@@ -133,6 +133,10 @@ impl PortalExporter {
     }
 
     fn render_index(results: &[crate::report::leaderboard::BenchmarkRunResult], base_url: &str) -> String {
+        let http_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("http")).count();
+        let redis_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("redis")).count();
+        let dns_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("dns")).count();
+        let passed_n = results.iter().filter(|r| r.pass_rate >= 100.0).count();
         let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
         let mut rows = String::new();
         for (i, r) in results.iter().enumerate() {
@@ -169,8 +173,16 @@ impl PortalExporter {
              <title>SubDollarBench Portal</title>\
              <style>{css}</style></head><body><main>\
              <h1>SubDollarBench Portal</h1>\
-             <p>Autonomous under-$1 LLM systems benchmark. {n} runs. <span class=\"muted\">Generated {now}.</span>\
+             <p>Autonomous under-$1 LLM systems benchmark. <span class=\"muted\">Updated {now}.</span>\
              {base}</p>\
+             <div class=\"grid\">\
+             <div class=\"card\"><div class=\"k\">Runs</div><div class=\"v\">{n}</div></div>\
+             <div class=\"card\"><div class=\"k\">Passed</div><div class=\"v\" style=\"color:var(--grn)\">{passed}</div></div>\
+             <div class=\"card\"><div class=\"k\">HTTP</div><div class=\"v\">{http}</div></div>\
+             <div class=\"card\"><div class=\"k\">Redis</div><div class=\"v\">{redis}</div></div>\
+             <div class=\"card\"><div class=\"k\">DNS</div><div class=\"v\">{dns}</div></div>\
+             </div>\
+
              <div class=\"wrap\"><table><thead><tr><th>#</th><th>Run</th><th>ID</th><th>Model</th><th>Task</th>\
              <th>Pass</th><th>Throughput</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div><script>
 (function(){{
@@ -199,6 +211,10 @@ th.textContent+=(dir===1?' \\u25B2':' \\u25BC');}});}});
              </body></html>",
             css = PORTAL_CSS,
             n = results.len(),
+            passed = passed_n,
+            http = http_n,
+            redis = redis_n,
+            dns = dns_n,
             now = now,
             base = if base_url.is_empty() {
                 String::new()

@@ -319,7 +319,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_main_cli_portal_export() {
-        use subdollarbench::report::PortalExporter;
 
         let temp_dir = std::env::temp_dir().join(format!("test_main_portal_{}", std::process::id()));
         let runs_dir = temp_dir.join("runs");
