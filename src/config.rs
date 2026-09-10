@@ -27,7 +27,7 @@ pub enum Commands {
         effort: String,
 
         /// Maximum turns/steps allowed for OMP
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 100)]
         max_turns: u32,
 
         /// Maximum cost budget in USD (e.g. 0.20 for 20 cents)
@@ -278,7 +278,7 @@ mod tests {
                 assert_eq!(task, TaskType::Redis);
                 assert_eq!(effort, "auto");
                 assert_eq!(budget_usd, 0.50);
-                assert_eq!(max_turns, 50);
+                assert_eq!(max_turns, 100);
                 assert_eq!(timeout_min, 15);
                 assert!(!eval_only);
             }

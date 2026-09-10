@@ -122,7 +122,7 @@ cargo run --release -- run \
   --task redis \
   --model openrouter/deepseek/deepseek-chat \
   --budget-usd 0.50 \
-  --max-turns 50
+  --max-turns 100
 
 # Run HTTP benchmark with max reasoning effort
 cargo run --release -- run \
@@ -141,7 +141,7 @@ Options:
   -t, --task <TASK>              Benchmark task [possible values: redis, http, dns] [default: redis]
   -e, --effort <EFFORT>          Reasoning effort: auto, max, high, medium, low, off [default: auto]
   -b, --budget-usd <BUDGET_USD>  Maximum cost allowance in USD [default: 0.50]
-      --max-turns <MAX_TURNS>    Maximum agent conversation turns [default: 50]
+      --max-turns <MAX_TURNS>    Maximum agent conversation turns [default: 100]
       --timeout-min <MINUTES>    Execution timeout in minutes [default: 15]
       --api-key <KEY>            OpenRouter API key (overrides OPENROUTER_API_KEY env var)
       --workdir <DIR>            Candidate workspace output directory [default: ./workspace]
