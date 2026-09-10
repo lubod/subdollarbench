@@ -21,6 +21,10 @@ const FORBIDDEN_BASE_IMAGES: &[&str] = &[
     "haproxy",
     "lighttpd",
     "memcached",
+    "pdftotext",
+    "pdfinfo",
+    "mutool",
+    "gs",
 ];
 
 const FORBIDDEN_DAEMONS: &[&str] = &[
@@ -590,6 +594,9 @@ impl ComplianceChecker {
                 "\"sails\"",
                 "\"connect\"",
                 "\"ioredis\"",
+                "\"pdfjs-dist\"",
+                "\"pdf-parse\"",
+                "\"pdf2json\"",
                 "\"redis\"",
             ];
             for f in forbidden {
@@ -603,6 +610,7 @@ impl ComplianceChecker {
         if filename == "requirements.txt" || filename == "pyproject.toml" {
             let forbidden = [
                 "flask", "fastapi", "django", "tornado", "aiohttp", "sanic", "redis", "valkey",
+                "pypdf", "pymupdf", "pdfminer", "pdfplumber", "pdf2image", "fitz",
                 "redis-py", "twisted",
             ];
             for line in content.lines() {
@@ -629,6 +637,9 @@ impl ComplianceChecker {
                 "hyper",
                 "redis",
                 "fred",
+                "lopdf",
+                "pdf-extract",
+                "pdfium-render",
             ];
             for line in content.lines() {
                 let code = line.split('#').next().unwrap_or("").trim().trim_start_matches('[');
@@ -648,6 +659,10 @@ impl ComplianceChecker {
                 "github.com/gofiber/fiber",
                 "github.com/go-redis/redis",
                 "github.com/redis/go-redis",
+                "github.com/pdfcpu/pdfcpu",
+                "github.com/unidoc/unipdf",
+                "github.com/ledongthuc/pdf",
+                "github.com/rsc/pdf",
             ];
             for f in forbidden {
                 if content.contains(f) {
@@ -666,6 +681,13 @@ impl ComplianceChecker {
                 }
                 if Self::imports_py_module(&content, "flask") {
                     violations.push(format!("{}: imports flask", filename));
+                }
+                if Self::imports_py_module(&content, "fitz")
+                    || Self::imports_py_module(&content, "pymupdf")
+                    || Self::imports_py_module(&content, "pdfminer")
+                    || Self::imports_py_module(&content, "pypdf")
+                    || Self::imports_py_module(&content, "pdfplumber") {
+                    violations.push(format!("{}: imports pdf library", filename));
                 }
                 if Self::imports_py_module(&content, "fastapi") {
                     violations.push(format!("{}: imports fastapi", filename));

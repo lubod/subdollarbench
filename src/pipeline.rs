@@ -19,6 +19,7 @@ use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSess
 use crate::verifier::compliance::ComplianceChecker;
 use crate::verifier::dns::DnsVerifier;
 use crate::verifier::http::HttpVerifier;
+use crate::verifier::pdf::PdfVerifier;
 use crate::verifier::redis::RedisVerifier;
 
 pub trait PipelineLogger: Send + Sync {
@@ -189,6 +190,9 @@ impl BenchmarkPipeline {
                         e
                     ));
                 }
+            }
+            TaskType::Pdf => {
+                logger.log("[SETUP] PDF task uses verifier-generated fixtures; no reference container.");
             }
         }
 
@@ -414,6 +418,24 @@ impl BenchmarkPipeline {
                         summary.stages,
                     )
                 }
+                TaskType::Pdf => {
+                    let verifier = PdfVerifier::new(port, Some(&verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage, s.name, status_str, err_str
+                        ));
+                    }
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
             };
 
             // Container diagnostics if any failures
@@ -454,6 +476,14 @@ impl BenchmarkPipeline {
                     }
                     TaskType::Dns => {
                         // DNS load is integrated into test suite
+                    }
+                    TaskType::Pdf => {
+                        let verifier = PdfVerifier::new(port, Some(&verifier_seed));
+                        if let Some(tp) = verifier.measure_throughput().await {
+                            logger.log(&format!("  Candidate Throughput: {:.0} pages/sec", tp));
+                            throughput = Some(tp);
+                        }
+                        logger.log("[BENCH] No external reference for PDF extraction; score uses verifier timing.");
                     }
                 }
 

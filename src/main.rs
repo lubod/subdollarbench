@@ -8,7 +8,7 @@ use std::sync::Arc;
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest, SummaryGenerator};
-use subdollarbench::verifier::{DnsVerifier, HttpVerifier, RedisVerifier};
+use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, RedisVerifier};
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
 
@@ -136,6 +136,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Redis => 6379,
                 TaskType::Http => 8080,
                 TaskType::Dns => 5353,
+                TaskType::Pdf => 8090,
             });
             println!("Evaluating {} on port {}...", task, p);
             match task {
@@ -157,6 +158,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
                 TaskType::Dns => {
                     let v = DnsVerifier::new(p, None);
+                    let res = v.run_all().await;
+                    println!(
+                        "Pass rate: {:.1}% ({}/{})",
+                        res.pass_rate, res.passed_count, res.total_stages
+                    );
+                }
+                TaskType::Pdf => {
+                    let v = PdfVerifier::new(p, None);
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",

@@ -1,6 +1,7 @@
 pub mod compliance;
 pub mod dns;
 pub mod http;
+pub mod pdf;
 pub mod redis;
 
 use serde::{Deserialize, Serialize};
@@ -16,4 +17,5 @@ pub struct StageResult {
 pub use compliance::ComplianceChecker;
 pub use dns::DnsVerifier;
 pub use http::HttpVerifier;
+pub use pdf::PdfVerifier;
 pub use redis::RedisVerifier;

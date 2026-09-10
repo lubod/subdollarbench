@@ -174,6 +174,7 @@ pub enum TaskType {
     Redis,
     Http,
     Dns,
+    Pdf,
 }
 
 impl TaskType {
@@ -182,6 +183,7 @@ impl TaskType {
             TaskType::Redis => 4,
             TaskType::Http => 5,
             TaskType::Dns => 6,
+            TaskType::Pdf => 5,
         }
     }
 
@@ -190,6 +192,7 @@ impl TaskType {
             TaskType::Redis => 6379,
             TaskType::Http => 8080,
             TaskType::Dns => 5353,
+            TaskType::Pdf => 8090,
         }
     }
 
@@ -204,6 +207,7 @@ impl std::fmt::Display for TaskType {
             TaskType::Redis => write!(f, "redis"),
             TaskType::Http => write!(f, "http"),
             TaskType::Dns => write!(f, "dns"),
+            TaskType::Pdf => write!(f, "pdf"),
         }
     }
 }
