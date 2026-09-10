@@ -1231,6 +1231,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span style="font-weight: 700; color: #fff; font-size: 1.05rem;">🏆 Benchmark Leaderboards</span>
                 <span id="lbTotalRunsBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
+                <span id="lbUpdatedAt" style="font-size: 0.72rem; color: var(--text-muted);"></span>
               </div>
               <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 3px;">
                 Task-specific & consolidated rankings • Strict 100% pass rate requirement • Live reference-adjusted throughput (pts/¢)
@@ -2345,6 +2346,8 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         if (cRedis) cRedis.textContent = redisCount;
         if (cDns) cDns.textContent = dnsCount;
         if (totalBadge) totalBadge.textContent = `${rawLeaderboardData.length} Verified Runs`;
+        const lbUpd = document.getElementById(lbUpdatedAt);
+        if (lbUpd) lbUpd.textContent = `Updated ${new Date().toLocaleTimeString()}`;
 
         // Update summary pill
         const fullPassCount = rawLeaderboardData.filter(r => r.pass_rate >= 100).length;
