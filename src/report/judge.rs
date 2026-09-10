@@ -106,7 +106,7 @@ impl RunJudge {
         p.push_str("You are an expert systems-engineering code reviewer. Review the candidate ");
         p.push_str(task);
         p.push_str(" server below against its task requirements and its measured results.\n");
-        p.push_str("Judge ONLY this run on its own prompt and its own numbers. Never compare against other runs, models, or leaderboard positions.\n");
+        p.push_str("Judge ONLY this run on its own prompt and its own numbers. Weigh run economy (turns, tokens, cost, duration) alongside correctness and throughput. Never compare against other runs, models, or leaderboard positions.\n");
         p.push_str("Respond with a single JSON object and nothing else, exactly this shape:\n");
         p.push_str("{\"good\": [\"...\", ...], \"bad\": [\"...\", ...], \"conclusion\": \"...\"}\n");
         p.push_str("Rules: good plus bad must total exactly 7 bullets (any split, at least one of each), each bullet one or two sentences grounded in the code or the numbers, conclusion exactly three sentences. No markdown fences.\n\n");
@@ -224,6 +224,10 @@ impl RunJudge {
             "stages": manifest.stages.iter().map(|s| serde_json::json!({"name": s.name, "passed": s.passed, "error": s.error})).collect::<Vec<_>>(),
             "duration_seconds": manifest.duration_seconds,
             "turns": manifest.turns,
+            "prompt_tokens": manifest.tokens.prompt_tokens,
+            "cached_tokens": manifest.tokens.cached_tokens,
+            "completion_tokens": manifest.tokens.completion_tokens,
+            "total_tokens": manifest.tokens.total_tokens,
             "cost_usd": manifest.cost_usd,
             "effective_cost_usd": manifest.effective_cost_usd,
             "throughput_req_sec": manifest.throughput_req_sec,
