@@ -439,6 +439,11 @@ async fn get_models(
     if let Ok(resp) = req.send().await {
         if let Ok(data) = resp.json::<OpenRouterResponse>().await {
             for item in data.data {
+                // Skip Batch API variants: queued, minutes-to-hours latency,
+                // unusable for interactive agentic runs.
+                if item.id.ends_with(":batch") {
+                    continue;
+                }
                 let prompt_p = item
                     .pricing
                     .as_ref()

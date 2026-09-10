@@ -126,6 +126,9 @@ impl RunJudge {
 
     fn resolve_target(review_model: &str) -> Result<(String, String)> {
         let m = review_model.trim();
+        if m.ends_with(":batch") {
+            anyhow::bail!("batch API judges stall the run; use the interactive variant");
+        }
         if m.is_empty() {
             anyhow::bail!("empty review model");
         }
