@@ -461,6 +461,17 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             limits.max_turns.unwrap_or(0),
             limits.max_budget_usd.unwrap_or(0.0)
         ));
+        let _ = tx.send(format!(
+            "[OMP-PROMPT] model={} cwd=/workspace",
+            effective_model
+        ));
+        for prompt_line in effective_prompt.lines() {
+            let clean = prompt_line.trim_end();
+            if clean.is_empty() {
+                continue;
+            }
+            let _ = tx.send(format!("  | {}", Self::cap_line(clean)));
+        }
 
         // Spawn thread to tail the active session .jsonl file in real-time
         let tail_ctx = TailSessionContext {
@@ -488,16 +499,15 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
-                    // If session file tailing is active, stdout mostly duplicates assistant text.
-                    // Only forward non-empty stdout if it contains system, error, or container notifications.
-                    if !trimmed.is_empty()
-                        && (trimmed.starts_with('[')
-                            || trimmed.starts_with("Error")
-                            || trimmed.starts_with("warn")
-                            || trimmed.starts_with("fatal"))
-                    {
-                        let _ = tx_out.send(trimmed.to_string());
+                    if trimmed.is_empty() {
+                        continue;
                     }
+                    // JSON lines are covered by the session-file tailer; forward
+                    // everything else (thoughts, progress, errors) verbatim.
+                    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+                        continue;
+                    }
+                    let _ = tx_out.send(format!("[OMP] {}", Self::cap_line(trimmed)));
                 }
             });
         }
@@ -887,8 +897,31 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         }
     }
 
+    /// Single-line flood guard for forwarded plain-text output.
+    fn cap_line(text: &str) -> String {
+        const MAX: usize = 2000;
+        let count = text.chars().count();
+        if count <= MAX {
+            text.to_string()
+        } else {
+            format!(
+                "{}... (+{} chars)",
+                text.chars().take(MAX).collect::<String>(),
+                count - MAX
+            )
+        }
+    }
+
     fn format_session_line(line: &str) -> Option<Vec<String>> {
-        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // Plain-text lines (thoughts, progress) are human output worth showing.
+        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => return Some(vec![format!("[OMP] {}", Self::cap_line(trimmed))]),
+        };
         let mut results = Vec::new();
 
         let custom_type = v.get("customType").and_then(|s| s.as_str());
@@ -1519,7 +1552,9 @@ mod tests {
         assert!(res_empty.iter().any(|s| s.contains("(empty output)")));
 
         // 4. Invalid or unhandled JSON
-        assert!(OmpRunner::format_session_line("not-json").is_none());
+        assert!(OmpRunner::format_session_line("").is_none());
+        let plain = OmpRunner::format_session_line("just thinking out loud").unwrap();
+        assert!(plain.iter().any(|l| l.contains("[OMP] just thinking out loud")));
         assert!(OmpRunner::format_session_line(r#"{"unknown": "object"}"#).is_none());
     }
 
