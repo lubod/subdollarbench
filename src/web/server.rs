@@ -995,6 +995,18 @@ async fn start_run(
         }
     }
 
+    if !matches!(
+        req.task.as_str(),
+        "redis" | "http" | "dns" | "pdf"
+    ) {
+        state.is_running.store(false, Ordering::SeqCst);
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Unknown task '{}': expected redis, http, dns, or pdf", req.task),
+        )
+            .into_response());
+    }
+
     state.cancel_requested.store(false, Ordering::SeqCst);
     let tx = state.log_sender.clone();
     let state_clone = state.clone();
@@ -1102,6 +1114,7 @@ async fn start_run(
                 "redis" => TaskType::Redis,
                 "http" => TaskType::Http,
                 "dns" => TaskType::Dns,
+                "pdf" => TaskType::Pdf,
                 _ => TaskType::Redis,
             };
 
