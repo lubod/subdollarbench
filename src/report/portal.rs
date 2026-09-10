@@ -154,12 +154,11 @@ impl PortalExporter {
             let tok_txt = format!("{:.1}k", tok_n as f64 / 1000.0);
             let cls = if r.pass_rate >= 100.0 { "pass" } else { "fail" };
             rows.push_str(&format!(
-                "<tr><td data-v=\"{}\">{}</td><td><a href=\"runs/{}/\">RUN</a></td><td><code>{}</code></td><td>{}</td><td>{}</td>\
+                "<tr><td data-v=\"{}\"><a href=\"runs/{}/\">{}</a></td><td>{}</td><td>{}</td>\
                  <td data-v=\"{}\"><span class=\"pill {}\">{:.0}% ({}/{})</span></td><td data-v=\"{}\">{}</td><td data-v=\"{}\">${:.4}</td><td data-v=\"{}\">{}</td><td data-v=\"{}\">{}</td><td class=\"score\">{:.1}</td></tr>\n",
                 (i + 1),
+                Self::esc(&r.id),
                 medal,
-                Self::esc(&r.id),
-                Self::esc(&r.id),
                 Self::esc(&r.model),
                 Self::esc(&r.task),
                 r.pass_rate,
@@ -194,7 +193,7 @@ impl PortalExporter {
              <div class=\"card\"><div class=\"k\">DNS</div><div class=\"v\">{dns}</div></div>\
              </div>\
 
-             <div class=\"wrap\"><table><thead><tr><th>#</th><th>Run</th><th>ID</th><th>Model</th><th>Task</th>\
+             <div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Task</th>\
              <th>Pass</th><th>Throughput</th><th>Cost</th><th>Time</th><th>Tokens</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div><script>
 (function(){{
 var ths=document.querySelectorAll('thead th');
