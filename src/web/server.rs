@@ -585,11 +585,29 @@ async fn delete_run(AxumPath(run_id): AxumPath<String>) -> Response {
     };
     let runs_dir = RunArchiver::resolve_runs_dir();
     let results_dir = resolve_results_dir();
-    if !runs_dir.join(&clean).join("manifest.json").exists() {
+    let run_path = runs_dir.join(&clean);
+    let res_path = results_dir.join(format!("{}.json", clean));
+    if !run_path.join("manifest.json").exists() && !res_path.exists() {
         return (StatusCode::NOT_FOUND, "run not found").into_response();
     }
-    let _ = std::fs::remove_dir_all(runs_dir.join(&clean));
-    let _ = std::fs::remove_file(results_dir.join(format!("{}.json", clean)));
+    if run_path.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&run_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to remove run directory: {}", e),
+            )
+                .into_response();
+        }
+    }
+    if res_path.exists() {
+        if let Err(e) = std::fs::remove_file(&res_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to remove result entry: {}", e),
+            )
+                .into_response();
+        }
+    }
     refresh_portal();
     Json(serde_json::json!({"deleted": clean})).into_response()
 }
@@ -1290,6 +1308,35 @@ mod tests {
             portal_content_type(Path::new("index.html"), b"<html>"),
             "text/html; charset=utf-8"
         );
+    }
+
+    #[tokio::test]
+    async fn test_run_delete_guards() {
+        let state = create_test_state();
+        let app = UiServer::build_app(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", port);
+
+        // Traversal rejected.
+        let res = client
+            .delete(format!("{}/api/runs/..%2Ffoo", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+
+        // Missing run 404s.
+        let res = client
+            .delete(format!("{}/api/runs/nonexistent_xyz_123", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
     }
 
     #[tokio::test]

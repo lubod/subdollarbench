@@ -3176,7 +3176,7 @@ function copyRunId() {
       if (!currentInspectRun) return;
       if (!confirm(`Delete run "${currentInspectRun.run_id}" permanently (workspace, results, portal)?`)) return;
       const res = await fetch(`/api/runs/${encodeURIComponent(currentInspectRun.run_id)}`, {method: 'DELETE'});
-      if (!res.ok) { alert('Failed to delete run'); return; }
+      if (!res.ok) { alert('Failed to delete run: ' + await res.text()); return; }
       closeRunInspector();
       refreshAfterRunMutation();
     }
