@@ -58,7 +58,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         no_save: bool,
 
-        /// Model used for the end-of-run code review judge (defaults to the run model)
+        /// Model used for the end-of-run code review judge (defaults to openrouter/meta/muse-spark-1.3-contributor)
         #[arg(long)]
         review_model: Option<String>,
     },

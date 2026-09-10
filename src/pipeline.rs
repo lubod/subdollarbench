@@ -611,7 +611,8 @@ impl BenchmarkPipeline {
                 let judge_model = config
                     .review_model
                     .clone()
-                    .unwrap_or_else(|| config.model.clone());
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| "openrouter/meta/muse-spark-1.3-contributor".to_string());
                 let task_name = config.task.to_string();
                 let task_prompt = std::fs::read_to_string(
                     get_repo_root().join("tasks").join(&task_name).join("prompt.md"),
