@@ -258,7 +258,7 @@ fn resolve_portal_dir() -> PathBuf {
     crate::config::get_repo_root().join("portal")
 }
 
-fn portal_content_type(path: &Path) -> &'static str {
+fn portal_content_type(path: &Path, bytes: &[u8]) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
@@ -266,7 +266,14 @@ fn portal_content_type(path: &Path) -> &'static str {
         "json" => "application/json",
         "md" => "text/markdown; charset=utf-8",
         "log" | "txt" => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
+        _ => {
+            // Render text sources inline; only true binaries download.
+            if std::str::from_utf8(bytes).is_ok_and(|t| !t.contains('\0')) {
+                "text/plain; charset=utf-8"
+            } else {
+                "application/octet-stream"
+            }
+        }
     }
 }
 
@@ -287,7 +294,10 @@ async fn serve_portal(AxumPath(sub): AxumPath<String>) -> Response {
         full.push("index.html");
     }
     match std::fs::read(&full) {
-        Ok(bytes) => ([("content-type", portal_content_type(&full))], bytes).into_response(),
+        Ok(bytes) => {
+            let ct = portal_content_type(&full, &bytes);
+            ([("content-type", ct)], bytes).into_response()
+        }
         Err(_) => (StatusCode::NOT_FOUND, "portal: not found").into_response(),
     }
 }
@@ -1171,6 +1181,26 @@ mod tests {
 
         let diff_del = generate_unified_diff("test.txt", "world\n", "");
         assert!(diff_del.contains("-world"));
+    }
+
+    #[test]
+    fn test_portal_content_type_renders_text_inline() {
+        assert_eq!(
+            portal_content_type(Path::new("server.py"), b"print(1)"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            portal_content_type(Path::new("Dockerfile"), b"FROM golang:1.22"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            portal_content_type(Path::new("run.bin"), &[0, 1, 2, 0]),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            portal_content_type(Path::new("index.html"), b"<html>"),
+            "text/html; charset=utf-8"
+        );
     }
 
     #[tokio::test]
