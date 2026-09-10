@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::report::archive::RunManifest;
-use crate::report::leaderboard::LeaderboardManager;
+use crate::report::leaderboard::{format_duration, LeaderboardManager};
 
 pub const PORTAL_HIDDEN_FILE: &str = ".portal_hidden";
 
@@ -44,7 +44,7 @@ pub struct PortalSummary {
     pub out_dir: PathBuf,
 }
 
-const PORTAL_CSS: &str = ":root{color-scheme:dark;--bg:#0b0e14;--panel:#121724;--line:#232c3d;--txt:#e8edf4;--mut:#8b94a3;--acc:#58a5ff;--grn:#3fb950;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 400px at 50% -10%,#16233d 0%,var(--bg) 60%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:2rem;margin:0;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#9ecbff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub{color:var(--mut);margin:.4rem 0 1.6rem}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45)}table{border-collapse:collapse;width:100%;font-size:.86rem}thead th{position:sticky;top:0;background:#161d2c;cursor:pointer;user-select:none;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}thead th:hover{color:#fff}tbody td{padding:9px 12px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:none}tbody tr{transition:background .12s}tbody tr:hover{background:#182032}tbody tr:nth-child(even){background:rgba(255,255,255,.015)}code{font-size:.78rem;word-break:break-all;background:#0b0f18;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:650;font-size:.76rem;white-space:nowrap}.pass{background:rgba(63,185,80,.14);color:var(--grn);border:1px solid rgba(63,185,80,.4)}.fail{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.4)}.score{color:#79c0ff;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:#0b0f18;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid var(--line);border-radius:10px}details{margin:1.2rem 0}summary{cursor:pointer;color:var(--acc)}.muted{color:var(--mut)}footer{margin-top:2rem;color:var(--mut);font-size:.8rem}";
+const PORTAL_CSS: &str = ":root{color-scheme:dark;--bg:#0b0e14;--panel:#121724;--line:#232c3d;--txt:#e8edf4;--mut:#8b94a3;--acc:#58a5ff;--grn:#3fb950;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 400px at 50% -10%,#16233d 0%,var(--bg) 60%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:2rem;margin:0;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#9ecbff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub{color:var(--mut);margin:.4rem 0 1.6rem}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45)}table{border-collapse:collapse;width:100%;font-size:.86rem}thead th{position:sticky;top:0;background:#161d2c;cursor:pointer;user-select:none;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}thead th:hover{color:#fff}tbody td{padding:9px 12px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:none}tbody tr{transition:background .12s}tbody tr:hover{background:#182032}tbody tr:nth-child(even){background:rgba(255,255,255,.015)}code{font-size:.78rem;word-break:break-all;background:#0b0f18;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:650;font-size:.76rem;white-space:nowrap}.pass{background:rgba(63,185,80,.14);color:var(--grn);border:1px solid rgba(63,185,80,.4)}.fail{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.4)}.score{color:#79c0ff;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:#0b0f18;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid var(--line);border-radius:10px}details{margin:1.2rem 0}summary{cursor:pointer;color:var(--acc)}.hero{margin:0 0 1.4rem}.hero h1{margin:.2rem 0 .6rem;word-break:break-word}.pills{display:flex;gap:8px;flex-wrap:wrap;margin:.4rem 0}.pill.info{background:rgba(88,165,255,.12);color:#58a5ff;border:1px solid rgba(88,165,255,.4)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:1rem 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}.card.wide{grid-column:1/-1}.card .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}.card .v{font-size:1.15rem;font-weight:700}.card small{font-size:.75rem;font-weight:400;color:var(--mut)}.stages{display:flex;flex-direction:column;gap:8px}.stage{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.bar{height:8px;background:#0b0f18;border:1px solid var(--line);border-radius:99px;margin-top:8px;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#1f6feb,#3fb950)}h2{margin-top:2rem}.muted{color:var(--mut)}footer{margin-top:2rem;color:var(--mut);font-size:.8rem}";
 
 pub struct PortalExporter;
 
@@ -234,99 +234,183 @@ th.textContent+=(dir===1?' \\u25B2':' \\u25BC');}});}});
             }
         }
 
-        let mut file_rows = String::new();
-        Self::copy_workspace(&src.join("workspace"), &dst.join("workspace"), secrets, &mut file_rows)?;
+        Self::copy_workspace(&src.join("workspace"), &dst.join("workspace"), secrets)?;
 
         let body = match &manifest {
-            Some(m) => Self::render_run(m, &file_rows, &dst, secrets)?,
+            Some(m) => Self::render_run(m, &dst, secrets)?,
             None => format!(
-                "<h1>{}</h1><p>Manifest missing; raw files below.</p><ul>{}</ul>",
-                Self::esc(clean),
-                file_rows
-            ),
+                "<h1>{}</h1><p>Manifest missing.</p>",
+                Self::esc(clean)
+            )
         };
         fs::write(dst.join("index.html"), body)?;
         Ok(())
     }
 
-    fn render_run(m: &RunManifest, file_rows: &str, dst: &Path, secrets: &[Regex]) -> Result<String> {
+    fn render_run(m: &RunManifest, dst: &Path, secrets: &[Regex]) -> Result<String> {
+        let passed_all = m.pass_rate >= 100.0;
         let mut stages = String::new();
         for s in &m.stages {
+            let cls = if s.passed { "pass" } else { "fail" };
+            let verdict = if s.passed { "PASS" } else { "FAIL" };
+            let err = s.error.as_deref().unwrap_or("");
             stages.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
-                s.stage,
-                Self::esc(&s.name),
-                if s.passed { "PASS" } else { "FAIL" },
-                Self::esc(s.error.as_deref().unwrap_or("")),
+                "<div class=\"stage {cls}\"><span class=\"pill {cls}\">{verdict}</span><div><b>{name}</b>{err}</div></div>\n",
+                cls = cls,
+                verdict = verdict,
+                name = Self::esc(&s.name),
+                err = if err.is_empty() {
+                    String::new()
+                } else {
+                    format!("<div class=\"muted\">{}</div>", Self::esc(err))
+                },
             ));
         }
         let env_rows = match serde_json::to_value(&m.env) {
-            Ok(serde_json::Value::Object(map)) => map
-                .iter()
-                .map(|(k, v)| {
-                    let val = match v {
-                        serde_json::Value::String(x) => x.clone(),
-                        _ => v.to_string(),
-                    };
-                    format!("<tr><td>{}</td><td>{}</td></tr>\n", Self::esc(k), Self::esc(&val))
-                })
-                .collect::<String>(),
+            Ok(serde_json::Value::Object(map)) => {
+                let mut rows: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+                rows.sort_by(|a, b| a.0.cmp(b.0));
+                rows.iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            serde_json::Value::String(x) => x.clone(),
+                            _ => v.to_string(),
+                        };
+                        format!("<tr><td>{}</td><td>{}</td></tr>\n", Self::esc(k), Self::esc(&val))
+                    })
+                    .collect::<String>()
+            }
             _ => "<tr><td colspan=\"2\">N/A</td></tr>\n".to_string(),
         };
         let log_html = fs::read_to_string(dst.join("console.log"))
-            .map(|c| format!("<details><summary>console.log</summary><pre>{}</pre></details>", Self::esc(&Self::redact(&c, secrets))))
+            .map(|c| format!("<details><summary>console.log (full trace)</summary><pre>{}</pre></details>", Self::esc(&Self::redact(&c, secrets))))
             .unwrap_or_default();
+        let readme_html = fs::read_to_string(dst.join("README.md"))
+            .map(|c| format!("<details><summary>README.md</summary><pre>{}</pre></details>", Self::esc(&c)))
+            .unwrap_or_default();
+        let mut file_list = String::new();
+        let mut inline_code = String::new();
+        Self::render_workspace(&dst.join("workspace"), "", &mut file_list, &mut inline_code)?;
+
+        let api = m.cost_usd;
+        let eff = m.effective_cost_usd.unwrap_or(m.cost_usd);
+        let comp = (eff - api).max(0.0);
+        let score = m.throughput_score.unwrap_or(m.efficiency_score);
+        let (tp_txt, tp_bar) = match (m.throughput_req_sec, m.reference_throughput_req_sec) {
+            (Some(tp), Some(ref_tp)) if ref_tp > 0.0 => {
+                let pct = ((tp / ref_tp * 100.0).min(100.0).max(0.0)) as u32;
+                (
+                    format!("{:.0} req/s ({:.0}% of reference)", tp, tp / ref_tp * 100.0),
+                    format!("<div class=\"bar\"><div class=\"fill\" style=\"width:{}%\"></div></div>", pct),
+                )
+            }
+            (Some(tp), _) => (format!("{:.0} req/s", tp), String::new()),
+            _ => ("N/A".to_string(), String::new()),
+        };
+        let total_tok = m.tokens.prompt_tokens + m.tokens.cached_tokens + m.tokens.completion_tokens;
         Ok(format!(
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
              <title>{id}</title>\
-             <style>{css}</style></head><body>\
-             <p><a href=\"../../\">&larr; leaderboard</a></p><h1><code>{id}</code></h1>\
-             <table>\
-             <tr><th>Model</th><td>{model}</td></tr>\
-             <tr><th>Task</th><td>{task}</td></tr>\
-             <tr><th>Status</th><td>{status}</td></tr>\
-             <tr><th>Language</th><td>{lang}</td></tr>\
-             <tr><th>Pass rate</th><td>{pass:.1}% ({passed}/{total})</td></tr>\
-             <tr><th>Duration</th><td>{dur:.1}s</td></tr>\
-             <tr><th>Turns</th><td>{turns}</td></tr>\
-             <tr><th>Cost</th><td>${cost:.4} (eff ${eff:.4})</td></tr>\
-             <tr><th>Efficiency</th><td>{score:.1} pts/&cent;</td></tr>\
-             <tr><th>Tokens</th><td>prompt {pt}, cached {ct}, completion {xt}</td></tr>\
-             </table>\
-             <h2>Stages</h2><table><tr><th>#</th><th>Name</th><th>Result</th><th>Error</th></tr>{stages}</table>\
-             <h2>Environment</h2><table><tr><th>Key</th><th>Value</th></tr>{env}</table>\
-             <h2>Files</h2><ul>{files}</ul>{log}</body></html>",
+             <style>{css}</style></head><body><main>\
+             <p><a href=\"../../\">&larr; leaderboard</a></p>\
+             <div class=\"hero\"><div class=\"muted\">{id}</div><h1>{model}</h1>\
+             <div class=\"pills\"><span class=\"pill info\">{task}</span> \
+             <span class=\"pill {scls}\">{status}</span> \
+             <span class=\"pill {pcls}\">{pass:.1}% ({passed}/{total})</span> \
+             <span class=\"pill info\">{lang}</span></div></div>\
+             <div class=\"grid\">\
+             <div class=\"card\"><div class=\"k\">Score</div><div class=\"v score\">{score:.1} <small>pts/&cent;</small></div></div>\
+             <div class=\"card\"><div class=\"k\">Duration</div><div class=\"v\">{dur}</div><div class=\"muted\">{turns} turns</div></div>\
+             <div class=\"card\"><div class=\"k\">Cost</div><div class=\"v\">${eff:.4}</div><div class=\"muted\">API ${api:.4} + compute ${comp:.4}</div></div>\
+             <div class=\"card\"><div class=\"k\">Tokens</div><div class=\"v\">{tott}</div><div class=\"muted\">{pt} prompt / {ct} cached / {xt} completion</div></div>\
+             <div class=\"card wide\"><div class=\"k\">Throughput</div><div class=\"v\">{tp}</div>{tpbar}</div>\
+             </div>\
+             <h2>Stages</h2><div class=\"stages\">{stages}</div>\
+             <h2>Code</h2>{code}\
+             <h2>All files</h2><ul>{files}</ul>\
+             {readme}\
+             <details><summary>Environment</summary><table><tr><th>Key</th><th>Value</th></tr>{env}</table></details>\
+             {log}\
+             <footer class=\"muted\">SubDollarBench run archive</footer></main></body></html>",
             css = PORTAL_CSS,
             id = Self::esc(&m.run_id),
             model = Self::esc(&m.model),
             task = Self::esc(&m.task),
             status = Self::esc(&m.status),
-            lang = Self::esc(&m.language),
+            scls = if m.status == "completed" { "pass" } else { "fail" },
+            pcls = if passed_all { "pass" } else { "fail" },
             pass = m.pass_rate,
             passed = m.passed_stages,
             total = m.total_stages,
-            dur = m.duration_seconds,
+            lang = Self::esc(&m.language),
+            score = score,
+            dur = format_duration(m.duration_seconds),
             turns = m.turns.map(|t| t.to_string()).unwrap_or_else(|| "N/A".to_string()),
-            cost = m.cost_usd,
-            eff = m.effective_cost_usd.unwrap_or(m.cost_usd),
-            score = m.throughput_score.unwrap_or(m.efficiency_score),
+            eff = eff,
+            api = api,
+            comp = comp,
+            tott = format!("{:.1}k", total_tok as f64 / 1000.0),
             pt = m.tokens.prompt_tokens,
             ct = m.tokens.cached_tokens,
             xt = m.tokens.completion_tokens,
+            tp = tp_txt,
+            tpbar = tp_bar,
             stages = stages,
+            code = inline_code,
+            files = file_list,
+            readme = readme_html,
             env = env_rows,
-            files = file_rows,
             log = log_html,
         ))
     }
 
-    fn copy_workspace(
-        src: &Path,
-        dst: &Path,
-        secrets: &[Regex],
-        rows: &mut String,
-    ) -> Result<()> {
+    fn render_workspace(dir: &Path, prefix: &str, list: &mut String, inline: &mut String) -> Result<()> {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .map(|rd| rd.flatten().collect())
+            .unwrap_or_default();
+        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        for entry in entries {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+                continue;
+            }
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            if path.is_dir() {
+                let mut sub_list = String::new();
+                let mut sub_inline = String::new();
+                Self::render_workspace(&path, &rel, &mut sub_list, &mut sub_inline)?;
+                list.push_str(&format!("<li>{}/<ul>{}</ul></li>\n", Self::esc(&name), sub_list));
+                inline.push_str(&sub_inline);
+            } else if path.is_file() {
+                let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                list.push_str(&format!(
+                    "<li><a href=\"workspace/{}\">{} ({} bytes)</a></li>\n",
+                    Self::esc(&rel),
+                    Self::esc(&name),
+                    size
+                ));
+                if size <= 100 * 1024 {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        inline.push_str(&format!(
+                            "<details><summary><code>{}</code> <span class=\"muted\">({} bytes)</span></summary><pre>{}</pre></details>\n",
+                            Self::esc(&rel),
+                            size,
+                            Self::esc(&content)
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_workspace(src: &Path, dst: &Path, secrets: &[Regex]) -> Result<()> {
         let entries = fs::read_dir(src);
         if entries.is_err() {
             return Ok(());
@@ -339,9 +423,7 @@ th.textContent+=(dir===1?' \\u25B2':' \\u25BC');}});}});
                 continue;
             }
             if path.is_dir() {
-                let mut sub = String::new();
-                Self::copy_workspace(&path, &dst.join(&name), secrets, &mut sub)?;
-                rows.push_str(&format!("<li>{}/<ul>{}</ul></li>\n", Self::esc(&name), sub));
+                Self::copy_workspace(&path, &dst.join(&name), secrets)?;
             } else if path.is_file() {
                 let size = path.metadata().map(|m| m.len()).unwrap_or(0);
                 if size <= 512 * 1024 {
@@ -351,16 +433,11 @@ th.textContent+=(dir===1?' \\u25B2':' \\u25BC');}});}});
                         let _ = fs::copy(&path, dst.join(&name));
                     }
                 }
-                rows.push_str(&format!(
-                    "<li><a href=\"workspace/{}\">{} ({} bytes)</a></li>\n",
-                    Self::esc(&name),
-                    Self::esc(&name),
-                    size
-                ));
             }
         }
         Ok(())
     }
+
 }
 
 #[cfg(test)]

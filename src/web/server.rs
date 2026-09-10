@@ -1375,6 +1375,7 @@ mod tests {
         assert!(res.status() == 403 || res.status() == 404);
     }
 
+    #[tokio::test]
     async fn test_web_routes_lifecycle() {
         // Drop guard restores SUMMARY.md even if the test panics mid-run,
         // preventing git working-tree pollution from summary regeneration.
