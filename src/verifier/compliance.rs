@@ -418,7 +418,9 @@ impl ComplianceChecker {
                                 let lower_first = first.to_lowercase();
                                 let base =
                                     lower_first.split('/').next_back().unwrap_or(&lower_first);
-                                if FORBIDDEN_DAEMONS.contains(&base) {
+                                if !Self::is_allowed_local_build_output(first, base)
+                                    && FORBIDDEN_DAEMONS.contains(&base)
+                                {
                                     violations.push(format!(
                                         "Dockerfile: specifies forbidden daemon '{}' in '{}'",
                                         base, line
@@ -619,6 +621,19 @@ mod tests {
         fs::write(temp_dir.join("start.sh"), "#!/bin/bash\n./server\n").unwrap();
 
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compliance_checker_allows_own_binary_in_dockerfile_cmd() {
+        let temp_dir = std::env::temp_dir().join(format!("test_compliance_dockercmd_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        fs::write(temp_dir.join("Dockerfile"), "FROM golang:1.22-alpine\nRUN go build -o redis-server main.go\nCMD [\"./redis-server\"]\n").unwrap();
+        assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
+        fs::write(temp_dir.join("Dockerfile"), "FROM alpine\nCMD [\"redis-server\"]\n").unwrap();
+        let res = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("redis-server"));
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
