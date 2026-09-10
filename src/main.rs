@@ -41,6 +41,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             eval_only,
             trials,
             no_save,
+            review_model,
         } => {
             let total_trials = trials.max(1);
             let mut passing_trials = 0;
@@ -91,6 +92,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     eval_only,
                     run_id: Some(run_id),
                     save_results: !no_save,
+                    review_model: review_model.clone(),
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;
@@ -420,6 +422,7 @@ mod tests {
                 eval_only: true,
                 trials: 2,
                 no_save: true,
+                review_model: None,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -471,6 +474,7 @@ mod tests {
                 eval_only: true,
                 trials: 1,
                 no_save: true,
+                review_model: None,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -518,6 +522,7 @@ mod tests {
                 eval_only: true,
                 trials: 1,
                 no_save: true,
+                review_model: None,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());

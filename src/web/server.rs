@@ -101,6 +101,8 @@ pub struct RunRequest {
     pub trials: u32,
     #[serde(default)]
     pub save_results: Option<bool>,
+    #[serde(default)]
+    pub review_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1147,6 +1149,7 @@ async fn start_run(
                 eval_only: req.eval_only,
                 run_id: Some(run_id.clone()),
                 save_results: req.save_results.unwrap_or(true),
+                review_model: req.review_model.clone(),
             };
 
             let pipe_res = BenchmarkPipeline::execute(
@@ -1591,6 +1594,7 @@ mod tests {
             timeout_min: Some(1),
             trials: 1,
             save_results: Some(false),
+            review_model: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -1644,6 +1648,7 @@ mod tests {
             timeout_min: Some(1),
             trials: 2,
             save_results: Some(false),
+            review_model: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -1891,6 +1896,7 @@ mod tests {
             timeout_min: Some(1),
             trials: 1,
             save_results: Some(false),
+            review_model: None,
         };
         let res = client
             .post(format!("{}/api/run", base))

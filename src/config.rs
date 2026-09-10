@@ -57,6 +57,10 @@ pub enum Commands {
         /// Do not save results or archive run artifacts to disk
         #[arg(long, default_value_t = false)]
         no_save: bool,
+
+        /// Model used for the end-of-run code review judge (defaults to the run model)
+        #[arg(long)]
+        review_model: Option<String>,
     },
 
     /// Directly run verification test suite against a running server

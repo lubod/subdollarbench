@@ -13,6 +13,7 @@ use crate::cost::ModelPricing;
 use crate::report::archive::{RunArchiver, RunManifest, RunTokenUsage};
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
 use crate::report::portal::PortalExporter;
+use crate::report::judge::RunJudge;
 use crate::sandbox::docker::SandboxManager;
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::verifier::compliance::ComplianceChecker;
@@ -75,6 +76,7 @@ pub struct BenchmarkConfig {
     pub eval_only: bool,
     pub run_id: Option<String>,
     pub save_results: bool,
+    pub review_model: Option<String>,
 }
 
 #[derive(Debug)]
@@ -604,6 +606,45 @@ impl BenchmarkPipeline {
                 results_dir.to_str().unwrap_or("./results"),
                 &benchmark_result,
             );
+            // 12. LLM judge code review (best-effort; never fails the run)
+            {
+                let judge_model = config
+                    .review_model
+                    .clone()
+                    .unwrap_or_else(|| config.model.clone());
+                let task_name = config.task.to_string();
+                let task_prompt = std::fs::read_to_string(
+                    get_repo_root().join("tasks").join(&task_name).join("prompt.md"),
+                )
+                .unwrap_or_default();
+                match RunJudge::judge_run(
+                    config.api_key.as_deref(),
+                    &judge_model,
+                    &task_name,
+                    &task_prompt,
+                    &config.workdir,
+                    &manifest,
+                )
+                .await
+                {
+                    Ok(review) => {
+                        let review_path = runs_dir.join(&manifest.run_id).join("review.json");
+                        if let Ok(text) = serde_json::to_string_pretty(&review) {
+                            let _ = std::fs::write(&review_path, text);
+                        }
+                        buffering_logger.log(&format!(
+                            "[REVIEW] Judge {} scored {} strengths, {} weaknesses",
+                            judge_model,
+                            review.good.len(),
+                            review.bad.len()
+                        ));
+                    }
+                    Err(e) => {
+                        buffering_logger.log(&format!("[REVIEW] Skipped: {}", e));
+                    }
+                }
+            }
+            // 13. Refresh the static portal mirror (includes any new review)
             let portal_out = get_repo_root().join("portal");
             let _ = PortalExporter::export(
                 runs_dir.to_str().unwrap_or("./runs"),
@@ -647,6 +688,7 @@ mod tests {
             eval_only: true,
             run_id: Some("test_cancel_run".to_string()),
             save_results: false,
+            review_model: None,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -673,6 +715,7 @@ mod tests {
             eval_only: true,
             run_id: Some(run_id.clone()),
             save_results: true,
+            review_model: None,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);

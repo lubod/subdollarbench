@@ -973,6 +973,13 @@
           <div id="selectedPricePill" class="price-pill" style="display: none; margin-top: 4px;"></div>
         </div>
 
+        <!-- Review Judge Model -->
+        <div class="form-group">
+          <label for="reviewModel">Review Judge Model (end-of-run code review)</label>
+          <input type="text" id="reviewModel" placeholder="Same as run model" />
+          <span class="hint">Blank reuses the run model. Cloud judges need the OpenRouter key; local/ needs llama-server.</span>
+        </div>
+
         <!-- Reasoning Effort / Thinking Level Selector -->
         <div class="form-group">
           <label for="effortSelect">
@@ -3764,7 +3771,8 @@ function copyRunId() {
             budget_usd: budget,
             max_turns: turns,
             timeout_min: timeoutMin,
-            eval_only: evalOnly
+            eval_only: evalOnly,
+            review_model: document.getElementById("reviewModel").value.trim() || null
           })
         });
 
