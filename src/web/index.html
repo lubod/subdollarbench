@@ -873,6 +873,7 @@
       </div>
       <div style="display: flex; align-items: center; gap: 12px;">
         <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500; text-decoration: none; display: inline-block;">Portal</a>
+        <button class="btn-secondary" onclick="rebuildPortalNow()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;" title="Regenerate the static portal from current runs">Rebuild portal</button>
         <button class="btn-secondary" id="toggleSidebarBtn" onclick="toggleSidebar()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;">◀ Hide Setup Panel</button>
         <div class="status-badge">
           <span class="status-dot" id="statusDot"></span>
@@ -2145,9 +2146,9 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         const safeLanguage = escapeHtml(r.language);
         const safeEffort = escapeHtml(r.effort || 'auto');
         const effBadge = `<span class="badge badge-effort">effort: ${safeEffort}</span>`;
-        const pubBadge = r.is_published 
-          ? `<span class="badge" style="background:#238636;color:#fff;font-size:0.72rem;padding:2px 8px;">✔ Git</span>` 
-          : `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.72rem;padding:2px 8px;">Local</span>`;
+        const pubBadge = r.portal_hidden 
+          ? `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.72rem;padding:2px 8px;">Hidden</span>` 
+          : `<span class="badge" style="background:#238636;color:#fff;font-size:0.72rem;padding:2px 8px;">Portal</span>`;
 
         const dateStr = formatTimestamp(r.started_at || r.completed_at);
         const durationStr = formatDuration(r.duration_seconds);
@@ -2833,13 +2834,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         currentInspectRun = m;
 
         // Populate Header & Badges
-        const gitBadge = document.getElementById('modalInspectGitBadge');
-        if (m.is_published) {
-          gitBadge.innerHTML = `<span class="badge" style="background:#238636;color:#fff;font-size:0.75rem;">✔ Git Published</span>`;
-        } else {
-          gitBadge.innerHTML = `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.75rem;">Local Only</span>`;
-        }
-        gitBadge.title = "Historical git-publish flag (workflow removed; see static portal)";
+        updatePortalModalBadge();
 
         const statusBadge = document.getElementById('modalInspectStatusBadge');
         const isCompleted = m.status === 'completed' || m.pass_rate === 100;
@@ -3121,6 +3116,56 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       navigator.clipboard.writeText(code).then(() => {
         copyButtonFeedback('modalCopyCodeBtn', '📋 Copy File');
       });
+    }
+
+    async function refreshAfterRunMutation() {
+      try { await loadRuns(); } catch (e) { console.error(e); }
+      try { await loadLeaderboard(); } catch (e) { console.error(e); }
+      if (typeof renderLeaderboardUI === "function") {
+        try { renderLeaderboardUI(); } catch (e) { console.error(e); }
+      }
+    }
+
+    function updatePortalModalBadge() {
+      const badge = document.getElementById('modalInspectPortalBadge');
+      if (!badge || !currentInspectRun) return;
+      const hidden = !!currentInspectRun.portal_hidden;
+      badge.innerHTML = hidden
+        ? `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.75rem;">Hidden from portal</span>`
+        : `<span class="badge" style="background:#238636;color:#fff;font-size:0.75rem;">Visible in portal</span>`;
+      const t = document.getElementById('modalTogglePortalBtn');
+      if (t) t.textContent = hidden ? 'Show in portal' : 'Hide from portal';
+    }
+
+    async function togglePortalVisibility() {
+      if (!currentInspectRun) return;
+      const next = !currentInspectRun.portal_hidden;
+      const res = await fetch(`/api/runs/${encodeURIComponent(currentInspectRun.run_id)}/portal`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hidden: next}),
+      });
+      if (!res.ok) { alert('Failed to update portal visibility'); return; }
+      currentInspectRun.portal_hidden = next;
+      updatePortalModalBadge();
+      refreshAfterRunMutation();
+    }
+
+    async function deleteCurrentRun() {
+      if (!currentInspectRun) return;
+      if (!confirm(`Delete run "${currentInspectRun.run_id}" permanently (workspace, results, portal)?`)) return;
+      const res = await fetch(`/api/runs/${encodeURIComponent(currentInspectRun.run_id)}`, {method: 'DELETE'});
+      if (!res.ok) { alert('Failed to delete run'); return; }
+      closeRunInspector();
+      refreshAfterRunMutation();
+    }
+
+    async function rebuildPortalNow() {
+      const res = await fetch('/api/portal/rebuild', {method: 'POST'});
+      if (!res.ok) { alert('Portal rebuild failed'); return; }
+      const data = await res.json();
+      alert(`Portal rebuilt (${data.run_count} runs)`);
+      refreshAfterRunMutation();
     }
 
     function copyInspectLog() {
@@ -3939,11 +3984,12 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
             <span id="modalInspectRunId" style="color: var(--primary); font-family: 'JetBrains Mono', monospace; font-size: 0.95rem;"></span>
           </span>
           <button id="modalCopyRunIdBtn" class="btn-secondary" style="padding: 2px 8px; font-size: 0.72rem;" onclick="copyRunId()">📋 Copy ID</button>
-          <span id="modalInspectGitBadge"></span>
+          <span id="modalInspectPortalBadge"></span>
           <span id="modalInspectStatusBadge"></span>
         </div>
         <div class="modal-actions">
-          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="openCompareWith(currentInspectRun ? currentInspectRun.run_id : '')">⚖️ Compare</button>
+          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" <button id="modalTogglePortalBtn"" class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="togglePortalVisibility()">Hide from portal</button>          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem; color: #f85149;" onclick="deleteCurrentRun()">Delete</button>
+          onclick="openCompareWith(currentInspectRun ? currentInspectRun.run_id : '')">⚖️ Compare</button>
           <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.8rem; font-weight: 600;" onclick="closeRunInspector()" title="Close (Escape)">✕ Close</button>
         </div>
       </div>

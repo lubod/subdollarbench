@@ -7,5 +7,5 @@ pub mod summary;
 pub use archive::{FileInfo, RunArchiver, RunManifest, RunTokenUsage};
 pub use environment::EnvironmentInfo;
 pub use leaderboard::{BenchmarkRunResult, LeaderboardManager};
-pub use portal::PortalExporter;
+pub use portal::{is_hidden, set_hidden, PortalExporter};
 pub use summary::SummaryGenerator;

@@ -1,8 +1,8 @@
 use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
-    BenchmarkRunResult, EnvironmentInfo, FileInfo, LeaderboardManager, RunArchiver, RunManifest,
-    SummaryGenerator,
+    EnvironmentInfo, FileInfo, LeaderboardManager, RunArchiver, RunManifest,
+    SummaryGenerator, is_hidden, set_hidden, PortalExporter,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -12,7 +12,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Redirect, Response,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -335,6 +335,9 @@ impl UiServer {
             .route("/api/runs/:id/file", get(get_run_file))
             .route("/portal", get(|| async { Redirect::permanent("/portal/") }))
             .route("/portal/", get(serve_portal_index))
+            .route("/api/portal/rebuild", post(rebuild_portal))
+            .route("/api/runs/:id/portal", post(set_run_portal_visibility))
+            .route("/api/runs/:id", delete(delete_run))
             .route("/portal/*path", get(serve_portal))
             .route("/api/summary", get(get_summary).post(regenerate_summary))
             .route("/api/env", get(get_env))
@@ -533,7 +536,7 @@ pub struct LeaderboardQuery {
     pub task: Option<String>,
 }
 
-async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<BenchmarkRunResult>> {
+async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<serde_json::Value>> {
     let r_dir = resolve_results_dir();
     let mut list = LeaderboardManager::load_all(r_dir.to_str().unwrap_or("./results"));
     if let Some(task_filter) = query.task {
@@ -542,18 +545,104 @@ async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<Benc
             list.retain(|r| r.task.eq_ignore_ascii_case(trimmed));
         }
     }
-    Json(list)
+    let runs_dir = RunArchiver::resolve_runs_dir();
+    Json(list.into_iter().map(|r| {
+        let mut v = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
+        v["portal_hidden"] = serde_json::Value::Bool(is_hidden(&runs_dir, &r.id));
+        v
+    }).collect())
 }
 
-async fn get_runs() -> Json<Vec<RunManifest>> {
+fn refresh_portal() {
+    let root = crate::config::get_repo_root();
+    let _ = PortalExporter::export(
+        RunArchiver::resolve_runs_dir().to_str().unwrap_or("./runs"),
+        resolve_results_dir().to_str().unwrap_or("./results"),
+        root.join("portal").to_str().unwrap_or("./portal"),
+        "",
+        200,
+    );
+}
+
+fn clean_run_id(run_id: &str) -> Option<String> {
+    let name = Path::new(run_id).file_name()?.to_str()?;
+    if name.is_empty() || name == "." || name != run_id {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn manifest_with_portal_flag(m: &RunManifest) -> serde_json::Value {
+    let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+    v["portal_hidden"] = serde_json::Value::Bool(is_hidden(&RunArchiver::resolve_runs_dir(), &m.run_id));
+    v
+}
+
+async fn delete_run(AxumPath(run_id): AxumPath<String>) -> Response {
+    let clean = match clean_run_id(&run_id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid run id").into_response(),
+    };
+    let runs_dir = RunArchiver::resolve_runs_dir();
+    let results_dir = resolve_results_dir();
+    if !runs_dir.join(&clean).join("manifest.json").exists() {
+        return (StatusCode::NOT_FOUND, "run not found").into_response();
+    }
+    let _ = std::fs::remove_dir_all(runs_dir.join(&clean));
+    let _ = std::fs::remove_file(results_dir.join(format!("{}.json", clean)));
+    refresh_portal();
+    Json(serde_json::json!({"deleted": clean})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PortalVisibilityRequest {
+    pub hidden: bool,
+}
+
+async fn set_run_portal_visibility(
+    AxumPath(run_id): AxumPath<String>,
+    Json(payload): Json<PortalVisibilityRequest>,
+) -> Response {
+    let clean = match clean_run_id(&run_id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid run id").into_response(),
+    };
+    match set_hidden(&RunArchiver::resolve_runs_dir(), &clean, payload.hidden) {
+        Ok(hidden) => {
+            refresh_portal();
+            Json(serde_json::json!({"run_id": clean, "portal_hidden": hidden})).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, format!("cannot update run: {}", e)).into_response(),
+    }
+}
+
+async fn rebuild_portal() -> Response {
+    let root = crate::config::get_repo_root();
+    match PortalExporter::export(
+        RunArchiver::resolve_runs_dir().to_str().unwrap_or("./runs"),
+        resolve_results_dir().to_str().unwrap_or("./results"),
+        root.join("portal").to_str().unwrap_or("./portal"),
+        "",
+        200,
+    ) {
+        Ok(summary) => Json(serde_json::json!({"run_count": summary.run_count})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("portal export failed: {}", e),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_runs() -> Json<Vec<serde_json::Value>> {
     let r_dir = RunArchiver::resolve_runs_dir();
-    Json(RunArchiver::list_runs(&r_dir))
+    Json(RunArchiver::list_runs(&r_dir).iter().map(manifest_with_portal_flag).collect())
 }
 
-async fn get_run_detail(AxumPath(run_id): AxumPath<String>) -> Result<Json<RunManifest>, Response> {
+async fn get_run_detail(AxumPath(run_id): AxumPath<String>) -> Result<Json<serde_json::Value>, Response> {
     let r_dir = RunArchiver::resolve_runs_dir();
     match RunArchiver::get_run(&r_dir, &run_id) {
-        Some(m) => Ok(Json(m)),
+        Some(m) => Ok(Json(manifest_with_portal_flag(&m))),
         None => Err((axum::http::StatusCode::NOT_FOUND, "Run not found").into_response()),
     }
 }

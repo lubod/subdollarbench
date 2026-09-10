@@ -7,6 +7,38 @@ use std::path::{Path, PathBuf};
 use crate::report::archive::RunManifest;
 use crate::report::leaderboard::LeaderboardManager;
 
+pub const PORTAL_HIDDEN_FILE: &str = ".portal_hidden";
+
+fn clean_id(run_id: &str) -> Option<String> {
+    let name = Path::new(run_id).file_name()?.to_str()?;
+    if name.is_empty() || name == "." {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+pub fn is_hidden(runs_dir: &Path, run_id: &str) -> bool {
+    match clean_id(run_id) {
+        Some(clean) => runs_dir.join(clean).join(PORTAL_HIDDEN_FILE).exists(),
+        None => true,
+    }
+}
+
+pub fn set_hidden(runs_dir: &Path, run_id: &str, hidden: bool) -> anyhow::Result<bool> {
+    let clean = clean_id(run_id).ok_or_else(|| anyhow::anyhow!("invalid run id"))?;
+    let dir = runs_dir.join(&clean);
+    if !dir.join("manifest.json").exists() {
+        anyhow::bail!("run not found");
+    }
+    let flag = dir.join(PORTAL_HIDDEN_FILE);
+    if hidden {
+        std::fs::write(&flag, "hidden\n")?;
+    } else {
+        let _ = std::fs::remove_file(&flag);
+    }
+    Ok(hidden)
+}
+
 pub struct PortalSummary {
     pub run_count: usize,
     pub out_dir: PathBuf,
@@ -26,8 +58,10 @@ impl PortalExporter {
         base_url: &str,
         keep: usize,
     ) -> Result<PortalSummary> {
+        let runs_path = Path::new(runs_dir);
         let mut results = LeaderboardManager::load_all(results_dir);
         results.truncate(keep);
+        let visible: Vec<_> = results.into_iter().filter(|r| !is_hidden(runs_path, &r.id)).collect();
         let out_dir = Path::new(out);
         let runs_out = out_dir.join("runs");
         fs::create_dir_all(&runs_out)
@@ -36,23 +70,23 @@ impl PortalExporter {
         let secrets = Self::secret_patterns();
         fs::write(
             out_dir.join("index.html"),
-            Self::render_index(&results, base_url),
+            Self::render_index(&visible, base_url),
         )?;
         fs::write(
             out_dir.join("results.json"),
-            serde_json::to_string_pretty(&results)?,
+            serde_json::to_string_pretty(&visible)?,
         )?;
 
         let mut count = 0;
         let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for r in &results {
+        for r in &visible {
             let clean = Path::new(&r.id)
                 .file_name()
                 .and_then(|x| x.to_str())
                 .unwrap_or(&r.id)
                 .to_string();
             live.insert(clean);
-            if Self::export_run(Path::new(runs_dir), &runs_out, &r.id, &secrets).is_ok() {
+            if Self::export_run(runs_path, &runs_out, &r.id, &secrets).is_ok() {
                 count += 1;
             }
         }
@@ -319,6 +353,57 @@ mod tests {
         assert!(clean.contains("export"));
     }
 
+    #[test]
+    fn test_portal_export_skips_hidden_runs() {
+        let base = std::env::temp_dir().join(format!("test_portal_hide_{}", std::process::id()));
+        let runs_dir = base.join("runs");
+        let results_dir = base.join("results");
+        let out_dir = base.join("portal");
+        let run_dir = runs_dir.join("hidden_run_1");
+        fs::create_dir_all(run_dir.join("workspace")).unwrap();
+        fs::write(
+            run_dir.join("manifest.json"),
+            serde_json::json!({
+                "run_id": "hidden_run_1", "model": "m", "task": "http", "status": "completed",
+                "language": "Python", "started_at": "t", "completed_at": "t",
+                "duration_seconds": 10.0, "pass_rate": 100.0, "passed_stages": 5, "total_stages": 5,
+                "stages": [], "tokens": {"prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1, "total_tokens": 2},
+                "cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 50.0, "files": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::create_dir_all(&results_dir).unwrap();
+        fs::write(
+            results_dir.join("hidden_run_1.json"),
+            serde_json::json!({
+                "id": "hidden_run_1", "model": "m", "task": "http", "language": "Python",
+                "pass_rate": 100.0, "passed_stages": 5, "total_stages": 5,
+                "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1,
+                "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 50.0,
+                "timestamp": "t"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(set_hidden(&runs_dir, "hidden_run_1", true).unwrap());
+        assert!(is_hidden(&runs_dir, "hidden_run_1"));
+        let summary = PortalExporter::export(
+            runs_dir.to_str().unwrap(),
+            results_dir.to_str().unwrap(),
+            out_dir.to_str().unwrap(),
+            "",
+            200,
+        )
+        .unwrap();
+        assert_eq!(summary.run_count, 0);
+        let index = fs::read_to_string(out_dir.join("index.html")).unwrap();
+        assert!(!index.contains("hidden_run_1"));
+        assert!(!out_dir.join("runs/hidden_run_1").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
     #[test]
     fn test_portal_export_writes_index_and_run_page() {
         let base = std::env::temp_dir().join(format!("test_portal_{}", std::process::id()));
