@@ -3988,8 +3988,9 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
           <span id="modalInspectStatusBadge"></span>
         </div>
         <div class="modal-actions">
-          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" <button id="modalTogglePortalBtn"" class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="togglePortalVisibility()">Hide from portal</button>          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem; color: #f85149;" onclick="deleteCurrentRun()">Delete</button>
-          onclick="openCompareWith(currentInspectRun ? currentInspectRun.run_id : '')">⚖️ Compare</button>
+          <button id="modalTogglePortalBtn" class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="togglePortalVisibility()">Hide from portal</button>
+          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem; color: #f85149;" onclick="deleteCurrentRun()">Delete</button>
+          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="openCompareWith(currentInspectRun ? currentInspectRun.run_id : '')">⚖️ Compare</button>
           <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.8rem; font-weight: 600;" onclick="closeRunInspector()" title="Close (Escape)">✕ Close</button>
         </div>
       </div>
