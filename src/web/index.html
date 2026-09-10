@@ -2795,7 +2795,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
     });
 
     function switchModalTab(tabKey) {
-      const tabs = ['code', 'trace', 'stages', 'specs'];
+      const tabs = ['code', 'trace', 'stages', 'specs', 'review'];
       tabs.forEach(k => {
         const btn = document.getElementById(`modalTabBtn-${k}`);
         const pane = document.getElementById(`modalPane-${k}`);
@@ -2835,6 +2835,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         if (!res.ok) throw new Error('Run manifest not found');
         const m = await res.json();
         currentInspectRun = m;
+        loadInspectReview(runId);
 
         // Populate Header & Badges
         updatePortalModalBadge();
@@ -3190,6 +3191,33 @@ function copyRunId() {
       const data = await res.json();
       alert(`Portal rebuilt (${data.run_count} runs)`);
       refreshAfterRunMutation();
+    }
+
+    async function loadInspectReview(runId) {
+      const box = document.getElementById('modalInspectReviewBody');
+      if (!box) return;
+      box.innerHTML = '<span style="color: var(--text-muted);">Loading review...</span>';
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/review`);
+        if (!res.ok) {
+          box.innerHTML = '<span style="color: var(--text-muted);">No review recorded for this run.</span>';
+          return;
+        }
+        const r = await res.json();
+        const sec = (title, items, color) => {
+          const lis = (items || []).map(t => `<li style="margin: 4px 0;">${escapeHtml(t)}</li>`).join('');
+          return `<div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;"><h4 style="font-size: 0.82rem; color: ${color}; margin: 0 0 6px;">${title}</h4><ul style="margin: 0; padding-left: 1.2rem; font-size: 0.8rem;">${lis}</ul></div>`;
+        };
+        box.innerHTML = `<div style="display: flex; flex-direction: column; gap: 12px;">`
+          + sec('Strengths', r.good, '#3fb950')
+          + sec('Weaknesses', r.bad, '#f85149')
+          + `<div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 0.82rem;"><b>Conclusion:</b> ${escapeHtml(r.conclusion || '—')}</div>
+        <div id="modalPane-review" class="modal-pane">
+          <div id="modalInspectReviewBody" style="display: flex; flex-direction: column; gap: 12px;"></div>
+        </div></div>`;
+      } catch (e) {
+        box.innerHTML = '<span style="color: var(--text-muted);">Review unavailable.</span>';
+      }
     }
 
     function copyInspectLog() {
@@ -4068,6 +4096,9 @@ function copyRunId() {
         </button>
         <button class="modal-tab-btn" id="modalTabBtn-specs" onclick="switchModalTab('specs')">
           🖥️ Environment & Manifest
+        </button>
+        <button class="modal-tab-btn" id="modalTabBtn-review" onclick="switchModalTab('review')">
+          Review
         </button>
       </div>
 

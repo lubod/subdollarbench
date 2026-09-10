@@ -340,6 +340,7 @@ impl UiServer {
             .route("/portal/", get(serve_portal_index))
             .route("/api/portal/rebuild", post(rebuild_portal))
             .route("/api/runs/:id/portal", post(set_run_portal_visibility))
+            .route("/api/runs/:id/review", get(get_run_review))
             .route("/api/runs/:id", delete(delete_run))
             .route("/portal/*path", get(serve_portal))
             .route("/api/summary", get(get_summary).post(regenerate_summary))
@@ -581,6 +582,19 @@ fn manifest_with_portal_flag(m: &RunManifest) -> serde_json::Value {
     v
 }
 
+async fn get_run_review(AxumPath(run_id): AxumPath<String>) -> Response {
+    let clean = match clean_run_id(&run_id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid run id").into_response(),
+    };
+    let path = RunArchiver::resolve_runs_dir()
+        .join(clean)
+        .join("review.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => ([("content-type", "application/json")], bytes).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "review not found").into_response(),
+    }
+}
 async fn delete_run(AxumPath(run_id): AxumPath<String>) -> Response {
     let clean = match clean_run_id(&run_id) {
         Some(c) => c,

@@ -44,7 +44,7 @@ pub struct PortalSummary {
     pub out_dir: PathBuf,
 }
 
-const PORTAL_CSS: &str = ":root{color-scheme:dark;--bg:#0b0e14;--panel:#121724;--line:#232c3d;--txt:#e8edf4;--mut:#8b94a3;--acc:#58a5ff;--grn:#3fb950;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 400px at 50% -10%,#16233d 0%,var(--bg) 60%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:2rem;margin:0;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#9ecbff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub{color:var(--mut);margin:.4rem 0 1.6rem}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45)}table{border-collapse:collapse;width:100%;font-size:.86rem}thead th{position:sticky;top:0;background:#161d2c;cursor:pointer;user-select:none;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}thead th:hover{color:#fff}tbody td{padding:9px 12px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:none}tbody tr{cursor:pointer;transition:background .12s}tbody tr:hover{background:#182032}tbody tr:nth-child(even){background:rgba(255,255,255,.015)}code{font-size:.78rem;word-break:break-all;background:#0b0f18;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:650;font-size:.76rem;white-space:nowrap}.pass{background:rgba(63,185,80,.14);color:var(--grn);border:1px solid rgba(63,185,80,.4)}.fail{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.4)}.score{color:#79c0ff;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:#0b0f18;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid var(--line);border-radius:10px}details{margin:1.2rem 0}summary{cursor:pointer;color:var(--acc)}.hero{margin:0 0 1.4rem}.hero h1{margin:.2rem 0 .6rem;word-break:break-word}.pills{display:flex;gap:8px;flex-wrap:wrap;margin:.4rem 0}.pill.info{background:rgba(88,165,255,.12);color:#58a5ff;border:1px solid rgba(88,165,255,.4)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:1rem 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}.card.wide{grid-column:1/-1}.card .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}.card .v{font-size:1.15rem;font-weight:700}.card small{font-size:.75rem;font-weight:400;color:var(--mut)}.stages{display:flex;flex-direction:column;gap:8px}.stage{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.bar{height:8px;background:#0b0f18;border:1px solid var(--line);border-radius:99px;margin-top:8px;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#1f6feb,#3fb950)}h2{margin-top:2rem}.muted{color:var(--mut)}footer{margin-top:2rem;color:var(--mut);font-size:.8rem}";
+const PORTAL_CSS: &str = ":root{color-scheme:dark;--bg:#0b0e14;--panel:#121724;--line:#232c3d;--txt:#e8edf4;--mut:#8b94a3;--acc:#58a5ff;--grn:#3fb950;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 400px at 50% -10%,#16233d 0%,var(--bg) 60%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:2rem;margin:0;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#9ecbff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub{color:var(--mut);margin:.4rem 0 1.6rem}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45)}table{border-collapse:collapse;width:100%;font-size:.86rem}thead th{position:sticky;top:0;background:#161d2c;cursor:pointer;user-select:none;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}thead th:hover{color:#fff}tbody td{padding:9px 12px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:none}tbody tr{cursor:pointer;transition:background .12s}tbody tr:hover{background:#182032}tbody tr:nth-child(even){background:rgba(255,255,255,.015)}code{font-size:.78rem;word-break:break-all;background:#0b0f18;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:650;font-size:.76rem;white-space:nowrap}.pass{background:rgba(63,185,80,.14);color:var(--grn);border:1px solid rgba(63,185,80,.4)}.fail{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.4)}.score{color:#79c0ff;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:#0b0f18;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid var(--line);border-radius:10px}details{margin:1.2rem 0}summary{cursor:pointer;color:var(--acc)}.hero{margin:0 0 1.4rem}.hero h1{margin:.2rem 0 .6rem;word-break:break-word}.pills{display:flex;gap:8px;flex-wrap:wrap;margin:.4rem 0}.pill.info{background:rgba(88,165,255,.12);color:#58a5ff;border:1px solid rgba(88,165,255,.4)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:1rem 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}.card.wide{grid-column:1/-1}.card .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}.card .v{font-size:1.15rem;font-weight:700}.card small{font-size:.75rem;font-weight:400;color:var(--mut)}.stages{display:flex;flex-direction:column;gap:8px}.stage{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.bar{height:8px;background:#0b0f18;border:1px solid var(--line);border-radius:99px;margin-top:8px;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#1f6feb,#3fb950)}h2{margin-top:2rem}.review{display:grid;gap:12px}@media(min-width:800px){.review{grid-template-columns:1fr 1fr}}.review ul{margin:.4rem 0;padding-left:1.2rem}.review li{margin:.35rem 0;font-size:.86rem}.review p{grid-column:1/-1}.muted{color:var(--mut)}footer{margin-top:2rem;color:var(--mut);font-size:.8rem}";
 
 pub struct PortalExporter;
 
@@ -193,7 +193,6 @@ impl PortalExporter {
              <div class=\"card\"><div class=\"k\">Redis</div><div class=\"v\">{redis}</div></div>\
              <div class=\"card\"><div class=\"k\">DNS</div><div class=\"v\">{dns}</div></div>\
              </div>\
-
              <div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Task</th>\
              <th>Pass</th><th>Throughput</th><th>Cost</th><th>Time</th><th>Tokens</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div><script>
 (function(){{
@@ -258,7 +257,7 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok());
 
-        for name in ["manifest.json", "env.json", "console.log", "README.md"] {
+        for name in ["manifest.json", "env.json", "console.log", "README.md", "review.json"] {
             if let Ok(content) = fs::read_to_string(src.join(name)) {
                 fs::write(dst.join(name), Self::redact(&content, secrets))?;
             }
@@ -277,6 +276,32 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
         Ok(())
     }
 
+    fn render_review(v: &serde_json::Value) -> String {
+        fn items(v: &serde_json::Value, key: &str, cls: &str, title: &str) -> String {
+            let lis = v
+                .get(key)
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(|t| format!("<li>{}</li>", PortalExporter::esc(t)))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            format!(
+                "<div><span class=\"pill {}\">{}</span><ul>{}</ul></div>",
+                cls, title, lis
+            )
+        }
+        let concl = v.get("conclusion").and_then(|x| x.as_str()).unwrap_or("");
+        format!(
+            "<h2>Code review</h2><div class=\"review\">{}{}{}<p><b>Conclusion:</b> {}</p></div>",
+            items(v, "good", "pass", "Strengths"),
+            items(v, "bad", "fail", "Weaknesses"),
+            "",
+            PortalExporter::esc(concl)
+        )
+    }
     fn render_run(m: &RunManifest, dst: &Path, secrets: &[Regex]) -> Result<String> {
         let passed_all = m.pass_rate >= 100.0;
         let mut stages = String::new();
@@ -318,6 +343,11 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
         let readme_html = fs::read_to_string(dst.join("README.md"))
             .map(|c| format!("<details><summary>README.md</summary><pre>{}</pre></details>", Self::esc(&c)))
             .unwrap_or_default();
+        let review_html = fs::read_to_string(dst.join("review.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .map(|v| Self::render_review(&v))
+            .unwrap_or_default();
         let mut file_list = String::new();
         let mut inline_code = String::new();
         Self::render_workspace(&dst.join("workspace"), "", &mut file_list, &mut inline_code)?;
@@ -357,7 +387,7 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
              <div class=\"card wide\"><div class=\"k\">Throughput</div><div class=\"v\">{tp}</div>{tpbar}</div>\
              </div>\
              <h2>Stages</h2><div class=\"stages\">{stages}</div>\
-             <h2>Code</h2>{code}\
+             {review}<h2>Code</h2>{code}\
              <h2>All files</h2><ul>{files}</ul>\
              {readme}\
              <details><summary>Environment</summary><table><tr><th>Key</th><th>Value</th></tr>{env}</table></details>\
@@ -390,6 +420,7 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
             code = inline_code,
             files = file_list,
             readme = readme_html,
+            review = review_html,
             env = env_rows,
             log = log_html,
         ))
@@ -574,6 +605,7 @@ mod tests {
         )
         .unwrap();
 
+        fs::write(run_dir.join("review.json"), "{\"good\": [\"g1\"], \"bad\": [\"b1\"], \"conclusion\": \"done well\"}").unwrap();
         let summary = PortalExporter::export(
             runs_dir.to_str().unwrap(),
             results_dir.to_str().unwrap(),
@@ -589,6 +621,8 @@ mod tests {
         assert!(!index.contains("{{"));
         let run_page = fs::read_to_string(out_dir.join("runs/demo_run_1/index.html")).unwrap();
         assert!(run_page.contains("demo_run_1"));
+        assert!(run_page.contains("Code review"));
+        assert!(run_page.contains("done well"));
         let log = fs::read_to_string(out_dir.join("runs/demo_run_1/console.log")).unwrap();
         assert!(!log.contains("sk-or-v1-zzz"));
 
