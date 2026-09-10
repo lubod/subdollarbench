@@ -10,7 +10,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        Html, IntoResponse, Response,
+        Html, IntoResponse, Redirect, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -254,6 +254,44 @@ fn resolve_results_dir() -> PathBuf {
     crate::config::get_repo_root().join("results")
 }
 
+fn resolve_portal_dir() -> PathBuf {
+    crate::config::get_repo_root().join("portal")
+}
+
+fn portal_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "json" => "application/json",
+        "md" => "text/markdown; charset=utf-8",
+        "log" | "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_portal_index() -> Response {
+    serve_portal(AxumPath(String::new())).await
+}
+
+async fn serve_portal(AxumPath(sub): AxumPath<String>) -> Response {
+    let root = resolve_portal_dir();
+    let mut full = root.clone();
+    for comp in Path::new(&sub).components() {
+        match comp {
+            std::path::Component::Normal(part) => full.push(part),
+            _ => return (StatusCode::FORBIDDEN, "portal: invalid path").into_response(),
+        }
+    }
+    if full.is_dir() {
+        full.push("index.html");
+    }
+    match std::fs::read(&full) {
+        Ok(bytes) => ([("content-type", portal_content_type(&full))], bytes).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "portal: not found").into_response(),
+    }
+}
+
 #[allow(dead_code)]
 fn resolve_workspace_dir() -> PathBuf {
     let ws = crate::config::get_repo_root().join("workspace");
@@ -285,6 +323,9 @@ impl UiServer {
             .route("/api/runs/:id/log", get(get_run_log))
             .route("/api/runs/:id/files", get(get_run_files))
             .route("/api/runs/:id/file", get(get_run_file))
+            .route("/portal", get(|| async { Redirect::permanent("/portal/") }))
+            .route("/portal/", get(serve_portal_index))
+            .route("/portal/*path", get(serve_portal))
             .route("/api/summary", get(get_summary).post(regenerate_summary))
             .route("/api/env", get(get_env))
             .route("/v1/models", get(crate::sandbox::tool_normalizer::handle_models))
@@ -1133,6 +1174,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_portal_static_routes() {
+        let state = create_test_state();
+        let app = UiServer::build_app(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", port);
+
+        // Bare /portal redirects to /portal/.
+        let res = client.get(format!("{}/portal", base)).send().await.unwrap();
+        assert_eq!(res.status(), 308);
+
+        // Unknown portal path 404s regardless of export state.
+        let res = client
+            .get(format!("{}/portal/nonexistent_xyz_123", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+
+        // Traversal outside the portal root is rejected.
+        let res = client
+            .get(format!("{}/portal/../Cargo.toml", base))
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status() == 403 || res.status() == 404);
+    }
+
     async fn test_web_routes_lifecycle() {
         // Drop guard restores SUMMARY.md even if the test panics mid-run,
         // preventing git working-tree pollution from summary regeneration.
