@@ -1109,7 +1109,36 @@
             </div>
           </div>
 
-          <div class="terminal" id="terminalOutput">SubDollarBench console initialized.
+          <style id="consoleCatStyle">
+#terminalOutput .ln{white-space:pre-wrap;word-break:break-word}
+#terminalOutput .ln-prompt{color:#d2a8ff}
+#terminalOutput .ln-thought{color:#e3b341;font-style:italic}
+#terminalOutput .ln-response{color:#7ee787}
+#terminalOutput .ln-action{color:#79c0ff;font-weight:600}
+#terminalOutput .ln-result,#terminalOutput .ln-code{color:#8b949e}
+#terminalOutput .ln-cmd{color:#79c0ff}
+#terminalOutput .ln-tokens{color:#6e7681}
+#terminalOutput .ln-omp{color:#ffa657}
+#terminalOutput .ln-error{color:#ff7b72;font-weight:700}
+#terminalOutput .ln-warn,#terminalOutput .ln-waiting{color:#e3b341}
+#terminalOutput .ln-sec{color:#58a6ff;font-weight:700}
+#terminalOutput .ln-pass{color:#3fb950;font-weight:700}
+#terminalOutput .ln-fail{color:#f85149;font-weight:700}
+#terminalOutput.hide-prompt .ln-prompt,#terminalOutput.hide-thought .ln-thought,#terminalOutput.hide-response .ln-response,#terminalOutput.hide-action .ln-action,#terminalOutput.hide-action .ln-cmd,#terminalOutput.hide-result .ln-result,#terminalOutput.hide-code .ln-code,#terminalOutput.hide-meta .ln-tokens{display:none}
+.cat-chip{font-size:.7rem;padding:2px 9px;border-radius:20px;border:1px solid var(--border);background:#0d1117;color:var(--text-muted);cursor:pointer;font-weight:600}
+.cat-chip.on{color:#fff;border-color:#58a6ff;background:#1c2b45}
+</style>
+<div id="consoleCats" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0;">
+<span style="font-size:.72rem;color:var(--text-muted);font-weight:600;">SHOW:</span>
+<button class="cat-chip on" onclick="toggleCat(this,'prompt')">Prompt</button>
+<button class="cat-chip on" onclick="toggleCat(this,'thought')">Thoughts</button>
+<button class="cat-chip on" onclick="toggleCat(this,'response')">Responses</button>
+<button class="cat-chip on" onclick="toggleCat(this,'action')">Actions</button>
+<button class="cat-chip on" onclick="toggleCat(this,'result')">Results</button>
+<button class="cat-chip on" onclick="toggleCat(this,'code')">Code</button>
+<button class="cat-chip on" onclick="toggleCat(this,'meta')">Meta</button>
+</div>
+<div class="terminal" id="terminalOutput">SubDollarBench console initialized.
 Select a model, choose reasoning effort, and click "Start Benchmark Run" to begin.
 </div>
         </div>
@@ -1687,41 +1716,77 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       document.getElementById('terminalOutput').textContent = '';
     }
 
-    function appendLog(line) {
-      if (!line) return;
-      if (parseTelemetryLine(line)) {
-        return; // Suppress raw control line from cluttering the terminal
+    function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+    function catFor(raw){
+      const line = raw.trimStart();
+      if (line.includes('[TELEMETRY]') || line.includes('[LIVE]')) return 'skip';
+      if (line.includes('[WAITING]')) return 'waiting';
+      if (line.startsWith('[OMP-PROMPT]') || line.startsWith('[PROMPT]')) return 'prompt';
+      if (line.startsWith('[THOUGHT]')) return 'thought';
+      if (line.startsWith('[RESPONSE]')) return 'response';
+      if (line.startsWith('[ACTION]')) return 'action';
+      if (line.startsWith('[RESULT]')) return 'result';
+      if (line.startsWith('[STDERR]') || line.startsWith('[FAIL') || line.includes('FAILED')) return 'error';
+      if (line.startsWith('[TOKENS]')) return 'tokens';
+      if (line.startsWith('[OMP]')) return 'omp';
+      if (line.startsWith('[WARN') || line.startsWith('[LIMIT]') || line.startsWith('[STOP]')) return 'warn';
+      if (/^\[(PIPELINE|SETUP|BENCH|DIAGNOSTICS|STATUS|EVAL|REVIVAL|MULTI-TRIAL|DONE|LOCAL RUNNER|OMP)/.test(line)) return 'sec';
+      if (raw.startsWith('  | ') || raw.startsWith('  | ...')) return 'code';
+      if (raw.startsWith('  > ')) return 'result';
+      if (raw.startsWith('  $ ') || raw.startsWith('  path:') || raw.startsWith('  - ') || raw.startsWith('  + ')) return 'cmd';
+      if (line.includes('-> PASS') || line.includes('  PASS')) return 'pass';
+      if (line.includes('-> FAIL') || line.includes('  FAIL')) return 'fail';
+      return '';
+    }
+    function renderLines(lines){
+      let html = '';
+      for (const raw of lines) {
+        if (!raw) continue;
+        if (parseTelemetryLine(raw)) continue;
+        const cat = catFor(raw);
+        if (cat === 'skip') continue;
+        if (!showCodeDetails && cat === 'code') continue;
+        html += cat ? '<div class="ln ln-' + cat + '">' + escHtml(raw) + '</div>' : '<div class="ln">' + escHtml(raw) + '</div>';
       }
-
-      // Filter code detail lines if toggled off
-      if (!showCodeDetails && (line.includes('  | ') || line.includes('  | ...'))) {
-        return;
-      }
-
+      return html;
+    }
+    function toggleCat(btn, cat){
       const term = document.getElementById('terminalOutput');
-
-      // Update [WAITING] lines in-place instead of creating dozens of scrolling lines
-      if (line.includes('[WAITING]')) {
-        const text = term.textContent;
-        const lastIdx = text.lastIndexOf('[WAITING]');
-        if (lastIdx !== -1) {
-          const prevPart = text.substring(0, lastIdx);
-          term.textContent = prevPart + line + '\n';
-          const autoScroll = document.getElementById('autoScrollCheck');
-          if (!autoScroll || autoScroll.checked) {
-            term.scrollTop = term.scrollHeight;
-          }
-          return;
-        }
-      }
-
-      term.textContent += line + '\n';
+      term.classList.toggle('hide-' + cat);
+      btn.classList.toggle('on');
+    }
+    function scrollTerm(){
       const autoScroll = document.getElementById('autoScrollCheck');
       if (!autoScroll || autoScroll.checked) {
+        const term = document.getElementById('terminalOutput');
         term.scrollTop = term.scrollHeight;
       }
     }
-
+    function appendLog(line) {
+      if (!line) return;
+      if (parseTelemetryLine(line)) {
+        return;
+      }
+      if (!showCodeDetails && catFor(line) === 'code') {
+        return;
+      }
+      const term = document.getElementById('terminalOutput');
+      const cat = catFor(line);
+      if (cat === 'skip') return;
+      if (cat === 'waiting') {
+        const prev = term.querySelector('.ln-waiting:last-of-type');
+        if (prev) {
+          prev.textContent = line;
+          scrollTerm();
+          return;
+        }
+      }
+      const div = document.createElement('div');
+      div.className = cat ? 'ln ln-' + cat : 'ln';
+      div.textContent = line;
+      term.appendChild(div);
+      scrollTerm();
+    }
     // Markdown Parser
     function sanitizeHtml(html) {
       if (!html) return '';
@@ -3324,8 +3389,7 @@ function copyRunId() {
             if (!showCodeDetails) {
               filtered = filtered.filter(l => !l.includes('  | ') && !l.includes('  | ...'));
             }
-            const cleanText = filtered.join('\n');
-            term.textContent = cleanText;
+            term.innerHTML = renderLines(filtered);
             const autoScroll = document.getElementById('autoScrollCheck');
             if (!autoScroll || autoScroll.checked) {
               term.scrollTop = term.scrollHeight;
