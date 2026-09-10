@@ -12,7 +12,7 @@ pub struct PortalSummary {
     pub out_dir: PathBuf,
 }
 
-const PORTAL_CSS: &str = ":root{{color-scheme:dark}}body{{font-family:system-ui,-apple-system,sans-serif;max-width:1200px;margin:0 auto;padding:2rem 1rem;background:#0d1117;color:#e6edf3;line-height:1.5}}a{{color:#58a5ff}}h1{{font-size:1.6rem}}.muted{{color:#8b949e}}.wrap{{overflow-x:auto}}table{{border-collapse:collapse;width:100%;font-size:.85rem}}thead th{{position:sticky;top:0;background:#161b22}}td,th{{border:1px solid #30363d;padding:7px 10px;text-align:left}}tbody tr:nth-child(even){{background:#11161d}}code{{font-size:.8rem;word-break:break-all;background:#161b22;padding:1px 5px;border-radius:4px}}.pill{{display:inline-block;padding:1px 10px;border-radius:999px;font-weight:600;font-size:.78rem;white-space:nowrap}}.pass{{background:#1a7f3733;color:#3fb950;border:1px solid #1a7f37}}.fail{{background:#da363333;color:#f85149;border:1px solid #da3633}}.score{{color:#79c0ff;font-weight:700;font-family:ui-monospace,monospace}}pre{{background:#161b22;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid #30363d;border-radius:6px}}details{{margin:1rem 0}}summary{{cursor:pointer;color:#58a5ff}}";
+const PORTAL_CSS: &str = ":root{color-scheme:dark}body{font-family:system-ui,-apple-system,sans-serif;max-width:1200px;margin:0 auto;padding:2rem 1rem;background:#0d1117;color:#e6edf3;line-height:1.5}a{color:#58a5ff}h1{font-size:1.6rem}.muted{color:#8b949e}.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.85rem}thead th{position:sticky;top:0;background:#161b22}td,th{border:1px solid #30363d;padding:7px 10px;text-align:left}tbody tr:nth-child(even){background:#11161d}code{font-size:.8rem;word-break:break-all;background:#161b22;padding:1px 5px;border-radius:4px}.pill{display:inline-block;padding:1px 10px;border-radius:999px;font-weight:600;font-size:.78rem;white-space:nowrap}.pass{background:#1a7f3733;color:#3fb950;border:1px solid #1a7f37}.fail{background:#da363333;color:#f85149;border:1px solid #da3633}.score{color:#79c0ff;font-weight:700;font-family:ui-monospace,monospace}pre{background:#161b22;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid #30363d;border-radius:6px}details{margin:1rem 0}summary{cursor:pointer;color:#58a5ff}";
 
 pub struct PortalExporter;
 
@@ -366,6 +366,8 @@ mod tests {
         assert_eq!(summary.run_count, 1);
         let index = fs::read_to_string(out_dir.join("index.html")).unwrap();
         assert!(index.contains("demo_run_1"));
+        assert!(index.contains("<style>:root{color-scheme:dark}body{"));
+        assert!(!index.contains("{{"));
         let run_page = fs::read_to_string(out_dir.join("runs/demo_run_1/index.html")).unwrap();
         assert!(run_page.contains("demo_run_1"));
         let log = fs::read_to_string(out_dir.join("runs/demo_run_1/console.log")).unwrap();
