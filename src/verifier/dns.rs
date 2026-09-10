@@ -80,6 +80,22 @@ impl DnsVerifier {
         }
     }
 
+    /// Timed burst of sequential queries, scored in queries/sec. None on failures.
+    pub async fn measure_throughput(&self) -> Option<f64> {
+        let iters = 200u32;
+        let start = std::time::Instant::now();
+        for i in 0..iters {
+            if self.send_query(0x7000 + (i % 60000) as u16, "example.com", 1).await.is_err() {
+                return None;
+            }
+        }
+        let secs = start.elapsed().as_secs_f64();
+        if secs <= 0.0 {
+            return None;
+        }
+        Some(iters as f64 / secs)
+    }
+
     async fn send_query(&self, id: u16, domain: &str, qtype: u16) -> Result<Vec<u8>, String> {
         let socket = UdpSocket::bind("127.0.0.1:0")
             .await

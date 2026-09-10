@@ -475,7 +475,12 @@ impl BenchmarkPipeline {
                         }
                     }
                     TaskType::Dns => {
-                        // DNS load is integrated into test suite
+                        let verifier = DnsVerifier::new(port, Some(&verifier_seed));
+                        if let Some(tp) = verifier.measure_throughput().await {
+                            logger.log(&format!("  Candidate Throughput: {:.0} queries/sec", tp));
+                            throughput = Some(tp);
+                        }
+                        logger.log("[BENCH] No external reference for DNS; score uses verifier timing.");
                     }
                     TaskType::Pdf => {
                         let verifier = PdfVerifier::new(port, Some(&verifier_seed));

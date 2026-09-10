@@ -2,7 +2,7 @@
 
 > **Measuring under-$1/1M token LLMs on autonomous, production-grade SWE systems engineering tasks (Redis & HTTP/1.1) in isolated Docker sandboxes.**
 
-*Last Updated: 2026-09-10 14:20:53 UTC*
+*Last Updated: 2026-09-10 16:14:26 UTC*
 
 ## 📑 Quick Navigation
 - [📊 Global Leaderboard](#-global-leaderboard)
@@ -17,13 +17,14 @@
 
 | Rank | Model | Effort | Task | Lang | Pass Rate | Duration | Turns | Throughput | Cost (USD) | Efficiency | Full Trace & Code |
 |:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 🥇 1 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 55s | 7 | 25721 req/s *(81% ref)* | $0.0025 *(eff: $0.0101)* | **258.8** pts/¢ *(base: 98.6)* | [Inspect](runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_105330/) |
-| 🥈 2 | `openai/gpt-5.6-luna-pro` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 1m 29s | 4 | 5853 req/s *(18% ref)* | $0.0167 *(eff: $0.0279)* | **48.4** pts/¢ *(base: 35.8)* | [Inspect](runs/http_openai_gpt-5.6-luna-pro_20260907_160545/) |
-| 🥉 3 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | Redis | `Go` | 100% (4/4) | 1m 48s | 27 | 93466 req/s *(117% ref)* | $0.0042 *(eff: $0.0345)* | **96.8** pts/¢ *(base: 28.9)* | [Inspect](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
-| 4 | `openrouter/google/gemini-3.8-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 1m 36s | 9 | 46151 req/s *(139% ref)* | $0.0651 *(eff: $0.0740)* | **51.0** pts/¢ *(base: 13.5)* | [Inspect](runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/) |
-| 5 | `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 4m 2s | 50 | 42258 req/s *(134% ref)* | $0.0236 *(eff: $0.1114)* | **33.0** pts/¢ *(base: 9.0)* | [Inspect](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
-| 6 | `openrouter/tencent/hy4-preview` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 6m 22s | 33 | 14802 req/s *(47% ref)* | $0.1283 *(eff: $0.1809)* | **10.7** pts/¢ *(base: 5.5)* | [Inspect](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
-| 7 | `openrouter/google/gemini-3.8-flash` | `auto` | Redis | `Go` | 0% (0/4) | 1m 35s | 19 | N/A | $0.1902 *(eff: $0.2074)* | **0.0** pts/¢ | [Inspect](runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/) |
+| 🥇 1 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | dns | `Python` | 100% (6/6) | 38s | 7 | N/A | $0.0013 *(eff: $0.0078)* | **128.0** pts/¢ | [Inspect](runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/) |
+| 🥈 2 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 55s | 7 | 25721 req/s *(81% ref)* | $0.0025 *(eff: $0.0101)* | **258.8** pts/¢ *(base: 98.6)* | [Inspect](runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_105330/) |
+| 🥉 3 | `openai/gpt-5.6-luna-pro` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 1m 29s | 4 | 5853 req/s *(18% ref)* | $0.0167 *(eff: $0.0279)* | **48.4** pts/¢ *(base: 35.8)* | [Inspect](runs/http_openai_gpt-5.6-luna-pro_20260907_160545/) |
+| 4 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | Redis | `Go` | 100% (4/4) | 1m 48s | 27 | 93466 req/s *(117% ref)* | $0.0042 *(eff: $0.0345)* | **96.8** pts/¢ *(base: 28.9)* | [Inspect](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
+| 5 | `openrouter/google/gemini-3.8-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 1m 36s | 9 | 46151 req/s *(139% ref)* | $0.0651 *(eff: $0.0740)* | **51.0** pts/¢ *(base: 13.5)* | [Inspect](runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/) |
+| 6 | `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 4m 2s | 50 | 42258 req/s *(134% ref)* | $0.0236 *(eff: $0.1114)* | **33.0** pts/¢ *(base: 9.0)* | [Inspect](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
+| 7 | `openrouter/tencent/hy4-preview` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 6m 22s | 33 | 14802 req/s *(47% ref)* | $0.1283 *(eff: $0.1809)* | **10.7** pts/¢ *(base: 5.5)* | [Inspect](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
+| 8 | `openrouter/google/gemini-3.8-flash` | `auto` | Redis | `Go` | 100% (5/5) | 1m 35s | 19 | 90156 req/s | $0.1902 *(eff: $0.2074)* | **31.2** pts/¢ *(base: 4.8)* | [Inspect](runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/) |
 
 ---
 
@@ -38,7 +39,7 @@ The candidate LLM is instructed to build a production-grade, concurrent Redis cl
 | Model | Effort | Lang | Pass Rate | Duration | Turns | Throughput | Cost | Score | Run Archive |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Go` | 100% | 1m 48s | 27 | 93466 req/s | $0.0042 | 28.9 pts/¢ | [runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
-| `openrouter/google/gemini-3.8-flash` | `auto` | `Go` | 0% | 1m 35s | 19 | N/A | $0.1902 | 0.0 pts/¢ | [runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/](runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/) |
+| `openrouter/google/gemini-3.8-flash` | `auto` | `Go` | 100% | 1m 35s | 19 | 90156 req/s | $0.1902 | 4.8 pts/¢ | [runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/](runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/) |
 
 ---
 
@@ -67,6 +68,10 @@ The candidate LLM is instructed to build an RFC 1035 UDP DNS Server from scratch
 - **Packaging Freedom**: Working multi-stage `Dockerfile` (automatically built and containerized) or `./start.sh`.
 - **Verification**: 4-stage automated UDP conformance suite + `queryperf` load test.
 
+| Model | Effort | Lang | Pass Rate | Duration | Turns | Throughput | Cost | Score | Run Archive |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Python` | 100% | 38s | 7 | N/A | $0.0013 | 128.0 pts/¢ | [runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/](runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/) |
+
 ---
 
 ## 🖥️ Benchmark Testbed Environment Specs
@@ -83,8 +88,8 @@ All runs recorded in this repository were benchmarked under identical, isolated 
 | **Rust Version** | N/A |
 | **Python Version** | Python 3.12.3 |
 | **Node.js Version** | v24.13.0 |
-| **Git Baseline** | Commit `4498eb1` (branch `master`) |
-| **Benchmark Captured** | 2026-09-10T14:20:53.723775479+00:00 |
+| **Git Baseline** | Commit `a5a26e5` (branch `master`) |
+| **Benchmark Captured** | 2026-09-10T16:14:26.572750797+00:00 |
 
 ---
 
