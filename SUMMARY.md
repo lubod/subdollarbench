@@ -2,7 +2,7 @@
 
 > **Measuring under-$1/1M token LLMs on autonomous, production-grade SWE systems engineering tasks (Redis & HTTP/1.1) in isolated Docker sandboxes.**
 
-*Last Updated: 2026-09-10 11:35:39 UTC*
+*Last Updated: 2026-09-10 13:40:39 UTC*
 
 ## 📑 Quick Navigation
 - [📊 Global Leaderboard](#-global-leaderboard)
@@ -23,6 +23,7 @@
 | 4 | `openrouter/google/gemini-3.8-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 1m 36s | 9 | 46151 req/s *(139% ref)* | $0.0651 *(eff: $0.0740)* | **51.0** pts/¢ *(base: 13.5)* | [Inspect](runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/) |
 | 5 | `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 4m 2s | 50 | 42258 req/s *(134% ref)* | $0.0236 *(eff: $0.1114)* | **33.0** pts/¢ *(base: 9.0)* | [Inspect](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
 | 6 | `openrouter/tencent/hy4-preview` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 6m 22s | 33 | 14802 req/s *(47% ref)* | $0.1283 *(eff: $0.1809)* | **10.7** pts/¢ *(base: 5.5)* | [Inspect](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
+| 7 | `openrouter/google/gemini-3.8-flash` | `auto` | HTTP/1.1 | `Go` | 0% (0/5) | 3m 11s | 16 | N/A | $0.0648 *(eff: $0.0815)* | **0.0** pts/¢ | [Inspect](runs/http_openrouter_google_gemini-3.8-flash_20260910_133655/) |
 
 ---
 
@@ -54,6 +55,7 @@ The candidate LLM is instructed to build an RFC 7230/7231 HTTP/1.1 web server fr
 | `openrouter/google/gemini-3.8-flash` | `auto` | `Go` | 100% | 1m 36s | 9 | 46151 req/s | $0.0651 | 13.5 pts/¢ | [runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/](runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/) |
 | `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | `Go` | 100% | 4m 2s | 50 | 42258 req/s | $0.0236 | 9.0 pts/¢ | [runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
 | `openrouter/tencent/hy4-preview` | `auto` | `Python` | 100% | 6m 22s | 33 | 14802 req/s | $0.1283 | 5.5 pts/¢ | [runs/http_openrouter_tencent_hy4-preview_20260909_174509/](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
+| `openrouter/google/gemini-3.8-flash` | `auto` | `Go` | 0% | 3m 11s | 16 | N/A | $0.0648 | 0.0 pts/¢ | [runs/http_openrouter_google_gemini-3.8-flash_20260910_133655/](runs/http_openrouter_google_gemini-3.8-flash_20260910_133655/) |
 
 ---
 
@@ -81,8 +83,8 @@ All runs recorded in this repository were benchmarked under identical, isolated 
 | **Rust Version** | N/A |
 | **Python Version** | Python 3.12.3 |
 | **Node.js Version** | v24.13.0 |
-| **Git Baseline** | Commit `ab48d11` (branch `master`) |
-| **Benchmark Captured** | 2026-09-10T11:35:39.165133524+00:00 |
+| **Git Baseline** | Commit `1fec23c` (branch `master`) |
+| **Benchmark Captured** | 2026-09-10T13:40:39.813665501+00:00 |
 
 ---
 
