@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use colored::*;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
-use subdollarbench::report::{LeaderboardManager, PortalExporter, SummaryGenerator};
+use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest, SummaryGenerator};
 use subdollarbench::verifier::{DnsVerifier, HttpVerifier, RedisVerifier};
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
@@ -175,6 +175,73 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
+        Commands::RegenReviews {
+            runs_dir,
+            run_id,
+            model,
+            api_key,
+            force,
+            results_dir,
+            out,
+            base_url,
+            keep,
+        } => {
+            let runs_path = std::path::Path::new(&runs_dir);
+            let mut ids: Vec<String> = std::fs::read_dir(runs_path)
+                .with_context(|| format!("read runs dir {runs_dir}"))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|id| run_id.as_ref().map(|w| w == id).unwrap_or(true))
+                .collect();
+            ids.sort();
+            let (mut done, mut skipped, mut failed) = (0, 0, 0);
+            for id in &ids {
+                let dir = runs_path.join(id);
+                if dir.join("review.json").exists() && !force {
+                    skipped += 1;
+                    continue;
+                }
+                let manifest: RunManifest = match std::fs::read_to_string(dir.join("manifest.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                {
+                    Some(m) => m,
+                    None => {
+                        eprintln!("[SKIP] {id}: no readable manifest.json");
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let task_prompt = std::fs::read_to_string(
+                    std::path::Path::new("tasks").join(&manifest.task).join("prompt.md"),
+                )
+                .unwrap_or_default();
+                match RunJudge::judge_run(
+                    api_key.as_deref(),
+                    &model,
+                    &manifest.task,
+                    &task_prompt,
+                    &dir.join("workspace"),
+                    &manifest,
+                )
+                .await
+                {
+                    Ok(review) => {
+                        let text = serde_json::to_string_pretty(&review)?;
+                        std::fs::write(dir.join("review.json"), text)?;
+                        println!("[OK] {id}: {}+{} bullets", review.good.len(), review.bad.len());
+                        done += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[FAIL] {id}: {e:#}");
+                        failed += 1;
+                    }
+                }
+            }
+            let summary = PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?;
+            println!("reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} runs", summary.run_count);
+        }
         Commands::Portal {
             runs_dir,
             results_dir,

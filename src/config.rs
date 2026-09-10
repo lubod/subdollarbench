@@ -86,6 +86,43 @@ pub enum Commands {
     },
 
     /// Export a static read-only portal (leaderboard + run pages) for VPS hosting
+    RegenReviews {
+        /// Regenerate LLM code reviews for existing runs with the current prompt
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// Only regenerate this single run id
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Judge model for the reviews
+        #[arg(long, default_value = "openrouter/meta/muse-spark-1.3-contributor")]
+        model: String,
+
+        /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
+        #[arg(long, env = "OPENROUTER_API_KEY")]
+        api_key: Option<String>,
+
+        /// Overwrite existing review.json files
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Path to results directory (for the portal refresh)
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+
+        /// Output directory for the static portal refresh
+        #[arg(long, default_value = "./portal")]
+        out: String,
+
+        /// Public base URL, used for absolute links (optional)
+        #[arg(long, default_value = "")]
+        base_url: String,
+
+        /// Maximum number of runs to include (newest first)
+        #[arg(long, default_value_t = 200)]
+        keep: usize,
+    },
     Portal {
         /// Path to runs directory
         #[arg(long, default_value = "./runs")]
