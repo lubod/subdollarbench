@@ -234,7 +234,10 @@ runs/<run_id>/
    cargo run --release -- portal --out ./portal
    rsync -az --delete ./portal/ <vps>:/srv/bench/
    ```
-5. Point your domain at the VPS; Caddy serves `./portal/` statically with automatic TLS (see `Caddyfile`).
+5. Point your domain at the VPS, rsync `./portal/` to `/srv/bench/`, and start the static file service behind your existing Traefik (TLS stays on your current certbot/Traefik setup):
+   ```bash
+   docker compose -f deploy/docker-compose.yml up -d
+   ```
 
 ---
 

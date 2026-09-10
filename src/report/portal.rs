@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ pub struct PortalSummary {
     pub run_count: usize,
     pub out_dir: PathBuf,
 }
+
+const PORTAL_CSS: &str = ":root{{color-scheme:dark}}body{{font-family:system-ui,-apple-system,sans-serif;max-width:1200px;margin:0 auto;padding:2rem 1rem;background:#0d1117;color:#e6edf3;line-height:1.5}}a{{color:#58a5ff}}h1{{font-size:1.6rem}}.muted{{color:#8b949e}}.wrap{{overflow-x:auto}}table{{border-collapse:collapse;width:100%;font-size:.85rem}}thead th{{position:sticky;top:0;background:#161b22}}td,th{{border:1px solid #30363d;padding:7px 10px;text-align:left}}tbody tr:nth-child(even){{background:#11161d}}code{{font-size:.8rem;word-break:break-all;background:#161b22;padding:1px 5px;border-radius:4px}}.pill{{display:inline-block;padding:1px 10px;border-radius:999px;font-weight:600;font-size:.78rem;white-space:nowrap}}.pass{{background:#1a7f3733;color:#3fb950;border:1px solid #1a7f37}}.fail{{background:#da363333;color:#f85149;border:1px solid #da3633}}.score{{color:#79c0ff;font-weight:700;font-family:ui-monospace,monospace}}pre{{background:#161b22;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid #30363d;border-radius:6px}}details{{margin:1rem 0}}summary{{cursor:pointer;color:#58a5ff}}";
 
 pub struct PortalExporter;
 
@@ -96,6 +99,7 @@ impl PortalExporter {
     }
 
     fn render_index(results: &[crate::report::leaderboard::BenchmarkRunResult], base_url: &str) -> String {
+        let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
         let mut rows = String::new();
         for (i, r) in results.iter().enumerate() {
             let tp = r
@@ -103,14 +107,17 @@ impl PortalExporter {
                 .map(|v| format!("{:.0} req/s", v))
                 .unwrap_or_else(|| "N/A".to_string());
             let score = r.throughput_score.unwrap_or(r.efficiency_score);
+            let medal = match i + 1 { 1 => "🥇".to_string(), 2 => "🥈".to_string(), 3 => "🥉".to_string(), n => n.to_string() };
+            let cls = if r.pass_rate >= 100.0 { "pass" } else { "fail" };
             rows.push_str(&format!(
-                "<tr><td>{}</td><td><a href=\"runs/{}/\">RUN</a></td><td>{}</td><td>{}</td><td>{}</td>\
-                 <td>{:.0}% ({}/{})</td><td>{}</td><td>{:.1}</td></tr>\n",
-                i + 1,
+                "<tr><td>{}</td><td><a href=\"runs/{}/\">RUN</a></td><td><code>{}</code></td><td>{}</td><td>{}</td>\
+                 <td><span class=\"pill {}\">{:.0}% ({}/{})</span></td><td>{}</td><td class=\"score\">{:.1}</td></tr>\n",
+                medal,
                 Self::esc(&r.id),
                 Self::esc(&r.id),
                 Self::esc(&r.model),
                 Self::esc(&r.task),
+                cls,
                 r.pass_rate,
                 r.passed_stages,
                 r.total_stages,
@@ -122,17 +129,16 @@ impl PortalExporter {
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
              <title>SubDollarBench Portal</title>\
-             <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#111}}\
-             table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:6px 8px;font-size:.85rem;text-align:left}}\
-             th{{background:#f4f4f4}}tr:nth-child(even){{background:#fafafa}}\
-             code{{font-size:.8rem;word-break:break-all}}</style></head><body>\
+             <style>{css}</style></head><body>\
              <h1>SubDollarBench Portal</h1>\
-             <p>Autonomous under-$1 LLM systems benchmark. {n} runs.\
+             <p>Autonomous under-$1 LLM systems benchmark. {n} runs. <span class=\"muted\">Generated {now}.</span>\
              {base}</p>\
-             <table><tr><th>#</th><th>Run</th><th>ID</th><th>Model</th><th>Task</th>\
-             <th>Pass</th><th>Throughput</th><th>Score pts/&cent;</th></tr>{rows}</table>\
+             <div class=\"wrap\"><table><thead><tr><th>#</th><th>Run</th><th>ID</th><th>Model</th><th>Task</th>\
+             <th>Pass</th><th>Throughput</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div>\
              </body></html>",
+            css = PORTAL_CSS,
             n = results.len(),
+            now = now,
             base = if base_url.is_empty() {
                 String::new()
             } else {
@@ -213,10 +219,7 @@ impl PortalExporter {
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
              <title>{id}</title>\
-             <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#111}}\
-             table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:6px 8px;font-size:.85rem;text-align:left}}\
-             th{{background:#f4f4f4}}pre{{background:#f4f4f4;padding:1rem;overflow-x:auto;font-size:.78rem}}\
-             details{{margin:1rem 0}}</style></head><body>\
+             <style>{css}</style></head><body>\
              <p><a href=\"../../\">&larr; leaderboard</a></p><h1><code>{id}</code></h1>\
              <table>\
              <tr><th>Model</th><td>{model}</td></tr>\
@@ -233,6 +236,7 @@ impl PortalExporter {
              <h2>Stages</h2><table><tr><th>#</th><th>Name</th><th>Result</th><th>Error</th></tr>{stages}</table>\
              <h2>Environment</h2><table><tr><th>Key</th><th>Value</th></tr>{env}</table>\
              <h2>Files</h2><ul>{files}</ul>{log}</body></html>",
+            css = PORTAL_CSS,
             id = Self::esc(&m.run_id),
             model = Self::esc(&m.model),
             task = Self::esc(&m.task),

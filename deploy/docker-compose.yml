@@ -1,0 +1,17 @@
+services:
+  bench-portal:
+    image: nginx:alpine
+    volumes:
+      - /srv/bench:/usr/share/nginx/html:ro
+    labels:
+      - traefik.enable=true
+      - "traefik.http.routers.bench-portal.rule=Host(`bench.YOUR-DOMAIN`)"
+      - traefik.http.routers.bench-portal.entrypoints=websecure
+      - traefik.http.routers.bench-portal.tls=true
+    # If traefik runs on a dedicated docker network, attach this service to it:
+    # networks:
+    #   - proxy
+    restart: unless-stopped
+# networks:
+#   proxy:
+#     external: true

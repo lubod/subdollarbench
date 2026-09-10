@@ -1,4 +1,0 @@
-subdollar-ai-coding-bench.example.com {
-	root * /srv/bench
-	file_server
-}
