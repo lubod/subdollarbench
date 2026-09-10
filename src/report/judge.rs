@@ -28,9 +28,9 @@ impl RunJudge {
         if good.is_empty() || bad.is_empty() {
             anyhow::bail!("review needs at least one strength and one weakness");
         }
-        if good.len() + bad.len() != 7 {
+        if good.len() + bad.len() != 9 {
             anyhow::bail!(
-                "review must carry exactly 7 bullets plus conclusion, got {}+{}",
+                "review must carry exactly 9 bullets plus conclusion, got {}+{}",
                 good.len(),
                 bad.len()
             );
@@ -109,7 +109,7 @@ impl RunJudge {
         p.push_str("Judge ONLY this run on its own prompt and its own numbers. Weigh run economy (turns, tokens, cost, duration) alongside correctness and throughput. Never compare against other runs, models, or leaderboard positions.\n");
         p.push_str("Respond with a single JSON object and nothing else, exactly this shape:\n");
         p.push_str("{\"good\": [\"...\", ...], \"bad\": [\"...\", ...], \"conclusion\": \"...\"}\n");
-        p.push_str("Rules: good plus bad must total exactly 7 bullets (any split, at least one of each), each bullet one or two sentences grounded in the code or the numbers, conclusion exactly three sentences. No markdown fences.\n\n");
+        p.push_str("Rules: good plus bad must total exactly 9 bullets (any split, at least one of each), each bullet one or two sentences grounded in the code or the numbers, conclusion exactly three sentences. No markdown fences.\n\n");
         p.push_str("## Task requirements (excerpt)\n");
         p.push_str(&task_prompt.chars().take(MAX_PROMPT_CHARS).collect::<String>());
         p.push_str("\n\n## Measured results\n");
@@ -277,7 +277,7 @@ impl RunJudge {
                     Ok(review) if Self::validate(&review).is_ok() => return Ok(review),
                     _ => {
                         messages.push(serde_json::json!({"role": "assistant", "content": text}));
-                        messages.push(serde_json::json!({"role": "user", "content": "That output was invalid. Reply with ONLY the JSON object: good plus bad totalling exactly 7 bullets (at least one of each), each bullet grounded in the code or numbers, plus a three-sentence conclusion."}));
+                        messages.push(serde_json::json!({"role": "user", "content": "That output was invalid. Reply with ONLY the JSON object: good plus bad totalling exactly 9 bullets (at least one of each), each bullet grounded in the code or numbers, plus a three-sentence conclusion."}));
                     }
                 }
             } else if attempt == 0 {
@@ -297,8 +297,8 @@ mod tests {
 
     fn sample() -> ReviewJson {
         ReviewJson {
-            good: vec!["a".to_string(), "b".to_string(), "c".to_string()],
-            bad: vec!["d".to_string(), "g".to_string(), "e".to_string(), "f".to_string()],
+            good: vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
+            bad: vec!["h".to_string(), "d".to_string(), "g".to_string(), "e".to_string(), "f".to_string()],
             conclusion: "ok".to_string(),
         }
     }
@@ -346,7 +346,7 @@ mod tests {
     fn test_judge_prompt_mentions_no_cross_run_comparison() {
         let p = RunJudge::build_prompt("redis", "PING must reply PONG", &[], "{}");
         assert!(p.contains("Never compare"));
-        assert!(p.contains("exactly 7 bullets"));
+        assert!(p.contains("exactly 9 bullets"));
     }
 
     #[test]
