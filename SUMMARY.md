@@ -2,7 +2,7 @@
 
 > **Measuring under-$1/1M token LLMs on autonomous, production-grade SWE systems engineering tasks (Redis & HTTP/1.1) in isolated Docker sandboxes.**
 
-*Last Updated: 2026-09-10 10:54:29 UTC*
+*Last Updated: 2026-09-10 11:35:39 UTC*
 
 ## 📑 Quick Navigation
 - [📊 Global Leaderboard](#-global-leaderboard)
@@ -19,9 +19,10 @@
 |:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | 🥇 1 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 55s | 7 | 25721 req/s *(81% ref)* | $0.0025 *(eff: $0.0101)* | **258.8** pts/¢ *(base: 98.6)* | [Inspect](runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_105330/) |
 | 🥈 2 | `openai/gpt-5.6-luna-pro` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 1m 29s | 4 | 5853 req/s *(18% ref)* | $0.0167 *(eff: $0.0279)* | **48.4** pts/¢ *(base: 35.8)* | [Inspect](runs/http_openai_gpt-5.6-luna-pro_20260907_160545/) |
-| 🥉 3 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | Redis | `Go` | 100% (4/4) | 1m 48s | 27 | N/A | $0.0042 *(eff: $0.0345)* | **28.9** pts/¢ | [Inspect](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
+| 🥉 3 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | Redis | `Go` | 100% (4/4) | 1m 48s | 27 | 93466 req/s *(117% ref)* | $0.0042 *(eff: $0.0345)* | **96.8** pts/¢ *(base: 28.9)* | [Inspect](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
 | 4 | `openrouter/google/gemini-3.8-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 1m 36s | 9 | 46151 req/s *(139% ref)* | $0.0651 *(eff: $0.0740)* | **51.0** pts/¢ *(base: 13.5)* | [Inspect](runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/) |
-| 5 | `openrouter/tencent/hy4-preview` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 6m 22s | 33 | 14802 req/s *(47% ref)* | $0.1283 *(eff: $0.1809)* | **10.7** pts/¢ *(base: 5.5)* | [Inspect](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
+| 5 | `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 4m 2s | 50 | 42258 req/s *(134% ref)* | $0.0236 *(eff: $0.1114)* | **33.0** pts/¢ *(base: 9.0)* | [Inspect](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
+| 6 | `openrouter/tencent/hy4-preview` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 6m 22s | 33 | 14802 req/s *(47% ref)* | $0.1283 *(eff: $0.1809)* | **10.7** pts/¢ *(base: 5.5)* | [Inspect](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
 
 ---
 
@@ -35,7 +36,7 @@ The candidate LLM is instructed to build a production-grade, concurrent Redis cl
 
 | Model | Effort | Lang | Pass Rate | Duration | Turns | Throughput | Cost | Score | Run Archive |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Go` | 100% | 1m 48s | 27 | N/A | $0.0042 | 28.9 pts/¢ | [runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
+| `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Go` | 100% | 1m 48s | 27 | 93466 req/s | $0.0042 | 28.9 pts/¢ | [runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/](runs/redis_openrouter_meta_muse-spark-1.3-contributor_20260909_180249/) |
 
 ---
 
@@ -51,6 +52,7 @@ The candidate LLM is instructed to build an RFC 7230/7231 HTTP/1.1 web server fr
 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Python` | 100% | 55s | 7 | 25721 req/s | $0.0025 | 98.6 pts/¢ | [runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_105330/](runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_105330/) |
 | `openai/gpt-5.6-luna-pro` | `auto` | `Python` | 100% | 1m 29s | 4 | 5853 req/s | $0.0167 | 35.8 pts/¢ | [runs/http_openai_gpt-5.6-luna-pro_20260907_160545/](runs/http_openai_gpt-5.6-luna-pro_20260907_160545/) |
 | `openrouter/google/gemini-3.8-flash` | `auto` | `Go` | 100% | 1m 36s | 9 | 46151 req/s | $0.0651 | 13.5 pts/¢ | [runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/](runs/http_openrouter_google_gemini-3.8-flash_20260909_163707/) |
+| `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | `Go` | 100% | 4m 2s | 50 | 42258 req/s | $0.0236 | 9.0 pts/¢ | [runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
 | `openrouter/tencent/hy4-preview` | `auto` | `Python` | 100% | 6m 22s | 33 | 14802 req/s | $0.1283 | 5.5 pts/¢ | [runs/http_openrouter_tencent_hy4-preview_20260909_174509/](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
 
 ---
@@ -79,8 +81,8 @@ All runs recorded in this repository were benchmarked under identical, isolated 
 | **Rust Version** | N/A |
 | **Python Version** | Python 3.12.3 |
 | **Node.js Version** | v24.13.0 |
-| **Git Baseline** | Commit `a428e32` (branch `master`) |
-| **Benchmark Captured** | 2026-09-10T10:54:29.585174170+00:00 |
+| **Git Baseline** | Commit `ab48d11` (branch `master`) |
+| **Benchmark Captured** | 2026-09-10T11:35:39.165133524+00:00 |
 
 ---
 
