@@ -291,6 +291,9 @@ async fn serve_portal(AxumPath(sub): AxumPath<String>) -> Response {
         }
     }
     if full.is_dir() {
+        if !sub.is_empty() && !sub.ends_with("/") {
+            return Redirect::permanent(&format!("/portal/{}/", sub)).into_response();
+        }
         full.push("index.html");
     }
     match std::fs::read(&full) {
