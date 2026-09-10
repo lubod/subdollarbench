@@ -44,7 +44,7 @@ pub struct PortalSummary {
     pub out_dir: PathBuf,
 }
 
-const PORTAL_CSS: &str = ":root{color-scheme:dark}body{font-family:system-ui,-apple-system,sans-serif;max-width:1200px;margin:0 auto;padding:2rem 1rem;background:#0d1117;color:#e6edf3;line-height:1.5}a{color:#58a5ff}h1{font-size:1.6rem}.muted{color:#8b949e}.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.85rem}thead th{position:sticky;top:0;background:#161b22}td,th{border:1px solid #30363d;padding:7px 10px;text-align:left}tbody tr:nth-child(even){background:#11161d}code{font-size:.8rem;word-break:break-all;background:#161b22;padding:1px 5px;border-radius:4px}.pill{display:inline-block;padding:1px 10px;border-radius:999px;font-weight:600;font-size:.78rem;white-space:nowrap}.pass{background:#1a7f3733;color:#3fb950;border:1px solid #1a7f37}.fail{background:#da363333;color:#f85149;border:1px solid #da3633}.score{color:#79c0ff;font-weight:700;font-family:ui-monospace,monospace}pre{background:#161b22;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid #30363d;border-radius:6px}details{margin:1rem 0}summary{cursor:pointer;color:#58a5ff}";
+const PORTAL_CSS: &str = ":root{color-scheme:dark;--bg:#0b0e14;--panel:#121724;--line:#232c3d;--txt:#e8edf4;--mut:#8b94a3;--acc:#58a5ff;--grn:#3fb950;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 400px at 50% -10%,#16233d 0%,var(--bg) 60%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:2rem;margin:0;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#9ecbff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub{color:var(--mut);margin:.4rem 0 1.6rem}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45)}table{border-collapse:collapse;width:100%;font-size:.86rem}thead th{position:sticky;top:0;background:#161d2c;cursor:pointer;user-select:none;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}thead th:hover{color:#fff}tbody td{padding:9px 12px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:none}tbody tr{transition:background .12s}tbody tr:hover{background:#182032}tbody tr:nth-child(even){background:rgba(255,255,255,.015)}code{font-size:.78rem;word-break:break-all;background:#0b0f18;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:650;font-size:.76rem;white-space:nowrap}.pass{background:rgba(63,185,80,.14);color:var(--grn);border:1px solid rgba(63,185,80,.4)}.fail{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.4)}.score{color:#79c0ff;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:#0b0f18;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid var(--line);border-radius:10px}details{margin:1.2rem 0}summary{cursor:pointer;color:var(--acc)}.muted{color:var(--mut)}footer{margin-top:2rem;color:var(--mut);font-size:.8rem}";
 
 pub struct PortalExporter;
 
@@ -142,19 +142,23 @@ impl PortalExporter {
                 .unwrap_or_else(|| "N/A".to_string());
             let score = r.throughput_score.unwrap_or(r.efficiency_score);
             let medal = match i + 1 { 1 => "🥇".to_string(), 2 => "🥈".to_string(), 3 => "🥉".to_string(), n => n.to_string() };
+            let tp_v = r.throughput_req_sec.unwrap_or(-1.0);
             let cls = if r.pass_rate >= 100.0 { "pass" } else { "fail" };
             rows.push_str(&format!(
-                "<tr><td>{}</td><td><a href=\"runs/{}/\">RUN</a></td><td><code>{}</code></td><td>{}</td><td>{}</td>\
-                 <td><span class=\"pill {}\">{:.0}% ({}/{})</span></td><td>{}</td><td class=\"score\">{:.1}</td></tr>\n",
+                "<tr><td data-v=\"{}\">{}</td><td><a href=\"runs/{}/\">RUN</a></td><td><code>{}</code></td><td>{}</td><td>{}</td>\
+                 <td data-v=\"{}\"><span class=\"pill {}\">{:.0}% ({}/{})</span></td><td data-v=\"{}\">{}</td><td class=\"score\">{:.1}</td></tr>\n",
+                (i + 1),
                 medal,
                 Self::esc(&r.id),
                 Self::esc(&r.id),
                 Self::esc(&r.model),
                 Self::esc(&r.task),
+                r.pass_rate,
                 cls,
                 r.pass_rate,
                 r.passed_stages,
                 r.total_stages,
+                tp_v,
                 tp,
                 score,
             ));
@@ -163,12 +167,35 @@ impl PortalExporter {
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
              <title>SubDollarBench Portal</title>\
-             <style>{css}</style></head><body>\
+             <style>{css}</style></head><body><main>\
              <h1>SubDollarBench Portal</h1>\
              <p>Autonomous under-$1 LLM systems benchmark. {n} runs. <span class=\"muted\">Generated {now}.</span>\
              {base}</p>\
              <div class=\"wrap\"><table><thead><tr><th>#</th><th>Run</th><th>ID</th><th>Model</th><th>Task</th>\
-             <th>Pass</th><th>Throughput</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div>\
+             <th>Pass</th><th>Throughput</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div><script>
+(function(){{
+var ths=document.querySelectorAll('thead th');
+var dir=-1, col=0;
+ths.forEach(function(th,idx){{
+th.addEventListener('click',function(){{
+var tb=document.querySelector('tbody');
+var rows=Array.prototype.slice.call(tb.rows);
+if(idx===col){{dir=-dir;}}else{{col=idx;dir=1;}}
+rows.sort(function(a,b){{
+var x=a.cells[idx].getAttribute('data-v');
+var y=b.cells[idx].getAttribute('data-v');
+if(x===null)x=a.cells[idx].textContent.trim();
+if(y===null)y=b.cells[idx].textContent.trim();
+var nx=parseFloat(x),ny=parseFloat(y);
+if(x!==''&&y!==''&&!isNaN(nx)&&!isNaN(ny))return dir*(nx-ny);
+x=String(x).toLowerCase();y=String(y).toLowerCase();
+return dir*(x<y?-1:x>y?1:0);}});
+rows.forEach(function(r){{tb.appendChild(r);}});
+ths.forEach(function(h){{h.textContent=h.textContent.replace(/ [\\u25B2\\u25BC]/,'');}});
+th.textContent+=(dir===1?' \\u25B2':' \\u25BC');}});}});
+}})();
+</script>
+<footer class=\"muted\">Static mirror - click a column header to sort.</footer></main>\
              </body></html>",
             css = PORTAL_CSS,
             n = results.len(),
@@ -451,7 +478,7 @@ mod tests {
         assert_eq!(summary.run_count, 1);
         let index = fs::read_to_string(out_dir.join("index.html")).unwrap();
         assert!(index.contains("demo_run_1"));
-        assert!(index.contains("<style>:root{color-scheme:dark}body{"));
+        assert!(index.contains("<style>:root{color-scheme:dark;--bg:"));
         assert!(!index.contains("{{"));
         let run_page = fs::read_to_string(out_dir.join("runs/demo_run_1/index.html")).unwrap();
         assert!(run_page.contains("demo_run_1"));
