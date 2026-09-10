@@ -3211,10 +3211,7 @@ function copyRunId() {
         box.innerHTML = `<div style="display: flex; flex-direction: column; gap: 12px;">`
           + sec('Strengths', r.good, '#3fb950')
           + sec('Weaknesses', r.bad, '#f85149')
-          + `<div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 0.82rem;"><b>Conclusion:</b> ${escapeHtml(r.conclusion || '—')}</div>
-        <div id="modalPane-review" class="modal-pane">
-          <div id="modalInspectReviewBody" style="display: flex; flex-direction: column; gap: 12px;"></div>
-        </div></div>`;
+          + `<div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 0.82rem;"><b>Conclusion:</b> ${escapeHtml(r.conclusion || '—')}</div></div>`;
       } catch (e) {
         box.innerHTML = '<span style="color: var(--text-muted);">Review unavailable.</span>';
       }
@@ -4182,6 +4179,9 @@ function copyRunId() {
           </div>
         </div>
       </div>
+        <div id="modalPane-review" class="modal-pane">
+          <div id="modalInspectReviewBody" style="display: flex; flex-direction: column; gap: 12px;"></div>
+        </div>
     </div>
   </div>
 </body>
