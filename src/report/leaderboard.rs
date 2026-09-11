@@ -22,6 +22,8 @@ pub struct BenchmarkRunResult {
     pub prompt_tokens: u64,
     pub cached_tokens: u64,
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
     pub total_cost_usd: f64,
     #[serde(default)]
     pub effective_cost_usd: Option<f64>,
@@ -172,7 +174,10 @@ impl LeaderboardManager {
                 let p = entry.path();
                 if p.extension().and_then(|s| s.to_str()) == Some("json") {
                     if let Ok(data) = fs::read_to_string(p) {
-                        if let Ok(res) = serde_json::from_str::<BenchmarkRunResult>(&data) {
+                        if let Ok(mut res) = serde_json::from_str::<BenchmarkRunResult>(&data) {
+                            if res.total_tokens == 0 {
+                                res.total_tokens = res.prompt_tokens + res.cached_tokens + res.completion_tokens;
+                            }
                             list.push(res);
                         }
                     }
@@ -449,6 +454,7 @@ mod tests {
             prompt_tokens: 1000,
             cached_tokens: 500,
             completion_tokens: 100,
+            total_tokens: 1600,
             total_cost_usd: 0.005,
             effective_cost_usd: Some(0.008),
             duration_seconds: Some(60.0),
@@ -483,6 +489,7 @@ mod tests {
             prompt_tokens: 1000,
             cached_tokens: 500,
             completion_tokens: 200,
+            total_tokens: 1700,
             total_cost_usd: 0.001,
             effective_cost_usd: Some(0.003),
             duration_seconds: Some(40.0),
@@ -509,6 +516,7 @@ mod tests {
             prompt_tokens: 2000,
             cached_tokens: 1500,
             completion_tokens: 300,
+            total_tokens: 3800,
             total_cost_usd: 0.005,
             effective_cost_usd: Some(0.008),
             duration_seconds: Some(50.0),
@@ -528,6 +536,38 @@ mod tests {
         // Full pass (100%) must rank higher than partial pass (50%) regardless of efficiency score!
         assert_eq!(list[0].id, "run_full_pass");
         assert_eq!(list[1].id, "run_partial_pass");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+    #[test]
+    fn test_leaderboard_total_tokens_fallback_when_omitted() {
+        let json_data = r#"{
+            "id": "legacy_run",
+            "model": "legacy_model",
+            "task": "redis",
+            "language": "Rust",
+            "pass_rate": 100.0,
+            "passed_stages": 4,
+            "total_stages": 4,
+            "prompt_tokens": 1200,
+            "cached_tokens": 800,
+            "completion_tokens": 300,
+            "total_cost_usd": 0.01,
+            "savings_percent": 40.0,
+            "efficiency_score": 100.0,
+            "timestamp": "2026-09-04T12:00:00Z"
+        }"#;
+
+        let res: BenchmarkRunResult = serde_json::from_str(json_data).unwrap();
+        assert_eq!(res.total_tokens, 0); // Defaulted by serde
+
+        let temp = std::env::temp_dir().join(format!("test_lb_fallback_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp);
+        fs::write(temp.join("legacy_run.json"), json_data).unwrap();
+
+        let loaded = LeaderboardManager::load_all(temp.to_str().unwrap());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].total_tokens, 2300); // 1200 + 800 + 300
 
         let _ = fs::remove_dir_all(&temp);
     }

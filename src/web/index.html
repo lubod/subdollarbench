@@ -2476,7 +2476,8 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
           : `<span class="badge badge-fail">✕ ${Math.round(r.pass_rate)}% (${r.passed_stages}/${r.total_stages})</span>`;
         const safeEffort = escapeHtml(r.effort || 'auto');
         const effBadge = `<span class="badge badge-effort">effort: ${safeEffort}</span>`;
-        const tokensStr = r.tokens ? `${(r.tokens.total_tokens / 1000).toFixed(1)}k tokens` : (r.completion_tokens ? `${((r.prompt_tokens + r.completion_tokens) / 1000).toFixed(1)}k tokens` : 'N/A');
+        const totalTok = (r.tokens && r.tokens.total_tokens) || r.total_tokens || ((r.prompt_tokens || 0) + (r.cached_tokens || 0) + (r.completion_tokens || 0));
+        const tokensStr = totalTok > 0 ? `${(totalTok / 1000).toFixed(1)}k tokens` : 'N/A';
         const durationStr = (r.duration_seconds !== undefined && r.duration_seconds !== null) ? formatDuration(r.duration_seconds) : '-';
         const turnsStr = (r.turns !== undefined && r.turns !== null) ? `${r.turns}` : '-';
         

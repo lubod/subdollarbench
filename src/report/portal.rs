@@ -457,7 +457,7 @@ const PORTAL_JS: &str = r#"
       const apiDiff = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null && Math.abs(r.effective_cost_usd - r.total_cost_usd) > 0.0001)
         ? `<span style="font-size: 0.7rem; color: var(--mut);">(API: $${r.total_cost_usd.toFixed(4)})</span>`
         : '';
-      const totalTokens = (r.prompt_tokens || 0) + (r.cached_tokens || 0) + (r.completion_tokens || 0);
+      const totalTokens = r.total_tokens || ((r.prompt_tokens || 0) + (r.cached_tokens || 0) + (r.completion_tokens || 0));
       const tokStr = `${(totalTokens / 1000).toFixed(1)}k tokens`;
 
       const score = (r.throughput_score !== undefined && r.throughput_score !== null) ? r.throughput_score : r.efficiency_score;
@@ -834,7 +834,7 @@ impl PortalExporter {
             let eff_c = r.effective_cost_usd.unwrap_or(r.total_cost_usd);
             let dur_s = r.duration_seconds.unwrap_or(0.0);
             let dur_txt = format_duration(dur_s);
-            let tok_n = r.prompt_tokens + r.cached_tokens + r.completion_tokens;
+            let tok_n = if r.total_tokens > 0 { r.total_tokens } else { r.prompt_tokens + r.cached_tokens + r.completion_tokens };
             let tok_txt = format!("{:.1}k tokens", tok_n as f64 / 1000.0);
             let pass_badge = if r.pass_rate >= 100.0 {
                 format!("<span class=\"badge badge-pass\">✔ 100% ({}/{})</span>", r.passed_stages, r.total_stages)
@@ -1199,7 +1199,7 @@ mod tests {
             serde_json::json!({
                 "id": "hidden_run_1", "model": "m", "task": "http", "language": "Python",
                 "pass_rate": 100.0, "passed_stages": 5, "total_stages": 5,
-                "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1,
+                "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1, "total_tokens": 2,
                 "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 50.0,
                 "timestamp": "t"
             })
@@ -1252,7 +1252,7 @@ mod tests {
             serde_json::json!({
                 "id": "demo_run_1", "model": "m", "task": "http", "language": "Python",
                 "pass_rate": 100.0, "passed_stages": 5, "total_stages": 5,
-                "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1,
+                "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1, "total_tokens": 2,
                 "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 50.0,
                 "timestamp": "t"
             })

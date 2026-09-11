@@ -326,6 +326,7 @@ mod tests {
             prompt_tokens: 100,
             cached_tokens: 50,
             completion_tokens: 20,
+            total_tokens: 170,
             total_cost_usd: 0.01,
             effective_cost_usd: Some(0.015),
             duration_seconds: Some(60.0),

@@ -521,7 +521,7 @@ impl BenchmarkPipeline {
         let duration_seconds = start_time.elapsed().as_secs_f64();
         let total_run_tokens = omp_stats
             .total_tokens
-            .max(prompt_tokens + completion_tokens);
+            .max(prompt_tokens + cached_tokens + completion_tokens);
 
         let pricing = ModelPricing::for_model_async(&config.model).await;
         let breakdown =
@@ -586,9 +586,7 @@ impl BenchmarkPipeline {
                 prompt_tokens,
                 cached_tokens,
                 completion_tokens,
-                total_tokens: omp_stats
-                    .total_tokens
-                    .max(prompt_tokens + completion_tokens),
+                total_tokens: total_run_tokens,
             },
             cost_usd,
             effective_cost_usd: Some(effective_cost_usd),
@@ -616,6 +614,7 @@ impl BenchmarkPipeline {
             prompt_tokens,
             cached_tokens,
             completion_tokens,
+            total_tokens: total_run_tokens,
             total_cost_usd: cost_usd,
             effective_cost_usd: Some(effective_cost_usd),
             duration_seconds: Some(duration_seconds),
