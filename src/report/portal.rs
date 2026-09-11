@@ -402,7 +402,7 @@ const PORTAL_JS: &str = r#"
       } else if (sortCol === 'model') {
         vA = (a.model || '').toLowerCase();
         vB = (b.model || '').toLowerCase();
-        return sortDir === 1 ? vA.localeCompare(vB) : vB.localeCompare(a.model);
+        return sortDir === 1 ? vA.localeCompare(vB) : vB.localeCompare(vA);
       } else if (sortCol === 'pass') {
         vA = a.pass_rate || 0;
         vB = b.pass_rate || 0;
