@@ -140,9 +140,14 @@ impl PortalExporter {
         let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
         let mut rows = String::new();
         for (i, r) in results.iter().enumerate() {
+            let unit = match r.task.to_lowercase().as_str() {
+                "pdf" => "pages/s",
+                "dns" => "queries/s",
+                _ => "req/s",
+            };
             let tp = r
                 .throughput_req_sec
-                .map(|v| format!("{:.0} req/s", v))
+                .map(|v| format!("{:.0} {}", v, unit))
                 .unwrap_or_else(|| "N/A".to_string());
             let score = r.throughput_score.unwrap_or(r.efficiency_score);
             let medal = match i + 1 { 1 => "🥇".to_string(), 2 => "🥈".to_string(), 3 => "🥉".to_string(), n => n.to_string() };
@@ -356,15 +361,20 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
         let eff = m.effective_cost_usd.unwrap_or(m.cost_usd);
         let comp = (eff - api).max(0.0);
         let score = m.throughput_score.unwrap_or(m.efficiency_score);
+        let unit = match m.task.to_lowercase().as_str() {
+            "pdf" => "pages/s",
+            "dns" => "queries/s",
+            _ => "req/s",
+        };
         let (tp_txt, tp_bar) = match (m.throughput_req_sec, m.reference_throughput_req_sec) {
             (Some(tp), Some(ref_tp)) if ref_tp > 0.0 => {
                 let pct = (tp / ref_tp * 100.0).clamp(0.0, 100.0) as u32;
                 (
-                    format!("{:.0} req/s ({:.0}% of reference)", tp, tp / ref_tp * 100.0),
+                    format!("{:.0} {} ({:.0}% of reference)", tp, unit, tp / ref_tp * 100.0),
                     format!("<div class=\"bar\"><div class=\"fill\" style=\"width:{}%\"></div></div>", pct),
                 )
             }
-            (Some(tp), _) => (format!("{:.0} req/s", tp), String::new()),
+            (Some(tp), _) => (format!("{:.0} {}", tp, unit), String::new()),
             _ => ("N/A".to_string(), String::new()),
         };
         let total_tok = m.tokens.total_tokens;

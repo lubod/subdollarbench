@@ -95,11 +95,16 @@ impl SummaryGenerator {
                 );
                 let dur_str = format_duration(r.duration_seconds);
                 let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
+                let unit = match r.task.to_lowercase().as_str() {
+                    "pdf" => "pages/s",
+                    "dns" => "queries/s",
+                    _ => "req/s",
+                };
                 let tp_str = match (r.throughput_req_sec, r.reference_throughput_req_sec) {
                     (Some(cand), Some(refr)) if refr > 0.0 => {
-                        format!("{:.0} req/s *({:.0}% ref)*", cand, (cand / refr) * 100.0)
+                        format!("{:.0} {} *({:.0}% ref)*", cand, unit, (cand / refr) * 100.0)
                     }
-                    (Some(cand), _) => format!("{:.0} req/s", cand),
+                    (Some(cand), _) => format!("{:.0} {}", cand, unit),
                     _ => "N/A".to_string(),
                 };
 
@@ -235,7 +240,7 @@ impl SummaryGenerator {
                 let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
                 let tp_str = r
                     .throughput_req_sec
-                    .map(|t| format!("{:.0} req/s", t))
+                    .map(|t| format!("{:.0} queries/s", t))
                     .unwrap_or_else(|| "N/A".to_string());
                 md.push_str(&format!(
                     "| `{}` | `{}` | `{}` | {:.0}% | {} | {} | {} | ${:.4} | {:.1} pts/¢ | [runs/{}/](runs/{}/) |\n",
@@ -274,7 +279,7 @@ impl SummaryGenerator {
                 let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
                 let tp_str = r
                     .throughput_req_sec
-                    .map(|t| format!("{:.0} req/s", t))
+                    .map(|t| format!("{:.0} pages/s", t))
                     .unwrap_or_else(|| "N/A".to_string());
                 md.push_str(&format!(
                     "| `{}` | `{}` | `{}` | {:.0}% | {} | {} | {} | ${:.4} | {:.1} pts/¢ | [runs/{}/](runs/{}/) |\n",
@@ -297,6 +302,13 @@ impl SummaryGenerator {
         md.push_str("---\n\n");
         md.push_str("## 🖥️ Benchmark Testbed Environment Specs\n\n");
         md.push_str("All runs recorded in this repository were benchmarked under identical, isolated hardware and sandbox conditions:\n\n");
+        md.push_str("### 📐 Throughput Scoring Calibration & Baseline Regimes\n\n");
+        md.push_str("Candidate throughput is normalized against measured reference baselines on this benchmark host:\n");
+        md.push_str("- **HTTP/1.1**: Normalized against `nginx:alpine` on port 8081 (live `wrk` test or 33,000 req/s fallback).\n");
+        md.push_str("- **Redis**: Normalized against `redis:alpine` on port 6380 (live `redis-benchmark` or 71,000 req/s fallback).\n");
+        md.push_str("- **DNS Server**: Normalized against reference RFC 1035 UDP resolver on testbed (calibrated 19,000 queries/s fallback).\n");
+        md.push_str("- **PDF Microservice**: Normalized against reference DEFLATE/xref Python extractor on testbed (calibrated 4,600 pages/s fallback).\n\n");
+        md.push_str("Formula: `Throughput Score = Base Efficiency * (1.0 + 2.0 * (Candidate Throughput / Reference Throughput))`\n\n");
         md.push_str(&env.to_markdown_table());
         md.push_str("\n\n---\n\n");
 

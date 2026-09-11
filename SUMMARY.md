@@ -2,7 +2,7 @@
 
 > **Measuring under-$1/1M token LLMs on autonomous, production-grade SWE systems engineering tasks (Redis & HTTP/1.1) in isolated Docker sandboxes.**
 
-*Last Updated: 2026-09-10 20:00:43 UTC*
+*Last Updated: 2026-09-11 06:08:33 UTC*
 
 ## 📑 Quick Navigation
 - [📊 Global Leaderboard](#-global-leaderboard)
@@ -17,7 +17,7 @@
 
 | Rank | Model | Effort | Task | Lang | Pass Rate | Duration | Turns | Throughput | Cost (USD) | Efficiency | Full Trace & Code |
 |:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 🥇 1 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | dns | `Python` | 100% (6/6) | 38s | 7 | 19127 req/s | $0.0013 *(eff: $0.0078)* | **276.4** pts/¢ *(base: 128.0)* | [Inspect](runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/) |
+| 🥇 1 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | dns | `Python` | 100% (6/6) | 38s | 7 | 19127 queries/s | $0.0013 *(eff: $0.0078)* | **385.7** pts/¢ *(base: 128.0)* | [Inspect](runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/) |
 | 🥈 2 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 55s | 7 | 25721 req/s *(81% ref)* | $0.0025 *(eff: $0.0101)* | **258.8** pts/¢ *(base: 98.6)* | [Inspect](runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_105330/) |
 | 🥉 3 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 51s | 11 | 26062 req/s *(83% ref)* | $0.0000 *(eff: $0.0108)* | **244.5** pts/¢ *(base: 92.2)* | [Inspect](runs/http_openrouter_meta_muse-spark-1.3-contributor_20260910_195930/) |
 | 4 | `openrouter/meta/muse-spark-1.3-contributor` | `auto` | Redis | `Go` | 100% (4/4) | 1m 50s | 12 | 74643 req/s *(96% ref)* | $0.0033 *(eff: $0.0175)* | **167.2** pts/¢ *(base: 57.2)* | [Inspect](runs/pdf_openrouter_meta_muse-spark-1.3-contributor_20260910_164744/) |
@@ -28,7 +28,7 @@
 | 9 | `openrouter/deepseek/deepseek-v4.1-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 4m 2s | 50 | 42258 req/s *(134% ref)* | $0.0236 *(eff: $0.1114)* | **33.0** pts/¢ *(base: 9.0)* | [Inspect](runs/http_openrouter_deepseek_deepseek-v4.1-flash_20260910_112833/) |
 | 10 | `openrouter/tencent/hy4-preview` | `auto` | HTTP/1.1 | `Python` | 100% (5/5) | 6m 22s | 33 | 14802 req/s *(47% ref)* | $0.1283 *(eff: $0.1809)* | **10.7** pts/¢ *(base: 5.5)* | [Inspect](runs/http_openrouter_tencent_hy4-preview_20260909_174509/) |
 | 11 | `openrouter/qwen/qwen3.8-flash` | `auto` | HTTP/1.1 | `Go` | 100% (5/5) | 15m 57s | 45 | 44500 req/s *(138% ref)* | $0.0732 *(eff: $0.1890)* | **19.9** pts/¢ *(base: 5.3)* | [Inspect](runs/http_openrouter_qwen_qwen3.8-flash_20260910_192547/) |
-| 12 | `openrouter/google/gemini-3.8-flash` | `auto` | Redis | `Go` | 100% (5/5) | 1m 35s | 19 | 90156 req/s | $0.1902 *(eff: $0.2074)* | **31.2** pts/¢ *(base: 4.8)* | [Inspect](runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/) |
+| 12 | `openrouter/google/gemini-3.8-flash` | `auto` | Redis | `Go` | 100% (5/5) | 1m 35s | 19 | 90156 req/s | $0.1902 *(eff: $0.2074)* | **17.1** pts/¢ *(base: 4.8)* | [Inspect](runs/redis_openrouter_google_gemini-3.8-flash_20260910_141902/) |
 
 ---
 
@@ -78,13 +78,33 @@ The candidate LLM is instructed to build an RFC 1035 UDP DNS Server from scratch
 
 | Model | Effort | Lang | Pass Rate | Duration | Turns | Throughput | Cost | Score | Run Archive |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Python` | 100% | 38s | 7 | 19127 req/s | $0.0013 | 128.0 pts/¢ | [runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/](runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/) |
+| `openrouter/meta/muse-spark-1.3-contributor` | `auto` | `Python` | 100% | 38s | 7 | 19127 queries/s | $0.0013 | 128.0 pts/¢ | [runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/](runs/dns_openrouter_meta_muse-spark-1.3-contributor_20260910_161312/) |
+
+---
+
+## 📄 Task 4: PDF Extraction Microservice (`task: pdf`)
+
+The candidate LLM is instructed to build an RFC-compliant HTTP microservice from scratch on port 8090 that extracts plain text from binary PDF files.
+- **Protocol**: Raw TCP socket server handling HTTP `GET /` health checks, `POST /extract` PDF payload decoding, and `400 Bad Request` rejection for malformed streams.
+- **Custom PDF Engine**: Parsing the PDF object graph (`xref`, trailer, catalog, page hierarchy, content streams, FlateDecode decompression, and text operators `Tj`/`TJ`/`Td`/`Tm`).
+- **Strict Prohibition**: Third-party PDF libraries (`pypdf`, `pdfminer`, `fitz`, `pdfcpu`, `lopdf`, `pdf.js`) and external binaries (`pdftotext`, `mutool`) are strictly forbidden.
+- **Verification**: 5-stage automated conformance suite + synthetic multi-page document throughput benchmark.
 
 ---
 
 ## 🖥️ Benchmark Testbed Environment Specs
 
 All runs recorded in this repository were benchmarked under identical, isolated hardware and sandbox conditions:
+
+### 📐 Throughput Scoring Calibration & Baseline Regimes
+
+Candidate throughput is normalized against measured reference baselines on this benchmark host:
+- **HTTP/1.1**: Normalized against `nginx:alpine` on port 8081 (live `wrk` test or 33,000 req/s fallback).
+- **Redis**: Normalized against `redis:alpine` on port 6380 (live `redis-benchmark` or 71,000 req/s fallback).
+- **DNS Server**: Normalized against reference RFC 1035 UDP resolver on testbed (calibrated 19,000 queries/s fallback).
+- **PDF Microservice**: Normalized against reference DEFLATE/xref Python extractor on testbed (calibrated 4,600 pages/s fallback).
+
+Formula: `Throughput Score = Base Efficiency * (1.0 + 2.0 * (Candidate Throughput / Reference Throughput))`
 
 | Component | Specification |
 |:---|:---|
@@ -93,11 +113,11 @@ All runs recorded in this repository were benchmarked under identical, isolated 
 | **CPU Model** | AMD Ryzen AI 9 HX 370 w/ Radeon 890M (24 vCPUs) |
 | **System Memory** | 54.5 GiB |
 | **Docker Runtime** | Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2 |
-| **Rust Version** | N/A |
+| **Rust Version** | rustc 1.92.0 (ded5c06cf 2025-12-08) |
 | **Python Version** | Python 3.12.3 |
 | **Node.js Version** | v24.13.0 |
-| **Git Baseline** | Commit `f821d4b` (branch `master`) |
-| **Benchmark Captured** | 2026-09-10T20:00:43.357561799+00:00 |
+| **Git Baseline** | Commit `d8061ab` (branch `master`) |
+| **Benchmark Captured** | 2026-09-11T06:08:33.842312058+00:00 |
 
 ---
 

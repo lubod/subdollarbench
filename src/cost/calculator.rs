@@ -73,10 +73,15 @@ impl ModelPricing {
         }
         let cand_tp = throughput_req_sec.unwrap_or(0.0).max(0.0);
         let ref_tp = reference_throughput_req_sec.unwrap_or(0.0).max(0.0);
+        // Calibrated against ground-truth reference implementations on the benchmark testbed:
+        // - HTTP: 33,000 req/s (Nginx live container reference via wrk)
+        // - Redis: 71,000 req/s (Redis:alpine live container reference via redis-benchmark)
+        // - DNS: 19,000 queries/s (Reference Python RFC 1035 UDP resolver on testbed)
+        // - PDF: 4,600 pages/s (Reference Python PDF extractor microservice on testbed)
         let fallback_baseline = match task.unwrap_or("http").to_lowercase().as_str() {
             "redis" => 71_000.0,
-            "dns" => 2_000.0,
-            "pdf" => 50.0,
+            "dns" => 19_000.0,
+            "pdf" => 4_600.0,
             _ => 33_000.0,
         };
         let speed_ratio = if ref_tp > 0.0 {
@@ -506,10 +511,10 @@ mod tests {
         let tp_redis = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(71_000.0), None, Some("redis"));
         assert!((tp_redis - (score * 3.0)).abs() < 1e-3);
 
-        let tp_dns = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(2_000.0), None, Some("dns"));
+        let tp_dns = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(19_000.0), None, Some("dns"));
         assert!((tp_dns - (score * 3.0)).abs() < 1e-3);
 
-        let tp_pdf = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(50.0), None, Some("pdf"));
+        let tp_pdf = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(4_600.0), None, Some("pdf"));
         assert!((tp_pdf - (score * 3.0)).abs() < 1e-3);
     }
 

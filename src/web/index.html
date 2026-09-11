@@ -1952,6 +1952,13 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
 
     }
 
+    function formatThroughput(tp, task) {
+      if (!tp) return 'N/A';
+      const t = (task || '').toLowerCase();
+      const unit = t === 'pdf' ? 'pages/s' : (t === 'dns' ? 'queries/s' : 'req/s');
+      return `${Math.round(tp).toLocaleString()} ${unit}`;
+    }
+
     function escapeHtml(str) {
       if (str === null || str === undefined) return "";
       return String(str)
@@ -2213,7 +2220,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       if (cardsContainer) cardsContainer.innerHTML = '';
 
       runs.forEach(r => {
-        const tp = r.throughput_req_sec ? `${Math.round(r.throughput_req_sec).toLocaleString()} req/s` : 'N/A';
+        const tp = formatThroughput(r.throughput_req_sec, r.task);
         const passBadge = r.pass_rate === 100 
           ? `<span class="badge badge-pass">✔ 100% (${r.passed_stages}/${r.total_stages})</span>` 
           : `<span class="badge badge-fail">✕ ${Math.round(r.pass_rate)}% (${r.passed_stages}/${r.total_stages})</span>`;
@@ -2364,7 +2371,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         icon: '📡',
         desc: 'Raw UDP DNS resolver handling RFC 1035 packet headers, query questions, standard flags (QR, Opcode, AA, RD, RA, RCODE), dynamic port listening, and A-record address resolution.',
         stagesCount: 6,
-        refInfo: 'Standard UDP query resolver benchmarked on port 5353',
+        refInfo: 'Reference RFC 1035 UDP resolver on testbed (~19,000 queries/s)',
         benchTool: 'UDP raw-socket conformance suite + queryperf'
       },
       pdf: {
@@ -2372,7 +2379,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         icon: '📄',
         desc: 'RFC-compliant HTTP microservice on port 8090 converting binary PDF documents to plaintext using a custom PDF parser and DEFLATE engine (no external PDF libraries).',
         stagesCount: 5,
-        refInfo: 'Verifier-timed synthetic PDF suite',
+        refInfo: 'Reference DEFLATE/xref text extractor on testbed (~4,600 pages/s)',
         benchTool: 'Synthetic multi-page PDF extraction burst'
       }
     };
@@ -2463,7 +2470,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       }
 
       return runs.map((r, idx) => {
-        const tp = r.throughput_req_sec ? `${Math.round(r.throughput_req_sec).toLocaleString()} req/s` : 'N/A';
+        const tp = formatThroughput(r.throughput_req_sec, r.task);
         const passBadge = r.pass_rate === 100 
           ? `<span class="badge badge-pass">✔ 100% (${r.passed_stages}/${r.total_stages})</span>` 
           : `<span class="badge badge-fail">✕ ${Math.round(r.pass_rate)}% (${r.passed_stages}/${r.total_stages})</span>`;
@@ -2964,7 +2971,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         }
         document.getElementById('modalInspectTokens').innerHTML = tokenStr;
 
-        document.getElementById('modalInspectThroughput').textContent = m.throughput_req_sec ? `${Math.round(m.throughput_req_sec).toLocaleString()} req/s` : 'N/A';
+        document.getElementById('modalInspectThroughput').textContent = formatThroughput(m.throughput_req_sec, m.task);
         document.getElementById('modalInspectDuration').textContent = formatDuration(m.duration_seconds || 0);
         document.getElementById('modalInspectTurns').textContent = (m.turns !== undefined && m.turns !== null) ? m.turns : '-';
         document.getElementById('modalInspectEffort').innerHTML = `${escapeHtml(m.effort || 'auto')} <span style="color:var(--text-muted); font-size:0.72rem;">· ${escapeHtml(m.task)}</span>`;

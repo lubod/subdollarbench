@@ -321,10 +321,10 @@ impl OmpRunner {
         let (target_port, test_cmd, guidance_snippet) = match task {
             Some(crate::config::TaskType::Pdf) => (
                 8090,
-                "curl -v http://localhost:8090/health",
+                "curl -v http://localhost:8090/",
                 r#"ANTI-CHEAT REQUIREMENT (STRICT):
 - Third-party PDF libraries (pypdf, pdfminer, fitz, lopdf, pdfcpu, etc.) and external CLI tools (pdftotext, mutool) are STRICTLY FORBIDDEN.
-- Build an RFC-compliant HTTP microservice on port 8090 using raw TCP sockets that extracts plain text from binary PDF payloads sent to POST /extract."#,
+- Build an RFC-compliant HTTP microservice on port 8090 using raw TCP sockets returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
             ),
             Some(crate::config::TaskType::Redis) => (
                 6379,
@@ -376,8 +376,8 @@ Content-Length: 0
                 if prompt_lower.contains("pdf") {
                     (
                         8090,
-                        "curl -v http://localhost:8090/health",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build an HTTP PDF microservice using raw TCP sockets on port 8090."#,
+                        "curl -v http://localhost:8090/",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build an HTTP PDF microservice using raw TCP sockets on port 8090 returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
                     )
                 } else if prompt_lower.contains("redis") {
                     (
