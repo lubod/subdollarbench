@@ -44,7 +44,677 @@ pub struct PortalSummary {
     pub out_dir: PathBuf,
 }
 
-const PORTAL_CSS: &str = ":root{color-scheme:dark;--bg:#0b0e14;--panel:#121724;--line:#232c3d;--txt:#e8edf4;--mut:#8b94a3;--acc:#58a5ff;--grn:#3fb950;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 400px at 50% -10%,#16233d 0%,var(--bg) 60%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:2rem;margin:0;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#9ecbff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub{color:var(--mut);margin:.4rem 0 1.6rem}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45)}table{border-collapse:collapse;width:100%;font-size:.86rem}thead th{position:sticky;top:0;background:#161d2c;cursor:pointer;user-select:none;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}thead th:hover{color:#fff}tbody td{padding:9px 12px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:none}tbody tr{cursor:pointer;transition:background .12s}tbody tr:hover{background:#182032}tbody tr:nth-child(even){background:rgba(255,255,255,.015)}code{font-size:.78rem;word-break:break-all;background:#0b0f18;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:650;font-size:.76rem;white-space:nowrap}.pass{background:rgba(63,185,80,.14);color:var(--grn);border:1px solid rgba(63,185,80,.4)}.fail{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.4)}.score{color:#79c0ff;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:#0b0f18;padding:1rem;overflow-x:auto;font-size:.78rem;border:1px solid var(--line);border-radius:10px}details{margin:1.2rem 0}summary{cursor:pointer;color:var(--acc)}.hero{margin:0 0 1.4rem}.hero h1{margin:.2rem 0 .6rem;word-break:break-word}.pills{display:flex;gap:8px;flex-wrap:wrap;margin:.4rem 0}.pill.info{background:rgba(88,165,255,.12);color:#58a5ff;border:1px solid rgba(88,165,255,.4)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:1rem 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}.card.wide{grid-column:1/-1}.card .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}.card .v{font-size:1.15rem;font-weight:700}.card small{font-size:.75rem;font-weight:400;color:var(--mut)}.stages{display:flex;flex-direction:column;gap:8px}.stage{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.bar{height:8px;background:#0b0f18;border:1px solid var(--line);border-radius:99px;margin-top:8px;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#1f6feb,#3fb950)}h2{margin-top:2rem}.review{display:grid;gap:12px}@media(min-width:800px){.review{grid-template-columns:1fr 1fr}}.review ul{margin:.4rem 0;padding-left:1.2rem}.review li{margin:.35rem 0;font-size:.86rem}.review p{grid-column:1/-1}.muted{color:var(--mut)}footer{margin-top:2rem;color:var(--mut);font-size:.8rem}";
+const PORTAL_CSS: &str = r#":root{color-scheme:dark;--bg:#0b0e14;
+  --panel: #121724;
+  --panel-card: #0d1117;
+  --line: #232c3d;
+  --border: #232c3d;
+  --txt: #e8edf4;
+  --mut: #8b94a3;
+  --acc: #58a5ff;
+  --primary: #58a5ff;
+  --grn: #3fb950;
+  --success: #3fb950;
+  --red: #f85149;
+  --danger: #f85149;
+  --warning: #d29922;
+  --gold: #f1e05a;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: radial-gradient(1200px 400px at 50% -10%, #16233d 0%, var(--bg) 60%);
+  color: var(--txt);
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  line-height: 1.55;
+}
+main {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 2.2rem 1.25rem 4rem;
+}
+h1 {
+  font-size: 2rem;
+  margin: 0;
+  letter-spacing: -.02em;
+  background: linear-gradient(90deg, #fff, #9ecbff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.sub { color: var(--mut); margin: .3rem 0 1.2rem; font-size: 0.88rem; }
+a { color: var(--acc); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 1rem 0 1.5rem;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.card.wide { grid-column: 1 / -1; }
+.card .k {
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--mut);
+}
+.card .v {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-top: 2px;
+}
+.card small { font-size: .75rem; font-weight: 400; color: var(--mut); }
+
+/* Controls Bar */
+.controls-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: var(--panel-card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+.pills-group {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #090d13;
+  flex-wrap: wrap;
+}
+.btn-toggle {
+  background: #161b22;
+  border: none;
+  border-right: 1px solid var(--line);
+  color: var(--mut);
+  padding: 6px 13px;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.pills-group .btn-toggle:last-child { border-right: none; }
+.btn-toggle:hover { color: #fff; background: #1c2333; }
+.btn-toggle.active {
+  background: var(--acc);
+  color: #000;
+  font-weight: 700;
+}
+.search-input {
+  padding: 6px 12px;
+  font-size: 0.78rem;
+  background: #090d13;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: #fff;
+  width: 220px;
+}
+.search-input:focus { outline: none; border-color: var(--acc); }
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badge-pass { background: rgba(63, 185, 80, 0.18); color: var(--grn); border: 1px solid rgba(63, 185, 80, 0.4); }
+.badge-fail { background: rgba(248, 81, 73, 0.16); color: var(--red); border: 1px solid rgba(248, 81, 73, 0.4); }
+.badge-info { background: rgba(88, 166, 255, 0.16); color: var(--acc); border: 1px solid rgba(88, 166, 255, 0.4); }
+.badge-effort { background: rgba(210, 153, 34, 0.18); color: var(--warning); border: 1px solid rgba(210, 153, 34, 0.4); }
+.badge-count { background: rgba(88, 166, 255, 0.2); color: var(--acc); border-radius: 999px; font-size: 0.65rem; padding: 1px 6px; }
+
+/* Table Wrap */
+.wrap {
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  margin-bottom: 24px;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: .83rem;
+}
+thead th {
+  position: sticky;
+  top: 0;
+  background: #161d2c;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  font-size: .73rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--mut);
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+thead th:hover { color: #fff; }
+tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr {
+  cursor: pointer;
+  transition: background .12s;
+}
+tbody tr:hover { background: #182032; }
+tbody tr:nth-child(even) { background: rgba(255,255,255,.015); }
+code {
+  font-size: .78rem;
+  word-break: break-all;
+  background: #0b0f18;
+  border: 1px solid var(--line);
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-weight: 650;
+  font-size: .75rem;
+  white-space: nowrap;
+}
+.pill.pass { background: rgba(63, 185, 80, 0.14); color: var(--grn); border: 1px solid rgba(63, 185, 80, 0.4); }
+.pill.fail { background: rgba(248, 81, 73, 0.12); color: var(--red); border: 1px solid rgba(248, 81, 73, 0.4); }
+.pill.info { background: rgba(88, 165, 255, 0.12); color: var(--acc); border: 1px solid rgba(88, 165, 255, 0.4); }
+.score {
+  color: #79c0ff;
+  font-weight: 750;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+pre {
+  background: #0b0f18;
+  padding: 1rem;
+  overflow-x: auto;
+  font-size: .78rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+details { margin: 1.2rem 0; }
+summary { cursor: pointer; color: var(--acc); }
+.hero { margin: 0 0 1.4rem; }
+.hero h1 { margin: .2rem 0 .6rem; word-break: break-word; }
+.pills { display: flex; gap: 8px; flex-wrap: wrap; margin: .4rem 0; }
+.stages { display: flex; flex-direction: column; gap: 8px; }
+.stage { display: flex; gap: 10px; align-items: flex-start; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.bar { height: 8px; background: #0b0f18; border: 1px solid var(--line); border-radius: 99px; margin-top: 8px; overflow: hidden; }
+.fill { height: 100%; background: linear-gradient(90deg, #1f6feb, #3fb950); }
+h2 { margin-top: 2rem; font-size: 1.3rem; letter-spacing: -0.01em; }
+.review { display: grid; gap: 12px; }
+@media(min-width:800px) { .review { grid-template-columns: 1fr 1fr; } }
+.review ul { margin: .4rem 0; padding-left: 1.2rem; }
+.review li { margin: .35rem 0; font-size: .86rem; }
+.review p { grid-column: 1 / -1; }
+.muted { color: var(--mut); }
+footer { margin-top: 2.5rem; color: var(--mut); font-size: .8rem; }
+
+/* Banner */
+.banner {
+  background: var(--panel-card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.banner-kpi {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+.kpi-card {
+  background: #090d13;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+"#;
+
+const PORTAL_JS: &str = r#"
+(function() {
+  const RUNS_DATA = window.__SUBDOLLAR_RUNS__ || [];
+  
+  const TASK_SPECS = {
+    http: {
+      name: 'HTTP/1.1 Web Server',
+      icon: '🌐',
+      desc: 'RFC 7230/7231 web server handling GET /, 404s, /echo/{str}, header reflection, POST/GET /files/{name} persistence, keep-alive socket reuse, and path traversal security guards.',
+      stagesCount: 5,
+      refInfo: 'nginx:alpine reference container on port 8081 (~33,000 req/s with wrk load test)',
+      benchTool: 'wrk -t2 -c20 -d3s http://127.0.0.1:8080/'
+    },
+    redis: {
+      name: 'In-Memory Concurrent Redis Clone',
+      icon: '⚡',
+      desc: 'RESP2 protocol TCP server handling pipelined streams, simple strings, bulk strings, integers, errors, PING, ECHO, SET (with PX expiry), GET, DEL, EXISTS, and INCR non-integer guards.',
+      stagesCount: 4,
+      refInfo: 'redis:alpine reference container on port 6380 (~71,000 req/s with redis-benchmark)',
+      benchTool: 'redis-benchmark -p 6379 -n 5000 -c 10 -t get,set -q'
+    },
+    dns: {
+      name: 'RFC 1035 UDP DNS Server',
+      icon: '📡',
+      desc: 'Raw UDP DNS resolver handling RFC 1035 packet headers, query questions, standard flags (QR, Opcode, AA, RD, RA, RCODE), dynamic port listening, and A-record address resolution.',
+      stagesCount: 6,
+      refInfo: 'Reference RFC 1035 UDP resolver on testbed (~19,000 queries/s)',
+      benchTool: 'UDP raw-socket sequential burst (200 queries)'
+    },
+    pdf: {
+      name: 'PDF-to-Text Microservice',
+      icon: '📄',
+      desc: 'RFC-compliant HTTP microservice on port 8090 converting binary PDF documents to plaintext using a custom PDF parser and DEFLATE engine (no external PDF libraries).',
+      stagesCount: 5,
+      refInfo: 'Reference DEFLATE/xref text extractor on testbed (~4,600 pages/s)',
+      benchTool: 'Synthetic multi-page PDF extraction burst (20 requests, 60 pages)'
+    }
+  };
+
+  let currentTab = 'all';
+  let searchQuery = '';
+  let passOnly = false;
+  let sortCol = 'score';
+  let sortDir = -1;
+
+  function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function formatDuration(sec) {
+    if (sec === null || sec === undefined) return '-';
+    if (sec < 60) return `${Math.round(sec)}s`;
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return `${m}m ${s}s`;
+  }
+
+  function formatThroughput(tp, task) {
+    if (!tp) return 'N/A';
+    const t = (task || '').toLowerCase();
+    const unit = t === 'pdf' ? 'pages/s' : (t === 'dns' ? 'queries/s' : 'req/s');
+    return `${Math.round(tp).toLocaleString()} ${unit}`;
+  }
+
+  function formatTimestamp(ts) {
+    if (!ts) return '';
+    try {
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return ts;
+      return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    } catch (e) {
+      return ts;
+    }
+  }
+
+  function getSortedFilteredRuns(runs, tab, query, onlyPassed) {
+    let filtered = runs.slice();
+    if (tab && tab !== 'all' && tab !== 'grouped') {
+      filtered = filtered.filter(r => (r.task || '').toLowerCase() === tab.toLowerCase());
+    }
+    if (query) {
+      const q = query.toLowerCase();
+      filtered = filtered.filter(r => 
+        (r.model || '').toLowerCase().includes(q) ||
+        (r.language || '').toLowerCase().includes(q) ||
+        (r.task || '').toLowerCase().includes(q)
+      );
+    }
+    if (onlyPassed) {
+      filtered = filtered.filter(r => (r.pass_rate || 0) >= 100);
+    }
+
+    filtered.sort((a, b) => {
+      let vA, vB;
+      if (sortCol === 'score') {
+        vA = (a.throughput_score !== undefined && a.throughput_score !== null) ? a.throughput_score : a.efficiency_score;
+        vB = (b.throughput_score !== undefined && b.throughput_score !== null) ? b.throughput_score : b.efficiency_score;
+      } else if (sortCol === 'model') {
+        vA = (a.model || '').toLowerCase();
+        vB = (b.model || '').toLowerCase();
+        return sortDir === 1 ? vA.localeCompare(vB) : vB.localeCompare(a.model);
+      } else if (sortCol === 'pass') {
+        vA = a.pass_rate || 0;
+        vB = b.pass_rate || 0;
+      } else if (sortCol === 'dur') {
+        vA = a.duration_seconds || 0;
+        vB = b.duration_seconds || 0;
+      } else if (sortCol === 'turns') {
+        vA = a.turns || 0;
+        vB = b.turns || 0;
+      } else if (sortCol === 'tp') {
+        vA = a.throughput_req_sec || 0;
+        vB = b.throughput_req_sec || 0;
+      } else if (sortCol === 'cost') {
+        vA = (a.effective_cost_usd !== undefined && a.effective_cost_usd !== null) ? a.effective_cost_usd : a.total_cost_usd;
+        vB = (b.effective_cost_usd !== undefined && b.effective_cost_usd !== null) ? b.effective_cost_usd : b.total_cost_usd;
+      } else {
+        vA = 0; vB = 0;
+      }
+      return sortDir === 1 ? (vA - vB) : (vB - vA);
+    });
+
+    return filtered;
+  }
+
+  function renderRowsHtml(runs, showTaskCol) {
+    if (!runs || runs.length === 0) {
+      const colSpan = showTaskCol ? 9 : 8;
+      return `<tr><td colspan="${colSpan}" style="text-align: center; color: var(--mut); padding: 28px;">No matching runs recorded.</td></tr>`;
+    }
+
+    return runs.map((r, idx) => {
+      let rankBadge = `<span style="font-weight: 700; color: var(--mut);">#${idx + 1}</span>`;
+      if (idx === 0) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: var(--gold);">🥇 #1</span>`;
+      else if (idx === 1) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #c0c0c0;">🥈 #2</span>`;
+      else if (idx === 2) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #cd7f32;">🥉 #3</span>`;
+
+      const taskBadge = showTaskCol
+        ? `<span class="badge badge-info" style="text-transform: uppercase;">${escapeHtml(r.task)}</span>`
+        : '';
+      const passBadge = (r.pass_rate >= 100)
+        ? `<span class="badge badge-pass">✔ 100% (${r.passed_stages}/${r.total_stages})</span>`
+        : `<span class="badge badge-fail">✕ ${Math.round(r.pass_rate)}% (${r.passed_stages}/${r.total_stages})</span>`;
+      const effBadge = `<span class="badge badge-effort">effort: ${escapeHtml(r.effort || 'auto')}</span>`;
+      const durStr = formatDuration(r.duration_seconds);
+      const turnsStr = (r.turns !== undefined && r.turns !== null) ? `${r.turns}` : '-';
+      const tpStr = formatThroughput(r.throughput_req_sec, r.task);
+      const refRatio = (r.reference_throughput_req_sec && r.throughput_req_sec)
+        ? `<div style="font-size: 0.72rem; color: var(--grn); font-weight: 600;">${Math.round((r.throughput_req_sec / r.reference_throughput_req_sec) * 100)}% of Ref</div>`
+        : '';
+      
+      const effCost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.total_cost_usd;
+      const apiDiff = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null && Math.abs(r.effective_cost_usd - r.total_cost_usd) > 0.0001)
+        ? `<span style="font-size: 0.7rem; color: var(--mut);">(API: $${r.total_cost_usd.toFixed(4)})</span>`
+        : '';
+      const totalTokens = (r.prompt_tokens || 0) + (r.cached_tokens || 0) + (r.completion_tokens || 0);
+      const tokStr = `${(totalTokens / 1000).toFixed(1)}k tokens`;
+
+      const score = (r.throughput_score !== undefined && r.throughput_score !== null) ? r.throughput_score : r.efficiency_score;
+      const bonusBase = (r.throughput_score !== undefined && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100)
+        ? `<div style="font-size: 0.72rem; color: var(--mut);">base: ${r.efficiency_score.toFixed(1)}</div>`
+        : '';
+
+      return `<tr data-href="runs/${escapeHtml(r.id)}/">
+        <td style="text-align: center;">${rankBadge}</td>
+        <td>
+          <div style="display: flex; flex-direction: column; gap: 3px;">
+            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+              <a href="runs/${escapeHtml(r.id)}/" style="font-weight: 600; color: var(--primary);">${escapeHtml(r.model)}</a>
+              ${taskBadge}
+              <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--grn);">${escapeHtml(r.language || 'Unknown')}</span>
+            </div>
+            <div style="font-size: 0.72rem; color: var(--mut);">${formatTimestamp(r.timestamp)}</div>
+          </div>
+        </td>
+        <td>
+          <div style="display: flex; flex-direction: column; gap: 3px;">
+            <div>${passBadge}</div>
+            <div>${effBadge}</div>
+          </div>
+        </td>
+        <td><span style="font-weight: 500;">${durStr}</span></td>
+        <td style="text-align: center;"><span class="badge" style="background: rgba(88, 166, 255, 0.15); color: var(--acc); font-weight: 600;">${turnsStr}</span></td>
+        <td>
+          <span style="font-weight: 600;">${tpStr}</span>
+          ${refRatio}
+        </td>
+        <td>
+          <div style="display: flex; flex-direction: column; gap: 2px;">
+            <div>
+              <span style="font-weight: 600; color: var(--gold);">$${effCost.toFixed(4)}</span>
+              ${apiDiff}
+            </div>
+            <span style="font-size: 0.72rem; color: var(--mut);">${tokStr}</span>
+          </div>
+        </td>
+        <td class="score">
+          <div style="font-size: 0.95rem; font-weight: 700;">${score.toFixed(1)} <small style="font-size: 0.72rem; color: var(--mut);">pts/¢</small></div>
+          ${bonusBase}
+        </td>
+        <td><a href="runs/${escapeHtml(r.id)}/" class="badge badge-info" style="text-decoration: none; padding: 4px 8px;">Inspect &rarr;</a></td>
+      </tr>`;
+    }).join('\n');
+  }
+
+  function renderTaskBanner(taskKey, runs) {
+    const spec = TASK_SPECS[taskKey];
+    if (!spec) return '';
+    const taskRuns = runs.filter(r => (r.task || '').toLowerCase() === taskKey.toLowerCase());
+    const passRuns = taskRuns.filter(r => r.pass_rate >= 100);
+    const topRun = passRuns.slice().sort((a, b) => {
+      const sA = a.throughput_score !== undefined && a.throughput_score !== null ? a.throughput_score : a.efficiency_score;
+      const sB = b.throughput_score !== undefined && b.throughput_score !== null ? b.throughput_score : b.efficiency_score;
+      return sB - sA;
+    })[0];
+
+    const peakTpRun = passRuns.slice().sort((a, b) => (b.throughput_req_sec || 0) - (a.throughput_req_sec || 0))[0];
+    const lowestCostRun = passRuns.slice().sort((a, b) => {
+      const cA = a.effective_cost_usd !== undefined && a.effective_cost_usd !== null ? a.effective_cost_usd : a.total_cost_usd;
+      const cB = b.effective_cost_usd !== undefined && b.effective_cost_usd !== null ? b.effective_cost_usd : b.total_cost_usd;
+      return cA - cB;
+    })[0];
+
+    const topModel = topRun ? topRun.model : 'None yet';
+    const topScore = topRun ? ((topRun.throughput_score !== undefined && topRun.throughput_score !== null ? topRun.throughput_score : topRun.efficiency_score).toFixed(1) + ' pts/¢') : '-';
+    const peakTpStr = peakTpRun ? formatThroughput(peakTpRun.throughput_req_sec, taskKey) : 'N/A';
+    const peakRatioStr = (peakTpRun && peakTpRun.reference_throughput_req_sec && peakTpRun.throughput_req_sec)
+      ? `${Math.round((peakTpRun.throughput_req_sec / peakTpRun.reference_throughput_req_sec) * 100)}% of reference`
+      : '';
+    const lowestCostStr = lowestCostRun
+      ? `$${((lowestCostRun.effective_cost_usd !== undefined && lowestCostRun.effective_cost_usd !== null) ? lowestCostRun.effective_cost_usd : lowestCostRun.total_cost_usd).toFixed(4)}`
+      : 'N/A';
+
+    return `
+      <div class="banner">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px;">
+          <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 1.3rem;">${spec.icon}</span>
+              <span style="font-size: 1.05rem; font-weight: 700; color: #fff;">${spec.name}</span>
+              <span class="badge badge-info">${spec.stagesCount} Stages</span>
+            </div>
+            <div style="font-size: 0.78rem; color: var(--mut); margin-top: 4px; max-width: 820px;">
+              ${spec.desc}
+            </div>
+          </div>
+          <div style="text-align: right; font-size: 0.74rem; color: var(--mut);">
+            <div><strong>Baseline:</strong> ${spec.refInfo}</div>
+            <div style="margin-top: 2px;"><strong>Benchmark:</strong> <code>${spec.benchTool}</code></div>
+          </div>
+        </div>
+        <div class="banner-kpi">
+          <div class="kpi-card">
+            <span class="k">🏆 Current Leader</span>
+            <span style="font-weight: 700; color: var(--gold); font-size: 0.88rem; word-break: break-all;">${escapeHtml(topModel)}</span>
+            <span style="font-size: 0.72rem; color: var(--acc); font-weight: 600;">${topScore}</span>
+          </div>
+          <div class="kpi-card">
+            <span class="k">⚡ Peak Throughput</span>
+            <span style="font-weight: 700; color: #fff; font-size: 0.95rem;">${peakTpStr}</span>
+            <span style="font-size: 0.72rem; color: var(--grn); font-weight: 600;">${peakRatioStr}</span>
+          </div>
+          <div class="kpi-card">
+            <span class="k">💰 Lowest Cost (100% Pass)</span>
+            <span style="font-weight: 700; color: var(--gold); font-size: 0.95rem;">${lowestCostStr}</span>
+            <span style="font-size: 0.72rem; color: var(--mut);">${passRuns.length} of ${taskRuns.length} passed</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTableContainer(runs, showTaskCol, title, subtitle) {
+    const headerHtml = title ? `
+      <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
+        <span style="font-weight: 700; color: #fff; font-size: 0.95rem;">${title}</span>
+        ${subtitle ? `<span style="font-size: 0.75rem; color: var(--mut);">${subtitle}</span>` : ''}
+      </div>` : '';
+
+    return `
+      ${headerHtml}
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 50px; text-align: center;" onclick="window.__subdollar_sort('score')">#</th>
+              <th onclick="window.__subdollar_sort('model')">Model & Stack</th>
+              <th onclick="window.__subdollar_sort('pass')">Conformance & Effort</th>
+              <th onclick="window.__subdollar_sort('dur')">Duration</th>
+              <th style="text-align: center;" onclick="window.__subdollar_sort('turns')">Turns</th>
+              <th onclick="window.__subdollar_sort('tp')">Throughput</th>
+              <th onclick="window.__subdollar_sort('cost')">Cost & Tokens</th>
+              <th onclick="window.__subdollar_sort('score')">Score pts/¢</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRowsHtml(runs, showTaskCol)}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderCalibrationNote() {
+    return `
+      <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px;">
+        <span>📐</span>
+        <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>
+      </div>
+    `;
+  }
+
+  function updateLeaderboardView() {
+    const container = document.getElementById('portalDynamicContainer');
+    if (!container) return;
+
+    ['all', 'http', 'redis', 'dns', 'pdf', 'grouped'].forEach(t => {
+      const btn = document.getElementById('tabBtn_' + t);
+      if (btn) {
+        if (t === currentTab) btn.classList.add('active');
+        else btn.classList.remove('active');
+      }
+    });
+
+    if (currentTab === 'grouped') {
+      const httpRuns = getSortedFilteredRuns(RUNS_DATA, 'http', searchQuery, passOnly);
+      const redisRuns = getSortedFilteredRuns(RUNS_DATA, 'redis', searchQuery, passOnly);
+      const dnsRuns = getSortedFilteredRuns(RUNS_DATA, 'dns', searchQuery, passOnly);
+      const pdfRuns = getSortedFilteredRuns(RUNS_DATA, 'pdf', searchQuery, passOnly);
+      const allRuns = getSortedFilteredRuns(RUNS_DATA, 'all', searchQuery, passOnly);
+
+      container.innerHTML = `
+        ${renderCalibrationNote()}
+        <div style="display: flex; flex-direction: column; gap: 16px;">
+          <div>
+            ${renderTaskBanner('http', RUNS_DATA)}
+            ${renderTableContainer(httpRuns, false, '🌐 Task 2: HTTP/1.1 Web Server Rankings', 'RFC 7230/7231 Conformance')}
+          </div>
+          <div>
+            ${renderTaskBanner('redis', RUNS_DATA)}
+            ${renderTableContainer(redisRuns, false, '⚡ Task 1: Redis Server Rankings', 'RESP2 Protocol Conformance')}
+          </div>
+          <div>
+            ${renderTaskBanner('dns', RUNS_DATA)}
+            ${renderTableContainer(dnsRuns, false, '📡 Task 3: DNS Server Rankings', 'RFC 1035 UDP 5353 Conformance')}
+          </div>
+          <div>
+            ${renderTaskBanner('pdf', RUNS_DATA)}
+            ${renderTableContainer(pdfRuns, false, '📄 Task 4: PDF Microservice Rankings', 'Port 8090 Raw Parser Conformance')}
+          </div>
+          <div>
+            ${renderTableContainer(allRuns, true, '🏆 Consolidated Global Leaderboard (All Runs)', 'Global multi-task ranking')}
+          </div>
+        </div>
+      `;
+    } else if (currentTab === 'all') {
+      const runs = getSortedFilteredRuns(RUNS_DATA, 'all', searchQuery, passOnly);
+      container.innerHTML = `
+        ${renderCalibrationNote()}
+        ${renderTableContainer(runs, true, '', '')}
+      `;
+    } else {
+      const runs = getSortedFilteredRuns(RUNS_DATA, currentTab, searchQuery, passOnly);
+      container.innerHTML = `
+        ${renderCalibrationNote()}
+        ${renderTaskBanner(currentTab, RUNS_DATA)}
+        ${renderTableContainer(runs, false, '', '')}
+      `;
+    }
+
+    container.querySelectorAll('tbody tr').forEach(row => {
+      row.addEventListener('click', e => {
+        if (e.target.tagName === 'A' || e.target.closest('a')) return;
+        const href = row.getAttribute('data-href');
+        if (href) window.location.href = href;
+      });
+    });
+  }
+
+  window.__subdollar_set_tab = function(tab) {
+    currentTab = tab;
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_search = function(val) {
+    searchQuery = val || '';
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_pass_toggle = function(checked) {
+    passOnly = !!checked;
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_sort = function(col) {
+    if (sortCol === col) {
+      sortDir = -sortDir;
+    } else {
+      sortCol = col;
+      sortDir = -1;
+    }
+    updateLeaderboardView();
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', updateLeaderboardView);
+  } else {
+    updateLeaderboardView();
+  }
+})();
+"#;
+
 
 pub struct PortalExporter;
 
@@ -136,9 +806,14 @@ impl PortalExporter {
         let http_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("http")).count();
         let redis_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("redis")).count();
         let dns_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("dns")).count();
+        let pdf_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("pdf")).count();
         let passed_n = results.iter().filter(|r| r.pass_rate >= 100.0).count();
         let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
-        let mut rows = String::new();
+
+        let runs_json = serde_json::to_string(results).unwrap_or_else(|_| "[]".to_string());
+
+        // Initial server-side fallback rows for crawlers and JS-disabled view
+        let mut initial_rows = String::new();
         for (i, r) in results.iter().enumerate() {
             let unit = match r.task.to_lowercase().as_str() {
                 "pdf" => "pages/s",
@@ -150,96 +825,65 @@ impl PortalExporter {
                 .map(|v| format!("{:.0} {}", v, unit))
                 .unwrap_or_else(|| "N/A".to_string());
             let score = r.throughput_score.unwrap_or(r.efficiency_score);
-            let medal = match i + 1 { 1 => "🥇".to_string(), 2 => "🥈".to_string(), 3 => "🥉".to_string(), n => n.to_string() };
-            let tp_v = r.throughput_req_sec.unwrap_or(-1.0);
+            let medal = match i + 1 {
+                1 => "🥇 #1".to_string(),
+                2 => "🥈 #2".to_string(),
+                3 => "🥉 #3".to_string(),
+                n => format!("#{}", n),
+            };
             let eff_c = r.effective_cost_usd.unwrap_or(r.total_cost_usd);
             let dur_s = r.duration_seconds.unwrap_or(0.0);
             let dur_txt = format_duration(dur_s);
             let tok_n = r.prompt_tokens + r.cached_tokens + r.completion_tokens;
-            let tok_txt = format!("{:.1}k", tok_n as f64 / 1000.0);
-            let cls = if r.pass_rate >= 100.0 { "pass" } else { "fail" };
-            rows.push_str(&format!(
-                "<tr data-href=\"runs/{}\"><td data-v=\"{}\"><a href=\"runs/{}/\">{}</a></td><td>{}</td><td>{}</td>\
-                 <td data-v=\"{}\"><span class=\"pill {}\">{:.0}% ({}/{})</span></td><td data-v=\"{}\">{}</td><td data-v=\"{}\">${:.4}</td><td data-v=\"{}\">{}</td><td data-v=\"{}\">{}</td><td class=\"score\">{:.1}</td></tr>\n",
-                Self::esc(&r.id),
-                (i + 1),
+            let tok_txt = format!("{:.1}k tokens", tok_n as f64 / 1000.0);
+            let pass_badge = if r.pass_rate >= 100.0 {
+                format!("<span class=\"badge badge-pass\">✔ 100% ({}/{})</span>", r.passed_stages, r.total_stages)
+            } else {
+                format!("<span class=\"badge badge-fail\">✕ {:.0}% ({}/{})</span>", r.pass_rate, r.passed_stages, r.total_stages)
+            };
+            let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
+
+            initial_rows.push_str(&format!(
+                "<tr data-href=\"runs/{}/\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;\"><a href=\"runs/{}/\" style=\"font-weight:600;color:var(--primary);\">{}</a> <span class=\"badge badge-info\">{}</span> <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div></div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div><div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
                 Self::esc(&r.id),
                 medal,
+                Self::esc(&r.id),
                 Self::esc(&r.model),
                 Self::esc(&r.task),
-                r.pass_rate,
-                cls,
-                r.pass_rate,
-                r.passed_stages,
-                r.total_stages,
-                tp_v,
+                Self::esc(&r.language),
+                Self::esc(&r.timestamp),
+                pass_badge,
+                Self::esc(r.effort.as_deref().unwrap_or("auto")),
+                dur_txt,
+                turns_str,
                 tp,
                 eff_c,
-                eff_c,
-                dur_s,
-                dur_txt,
-                tok_n,
                 tok_txt,
                 score,
+                Self::esc(&r.id),
             ));
         }
-        format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-             <title>SubDollarBench Portal</title>\
-             <style>{css}</style></head><body><main>\
-             <h1>SubDollarBench Portal</h1>\
-             <p>Autonomous under-$1 LLM systems benchmark. <span class=\"muted\">Updated {now}.</span>\
-             {base}</p>\
-             <div class=\"grid\">\
-             <div class=\"card\"><div class=\"k\">Runs</div><div class=\"v\">{n}</div></div>\
-             <div class=\"card\"><div class=\"k\">Passed</div><div class=\"v\" style=\"color:var(--grn)\">{passed}</div></div>\
-             <div class=\"card\"><div class=\"k\">HTTP</div><div class=\"v\">{http}</div></div>\
-             <div class=\"card\"><div class=\"k\">Redis</div><div class=\"v\">{redis}</div></div>\
-             <div class=\"card\"><div class=\"k\">DNS</div><div class=\"v\">{dns}</div></div>\
-             </div>\
-             <div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Task</th>\
-             <th>Pass</th><th>Throughput</th><th>Cost</th><th>Time</th><th>Tokens</th><th>Score pts/&cent;</th></tr></thead><tbody>{rows}</tbody></table></div><script>
-(function(){{
-var ths=document.querySelectorAll('thead th');
-var dir=-1, col=0;
-ths.forEach(function(th,idx){{
-th.addEventListener('click',function(){{
-var tb=document.querySelector('tbody');
-var rows=Array.prototype.slice.call(tb.rows);
-if(idx===col){{dir=-dir;}}else{{col=idx;dir=1;}}
-rows.sort(function(a,b){{
-var x=a.cells[idx].getAttribute('data-v');
-var y=b.cells[idx].getAttribute('data-v');
-if(x===null)x=a.cells[idx].textContent.trim();
-if(y===null)y=b.cells[idx].textContent.trim();
-var nx=parseFloat(x),ny=parseFloat(y);
-if(x!==''&&y!==''&&!isNaN(nx)&&!isNaN(ny))return dir*(nx-ny);
-x=String(x).toLowerCase();y=String(y).toLowerCase();
-return dir*(x<y?-1:x>y?1:0);}});
-rows.forEach(function(r){{tb.appendChild(r);}});
-ths.forEach(function(h){{h.textContent=h.textContent.replace(/ [\\u25B2\\u25BC]/,'');}});
-th.textContent+=(dir===1?' \\u25B2':' \\u25BC');}});}});
-}})();
-</script><script>
-document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='pointer';r.addEventListener('click',function(){{var u=r.getAttribute('data-href');if(u)window.location.href=u;}});}});
-</script>
 
-<footer class=\"muted\">Static mirror - click a column header to sort.</footer></main>\
-             </body></html>",
+        let base_info = if base_url.is_empty() {
+            String::new()
+        } else {
+            format!(" · Base: {}", Self::esc(base_url))
+        };
+
+        format!(
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                 <div>Updated {now}{base_info}</div>                 <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📡 DNS Server</div><div class=\"v\">{dns}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                 <button id=\"tabBtn_all\" class=\"btn-toggle active\" onclick=\"window.__subdollar_set_tab('all')\">🌐 Consolidated (All Tasks)</button>                 <button id=\"tabBtn_http\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('http')\">🌐 HTTP/1.1 Server <span class=\"badge-count\">{http}</span></button>                 <button id=\"tabBtn_redis\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('redis')\">⚡ Redis Clone <span class=\"badge-count\">{redis}</span></button>                 <button id=\"tabBtn_dns\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('dns')\">📡 DNS Server <span class=\"badge-count\">{dns}</span></button>                 <button id=\"tabBtn_pdf\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pdf')\">📄 PDF Microservice <span class=\"badge-count\">{pdf}</span></button>                 <button id=\"tabBtn_grouped\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('grouped')\">📑 Grouped View</button>               </div>               <div style=\"display:flex;gap:10px;align-items:center;flex-wrap:wrap;\">                 <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>             <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             <script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
             css = PORTAL_CSS,
+            js = PORTAL_JS,
             n = results.len(),
             passed = passed_n,
             http = http_n,
             redis = redis_n,
             dns = dns_n,
+            pdf = pdf_n,
             now = now,
-            base = if base_url.is_empty() {
-                String::new()
-            } else {
-                format!("Base URL: {}", Self::esc(base_url))
-            },
-            rows = rows,
+            base_info = base_info,
+            initial_rows = initial_rows,
+            runs_json = runs_json,
         )
     }
 
