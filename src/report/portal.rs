@@ -358,7 +358,7 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
         let score = m.throughput_score.unwrap_or(m.efficiency_score);
         let (tp_txt, tp_bar) = match (m.throughput_req_sec, m.reference_throughput_req_sec) {
             (Some(tp), Some(ref_tp)) if ref_tp > 0.0 => {
-                let pct = ((tp / ref_tp * 100.0).min(100.0).max(0.0)) as u32;
+                let pct = (tp / ref_tp * 100.0).clamp(0.0, 100.0) as u32;
                 (
                     format!("{:.0} req/s ({:.0}% of reference)", tp, tp / ref_tp * 100.0),
                     format!("<div class=\"bar\"><div class=\"fill\" style=\"width:{}%\"></div></div>", pct),
@@ -367,7 +367,8 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
             (Some(tp), _) => (format!("{:.0} req/s", tp), String::new()),
             _ => ("N/A".to_string(), String::new()),
         };
-        let total_tok = m.tokens.prompt_tokens + m.tokens.cached_tokens + m.tokens.completion_tokens;
+        let total_tok = m.tokens.total_tokens;
+        let tott_str = format!("{:.1}k", total_tok as f64 / 1000.0);
         Ok(format!(
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
@@ -410,7 +411,7 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
             eff = eff,
             api = api,
             comp = comp,
-            tott = format!("{:.1}k", total_tok as f64 / 1000.0),
+            tott = tott_str,
             pt = m.tokens.prompt_tokens,
             ct = m.tokens.cached_tokens,
             xt = m.tokens.completion_tokens,
@@ -430,7 +431,7 @@ document.querySelectorAll('tbody tr').forEach(function(r){{r.style.cursor='point
         let mut entries: Vec<_> = fs::read_dir(dir)
             .map(|rd| rd.flatten().collect())
             .unwrap_or_default();
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        entries.sort_by_key(|a| a.file_name());
         for entry in entries {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();

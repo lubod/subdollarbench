@@ -43,8 +43,10 @@ impl BenchmarkRunner {
     }
 
     pub fn run_redis_benchmark(port: u16) -> Result<f64> {
-        let output = Command::new("docker")
+        let output = Command::new("timeout")
             .args([
+                "15",
+                "docker",
                 "run",
                 "--rm",
                 "--network",
@@ -75,8 +77,10 @@ impl BenchmarkRunner {
 
     pub fn run_wrk_benchmark(port: u16) -> Result<f64> {
         let url = format!("http://127.0.0.1:{}/", port);
-        let output = Command::new("docker")
+        let output = Command::new("timeout")
             .args([
+                "15",
+                "docker",
                 "run",
                 "--rm",
                 "--network",

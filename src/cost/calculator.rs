@@ -51,16 +51,38 @@ impl ModelPricing {
         throughput_req_sec: Option<f64>,
         reference_throughput_req_sec: Option<f64>,
     ) -> f64 {
+        Self::calculate_throughput_score_for_task(
+            pass_rate,
+            effective_cost_usd,
+            throughput_req_sec,
+            reference_throughput_req_sec,
+            None,
+        )
+    }
+
+    pub fn calculate_throughput_score_for_task(
+        pass_rate: f64,
+        effective_cost_usd: f64,
+        throughput_req_sec: Option<f64>,
+        reference_throughput_req_sec: Option<f64>,
+        task: Option<&str>,
+    ) -> f64 {
         let base_eff = Self::calculate_efficiency_score(pass_rate, effective_cost_usd);
         if base_eff <= 0.0 {
             return 0.0;
         }
         let cand_tp = throughput_req_sec.unwrap_or(0.0).max(0.0);
         let ref_tp = reference_throughput_req_sec.unwrap_or(0.0).max(0.0);
+        let fallback_baseline = match task.unwrap_or("http").to_lowercase().as_str() {
+            "redis" => 71_000.0,
+            "dns" => 2_000.0,
+            "pdf" => 50.0,
+            _ => 33_000.0,
+        };
         let speed_ratio = if ref_tp > 0.0 {
             cand_tp / ref_tp
         } else if cand_tp > 0.0 {
-            cand_tp / 33_000.0
+            cand_tp / fallback_baseline
         } else {
             0.0
         };
@@ -479,6 +501,16 @@ mod tests {
 
         let tp_score = ModelPricing::calculate_throughput_score(100.0, eff, Some(30_000.0), Some(30_000.0));
         assert!((tp_score - (score * 3.0)).abs() < 1e-3);
+
+        // Task-aware fallback tests
+        let tp_redis = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(71_000.0), None, Some("redis"));
+        assert!((tp_redis - (score * 3.0)).abs() < 1e-3);
+
+        let tp_dns = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(2_000.0), None, Some("dns"));
+        assert!((tp_dns - (score * 3.0)).abs() < 1e-3);
+
+        let tp_pdf = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(50.0), None, Some("pdf"));
+        assert!((tp_pdf - (score * 3.0)).abs() < 1e-3);
     }
 
     #[test]

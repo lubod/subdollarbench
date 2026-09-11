@@ -399,8 +399,8 @@ impl SandboxManager {
         if dockerfile.exists() {
             info!("Candidate provided custom Dockerfile. Building image...");
             let image_tag = format!("subdollar-candidate-{}", self.instance_id);
-            let build_res = Command::new("docker")
-                .args(["build", "-t", &image_tag, "."])
+            let build_res = Command::new("timeout")
+                .args(["120", "docker", "build", "-t", &image_tag, "."])
                 .current_dir(&canonical_workdir)
                 .output();
 

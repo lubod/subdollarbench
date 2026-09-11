@@ -80,13 +80,21 @@ impl DnsVerifier {
         }
     }
 
-    /// Timed burst of sequential queries, scored in queries/sec. None on failures.
+    /// Timed burst of sequential queries, scored in queries/sec. Reuses a single client socket.
     pub async fn measure_throughput(&self) -> Option<f64> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.ok()?;
+        let target: SocketAddr = format!("127.0.0.1:{}", self.target_port).parse().ok()?;
         let iters = 200u32;
         let start = std::time::Instant::now();
         for i in 0..iters {
-            if self.send_query(0x7000 + (i % 60000) as u16, "example.com", 1).await.is_err() {
-                return None;
+            let id = 0x7000 + (i % 60000) as u16;
+            let query = Self::build_query(id, "example.com", 1);
+            socket.send_to(&query, target).await.ok()?;
+            let mut buf = [0u8; 512];
+            let resp = timeout(Duration::from_millis(500), socket.recv_from(&mut buf)).await;
+            match resp {
+                Ok(Ok((len, _))) if len >= 12 => {}
+                _ => return None,
             }
         }
         let secs = start.elapsed().as_secs_f64();

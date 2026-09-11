@@ -65,6 +65,8 @@ pub struct AgentRunSpec<'a> {
     pub limits: AgentExecutionLimits,
     pub effort: Option<&'a str>,
     pub network: Option<&'a str>,
+    pub task: Option<crate::config::TaskType>,
+    pub run_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +121,8 @@ impl OmpRunner {
             limits,
             effort,
             network,
+            task,
+            run_id,
         } = spec;
         info!(
             "Launching OMP agent in Docker sandbox with model: {}, effort: {:?}, limits: {:?}",
@@ -126,7 +130,10 @@ impl OmpRunner {
         );
 
         let start_time = SystemTime::now();
-        let container_name = format!("subdollar-omp-agent-{}", std::process::id());
+        let container_id = run_id
+            .unwrap_or("run")
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "");
+        let container_name = format!("subdollar-omp-agent-{}", container_id);
 
         // Pre-clean any stale agent container
         let _ = Command::new("docker")
@@ -174,7 +181,7 @@ impl OmpRunner {
                 for entry in entries.flatten() {
                     if let Ok(ft) = entry.file_type() {
                         if ft.is_file() {
-                            let _ = std::fs::set_permissions(&entry.path(), std::fs::Permissions::from_mode(0o666));
+                            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o666));
                         }
                     }
                 }
@@ -311,13 +318,32 @@ impl OmpRunner {
             cmd.arg("-e").arg("OPENAI_API_KEY=dummy");
         }
 
-        let prompt_lower = prompt.to_lowercase();
-        let is_http = prompt_lower.contains("http");
-        let is_redis = prompt_lower.contains("redis");
-        let is_dns = prompt_lower.contains("dns");
-
-        let (target_port, test_cmd, guidance_snippet) = if is_http {
-            (
+        let (target_port, test_cmd, guidance_snippet) = match task {
+            Some(crate::config::TaskType::Pdf) => (
+                8090,
+                "curl -v http://localhost:8090/health",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Third-party PDF libraries (pypdf, pdfminer, fitz, lopdf, pdfcpu, etc.) and external CLI tools (pdftotext, mutool) are STRICTLY FORBIDDEN.
+- Build an RFC-compliant HTTP microservice on port 8090 using raw TCP sockets that extracts plain text from binary PDF payloads sent to POST /extract."#,
+            ),
+            Some(crate::config::TaskType::Redis) => (
+                6379,
+                "redis-cli -p 6379 ping",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Pre-built Redis servers and client libraries are FORBIDDEN.
+- Build from raw TCP sockets on port 6379 parsing RESP wire format (`+PONG
+`, `:1
+`, `$len
+`)."#,
+            ),
+            Some(crate::config::TaskType::Dns) => (
+                5353,
+                "dig @127.0.0.1 -p 5353 test.local",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Pre-built DNS servers (bind9, coredns, dnsmasq) are FORBIDDEN.
+- Build from raw UDP sockets on port 5353 handling RFC 1035 wire packets."#,
+            ),
+            Some(crate::config::TaskType::Http) => (
                 8080,
                 "curl -v http://localhost:8080/",
                 r#"ANTI-CHEAT REQUIREMENT (STRICT):
@@ -344,32 +370,35 @@ Content-Length: 0
   ```
 - Go: use `net.Listen("tcp", "0.0.0.0:8080")` and `net.Conn`. Do NOT use `net/http`.
 - Rust: use `std::net::TcpListener` or `tokio::net::TcpListener`."#,
-            )
-        } else if is_redis {
-            (
-                6379,
-                "redis-cli -p 6379 ping",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built Redis servers and client libraries are FORBIDDEN.
-- Build from raw TCP sockets on port 6379 parsing RESP wire format (`+PONG
-`, `:1
-`, `$len
-`)."#,
-            )
-        } else if is_dns {
-            (
-                5354,
-                "dig @127.0.0.1 -p 5354 test.local",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built DNS servers (bind9, coredns, dnsmasq) are FORBIDDEN.
-- Build from raw UDP/TCP sockets handling RFC 1035 wire packets."#,
-            )
-        } else {
-            (
-                8080,
-                "curl -v http://localhost:8080/",
-                r#"Build using raw TCP sockets and stream I/O."#,
-            )
+            ),
+            None => {
+                let prompt_lower = prompt.to_lowercase();
+                if prompt_lower.contains("pdf") {
+                    (
+                        8090,
+                        "curl -v http://localhost:8090/health",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build an HTTP PDF microservice using raw TCP sockets on port 8090."#,
+                    )
+                } else if prompt_lower.contains("redis") {
+                    (
+                        6379,
+                        "redis-cli -p 6379 ping",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw TCP sockets on port 6379 parsing RESP wire format."#,
+                    )
+                } else if prompt_lower.contains("dns") {
+                    (
+                        5353,
+                        "dig @127.0.0.1 -p 5353 test.local",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw UDP sockets on port 5353 handling RFC 1035 wire packets."#,
+                    )
+                } else {
+                    (
+                        8080,
+                        "curl -v http://localhost:8080/",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build using raw TCP sockets on port 8080."#,
+                    )
+                }
+            }
         };
 
         let effective_prompt = format!(
@@ -1668,6 +1697,8 @@ mod tests {
             limits,
             effort: Some("auto"),
             network: None,
+            task: None,
+            run_id: None,
         });
 
         // omp should fail on nonexistent model with error
@@ -1695,6 +1726,8 @@ mod tests {
             limits,
             effort: Some("auto"),
             network: None,
+            task: None,
+            run_id: None,
         });
 
         if let Err(e) = res {

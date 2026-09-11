@@ -70,7 +70,7 @@ impl RunJudge {
             return;
         }
         let mut entries: Vec<_> = std::fs::read_dir(dir).map(|rd| rd.flatten().collect()).unwrap_or_default();
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        entries.sort_by_key(|a| a.file_name());
         for entry in entries {
             if *budget == 0 {
                 return;
@@ -90,11 +90,12 @@ impl RunJudge {
             } else if path.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let take = (*budget).min(content.len());
-                    let mut clipped = content[..take].to_string();
-                    if content.len() > take {
+                    let boundary = content.floor_char_boundary(take);
+                    let mut clipped = content[..boundary].to_string();
+                    if content.len() > boundary {
                         clipped.push_str("\n...[truncated]");
                     }
-                    *budget -= take;
+                    *budget = budget.saturating_sub(boundary);
                     out.push((rel, clipped));
                 }
             }

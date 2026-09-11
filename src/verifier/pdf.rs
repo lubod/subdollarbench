@@ -136,11 +136,13 @@ impl PdfVerifier {
     }
 
     fn short(s: &str) -> String {
-        const MAX: usize = 160;
-        if s.len() <= MAX {
-            s.to_string()
+        const MAX_CHARS: usize = 160;
+        let mut chars = s.chars();
+        let prefix: String = chars.by_ref().take(MAX_CHARS).collect();
+        if chars.next().is_some() {
+            format!("{}...", prefix)
         } else {
-            format!("{}...", &s[..MAX])
+            prefix
         }
     }
 
@@ -352,5 +354,13 @@ mod tests {
             | ((STAGE3_STREAM[n - 2] as u32) << 8)
             | (STAGE3_STREAM[n - 1] as u32);
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_short_utf8_boundary_safety() {
+        let emoji_str: String = "🦀".repeat(200);
+        let shortened = PdfVerifier::short(&emoji_str);
+        assert!(shortened.ends_with("..."));
+        assert_eq!(shortened.chars().count(), 163); // 160 chars + "..."
     }
 }

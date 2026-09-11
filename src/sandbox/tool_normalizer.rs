@@ -16,9 +16,6 @@ pub struct ExtractedToolCall {
     pub arguments: String,
 }
 
-/// Extracts files defined in markdown code blocks when local models output
-/// implementation files in conversational text instead of invoking tool calls directly.
-
 /// Parses pseudo-command write invocations emitted by models such as:
 /// write content='#!/bin/sh\npython3 /workspace/tcp_listener.py' i="Create executable start script" path="/workspace/start.sh"
 /// or:
@@ -308,24 +305,25 @@ pub fn extract_tool_calls(content: &str) -> Option<Vec<ExtractedToolCall>> {
     }
 
     // 3. Custom XML tags: <function=name><parameter=key>value</parameter></function>
-    if let Ok(fn_re) = Regex::new(r"(?s)<function=([a-zA-Z0-9_\.-]+)>\s*(.*?)\s*</function>") {
+    if let (Ok(fn_re), Ok(param_re)) = (
+        Regex::new(r"(?s)<function=([a-zA-Z0-9_\.-]+)>\s*(.*?)\s*</function>"),
+        Regex::new(r"(?s)<parameter=([a-zA-Z0-9_\.-]+)>\s*(.*?)\s*</parameter>"),
+    ) {
         for cap in fn_re.captures_iter(content) {
             let fn_name = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
             let body = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            if let Ok(param_re) = Regex::new(r"(?s)<parameter=([a-zA-Z0-9_\.-]+)>\s*(.*?)\s*</parameter>") {
-                let mut params_map = serde_json::Map::new();
-                for pcap in param_re.captures_iter(body) {
-                    if let (Some(k), Some(v)) = (pcap.get(1), pcap.get(2)) {
-                        params_map.insert(k.as_str().to_string(), json!(v.as_str().trim()));
-                    }
+            let mut params_map = serde_json::Map::new();
+            for pcap in param_re.captures_iter(body) {
+                if let (Some(k), Some(v)) = (pcap.get(1), pcap.get(2)) {
+                    params_map.insert(k.as_str().to_string(), json!(v.as_str().trim()));
                 }
-                let args_str = serde_json::to_string(&params_map).unwrap_or_else(|_| "{}".to_string());
-                if !fn_name.is_empty() {
-                    tool_calls.push(ExtractedToolCall {
-                        name: fn_name,
-                        arguments: args_str,
-                    });
-                }
+            }
+            let args_str = serde_json::to_string(&params_map).unwrap_or_else(|_| "{}".to_string());
+            if !fn_name.is_empty() {
+                tool_calls.push(ExtractedToolCall {
+                    name: fn_name,
+                    arguments: args_str,
+                });
             }
         }
     }
@@ -359,24 +357,22 @@ pub fn extract_tool_calls(content: &str) -> Option<Vec<ExtractedToolCall>> {
     }
 
     // 4b. Bare pseudo-command write calls in conversational text
-    if let Some((pseudo_path, pseudo_content)) = parse_pseudo_write(trimmed) {
-        if let Some(p) = pseudo_path {
-            let clean_p = p
-                .trim()
-                .trim_matches(|c| c == '`' || c == '*' || c == '\x27' || c == '"')
-                .trim_start_matches("/workspace/")
-                .trim_start_matches("./")
-                .to_string();
-            if !clean_p.is_empty() {
-                return Some(vec![ExtractedToolCall {
-                    name: "write".to_string(),
-                    arguments: json!({
-                        "path": clean_p,
-                        "content": pseudo_content,
-                    })
-                    .to_string(),
-                }]);
-            }
+    if let Some((Some(p), pseudo_content)) = parse_pseudo_write(trimmed) {
+        let clean_p = p
+            .trim()
+            .trim_matches(|c| c == '`' || c == '*' || c == '\x27' || c == '"')
+            .trim_start_matches("/workspace/")
+            .trim_start_matches("./")
+            .to_string();
+        if !clean_p.is_empty() {
+            return Some(vec![ExtractedToolCall {
+                name: "write".to_string(),
+                arguments: json!({
+                    "path": clean_p,
+                    "content": pseudo_content,
+                })
+                .to_string(),
+            }]);
         }
     }
 

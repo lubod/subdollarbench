@@ -1259,7 +1259,7 @@ async fn stream_logs(
             for line in item.lines() {
                 let clean = line.trim_end();
                 if !clean.is_empty() {
-                    evts.push(Event::default().data(clean.to_string()));
+                    evts.push(Event::default().data(clean));
                 }
             }
         }
@@ -1273,7 +1273,7 @@ async fn stream_logs(
             Some(Ok(Event::default().data(clean)))
         }
         Err(_) => {
-            Some(Ok(Event::default().data("[STREAM NOTICE] Event burst: log stream caught up (full log preserved in console)".to_string())))
+            Some(Ok(Event::default().data("[STREAM NOTICE] Event burst: log stream caught up (full log preserved in console)")))
         }
     });
 

@@ -164,8 +164,16 @@ impl RunArchiver {
         if filename.contains("..") || filename.starts_with('/') {
             return None;
         }
-        let file_path = runs_dir.join(clean_id).join("workspace").join(filename);
-        fs::read_to_string(file_path).ok()
+        let ws_dir = runs_dir.join(clean_id).join("workspace");
+        let file_path = ws_dir.join(filename);
+        if let (Ok(can_ws), Ok(can_file)) = (ws_dir.canonicalize(), file_path.canonicalize()) {
+            if !can_file.starts_with(&can_ws) {
+                return None;
+            }
+            fs::read_to_string(can_file).ok()
+        } else {
+            None
+        }
     }
 
     pub fn scan_workspace_files(workspace_dir: &Path) -> Vec<FileInfo> {
@@ -319,6 +327,17 @@ mod tests {
         let code =
             RunArchiver::get_workspace_file(&runs_dir, "test_run_123", "src/main.go").unwrap();
         assert!(code.contains("package main"));
+
+        // Verify symlink escape protection
+        let outside_file = temp_dir.join("secret.txt");
+        let _ = fs::write(&outside_file, "super_secret_token");
+        let symlink_path = runs_dir.join("test_run_123").join("workspace").join("evil_symlink");
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(&outside_file, &symlink_path);
+            let escaped = RunArchiver::get_workspace_file(&runs_dir, "test_run_123", "evil_symlink");
+            assert!(escaped.is_none(), "Symlink escape outside workspace should be denied");
+        }
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

@@ -255,6 +255,45 @@ impl SummaryGenerator {
             md.push('\n');
         }
 
+                md.push_str("---\n\n");
+        md.push_str("## 📄 Task 4: PDF Extraction Microservice (`task: pdf`)\n\n");
+        md.push_str("The candidate LLM is instructed to build an RFC-compliant HTTP microservice from scratch on port 8090 that extracts plain text from binary PDF files.\n");
+        md.push_str("- **Protocol**: Raw TCP socket server handling HTTP `GET /` health checks, `POST /extract` PDF payload decoding, and `400 Bad Request` rejection for malformed streams.\n");
+        md.push_str("- **Custom PDF Engine**: Parsing the PDF object graph (`xref`, trailer, catalog, page hierarchy, content streams, FlateDecode decompression, and text operators `Tj`/`TJ`/`Td`/`Tm`).\n");
+        md.push_str("- **Strict Prohibition**: Third-party PDF libraries (`pypdf`, `pdfminer`, `fitz`, `pdfcpu`, `lopdf`, `pdf.js`) and external binaries (`pdftotext`, `mutool`) are strictly forbidden.\n");
+        md.push_str("- **Verification**: 5-stage automated conformance suite + synthetic multi-page document throughput benchmark.\n\n");
+
+        let pdf_runs: Vec<&RunManifest> = runs.iter().filter(|r| r.task == "pdf").collect();
+        if !pdf_runs.is_empty() {
+            md.push_str(
+                "| Model | Effort | Lang | Pass Rate | Duration | Turns | Throughput | Cost | Score | Run Archive |\n",
+            );
+            md.push_str("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|\n");
+            for r in pdf_runs {
+                let dur_str = format_duration(r.duration_seconds);
+                let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
+                let tp_str = r
+                    .throughput_req_sec
+                    .map(|t| format!("{:.0} req/s", t))
+                    .unwrap_or_else(|| "N/A".to_string());
+                md.push_str(&format!(
+                    "| `{}` | `{}` | `{}` | {:.0}% | {} | {} | {} | ${:.4} | {:.1} pts/¢ | [runs/{}/](runs/{}/) |\n",
+                    r.model,
+                    r.effort.as_deref().unwrap_or("auto"),
+                    r.language,
+                    r.pass_rate,
+                    dur_str,
+                    turns_str,
+                    tp_str,
+                    r.cost_usd,
+                    r.efficiency_score,
+                    r.run_id,
+                    r.run_id
+                ));
+            }
+            md.push('\n');
+        }
+
         md.push_str("---\n\n");
         md.push_str("## 🖥️ Benchmark Testbed Environment Specs\n\n");
         md.push_str("All runs recorded in this repository were benchmarked under identical, isolated hardware and sandbox conditions:\n\n");

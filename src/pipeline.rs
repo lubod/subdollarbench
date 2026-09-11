@@ -236,6 +236,7 @@ impl BenchmarkPipeline {
             let work_path_buf = config.workdir.clone();
             let api_key_c = config.api_key.clone();
             let effort_c = config.effort.clone();
+            let run_id_c = run_id.clone();
             let net_name = sandbox.network_name();
 
             let omp_res = tokio::task::spawn_blocking(move || {
@@ -247,6 +248,8 @@ impl BenchmarkPipeline {
                     limits,
                     effort: Some(&effort_c),
                     network: Some(net_name.as_str()),
+                    task: Some(config.task),
+                    run_id: Some(&run_id_c),
                 };
                 OmpRunner::run_agent_with_logger(spec, move |line| {
                     logger_sub.log(&line);
@@ -539,11 +542,12 @@ impl BenchmarkPipeline {
             ModelPricing::calculate_effective_cost(cost_usd, duration_seconds, total_run_tokens);
         let efficiency_score =
             ModelPricing::calculate_efficiency_score(pass_rate, effective_cost_usd);
-        let throughput_score = ModelPricing::calculate_throughput_score(
+        let throughput_score = ModelPricing::calculate_throughput_score_for_task(
             pass_rate,
             effective_cost_usd,
             throughput,
             reference_throughput,
+            Some(&config.task.to_string()),
         );
 
         let lang = LeaderboardManager::detect_language(&config.workdir);
@@ -668,15 +672,27 @@ impl BenchmarkPipeline {
                         if let Ok(text) = serde_json::to_string_pretty(&review) {
                             let _ = std::fs::write(&review_path, text);
                         }
-                        buffering_logger.log(&format!(
+                        let rev_msg = format!(
                             "[REVIEW] Judge {} scored {} strengths, {} weaknesses",
                             judge_model,
                             review.good.len(),
                             review.bad.len()
-                        ));
+                        );
+                        buffering_logger.log(&rev_msg);
+                        let log_path = runs_dir.join(&manifest.run_id).join("console.log");
+                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                            use std::io::Write;
+                            let _ = writeln!(f, "[{}] {}", Utc::now().format("%H:%M:%S"), rev_msg);
+                        }
                     }
                     Err(e) => {
-                        buffering_logger.log(&format!("[REVIEW] Skipped: {}", e));
+                        let skip_msg = format!("[REVIEW] Skipped: {}", e);
+                        buffering_logger.log(&skip_msg);
+                        let log_path = runs_dir.join(&manifest.run_id).join("console.log");
+                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                            use std::io::Write;
+                            let _ = writeln!(f, "[{}] {}", Utc::now().format("%H:%M:%S"), skip_msg);
+                        }
                     }
                 }
             }

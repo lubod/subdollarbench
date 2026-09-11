@@ -1288,6 +1288,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <button id="lbPillHttp" class="btn-toggle" onclick="setLeaderboardTab('http')">🌐 HTTP/1.1 Server <span id="lbCountHttp" class="badge" style="background: rgba(88,166,255,0.2); color: var(--primary); margin-left: 4px; font-size: 0.65rem;">0</span></button>
               <button id="lbPillRedis" class="btn-toggle" onclick="setLeaderboardTab('redis')">⚡ Redis Clone <span id="lbCountRedis" class="badge" style="background: rgba(88,166,255,0.2); color: var(--primary); margin-left: 4px; font-size: 0.65rem;">0</span></button>
               <button id="lbPillDns" class="btn-toggle" onclick="setLeaderboardTab('dns')">📡 DNS Server <span id="lbCountDns" class="badge" style="background: rgba(88,166,255,0.2); color: var(--primary); margin-left: 4px; font-size: 0.65rem;">0</span></button>
+              <button id="lbPillPdf" class="btn-toggle" onclick="setLeaderboardTab('pdf')">📄 PDF Microservice <span id="lbCountPdf" class="badge" style="background: rgba(88,166,255,0.2); color: var(--primary); margin-left: 4px; font-size: 0.65rem;">0</span></button>
               <button id="lbPillGrouped" class="btn-toggle" onclick="setLeaderboardTab('grouped')">📑 Grouped View</button>
             </div>
             <div id="lbSummaryPills" style="display: flex; gap: 8px; align-items: center; font-size: 0.75rem; color: var(--text-muted);"></div>
@@ -2362,9 +2363,17 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         name: 'RFC 1035 UDP DNS Server',
         icon: '📡',
         desc: 'Raw UDP DNS resolver handling RFC 1035 packet headers, query questions, standard flags (QR, Opcode, AA, RD, RA, RCODE), dynamic port listening, and A-record address resolution.',
-        stagesCount: 4,
+        stagesCount: 6,
         refInfo: 'Standard UDP query resolver benchmarked on port 5353',
         benchTool: 'UDP raw-socket conformance suite + queryperf'
+      },
+      pdf: {
+        name: 'PDF-to-Text Microservice',
+        icon: '📄',
+        desc: 'RFC-compliant HTTP microservice on port 8090 converting binary PDF documents to plaintext using a custom PDF parser and DEFLATE engine (no external PDF libraries).',
+        stagesCount: 5,
+        refInfo: 'Verifier-timed synthetic PDF suite',
+        benchTool: 'Synthetic multi-page PDF extraction burst'
       }
     };
 
@@ -2375,6 +2384,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         http: document.getElementById('lbPillHttp'),
         redis: document.getElementById('lbPillRedis'),
         dns: document.getElementById('lbPillDns'),
+        pdf: document.getElementById('lbPillPdf'),
         grouped: document.getElementById('lbPillGrouped')
       };
       Object.keys(pills).forEach(k => {
@@ -2410,15 +2420,18 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         const httpCount = rawLeaderboardData.filter(r => (r.task || '').toLowerCase() === 'http').length;
         const redisCount = rawLeaderboardData.filter(r => (r.task || '').toLowerCase() === 'redis').length;
         const dnsCount = rawLeaderboardData.filter(r => (r.task || '').toLowerCase() === 'dns').length;
+        const pdfCount = rawLeaderboardData.filter(r => (r.task || '').toLowerCase() === 'pdf').length;
 
         const cHttp = document.getElementById('lbCountHttp');
         const cRedis = document.getElementById('lbCountRedis');
         const cDns = document.getElementById('lbCountDns');
+        const cPdf = document.getElementById('lbCountPdf');
         const totalBadge = document.getElementById('lbTotalRunsBadge');
 
         if (cHttp) cHttp.textContent = httpCount;
         if (cRedis) cRedis.textContent = redisCount;
         if (cDns) cDns.textContent = dnsCount;
+        if (cPdf) cPdf.textContent = pdfCount;
         if (totalBadge) totalBadge.textContent = `${rawLeaderboardData.length} Verified Runs`;
         const lbUpd = document.getElementById(lbUpdatedAt);
         if (lbUpd) lbUpd.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -2788,6 +2801,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         const redisRuns = filtered.filter(r => (r.task || '').toLowerCase() === 'redis');
         const httpRuns = filtered.filter(r => (r.task || '').toLowerCase() === 'http');
         const dnsRuns = filtered.filter(r => (r.task || '').toLowerCase() === 'dns');
+        const pdfRuns = filtered.filter(r => (r.task || '').toLowerCase() === 'pdf');
 
         const redisSection = `
           <div style="display: flex; flex-direction: column; gap: 10px;">
@@ -2810,12 +2824,20 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
           </div>
         `;
 
+        const pdfSection = `
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            ${renderTaskHeaderBannerHtml('pdf')}
+            ${pdfRuns.length > 0 ? renderRunsTableContainerHtml(pdfRuns, false, '📄 Task: PDF Microservice Rankings', 'Port 8090 Raw Parser Conformance') : renderEmptyTaskNoticeHtml('pdf')}
+          </div>
+        `;
+
         const consolidatedSection = renderRunsTableContainerHtml(filtered, true, '🏆 Consolidated Global Leaderboard (All Runs)', 'Global multi-task ranking');
 
         container.innerHTML = `
           ${httpSection}
           ${redisSection}
           ${dnsSection}
+          ${pdfSection}
           ${consolidatedSection}
         `;
       } else {
