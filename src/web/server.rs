@@ -2,7 +2,7 @@ use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
     EnvironmentInfo, FileInfo, LeaderboardManager, RunArchiver, RunManifest,
-    SummaryGenerator, is_hidden, set_hidden, PortalExporter,
+    is_hidden, set_hidden, PortalExporter,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -349,7 +349,6 @@ impl UiServer {
             .route("/api/runs/:id/review", get(get_run_review))
             .route("/api/runs/:id", delete(delete_run))
             .route("/portal/*path", get(serve_portal))
-            .route("/api/summary", get(get_summary).post(regenerate_summary))
             .route("/api/env", get(get_env))
             .route("/v1/models", get(crate::sandbox::tool_normalizer::handle_models))
             .route("/v1/chat/completions", post(crate::sandbox::tool_normalizer::handle_chat_completions))
@@ -729,39 +728,7 @@ async fn get_active_console(State(state): State<AppState>) -> Response {
     buf.join("\n").into_response()
 }
 
-async fn get_summary() -> Response {
-    let repo_root = crate::config::get_repo_root();
-    let summary_path = repo_root.join("SUMMARY.md");
-    if !summary_path.exists() {
-        let runs_dir = RunArchiver::resolve_runs_dir();
-        let _ = SummaryGenerator::update_summary_file(&repo_root, &runs_dir);
-    }
 
-    match fs::read_to_string(&summary_path) {
-        Ok(content) => content.into_response(),
-        Err(_) => (axum::http::StatusCode::NOT_FOUND, "SUMMARY.md not found").into_response(),
-    }
-}
-
-async fn regenerate_summary() -> Response {
-    let repo_root = crate::config::get_repo_root();
-    let runs_dir = RunArchiver::resolve_runs_dir();
-    match SummaryGenerator::update_summary_file(&repo_root, &runs_dir) {
-        Ok(p) => match fs::read_to_string(p) {
-            Ok(content) => content.into_response(),
-            Err(e) => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Read error: {}", e),
-            )
-                .into_response(),
-        },
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to generate summary: {}", e),
-        )
-            .into_response(),
-    }
-}
 
 async fn get_env() -> Json<EnvironmentInfo> {
     Json(EnvironmentInfo::detect())
@@ -1262,12 +1229,7 @@ async fn start_run(
             );
         }
 
-        // Regenerate summary
-        if req.save_results.unwrap_or(true) {
-            let runs_dir = RunArchiver::resolve_runs_dir();
-            let repo_root = crate::config::get_repo_root();
-            let _ = SummaryGenerator::update_summary_file(&repo_root, &runs_dir);
-        }
+
 
         if total_trials > 1 {
             let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
@@ -1474,25 +1436,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_routes_lifecycle() {
-        // Drop guard restores SUMMARY.md even if the test panics mid-run,
-        // preventing git working-tree pollution from summary regeneration.
-        struct SummaryRestoreGuard {
-            path: PathBuf,
-            original: Option<String>,
-        }
-        impl Drop for SummaryRestoreGuard {
-            fn drop(&mut self) {
-                if let Some(orig) = self.original.take() {
-                    let _ = fs::write(&self.path, orig);
-                }
-            }
-        }
-        let summary_path = crate::config::get_repo_root().join("SUMMARY.md");
-        let _summary_guard = SummaryRestoreGuard {
-            original: fs::read_to_string(&summary_path).ok(),
-            path: summary_path,
-        };
-
         let state = create_test_state();
         state
             .log_buffer
@@ -1641,22 +1584,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 404);
-
-        // 13. GET /api/summary
-        let res = client
-            .get(format!("{}/api/summary", base))
-            .send()
-            .await
-            .unwrap();
-        assert!(res.status() == 200 || res.status() == 404);
-
-        // 14. POST /api/summary
-        let res = client
-            .post(format!("{}/api/summary", base))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status(), 200);
 
         // 15. POST /api/run conflict test
         state.is_running.store(true, Ordering::SeqCst);
@@ -2024,7 +1951,6 @@ mod tests {
             }
         }
 
-        // SUMMARY.md restore happens in SummaryRestoreGuard::drop
     }
 
     #[test]

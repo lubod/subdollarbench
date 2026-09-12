@@ -16,7 +16,7 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 |                                                                                         |
 |   +--------------------------+                      +-------------------------------+   |
 |   |   Web UI / CLI Harness   | <==================> |      Run Archiver & Git       |   |
-|   | (Axum SSE, Tokio, Clap)  |                      | (runs/<id>/, SUMMARY, results)|   |
+|   | (Axum SSE, Tokio, Clap)  |                      | (runs/<id>/, portal, results) |   |
 |   +------------+-------------+                      +-------------------------------+   |
 |                |                                                                        |
 +----------------|------------------------------------------------------------------------+
@@ -174,10 +174,6 @@ cargo run --release -- portal --out ./portal
 rsync -az --delete ./portal/ <vps>:/srv/bench/
 ```
 
-#### Regenerate SUMMARY.md
-```bash
-cargo run --release -- summary
-```
 
 ---
 

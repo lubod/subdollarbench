@@ -145,17 +145,6 @@ pub enum Commands {
         keep: usize,
     },
 
-    /// Regenerate SUMMARY.md from recorded runs
-    Summary {
-        /// Path to runs directory
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
-
-        /// Path to repository root
-        #[arg(long, default_value = ".")]
-        repo_root: String,
-    },
-
     /// Launch web-based GUI for configuring and running benchmarks
     Ui {
         /// Port to bind the web server
@@ -505,29 +494,6 @@ mod tests {
                 assert_eq!(keep, 50);
             }
             _ => panic!("Expected Portal command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parsing_summary() {
-        let args = [
-            "subdollarbench",
-            "summary",
-            "--runs-dir",
-            "./test_runs",
-            "--repo-root",
-            "./test_repo",
-        ];
-        let cli = Cli::try_parse_from(args).unwrap();
-        match cli.command {
-            Commands::Summary {
-                runs_dir,
-                repo_root,
-            } => {
-                assert_eq!(runs_dir, "./test_runs");
-                assert_eq!(repo_root, "./test_repo");
-            }
-            _ => panic!("Expected Summary command"),
         }
     }
 

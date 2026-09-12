@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
-use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest, SummaryGenerator};
+use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest};
 use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, RedisVerifier};
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
@@ -284,24 +284,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("  Deploy: rsync -az --delete {}/ <vps>:/srv/bench/", out);
         }
 
-        Commands::Summary {
-            runs_dir,
-            repo_root,
-        } => {
-            println!(
-                "{}",
-                "Regenerating SUMMARY.md from recorded runs..."
-                    .bold()
-                    .cyan()
-            );
-            let summary_path =
-                SummaryGenerator::update_summary_file(Path::new(&repo_root), Path::new(&runs_dir))?;
-            println!(
-                "✅ Successfully updated {}",
-                summary_path.display().to_string().bold().green()
-            );
-        }
-
         Commands::Ui { port, host } => {
             web::UiServer::start(&host, port).await?;
         }
@@ -369,25 +351,6 @@ mod tests {
         };
         assert!(run_cli(cli_with_res).await.is_ok());
 
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
-
-    #[tokio::test]
-    async fn test_main_cli_summary() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("test_main_summary_{}", std::process::id()));
-        let runs_dir = temp_dir.join("runs");
-        let repo_root = temp_dir.join("repo");
-        let _ = fs::create_dir_all(&runs_dir);
-        let _ = fs::create_dir_all(&repo_root);
-
-        let cli = Cli {
-            command: Commands::Summary {
-                runs_dir: runs_dir.to_string_lossy().to_string(),
-                repo_root: repo_root.to_string_lossy().to_string(),
-            },
-        };
-        assert!(run_cli(cli).await.is_ok());
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
