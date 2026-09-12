@@ -1202,31 +1202,11 @@ async fn start_run(
         }
 
         if total_trials > 1 && !subrun_results.is_empty() {
-            if let Some(merged) = crate::report::leaderboard::BenchmarkRunResult::merge_subruns(&parent_run_id, subrun_results.clone()) {
-                if req.save_results.unwrap_or(true) {
-                    let results_dir_buf = crate::config::get_repo_root().join("results");
-                    let results_dir_str = results_dir_buf.to_str().unwrap_or("./results");
-                    let _ = LeaderboardManager::save_result(results_dir_str, &merged);
-
-                    for sub in &subrun_results {
-                        let _ = fs::remove_file(results_dir_buf.join(format!("{}.json", sub.id)));
-                    }
-
-                    let runs_dir = RunArchiver::resolve_runs_dir();
-                    let parent_dir = runs_dir.join(&parent_run_id);
-                    let _ = fs::create_dir_all(&parent_dir);
-                    if let Some(first_sub) = subrun_results.first() {
-                        let first_sub_dir = runs_dir.join(&first_sub.id);
-                        for file_name in ["manifest.json", "env.json", "console.log", "review.json"] {
-                            if let Ok(content) = fs::read_to_string(first_sub_dir.join(file_name)) {
-                                let _ = fs::write(parent_dir.join(file_name), content);
-                            }
-                        }
-                        let merged_data = serde_json::to_string_pretty(&merged).unwrap_or_default();
-                        let _ = fs::write(parent_dir.join("run.json"), merged_data);
-                    }
-                }
-            }
+            let _ = LeaderboardManager::consolidate_multi_trial_run(
+                &parent_run_id,
+                &subrun_results,
+                req.save_results.unwrap_or(true),
+            );
         }
 
         // Regenerate summary

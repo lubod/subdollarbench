@@ -136,14 +136,18 @@ impl BenchmarkRunResult {
         };
 
         let avg_savings_percent = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n_f64;
-        let avg_efficiency_score = subruns.iter().map(|r| r.efficiency_score).sum::<f64>() / n_f64;
-
-        let tp_score_count = subruns.iter().filter_map(|r| r.throughput_score).count();
-        let avg_throughput_score = if tp_score_count > 0 {
-            Some(subruns.iter().filter_map(|r| r.throughput_score).sum::<f64>() / tp_score_count as f64)
-        } else {
-            None
-        };
+        let avg_cost_for_score = avg_effective_cost.unwrap_or(avg_total_cost);
+        let recomputed_eff_score = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
+            avg_pass_rate,
+            avg_cost_for_score,
+        );
+        let recomputed_tp_score = crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
+            avg_pass_rate,
+            avg_cost_for_score,
+            avg_tp,
+            reference_tp,
+            Some(&task),
+        );
 
         let latest_timestamp = subruns.iter().map(|r| &r.timestamp).max().cloned().unwrap_or_else(|| Utc::now().to_rfc3339());
 
@@ -167,8 +171,8 @@ impl BenchmarkRunResult {
             duration_seconds: avg_duration,
             turns: avg_turns,
             savings_percent: avg_savings_percent,
-            efficiency_score: avg_efficiency_score,
-            throughput_score: avg_throughput_score,
+            efficiency_score: recomputed_eff_score,
+            throughput_score: Some(recomputed_tp_score),
             timestamp: latest_timestamp,
             method_version: method_ver,
             subruns,
@@ -273,6 +277,139 @@ impl LeaderboardManager {
                 }
             }
         }
+    }
+
+    /// Consolidates subruns of a multi-trial run into a single canonical result,
+    /// writing a properly labeled merged manifest.json, preserving the best trial's
+    /// workspace and review disclosure, and removing loose trial files.
+    pub fn consolidate_multi_trial_run(
+        parent_run_id: &str,
+        subrun_results: &[BenchmarkRunResult],
+        save_results: bool,
+    ) -> Option<BenchmarkRunResult> {
+        if subrun_results.is_empty() {
+            return None;
+        }
+
+        let merged = BenchmarkRunResult::merge_subruns(parent_run_id, subrun_results.to_vec())?;
+
+        if save_results {
+            let repo_root = crate::config::get_repo_root();
+            let results_dir = repo_root.join("results");
+            let _ = Self::save_result(results_dir.to_str().unwrap_or("./results"), &merged);
+
+            // Clean up individual trial JSON files from results/ so only the merged parent appears
+            for sub in subrun_results {
+                let _ = fs::remove_file(results_dir.join(format!("{}.json", sub.id)));
+            }
+
+            // Select the best trial (highest pass rate, then highest score)
+            let best_sub = subrun_results
+                .iter()
+                .max_by(|a, b| {
+                    a.pass_rate
+                        .partial_cmp(&b.pass_rate)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            let s_a = a.throughput_score.unwrap_or(a.efficiency_score);
+                            let s_b = b.throughput_score.unwrap_or(b.efficiency_score);
+                            s_a.partial_cmp(&s_b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                })
+                .unwrap_or(&subrun_results[0]);
+
+            let runs_dir = crate::report::RunArchiver::resolve_runs_dir();
+            let parent_dir = runs_dir.join(parent_run_id);
+            let _ = fs::create_dir_all(&parent_dir);
+
+            let best_sub_dir = runs_dir.join(&best_sub.id);
+
+            // 1. Build genuine merged parent manifest (not a trial-1 clone)
+            if let Ok(content) = fs::read_to_string(best_sub_dir.join("manifest.json")) {
+                if let Ok(mut manifest) = serde_json::from_str::<crate::report::RunManifest>(&content) {
+                    manifest.run_id = parent_run_id.to_string();
+                    manifest.status = if merged.pass_rate >= 100.0 {
+                        "completed".to_string()
+                    } else {
+                        "failed_tests".to_string()
+                    };
+                    manifest.pass_rate = merged.pass_rate;
+                    manifest.passed_stages = merged.passed_stages;
+                    manifest.total_stages = merged.total_stages;
+                    manifest.duration_seconds = merged.duration_seconds.unwrap_or(0.0);
+                    manifest.turns = merged.turns;
+                    manifest.throughput_req_sec = merged.throughput_req_sec;
+                    manifest.reference_throughput_req_sec = merged.reference_throughput_req_sec;
+                    manifest.cost_usd = merged.total_cost_usd;
+                    manifest.effective_cost_usd = merged.effective_cost_usd;
+                    manifest.savings_percent = merged.savings_percent;
+                    manifest.efficiency_score = merged.efficiency_score;
+                    manifest.throughput_score = merged.throughput_score;
+                    manifest.tokens = crate::report::archive::RunTokenUsage {
+                        prompt_tokens: merged.prompt_tokens,
+                        cached_tokens: merged.cached_tokens,
+                        completion_tokens: merged.completion_tokens,
+                        total_tokens: merged.total_tokens,
+                    };
+                    manifest.completed_at = merged.timestamp.clone();
+                    if let Ok(m_json) = serde_json::to_string_pretty(&manifest) {
+                        let _ = fs::write(parent_dir.join("manifest.json"), m_json);
+                    }
+                }
+            }
+
+            // 2. Copy env.json
+            if let Ok(content) = fs::read_to_string(best_sub_dir.join("env.json")) {
+                let _ = fs::write(parent_dir.join("env.json"), content);
+            }
+
+            // 3. Review with multi-trial context disclosure
+            if let Ok(content) = fs::read_to_string(best_sub_dir.join("review.json")) {
+                if let Ok(mut rev_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let p1 = merged.pass_at_1.unwrap_or(100.0);
+                    let pk = merged.pass_at_k.unwrap_or(100.0);
+                    let n = subrun_results.len();
+                    let passing = subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count();
+                    rev_val["multi_trial_disclosure"] = serde_json::Value::String(format!(
+                        "Evaluated best workspace of {} subruns ({}/{} passed, Pass@1: {:.0}%, Pass@{}: {:.0}%). Best subrun: {}",
+                        n, passing, n, p1, n, pk, best_sub.id
+                    ));
+                    let _ = fs::write(parent_dir.join("review.json"), serde_json::to_string_pretty(&rev_val).unwrap_or(content));
+                } else {
+                    let _ = fs::write(parent_dir.join("review.json"), content);
+                }
+            }
+
+            // 4. Copy workspace from the best trial
+            let _ = crate::report::RunArchiver::copy_dir_recursive(
+                &best_sub_dir.join("workspace"),
+                &parent_dir.join("workspace"),
+            );
+
+            // 5. Create multi-trial header in parent console.log
+            let mut parent_log = format!(
+                "=== Multi-Trial Benchmark Execution ===\nModel: {}\nTask: {}\nSubruns: {}\nPass@1: {:.1}%\nPass@{}: {:.1}%\nAverage Throughput: {:.0} req/s\nAverage Cost: ${:.4}\nBest Subrun: {}\n=========================================\n\n",
+                merged.model,
+                merged.task,
+                subrun_results.len(),
+                merged.pass_at_1.unwrap_or(100.0),
+                subrun_results.len(),
+                merged.pass_at_k.unwrap_or(100.0),
+                merged.throughput_req_sec.unwrap_or(0.0),
+                merged.total_cost_usd,
+                best_sub.id
+            );
+            if let Ok(best_log) = fs::read_to_string(best_sub_dir.join("console.log")) {
+                parent_log.push_str(&best_log);
+            }
+            let _ = fs::write(parent_dir.join("console.log"), parent_log);
+
+            // 6. Write parent run.json
+            let merged_data = serde_json::to_string_pretty(&merged).unwrap_or_default();
+            let _ = fs::write(parent_dir.join("run.json"), merged_data);
+        }
+
+        Some(merged)
     }
 
     pub fn save_result(results_dir: &str, result: &BenchmarkRunResult) -> Result<()> {

@@ -2,13 +2,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use colored::*;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
-use subdollarbench::report::{BenchmarkRunResult, LeaderboardManager, PortalExporter, RunArchiver, RunJudge, RunManifest, SummaryGenerator};
+use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest, SummaryGenerator};
 use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, RedisVerifier};
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
@@ -110,31 +109,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
 
             if total_trials > 1 && !subrun_results.is_empty() {
-                if let Some(merged) = BenchmarkRunResult::merge_subruns(&parent_run_id, subrun_results.clone()) {
-                    if !no_save {
-                        let results_dir_buf = subdollarbench::config::get_repo_root().join("results");
-                        let results_dir_str = results_dir_buf.to_str().unwrap_or("./results");
-                        let _ = LeaderboardManager::save_result(results_dir_str, &merged);
-
-                        for sub in &subrun_results {
-                            let _ = fs::remove_file(results_dir_buf.join(format!("{}.json", sub.id)));
-                        }
-
-                        let runs_dir = RunArchiver::resolve_runs_dir();
-                        let parent_dir = runs_dir.join(&parent_run_id);
-                        let _ = fs::create_dir_all(&parent_dir);
-                        if let Some(first_sub) = subrun_results.first() {
-                            let first_sub_dir = runs_dir.join(&first_sub.id);
-                            for file_name in ["manifest.json", "env.json", "console.log", "review.json"] {
-                                if let Ok(content) = fs::read_to_string(first_sub_dir.join(file_name)) {
-                                    let _ = fs::write(parent_dir.join(file_name), content);
-                                }
-                            }
-                            let merged_data = serde_json::to_string_pretty(&merged).unwrap_or_default();
-                            let _ = fs::write(parent_dir.join("run.json"), merged_data);
-                        }
-                    }
-                }
+                let _ = LeaderboardManager::consolidate_multi_trial_run(
+                    &parent_run_id,
+                    &subrun_results,
+                    !no_save,
+                );
             }
 
             if total_trials > 1 {
