@@ -44,7 +44,13 @@ impl ModelPricing {
     }
 
     /// Calculates the Throughput-Adjusted Score.
-    /// Score = Base Efficiency * (1.0 + 2.0 * (candidate_tp / reference_tp))
+    /// Score = Base Efficiency * speed_ratio * (1.0 + 2.0 * speed_ratio)
+    /// where speed_ratio = candidate_tp / reference_tp.
+    ///
+    /// At speed_ratio = 1.0 (matching reference baseline), multiplier is 3.0x.
+    /// At speed_ratio = 0.0 (crash / 0 req/s), multiplier is 0.0x.
+    /// Sub-reference throughput drops off quadratically to penalize slow implementations,
+    /// while high throughput earns superlinear rewards.
     pub fn calculate_throughput_score(
         pass_rate: f64,
         effective_cost_usd: f64,
@@ -91,7 +97,7 @@ impl ModelPricing {
         } else {
             0.0
         };
-        base_eff * (1.0 + 2.0 * speed_ratio)
+        base_eff * speed_ratio * (1.0 + 2.0 * speed_ratio)
     }
 
     pub fn new(
@@ -516,6 +522,20 @@ mod tests {
 
         let tp_pdf = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(4_600.0), None, Some("pdf"));
         assert!((tp_pdf - (score * 3.0)).abs() < 1e-3);
+
+        // Zero throughput or missing throughput yields 0.0
+        let tp_zero = ModelPricing::calculate_throughput_score(100.0, eff, Some(0.0), Some(30_000.0));
+        assert_eq!(tp_zero, 0.0);
+        let tp_none = ModelPricing::calculate_throughput_score(100.0, eff, None, Some(30_000.0));
+        assert_eq!(tp_none, 0.0);
+
+        // Sub-reference performance (half-speed: ratio 0.5 => multiplier 0.5 * (1 + 1) = 1.0)
+        let tp_half = ModelPricing::calculate_throughput_score(100.0, eff, Some(15_000.0), Some(30_000.0));
+        assert!((tp_half - (score * 1.0)).abs() < 1e-3);
+
+        // Superlinear high performance (2x speed: ratio 2.0 => multiplier 2.0 * (1 + 4) = 10.0)
+        let tp_double = ModelPricing::calculate_throughput_score(100.0, eff, Some(60_000.0), Some(30_000.0));
+        assert!((tp_double - (score * 10.0)).abs() < 1e-3);
     }
 
     #[test]

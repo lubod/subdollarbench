@@ -2312,7 +2312,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             </td>
             <td>
               <div style="display: flex; flex-direction: column; gap: 2px;">
-                <span style="font-weight: 700; color: var(--primary); font-size: 0.95rem;">${r.efficiency_score.toFixed(1)} <span style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">pts/¢</span></span>
+                <span style="font-weight: 700; color: var(--primary); font-size: 0.95rem;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)} <span style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">pts/¢</span></span>
+                ${(r.throughput_score !== undefined && r.throughput_score !== null && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100) ? `<span style="font-size: 0.7rem; color: var(--text-muted);">(base: ${r.efficiency_score.toFixed(1)})</span>` : ''}
                 <span style="font-size: 0.72rem; color: var(--text-muted);">${tp}</span>
               </div>
             </td>
@@ -2355,7 +2356,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               </div>
               <div>
                 <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Score / ¢</div>
-                <div style="font-weight: 700; color: var(--primary); font-size: 0.85rem; margin-top: 2px;">${r.efficiency_score.toFixed(1)}</div>
+                <div style="font-weight: 700; color: var(--primary); font-size: 0.85rem; margin-top: 2px;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)}</div>
               </div>
               <div>
                 <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Eff Cost</div>
@@ -2786,7 +2787,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         // Consolidated View
         const passingRuns = filtered.filter(r => r.pass_rate >= 100);
         const topModel = passingRuns[0] ? passingRuns[0].model : (filtered[0] ? filtered[0].model : 'N/A');
-        const topScore = passingRuns[0] ? (passingRuns[0].throughput_score || passingRuns[0].efficiency_score).toFixed(1) : '0.0';
+        const topScore = passingRuns[0] ? ((passingRuns[0].throughput_score !== undefined && passingRuns[0].throughput_score !== null ? passingRuns[0].throughput_score : passingRuns[0].efficiency_score)).toFixed(1) : '0.0';
         
         let peakTp = 0;
         let peakTpRatio = 0;
@@ -2984,7 +2985,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
 
         // Populate KPI Strip
-        document.getElementById('modalInspectScore').textContent = (m.efficiency_score || 0).toFixed(1);
+        const finalScore = (m.throughput_score !== undefined && m.throughput_score !== null) ? m.throughput_score : (m.efficiency_score || 0);
+        document.getElementById('modalInspectScore').innerHTML = `${finalScore.toFixed(1)} ${(m.throughput_score !== undefined && Math.abs(m.throughput_score - (m.efficiency_score || 0)) > 0.1 && m.pass_rate >= 100) ? `<span style="font-size:0.68rem; color:var(--text-muted); font-weight:normal;">(base: ${(m.efficiency_score || 0).toFixed(1)})</span>` : ''}`;
         document.getElementById('modalInspectPass').innerHTML = m.pass_rate === 100 
           ? `<span style="color: var(--success);">${m.pass_rate}% (${m.passed_stages || 0}/${m.total_stages || 0})</span>` 
           : `<span style="color: var(--danger);">${(m.pass_rate || 0).toFixed(0)}% (${m.passed_stages || 0}/${m.total_stages || 0})</span>`;

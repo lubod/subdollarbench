@@ -197,6 +197,18 @@ $$C_{\text{eff}} = C_{\text{API}} + C_{\text{compute}}$$
 - Fast Local Model: 100% pass rate, $0.000 API + $0.003 compute = $0.003 (0.3¢) $\rightarrow$ **333.3 pts/¢**
 - Slow Looping Model: 100% pass rate, $0.002 API + $0.025 compute = $0.027 (2.7¢) $\rightarrow$ **37.0 pts/¢**
 
+### ⚡ Throughput-Adjusted Scoring
+
+To ensure that fast, production-grade compiled implementations are properly recognized and rewarded over sluggish scripts, the benchmark computes a **Throughput Score** when runtime stress benchmarks complete:
+
+$$\text{Speed Ratio} = \frac{\text{Throughput}_{\text{candidate}}}{\text{Throughput}_{\text{reference}}}$$
+$$\text{Performance Multiplier} = \text{Speed Ratio} \times (1.0 + 2.0 \times \text{Speed Ratio})$$
+$$\text{Throughput Score} = \text{Base Efficiency} \times \text{Performance Multiplier}$$
+
+- **Reference Baseline Calibration**: At $\text{Speed Ratio} = 1.0$ (matching reference implementations e.g. Nginx, Redis-Alpine, Python RFC 1035 UDP resolver), the performance multiplier is exactly $3.0\times$, preserving baseline calibration.
+- **Decisive Performance Impact**: Sub-reference throughput drops quadratically (e.g. $0.2\times$ reference speed yields $0.28\times$, penalizing slow implementations by over $10\times$ compared to reference), while implementations that crash under load ($0\text{ req/s}$) receive $0.0\text{ pts/¢}$.
+- **Superlinear Reward**: High-speed implementations surpassing reference baselines receive superlinear bonuses (e.g. $1.5\times$ reference speed yields $6.0\times$, double the reference baseline multiplier).
+
 ### Supported Cost Calculation:
 1. **Live OpenRouter Accounting:** If an API key is provided, the harness queries the `/api/v1/auth/key` endpoint before and after the run to verify the exact billing delta deducted by OpenRouter.
 2. **Context Cache Awareness:** For token-based formula fallback, cached prompt tokens are discounted by 50% to 90% depending on model provider caching rules.
