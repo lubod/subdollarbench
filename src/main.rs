@@ -340,6 +340,7 @@ mod tests {
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
+            avg_pass_rate: None,
         };
         let _ = LeaderboardManager::save_result(&temp_dir.to_string_lossy(), &result);
 

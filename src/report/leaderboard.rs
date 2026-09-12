@@ -47,6 +47,8 @@ pub struct BenchmarkRunResult {
     pub pass_at_1: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_at_k: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_pass_rate: Option<f64>,
 }
 
 pub fn format_duration(secs: f64) -> String {
@@ -79,106 +81,78 @@ impl BenchmarkRunResult {
             single.total_trials = Some(1);
             single.pass_at_1 = Some(p1);
             single.pass_at_k = Some(p1);
+            single.avg_pass_rate = Some(single.pass_rate);
             return Some(single);
         }
 
         let n = subruns.len();
-        let n_f64 = n as f64;
 
-        let first = &subruns[0];
-        let model = first.model.clone();
-        let task = first.task.clone();
-        let language = first.language.clone();
-        let effort = first.effort.clone();
-        let reference_tp = first.reference_throughput_req_sec;
-        let method_ver = first.method_version.clone();
-        let total_stages = first.total_stages;
+        // Best-of: headline metrics come from the strongest trial
+        // (highest pass rate, then highest score). The trial average is
+        // preserved separately so reliability stays visible.
+        let best = subruns
+            .iter()
+            .max_by(|a, b| {
+                a.pass_rate
+                    .partial_cmp(&b.pass_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        let s_a = a.throughput_score.unwrap_or(a.efficiency_score);
+                        let s_b = b.throughput_score.unwrap_or(b.efficiency_score);
+                        s_a.partial_cmp(&s_b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            })
+            .unwrap_or(&subruns[0]);
 
         let passing_trials = subruns.iter().filter(|r| r.pass_rate >= 100.0).count();
         let pass_at_1 = compute_pass_at_k(n, passing_trials, 1) * 100.0;
         let pass_at_k = compute_pass_at_k(n, passing_trials, n) * 100.0;
+        let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n as f64;
 
-        let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n_f64;
-        let avg_passed_stages = (subruns.iter().map(|r| r.passed_stages as f64).sum::<f64>() / n_f64).round() as u32;
-
-        let tp_count = subruns.iter().filter_map(|r| r.throughput_req_sec).count();
-        let avg_tp = if tp_count > 0 {
-            Some(subruns.iter().filter_map(|r| r.throughput_req_sec).sum::<f64>() / tp_count as f64)
-        } else {
-            None
-        };
-
-        let avg_prompt_tokens = (subruns.iter().map(|r| r.prompt_tokens as f64).sum::<f64>() / n_f64).round() as u64;
-        let avg_cached_tokens = (subruns.iter().map(|r| r.cached_tokens as f64).sum::<f64>() / n_f64).round() as u64;
-        let avg_completion_tokens = (subruns.iter().map(|r| r.completion_tokens as f64).sum::<f64>() / n_f64).round() as u64;
-        let avg_total_tokens = (subruns.iter().map(|r| r.total_tokens as f64).sum::<f64>() / n_f64).round() as u64;
-
-        let avg_total_cost = subruns.iter().map(|r| r.total_cost_usd).sum::<f64>() / n_f64;
-        let eff_cost_count = subruns.iter().filter_map(|r| r.effective_cost_usd).count();
-        let avg_effective_cost = if eff_cost_count > 0 {
-            Some(subruns.iter().filter_map(|r| r.effective_cost_usd).sum::<f64>() / eff_cost_count as f64)
-        } else {
-            None
-        };
-
-        let dur_count = subruns.iter().filter_map(|r| r.duration_seconds).count();
-        let avg_duration = if dur_count > 0 {
-            Some(subruns.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / dur_count as f64)
-        } else {
-            None
-        };
-
-        let turns_count = subruns.iter().filter_map(|r| r.turns).count();
-        let avg_turns = if turns_count > 0 {
-            Some((subruns.iter().filter_map(|r| r.turns).map(|t| t as f64).sum::<f64>() / turns_count as f64).round() as u32)
-        } else {
-            None
-        };
-
-        let avg_savings_percent = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n_f64;
-        let avg_cost_for_score = avg_effective_cost.unwrap_or(avg_total_cost);
+        let best_cost_for_score = best.effective_cost_usd.unwrap_or(best.total_cost_usd);
         let recomputed_eff_score = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
-            avg_pass_rate,
-            avg_cost_for_score,
+            best.pass_rate,
+            best_cost_for_score,
         );
         let recomputed_tp_score = crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
-            avg_pass_rate,
-            avg_cost_for_score,
-            avg_tp,
-            reference_tp,
-            Some(&task),
+            best.pass_rate,
+            best_cost_for_score,
+            best.throughput_req_sec,
+            best.reference_throughput_req_sec,
+            Some(&best.task),
         );
 
         let latest_timestamp = subruns.iter().map(|r| &r.timestamp).max().cloned().unwrap_or_else(|| Utc::now().to_rfc3339());
 
         Some(BenchmarkRunResult {
             id: parent_id.to_string(),
-            model,
-            task,
-            language,
-            effort,
-            pass_rate: avg_pass_rate,
-            passed_stages: avg_passed_stages,
-            total_stages,
-            throughput_req_sec: avg_tp,
-            reference_throughput_req_sec: reference_tp,
-            prompt_tokens: avg_prompt_tokens,
-            cached_tokens: avg_cached_tokens,
-            completion_tokens: avg_completion_tokens,
-            total_tokens: avg_total_tokens,
-            total_cost_usd: avg_total_cost,
-            effective_cost_usd: avg_effective_cost,
-            duration_seconds: avg_duration,
-            turns: avg_turns,
-            savings_percent: avg_savings_percent,
+            model: best.model.clone(),
+            task: best.task.clone(),
+            language: best.language.clone(),
+            effort: best.effort.clone(),
+            pass_rate: best.pass_rate,
+            passed_stages: best.passed_stages,
+            total_stages: best.total_stages,
+            throughput_req_sec: best.throughput_req_sec,
+            reference_throughput_req_sec: best.reference_throughput_req_sec,
+            prompt_tokens: best.prompt_tokens,
+            cached_tokens: best.cached_tokens,
+            completion_tokens: best.completion_tokens,
+            total_tokens: best.total_tokens,
+            total_cost_usd: best.total_cost_usd,
+            effective_cost_usd: best.effective_cost_usd,
+            duration_seconds: best.duration_seconds,
+            turns: best.turns,
+            savings_percent: best.savings_percent,
             efficiency_score: recomputed_eff_score,
             throughput_score: Some(recomputed_tp_score),
             timestamp: latest_timestamp,
-            method_version: method_ver,
+            method_version: best.method_version.clone(),
             subruns,
             total_trials: Some(n as u32),
             pass_at_1: Some(pass_at_1),
             pass_at_k: Some(pass_at_k),
+            avg_pass_rate: Some(avg_pass_rate),
         })
     }
 }
@@ -687,7 +661,7 @@ impl LeaderboardManager {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_merge_subruns_computes_averages_and_pass_at_k() {
+    fn test_merge_subruns_best_of_and_pass_at_k() {
         let make_run = |id: &str, tp: f64, dur: f64, turns: u32, cost: f64, pass: f64| BenchmarkRunResult {
             id: id.to_string(),
             model: "test-model".to_string(),
@@ -716,6 +690,7 @@ mod tests {
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
+            avg_pass_rate: None,
         };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
@@ -728,11 +703,25 @@ mod tests {
         assert_eq!(merged.pass_rate, 100.0);
         assert_eq!(merged.pass_at_1, Some(100.0));
         assert_eq!(merged.pass_at_k, Some(100.0));
+        assert_eq!(merged.avg_pass_rate, Some(100.0));
         assert_eq!(merged.subruns.len(), 3);
-        assert_eq!(merged.throughput_req_sec.unwrap(), 6000.0);
-        assert_eq!(merged.duration_seconds.unwrap(), 40.0);
-        assert_eq!(merged.turns.unwrap(), 8);
-        assert_eq!(merged.total_cost_usd, 0.002);
+        // Best-of: all pass, highest score (t3) headlines.
+        assert_eq!(merged.throughput_req_sec.unwrap(), 7000.0);
+        assert_eq!(merged.duration_seconds.unwrap(), 50.0);
+        assert_eq!(merged.turns.unwrap(), 9);
+        assert_eq!(merged.total_cost_usd, 0.003);
+
+        // Mixed outcome: headline follows the best passing trial, average is kept.
+        let f1 = make_run("run_a", 5000.0, 40.0, 8, 0.001, 100.0);
+        let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
+        let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
+        let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3]).unwrap();
+        assert_eq!(mixed.pass_rate, 100.0);
+        assert_eq!(mixed.throughput_req_sec.unwrap(), 6000.0);
+        assert!((mixed.avg_pass_rate.unwrap() - 66.66666666666667).abs() < 1e-9);
+        assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
+        assert!(mixed.efficiency_score > 0.0);
+        assert!(mixed.throughput_score.unwrap() > 0.0);
     }
 
     use super::*;
@@ -844,6 +833,7 @@ mod tests {
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
+            avg_pass_rate: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -883,6 +873,7 @@ mod tests {
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
+            avg_pass_rate: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -914,6 +905,7 @@ mod tests {
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
+            avg_pass_rate: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();
