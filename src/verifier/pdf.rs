@@ -33,16 +33,7 @@ impl PdfVerifier {
     }
 
     pub fn get_seed_prefix<'a>(&'a self, default_val: &'a str) -> &'a str {
-        match &self.run_seed {
-            Some(s) if !s.is_empty() => {
-                if s.len() <= 8 {
-                    s.as_str()
-                } else {
-                    &s[s.len() - 8..]
-                }
-            }
-            _ => default_val,
-        }
+        super::get_seed_prefix(self.run_seed.as_deref(), default_val)
     }
 
     fn base(&self) -> String {

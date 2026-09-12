@@ -515,26 +515,79 @@ impl ComplianceChecker {
     }
 
 
+    fn scan_elf_for_vendor_signatures(path: &Path) -> Option<Option<String>> {
+        use std::io::Read;
+        let mut file = fs::File::open(path).ok()?;
+        let mut header = [0u8; 4];
+        if file.read_exact(&mut header).is_err() || header != *b"\x7fELF" {
+            return None; // Not an ELF binary
+        }
+
+        // Distinct vendor daemon signatures to detect forbidden pre-compiled daemons.
+        // Narrowed to avoid false positives on legitimate candidate strings (e.g. nginx/1.x vs bare nginx/)
+        let signatures: &[&[u8]] = &[
+            b"redis-server",
+            b"nginx/1.",
+            b"nginx/2.",
+            b"pdftotext",
+            b"coredns",
+            b"lighttpd/",
+            b"apache2/",
+        ];
+        let max_sig = signatures.iter().map(|s| s.len()).max().unwrap_or(0);
+        let mut buf = vec![0u8; 64 * 1024];
+        buf[..4].copy_from_slice(&header);
+        let mut overlap_len = 4;
+        let mut total_read = 4;
+        const MAX_SCAN_BYTES: usize = 32 * 1024 * 1024; // Limit scan to first 32MB
+
+        loop {
+            if total_read >= MAX_SCAN_BYTES {
+                break;
+            }
+            let space = buf.len() - overlap_len;
+            let to_read = space.min(MAX_SCAN_BYTES - total_read);
+            if to_read == 0 {
+                break;
+            }
+            let n = match file.read(&mut buf[overlap_len..overlap_len + to_read]) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            total_read += n;
+            let valid_len = overlap_len + n;
+            let current_window = &buf[..valid_len];
+
+            for sig in signatures {
+                if current_window
+                    .windows(sig.len())
+                    .any(|w| w.eq_ignore_ascii_case(sig))
+                {
+                    return Some(Some(String::from_utf8_lossy(sig).into_owned()));
+                }
+            }
+
+            if valid_len > max_sig {
+                overlap_len = max_sig;
+                buf.copy_within(valid_len - max_sig..valid_len, 0);
+            } else {
+                overlap_len = valid_len;
+            }
+        }
+        Some(None) // Is an ELF binary, but no forbidden signature found
+    }
+
     fn inspect_file(path: &Path, filename: &str, violations: &mut Vec<String>) {
         // First check if it is an ELF binary with foreign precompiled signatures
-        if let Ok(raw_bytes) = fs::read(path) {
-            if raw_bytes.starts_with(b"\x7fELF") {
-                let lower_bytes = raw_bytes.to_ascii_lowercase();
-                let signatures: &[&[u8]] = &[
-                    b"redis-server", b"nginx/", b"pdftotext", b"coredns", b"lighttpd/", b"apache2"
-                ];
-                for sig in signatures {
-                    if lower_bytes.windows(sig.len()).any(|w| w == *sig) {
-                        violations.push(format!(
-                            "{}: precompiled binary contains forbidden vendor signature {:?}",
-                            filename,
-                            String::from_utf8_lossy(sig)
-                        ));
-                        break;
-                    }
-                }
-                return;
+        if let Some(elf_match) = Self::scan_elf_for_vendor_signatures(path) {
+            if let Some(sig) = elf_match {
+                violations.push(format!(
+                    "{}: precompiled binary contains forbidden vendor signature {:?}",
+                    filename, sig
+                ));
             }
+            return;
         }
 
         let content = match fs::read_to_string(path) {
@@ -1211,6 +1264,14 @@ RUN apk add redis
         let res_elf = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(res_elf.is_err());
         assert!(res_elf.unwrap_err().contains("forbidden vendor signature"));
+        let _ = fs::remove_file(temp_dir.join("my_server"));
+
+        // 4. Safe ELF binary containing benign substring (e.g. nginx/custom) should NOT trigger false positive
+        let mut safe_elf = b"\x7fELFfakeheader".to_vec();
+        safe_elf.extend_from_slice(b"HTTP response header Server: nginx/custom-benchmark-test");
+        fs::write(temp_dir.join("safe_server"), safe_elf).unwrap();
+        let res_safe_elf = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_safe_elf.is_ok());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
