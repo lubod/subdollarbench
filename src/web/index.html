@@ -2988,6 +2988,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const m = await res.json();
         currentInspectRun = m;
         loadInspectReview(runId);
+        loadInspectSubruns(runId);
 
         // Populate Header & Badges
         updatePortalModalBadge();
@@ -3346,6 +3347,40 @@ function copyRunId() {
       refreshAfterRunMutation();
     }
 
+    async function loadInspectSubruns(runId) {
+      const section = document.getElementById('modalSubrunsSection');
+      const body = document.getElementById('modalSubrunsBody');
+      const title = document.getElementById('modalSubrunsTitle');
+      if (!section || !body) return;
+      section.style.display = 'none';
+      body.innerHTML = '';
+      try {
+        let cache = (typeof allRunsCache !== 'undefined' && allRunsCache.length) ? allRunsCache : null;
+        if (!cache) {
+          const res = await fetch('/api/runs');
+          if (!res.ok) return;
+          cache = await res.json();
+        }
+        const kids = cache.filter(x => x.run_id.startsWith(runId + '_trial')).sort((x, y) => x.run_id.localeCompare(y.run_id));
+        if (!kids.length) return;
+        let best = kids[0];
+        for (const k of kids) {
+          const sb = (k.throughput_score !== undefined && k.throughput_score !== null) ? k.throughput_score : (k.efficiency_score || 0);
+          const bb = (best.throughput_score !== undefined && best.throughput_score !== null) ? best.throughput_score : (best.efficiency_score || 0);
+          if (k.pass_rate > best.pass_rate || (k.pass_rate === best.pass_rate && sb > bb)) best = k;
+        }
+        title.textContent = `📦 ${kids.length} subruns (best: ${best.run_id.slice(-8)})`;
+        for (const k of kids) {
+          const row = document.createElement('div');
+          row.style.cssText = 'display: flex; align-items: center; gap: 10px; font-size: 0.76rem; padding: 5px 9px; border-radius: 4px; background: ' + (k.run_id === best.run_id ? 'rgba(210,168,255,0.08)' : 'transparent');
+          const badge = k.pass_rate === 100 ? `<span class="badge badge-pass">\u2714 100%</span>` : `<span class="badge badge-fail">\u2715 ${Math.round(k.pass_rate)}%</span>`;
+          const star = k.run_id === best.run_id ? ' \u2B50' : '';
+          row.innerHTML = `<span style="font-family: monospace; color: var(--text-muted);">${escapeHtml(k.run_id.slice(-14))}</span>${badge}<span style="color: var(--text-muted);">${escapeHtml(formatThroughput(k.throughput_req_sec, k.task))}</span><span style="margin-left: auto; display: flex; gap: 6px; align-items: center;"><span>${star}</span><button class="btn-secondary" style="padding: 2px 9px; font-size: 0.72rem;" data-rid="${escapeHtml(k.run_id)}" onclick="inspectRun(this.dataset.rid)">Inspect trial</button></span>`;
+          body.appendChild(row);
+        }
+        section.style.display = 'flex';
+      } catch (e) { /* subruns optional */ }
+    }
     async function loadInspectReview(runId) {
       const box = document.getElementById('modalInspectReviewBody');
       if (!box) return;
@@ -4178,6 +4213,11 @@ function copyRunId() {
           <div class="kpi-val" id="modalInspectEffort" style="color: var(--warning);">-</div>
           <div class="kpi-lbl">Effort / Task</div>
         </div>
+      </div>
+
+      <div id="modalSubrunsSection" style="display: none; flex-direction: column; gap: 8px; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px;">
+        <div style="font-size: 0.78rem; font-weight: 700; color: #d2a8ff;" id="modalSubrunsTitle">📦 Subruns</div>
+        <div id="modalSubrunsBody" style="display: flex; flex-direction: column; gap: 6px;"></div>
       </div>
 
       <!-- Modal Tabs Bar -->
