@@ -1170,6 +1170,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <button id="viewBtnTable" class="btn-toggle active" onclick="setRunsViewMode('table')" title="Table View">📑 Table</button>
                 <button id="viewBtnCards" class="btn-toggle" onclick="setRunsViewMode('cards')" title="Cards View">🗂️ Cards</button>
               </div>
+              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Show hidden trial subruns">
+                <input type="checkbox" onchange="toggleHiddenRuns(this.checked)"> 👁 Hidden
+              </label>
               <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="loadRuns()">🔄 Refresh</button>
             </div>
           </div>
@@ -2149,6 +2152,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     let allRunsCache = [];
     let currentRunsFilter = '';
+    let showHiddenRuns = false;
     let currentRunsView = localStorage.getItem('runs_view_mode') || 'table';
 
     function toggleSidebar() {
@@ -2228,12 +2232,18 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       }
     }
 
+    function toggleHiddenRuns(show) {
+      showHiddenRuns = show;
+      renderRuns();
+    }
     function renderRuns() {
       const q = currentRunsFilter;
-      const runs = q ? allRunsCache.filter(r => {
+      const runs = allRunsCache.filter(r => {
+        if (r.portal_hidden && !showHiddenRuns) return false;
+        if (!q) return true;
         const text = `${r.run_id} ${r.model} ${r.task} ${r.language} ${r.status} ${r.effort || ''}`.toLowerCase();
         return text.includes(q);
-      }) : allRunsCache;
+      });
 
       const badge = document.getElementById('runsCountBadge');
       if (badge) badge.textContent = `${runs.length} ${runs.length === 1 ? 'run' : 'runs'}`;

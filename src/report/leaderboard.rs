@@ -302,6 +302,11 @@ impl LeaderboardManager {
             for sub in subrun_results {
                 let _ = fs::remove_file(results_dir.join(format!("{}.json", sub.id)));
             }
+            // Mark trial subruns hidden so run lists show the consolidated parent
+            let trial_runs_dir = crate::report::RunArchiver::resolve_runs_dir();
+            for sub in subrun_results {
+                let _ = crate::report::portal::set_hidden(&trial_runs_dir, &sub.id, true);
+            }
 
             // Select the best trial (highest pass rate, then highest score)
             let best_sub = subrun_results
