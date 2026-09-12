@@ -215,6 +215,7 @@ impl RunArchiver {
         if !src.exists() {
             return Ok(());
         }
+        fs::create_dir_all(dst)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let ft = entry.file_type()?;
@@ -240,6 +241,22 @@ impl RunArchiver {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_copy_dir_recursive_creates_dest_root() {
+        let base = std::env::temp_dir().join(format!("test_copy_dst_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src_ws");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("main.go"), "package main").unwrap();
+        std::fs::write(src.join("nested").join("a.txt"), "hi").unwrap();
+        let dst = base.join("parent").join("workspace");
+        assert!(!dst.exists());
+        RunArchiver::copy_dir_recursive(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("main.go")).unwrap(), "package main");
+        assert_eq!(std::fs::read_to_string(dst.join("nested").join("a.txt")).unwrap(), "hi");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     #[test]
