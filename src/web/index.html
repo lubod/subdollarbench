@@ -1015,8 +1015,8 @@
           </select>
         </div>
 
-        <!-- Budget, Turns & Timeout -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+        <!-- Budget, Turns, Timeout & Subruns -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
           <div class="form-group">
             <label for="budget">Budget ($)</label>
             <input type="number" id="budget" value="0.20" step="0.05" min="0.01" />
@@ -1029,7 +1029,15 @@
             <label for="timeout_min">Timeout (min)</label>
             <input type="number" id="timeout_min" value="15" min="1" max="120" />
           </div>
+          <div class="form-group">
+            <label for="trials" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>Subruns</span>
+              <span class="badge" style="background: rgba(163, 113, 247, 0.2); color: #d2a8ff; font-size: 0.65rem;">Default: 3</span>
+            </label>
+            <input type="number" id="trials" value="3" min="1" max="10" title="Number of subruns/trials to run and average (Pass@k)" />
+          </div>
         </div>
+        <span class="hint" style="margin-top: -4px; margin-bottom: 8px; display: block;">Runs 3 subruns by default to compute Pass@k and average throughput.</span>
 
         <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
           <input type="checkbox" id="evalOnly" style="width: auto;" />
@@ -3825,6 +3833,7 @@ function copyRunId() {
       const budget = parseFloat(document.getElementById('budget').value) || 0.20;
       const turns = parseInt(document.getElementById('turns').value, 10) || 50;
       const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 15;
+      const trials = parseInt(document.getElementById('trials').value, 10) || 3;
       const evalOnly = document.getElementById('evalOnly').checked;
 
       const isLocal = model.includes('local') || model.startsWith('openai/qwen');
@@ -3835,7 +3844,7 @@ function copyRunId() {
 
       switchTab('console');
       clearConsole();
-      appendLog(`[INIT] Starting benchmark for ${model} (Effort: ${effort}) on task '${task}'...`);
+      appendLog(`[INIT] Starting benchmark for ${model} (Effort: ${effort}, Subruns: ${trials}) on task '${task}'...`);
 
       // Initialize Live Telemetry
       liveTelemetry.turns = 0;
@@ -3867,6 +3876,7 @@ function copyRunId() {
             budget_usd: budget,
             max_turns: turns,
             timeout_min: timeoutMin,
+            trials,
             eval_only: evalOnly,
             review_model: document.getElementById("reviewModel").value.trim() || null
           })
