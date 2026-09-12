@@ -1499,7 +1499,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (compTab) compTab.style.display = 'none';
       document.getElementById('tab-prompt').style.display = 'none';
       document.getElementById('tab-leaderboard').style.display = 'none';
-      document.getElementById('tab-summary').style.display = 'none';
 
       const tabs = document.querySelectorAll('.tab');
       if (name === 'console') {
@@ -1522,6 +1521,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         if (tabs[4]) tabs[4].classList.add('active');
         loadLeaderboard();
 
+      }
     }
 
     // =========================================================================
@@ -1752,8 +1752,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
     function catFor(raw){
-      let line = raw.trimStart();
-      line = line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s+/, '');
+      let line = raw;
+      line = line.replace(/^\s*\[\d{2}:\d{2}:\d{2}\] /, '');
       if (line.includes('[TELEMETRY]') || line.includes('[LIVE]')) return 'skip';
       if (line.includes('[WAITING]')) return 'waiting';
       if (line.startsWith('[OMP-PROMPT]') || line.startsWith('[PROMPT]')) return 'prompt';
@@ -1766,9 +1766,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (line.startsWith('[OMP]')) return 'omp';
       if (line.startsWith('[WARN') || line.startsWith('[LIMIT]') || line.startsWith('[STOP]')) return 'warn';
       if (/^\[(PIPELINE|SETUP|BENCH|DIAGNOSTICS|STATUS|EVAL|REVIVAL|MULTI-TRIAL|SUBRUN|DONE|LOCAL RUNNER|OMP)/.test(line)) return 'sec';
-      if (raw.startsWith('  | ') || raw.startsWith('  | ...')) return 'code';
-      if (raw.startsWith('  > ')) return 'result';
-      if (raw.startsWith('  $ ') || raw.startsWith('  path:') || raw.startsWith('  - ') || raw.startsWith('  + ')) return 'cmd';
+      if (line.startsWith('  | ') || line.startsWith('  | ...')) return 'code';
+      if (line.startsWith('  > ')) return 'result';
+      if (line.startsWith('  $ ') || line.startsWith('  path:') || line.startsWith('  - ') || line.startsWith('  + ')) return 'cmd';
       if (line.includes('-> PASS') || line.includes('  PASS')) return 'pass';
       if (line.includes('-> FAIL') || line.includes('  FAIL')) return 'fail';
       return '';
