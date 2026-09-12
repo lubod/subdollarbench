@@ -324,11 +324,24 @@ impl LeaderboardManager {
 
             let best_sub_dir = runs_dir.join(&best_sub.id);
 
+            // Check if any subrun was disqualified for cheating
+            let any_cheat = subrun_results.iter().any(|sub| {
+                let sub_manifest_path = runs_dir.join(&sub.id).join("manifest.json");
+                if let Ok(m_str) = fs::read_to_string(sub_manifest_path) {
+                    if let Ok(m_val) = serde_json::from_str::<serde_json::Value>(&m_str) {
+                        return m_val.get("status").and_then(|s| s.as_str()) == Some("disqualified_cheat");
+                    }
+                }
+                false
+            });
+
             // 1. Build genuine merged parent manifest (not a trial-1 clone)
             if let Ok(content) = fs::read_to_string(best_sub_dir.join("manifest.json")) {
                 if let Ok(mut manifest) = serde_json::from_str::<crate::report::RunManifest>(&content) {
                     manifest.run_id = parent_run_id.to_string();
-                    manifest.status = if merged.pass_rate >= 100.0 {
+                    manifest.status = if any_cheat {
+                        "disqualified_cheat".to_string()
+                    } else if merged.pass_rate >= 100.0 {
                         "completed".to_string()
                     } else {
                         "failed_tests".to_string()

@@ -1802,10 +1802,10 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
 
     function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
     function catFor(raw){
-      const line = raw.trimStart();
+      let line = raw.trimStart();
+      line = line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s+/, '');
       if (line.includes('[TELEMETRY]') || line.includes('[LIVE]')) return 'skip';
       if (line.includes('[WAITING]')) return 'waiting';
-      if (line.startsWith('[SUBRUN]')) return 'subrun';
       if (line.startsWith('[OMP-PROMPT]') || line.startsWith('[PROMPT]')) return 'prompt';
       if (line.startsWith('[THOUGHT]')) return 'thought';
       if (line.startsWith('[RESPONSE]')) return 'response';
@@ -1815,7 +1815,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       if (line.startsWith('[TOKENS]')) return 'tokens';
       if (line.startsWith('[OMP]')) return 'omp';
       if (line.startsWith('[WARN') || line.startsWith('[LIMIT]') || line.startsWith('[STOP]')) return 'warn';
-      if (/^\[(PIPELINE|SETUP|BENCH|DIAGNOSTICS|STATUS|EVAL|REVIVAL|MULTI-TRIAL|DONE|LOCAL RUNNER|OMP)/.test(line)) return 'sec';
+      if (/^\[(PIPELINE|SETUP|BENCH|DIAGNOSTICS|STATUS|EVAL|REVIVAL|MULTI-TRIAL|SUBRUN|DONE|LOCAL RUNNER|OMP)/.test(line)) return 'sec';
       if (raw.startsWith('  | ') || raw.startsWith('  | ...')) return 'code';
       if (raw.startsWith('  > ')) return 'result';
       if (raw.startsWith('  $ ') || raw.startsWith('  path:') || raw.startsWith('  - ') || raw.startsWith('  + ')) return 'cmd';
