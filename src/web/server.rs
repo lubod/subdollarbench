@@ -45,6 +45,10 @@ pub struct ActiveRunInfo {
     pub tokens: u64,
     #[serde(default)]
     pub duration_secs: Option<u64>,
+    #[serde(default)]
+    pub subrun: Option<u32>,
+    #[serde(default)]
+    pub total_subruns: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -1054,6 +1058,8 @@ async fn start_run(
                 cost_usd: 0.0,
                 tokens: 0,
                 duration_secs: None,
+                subrun: Some(trial_idx),
+                total_subruns: Some(total_trials),
             });
             if trial_idx == 1 {
                 state_clone.log_buffer.write().unwrap().clear();
@@ -1063,13 +1069,23 @@ async fn start_run(
                 tx: broadcast::Sender<String>,
                 log_buf: Arc<RwLock<Vec<String>>>,
                 current_run: Arc<RwLock<Option<ActiveRunInfo>>>,
+                trial_idx: u32,
+                total_trials: u32,
             }
             impl PipelineLogger for WebLogger {
                 fn log(&self, msg: &str) {
                     let ts = Utc::now().format("%H:%M:%S").to_string();
                     for line in msg.lines() {
                         let clean = line.trim_end();
-                        let formatted = format!("[{}] {}", ts, clean);
+                        let mut line_to_log = clean.to_string();
+
+                        if clean.starts_with("[LIVE] Turn ") && self.total_trials > 1 {
+                            line_to_log = format!("[LIVE] Subrun {}/{} | {}", self.trial_idx, self.total_trials, &clean[7..]);
+                        } else if clean.starts_with("[TELEMETRY] ") && !clean.contains("subrun=") {
+                            line_to_log = format!("{} subrun={} total_subruns={}", clean, self.trial_idx, self.total_trials);
+                        }
+
+                        let formatted = format!("[{}] {}", ts, line_to_log);
                         self.log_buf.write().unwrap().push(formatted.clone());
                         let _ = self.tx.send(formatted);
                     }
@@ -1080,6 +1096,8 @@ async fn start_run(
                             let mut max_turns = None;
                             let mut spent = None;
                             let mut tokens = None;
+                            let mut subrun = None;
+                            let mut total_subruns = None;
 
                             for token in telemetry_part.split_whitespace() {
                                 if let Some((k, v)) = token.split_once("=") {
@@ -1088,6 +1106,8 @@ async fn start_run(
                                         "max_turns" => max_turns = v.parse::<u32>().ok(),
                                         "spent" => spent = v.parse::<f64>().ok(),
                                         "tokens" => tokens = v.parse::<u64>().ok(),
+                                        "subrun" => subrun = v.parse::<u32>().ok(),
+                                        "total_subruns" => total_subruns = v.parse::<u32>().ok(),
                                         _ => {}
                                     }
                                 }
@@ -1099,6 +1119,8 @@ async fn start_run(
                                     if let Some(mt) = max_turns { info.max_turns = mt; }
                                     if let Some(s) = spent { info.cost_usd = s; }
                                     if let Some(tok) = tokens { info.tokens = tok; }
+                                    info.subrun = subrun.or(Some(self.trial_idx));
+                                    info.total_subruns = total_subruns.or(Some(self.total_trials));
                                 }
                             }
                         }
@@ -1110,7 +1132,29 @@ async fn start_run(
                 tx: tx.clone(),
                 log_buf: state_clone.log_buffer.clone(),
                 current_run: state_clone.current_run.clone(),
+                trial_idx,
+                total_trials,
             });
+
+            if total_trials > 1 {
+                logger.log(&format!(
+                    "[SUBRUN] ━━━ Starting Subrun {}/{} (Model: {}, Task: {}) ━━━",
+                    trial_idx, total_trials, req.model, req.task
+                ));
+            } else {
+                logger.log(&format!(
+                    "[SUBRUN] ━━━ Starting Benchmark Run (Model: {}, Task: {}) ━━━",
+                    req.model, req.task
+                ));
+            }
+            logger.log(&format!(
+                "[LIVE] Subrun {}/{} | Turn 0/{} | Spent: $0.0000 | Tokens: 0",
+                trial_idx, total_trials, req.max_turns
+            ));
+            logger.log(&format!(
+                "[TELEMETRY] turn=0 max_turns={} spent=0.000000 tokens=0 subrun={} total_subruns={}",
+                req.max_turns, trial_idx, total_trials
+            ));
 
             let task_type = match req.task.as_str() {
                 "redis" => TaskType::Redis,
@@ -1178,14 +1222,23 @@ async fn start_run(
                 Ok(output) => {
                     if output.benchmark_result.pass_rate == 100.0 {
                         passing_trials += 1;
+                        if total_trials > 1 {
+                            logger.log(&format!(
+                                "[SUBRUN] ━━━ Subrun {}/{} PASSED (100.0%) ━━━",
+                                trial_idx, total_trials
+                            ));
+                        } else {
+                            logger.log("[PIPELINE SUCCESS] Benchmark run PASSED (100.0%)");
+                        }
+                    } else if total_trials > 1 {
                         logger.log(&format!(
-                            "[PIPELINE SUCCESS] Completed trial {}/{} with pass rate: 100.0%",
-                            trial_idx, total_trials
+                            "[SUBRUN] ━━━ Subrun {}/{} COMPLETED (Pass Rate: {:.1}%) ━━━",
+                            trial_idx, total_trials, output.benchmark_result.pass_rate
                         ));
                     } else {
                         logger.log(&format!(
-                            "[PIPELINE RESULT] Completed trial {}/{} with pass rate: {:.1}%",
-                            trial_idx, total_trials, output.benchmark_result.pass_rate
+                            "[PIPELINE RESULT] Benchmark run completed with pass rate: {:.1}%",
+                            output.benchmark_result.pass_rate
                         ));
                     }
                     subrun_results.push(output.benchmark_result);
@@ -1195,7 +1248,7 @@ async fn start_run(
                         logger.log("[PIPELINE] Run cancelled by user.");
                         break;
                     }
-                    logger.log(&format!("[PIPELINE ERROR] {}", e));
+                    logger.log(&format!("[SUBRUN ERROR] Subrun {}/{} failed: {}", trial_idx, total_trials, e));
                     break;
                 }
             }
@@ -1688,6 +1741,14 @@ mod tests {
                 break;
             }
         }
+        let status_res = client
+            .get(format!("{}/api/status", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(status_res.status(), 200);
+        let status_body: StatusResponse = status_res.json().await.unwrap();
+        assert_eq!(status_body.last_run.as_ref().and_then(|r| r.total_subruns), Some(2));
 
         // 19. GET /api/models
         let res = client

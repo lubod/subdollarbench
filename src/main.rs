@@ -66,9 +66,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 if total_trials > 1 {
                     println!(
                         "{}",
-                        format!("=== Starting Trial {}/{} ===", trial_idx, total_trials)
+                        format!("=== Starting Subrun {}/{} ===", trial_idx, total_trials)
                             .bold()
-                            .blue()
+                            .cyan()
                     );
                 }
 
@@ -100,10 +100,21 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         if output.benchmark_result.pass_rate == 100.0 {
                             passing_trials += 1;
                         }
+                        if total_trials > 1 {
+                            println!(
+                                "{}",
+                                format!(
+                                    "=== Subrun {}/{} Completed (Pass Rate: {:.1}%) ===",
+                                    trial_idx, total_trials, output.benchmark_result.pass_rate
+                                )
+                                .bold()
+                                .cyan()
+                            );
+                        }
                         subrun_results.push(output.benchmark_result);
                     }
                     Err(e) => {
-                        eprintln!("  [ERROR] Trial execution failed: {}", e);
+                        eprintln!("  [ERROR] Subrun {}/{} execution failed: {}", trial_idx, total_trials, e);
                     }
                 }
             }

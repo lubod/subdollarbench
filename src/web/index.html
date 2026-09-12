@@ -1074,6 +1074,7 @@
                 <span style="width: 7px; height: 7px; border-radius: 50%; background: #3fb950; display: inline-block;"></span>
                 <span id="consolePulseText">Live Sync Active</span>
               </span>
+              <span id="consoleSubrunBadge" class="badge" style="display: none; background: rgba(240,136,62,0.15); color: #f0883e; border: 1px solid rgba(240,136,62,0.3); font-size: 0.72rem; font-weight: 700;">Subrun 1/3</span>
             </div>
             <div style="display: flex; gap: 10px; align-items: center;">
               <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Toggle preview of written code and tool arguments">
@@ -1090,11 +1091,16 @@
             </div>
           </div>
 
-          <!-- Live Telemetry Status Bar (Elapsed, Turns, Spent, Tokens) -->
+          <!-- Live Telemetry Status Bar (Elapsed, Subrun, Turns, Spent, Tokens) -->
           <div id="liveTelemetryBar" style="display: flex; gap: 14px; align-items: center; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 9px 15px; flex-wrap: wrap; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);">
             <div style="display: flex; align-items: center; gap: 7px;">
               <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">⏱️ Elapsed</span>
               <span id="liveMetricElapsed" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #58a6ff; font-size: 1.05rem;">00:00</span>
+            </div>
+            <div style="width: 1px; height: 18px; background: var(--border);"></div>
+            <div id="liveMetricSubrunWrapper" style="display: flex; align-items: center; gap: 7px;">
+              <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">🔁 Subrun</span>
+              <span id="liveMetricSubrun" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #f0883e; font-size: 1.05rem;">-</span>
             </div>
             <div style="width: 1px; height: 18px; background: var(--border);"></div>
             <div style="display: flex; align-items: center; gap: 7px;">
@@ -1126,6 +1132,7 @@
 #terminalOutput .ln-result,#terminalOutput .ln-code{color:#8b949e}
 #terminalOutput .ln-cmd{color:#79c0ff}
 #terminalOutput .ln-tokens{color:#6e7681}
+#terminalOutput .ln-subrun{color:#f0883e;font-weight:700}
 #terminalOutput .ln-omp{color:#ffa657}
 #terminalOutput .ln-error{color:#ff7b72;font-weight:700}
 #terminalOutput .ln-warn,#terminalOutput .ln-waiting{color:#e3b341}
@@ -1577,6 +1584,8 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       maxTurns: 100,
       spent: 0.0,
       tokens: 0,
+      subrun: 1,
+      totalSubruns: 3,
       isRunning: false,
       timerInterval: null
     };
@@ -1594,11 +1603,47 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
 
     function updateTelemetryDisplay() {
       const elapsedEl = document.getElementById('liveMetricElapsed');
+      const subrunEl = document.getElementById('liveMetricSubrun');
       const turnsEl = document.getElementById('liveMetricTurns');
       const spentEl = document.getElementById('liveMetricSpent');
       const tokensEl = document.getElementById('liveMetricTokens');
       const statusDot = document.getElementById('liveMetricStatusDot');
       const statusText = document.getElementById('liveMetricStatusText');
+      const consoleBadge = document.getElementById('consoleSubrunBadge');
+      const statusTextHeader = document.getElementById('statusText');
+
+      const sRun = liveTelemetry.subrun || 1;
+      const sTotal = liveTelemetry.totalSubruns || 1;
+
+      if (subrunEl) {
+        if (sTotal > 1) {
+          subrunEl.textContent = `${sRun} / ${sTotal}`;
+          subrunEl.style.color = '#f0883e';
+        } else if (liveTelemetry.isRunning) {
+          subrunEl.textContent = `${sRun} / ${sTotal}`;
+          subrunEl.style.color = '#58a6ff';
+        } else {
+          subrunEl.textContent = '-';
+          subrunEl.style.color = 'var(--text-muted)';
+        }
+      }
+
+      if (consoleBadge) {
+        if (liveTelemetry.isRunning && sTotal > 1) {
+          consoleBadge.style.display = 'inline-flex';
+          consoleBadge.textContent = `Subrun ${sRun}/${sTotal}`;
+        } else {
+          consoleBadge.style.display = 'none';
+        }
+      }
+
+      if (statusTextHeader && liveTelemetry.isRunning) {
+        if (sTotal > 1) {
+          statusTextHeader.textContent = `Running (${sRun}/${sTotal})`;
+        } else {
+          statusTextHeader.textContent = 'Running';
+        }
+      }
 
       if (turnsEl) {
         if (liveTelemetry.maxTurns > 0) {
@@ -1620,7 +1665,11 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
         if (liveTelemetry.isRunning) {
           statusDot.className = 'live-dot-running';
           statusText.style.color = '#3fb950';
-          statusText.textContent = 'RUNNING';
+          if (sTotal > 1) {
+            statusText.textContent = `RUNNING (${sRun}/${sTotal})`;
+          } else {
+            statusText.textContent = 'RUNNING';
+          }
         } else if (liveTelemetry.durationSecs !== null || liveTelemetry.turns > 0 || liveTelemetry.spent > 0) {
           statusDot.className = '';
           statusDot.style.background = '#238636';
@@ -1675,33 +1724,59 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
     function parseTelemetryLine(line) {
       if (!line) return false;
 
-      // 1. Structured [TELEMETRY] turn=X max_turns=Y spent=Z tokens=W
-      const telMatch = line.match(/\[TELEMETRY\]\s+turn=(\d+)(?:\s+max_turns=(\d+))?(?:\s+spent=([\d.]+))?(?:\s+tokens=(\d+))?/i);
-      if (telMatch) {
-        if (telMatch[1] !== undefined) liveTelemetry.turns = parseInt(telMatch[1], 10);
-        if (telMatch[2] !== undefined && parseInt(telMatch[2], 10) > 0) liveTelemetry.maxTurns = parseInt(telMatch[2], 10);
-        if (telMatch[3] !== undefined) liveTelemetry.spent = parseFloat(telMatch[3]);
-        if (telMatch[4] !== undefined) liveTelemetry.tokens = parseInt(telMatch[4], 10);
+      // 1. Structured [TELEMETRY] turn=X max_turns=Y spent=Z tokens=W subrun=A total_subruns=B
+      if (line.includes('[TELEMETRY]')) {
+        const turnMatch = line.match(/turn=(\d+)/i);
+        if (turnMatch) liveTelemetry.turns = parseInt(turnMatch[1], 10);
+        const maxTurnMatch = line.match(/max_turns=(\d+)/i);
+        if (maxTurnMatch && parseInt(maxTurnMatch[1], 10) > 0) liveTelemetry.maxTurns = parseInt(maxTurnMatch[1], 10);
+        const spentMatch = line.match(/spent=([\d.]+)/i);
+        if (spentMatch) liveTelemetry.spent = parseFloat(spentMatch[1]);
+        const tokMatch = line.match(/tokens=(\d+)/i);
+        if (tokMatch) liveTelemetry.tokens = parseInt(tokMatch[1], 10);
+        const subrunMatch = line.match(/subrun=(\d+)/i);
+        if (subrunMatch) liveTelemetry.subrun = parseInt(subrunMatch[1], 10);
+        const totalSubMatch = line.match(/total_subruns=(\d+)/i);
+        if (totalSubMatch) liveTelemetry.totalSubruns = parseInt(totalSubMatch[1], 10);
         updateTelemetryDisplay();
         return true;
       }
 
-      // 2. Human-readable [LIVE] Turn X/Y | Spent: $Z | Tokens: W
-      const liveMatch = line.match(/\[LIVE\]\s+Turn\s+(\d+)\s*\/\s*(\d+|\S+)\s*\|\s*Spent:\s*\$([\d.]+)(?:\s*\|\s*Tokens:\s*([\d,]+))?/i);
-      if (liveMatch) {
-        liveTelemetry.turns = parseInt(liveMatch[1], 10);
-        if (liveMatch[2] && !isNaN(parseInt(liveMatch[2], 10))) {
-          liveTelemetry.maxTurns = parseInt(liveMatch[2], 10);
+      // 2. Human-readable [LIVE] Subrun X/Y | Turn A/B | Spent: $Z | Tokens: W
+      const liveSubrunMatch = line.match(/\[LIVE\]\s+Subrun\s+(\d+)\s*\/\s*(\d+)/i);
+      if (liveSubrunMatch) {
+        liveTelemetry.subrun = parseInt(liveSubrunMatch[1], 10);
+        liveTelemetry.totalSubruns = parseInt(liveSubrunMatch[2], 10);
+      }
+      const liveTurnMatch = line.match(/Turn\s+(\d+)\s*\/\s*(\d+|\S+)/i);
+      if (liveTurnMatch) {
+        liveTelemetry.turns = parseInt(liveTurnMatch[1], 10);
+        if (liveTurnMatch[2] && !isNaN(parseInt(liveTurnMatch[2], 10))) {
+          liveTelemetry.maxTurns = parseInt(liveTurnMatch[2], 10);
         }
-        liveTelemetry.spent = parseFloat(liveMatch[3]);
-        if (liveMatch[4]) {
-          liveTelemetry.tokens = parseInt(liveMatch[4].replace(/,/g, ''), 10);
-        }
+      }
+      const liveSpentMatch = line.match(/Spent:\s*\$([\d.]+)/i);
+      if (liveSpentMatch) {
+        liveTelemetry.spent = parseFloat(liveSpentMatch[1]);
+      }
+      const liveTokMatch = line.match(/Tokens:\s*([\d,]+)/i);
+      if (liveTokMatch) {
+        liveTelemetry.tokens = parseInt(liveTokMatch[1].replace(/,/g, ''), 10);
+      }
+      if (line.includes('[LIVE]')) {
         updateTelemetryDisplay();
         return false;
       }
 
-      // 3. Fallback token usage matching
+      // 3. Subrun banners
+      const subrunBannerMatch = line.match(/(?:\[SUBRUN\]|Starting Subrun)\s*(?:━━━\s*)?(?:Starting\s+)?(?:Subrun\s+)?(\d+)\s*\/\s*(\d+)/i);
+      if (subrunBannerMatch) {
+        liveTelemetry.subrun = parseInt(subrunBannerMatch[1], 10);
+        liveTelemetry.totalSubruns = parseInt(subrunBannerMatch[2], 10);
+        updateTelemetryDisplay();
+      }
+
+      // 4. Fallback token usage matching
       const tokMatch = line.match(/\[TOKENS\]\s+Turn usage - input:\s*(\d+),\s*output:\s*(\d+)/i);
       if (tokMatch) {
         const sum = parseInt(tokMatch[1], 10) + parseInt(tokMatch[2], 10);
@@ -1730,6 +1805,7 @@ rsync -az --delete ./portal/ &lt;vps&gt;:/srv/bench/</code></pre>
       const line = raw.trimStart();
       if (line.includes('[TELEMETRY]') || line.includes('[LIVE]')) return 'skip';
       if (line.includes('[WAITING]')) return 'waiting';
+      if (line.startsWith('[SUBRUN]')) return 'subrun';
       if (line.startsWith('[OMP-PROMPT]') || line.startsWith('[PROMPT]')) return 'prompt';
       if (line.startsWith('[THOUGHT]')) return 'thought';
       if (line.startsWith('[RESPONSE]')) return 'response';
@@ -3791,6 +3867,8 @@ function copyRunId() {
             if (m.max_turns !== undefined && m.max_turns > 0) liveTelemetry.maxTurns = m.max_turns;
             if (m.cost_usd !== undefined) liveTelemetry.spent = m.cost_usd;
             if (m.tokens !== undefined) liveTelemetry.tokens = m.tokens;
+            if (m.subrun !== undefined && m.subrun !== null) liveTelemetry.subrun = m.subrun;
+            if (m.total_subruns !== undefined && m.total_subruns !== null) liveTelemetry.totalSubruns = m.total_subruns;
 
             if (m.started_at && (!liveTelemetry.isRunning || !liveTelemetry.startedAtMs)) {
               startElapsedTimer(new Date(m.started_at).getTime());
@@ -3812,6 +3890,8 @@ function copyRunId() {
             liveTelemetry.maxTurns = lr.max_turns || 50;
             liveTelemetry.spent = lr.cost_usd || 0.0;
             liveTelemetry.tokens = lr.tokens || 0;
+            if (lr.subrun !== undefined && lr.subrun !== null) liveTelemetry.subrun = lr.subrun;
+            if (lr.total_subruns !== undefined && lr.total_subruns !== null) liveTelemetry.totalSubruns = lr.total_subruns;
             if (lr.duration_secs) {
               liveTelemetry.durationSecs = lr.duration_secs;
               const elapsedEl = document.getElementById('liveMetricElapsed');
@@ -3851,6 +3931,8 @@ function copyRunId() {
       liveTelemetry.maxTurns = turns;
       liveTelemetry.spent = 0.0;
       liveTelemetry.tokens = 0;
+      liveTelemetry.subrun = 1;
+      liveTelemetry.totalSubruns = trials;
       liveTelemetry.durationSecs = null;
       startElapsedTimer(Date.now());
 
