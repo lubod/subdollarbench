@@ -624,6 +624,10 @@ impl BenchmarkPipeline {
             throughput_score: Some(throughput_score),
             timestamp: completed_at,
             method_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
         };
 
         logger.log(&format!(

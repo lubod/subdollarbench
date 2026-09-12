@@ -442,10 +442,34 @@ const PORTAL_JS: &str = r#"
       const taskBadge = showTaskCol
         ? `<span class="badge badge-info" style="text-transform: uppercase;">${escapeHtml(r.task)}</span>`
         : '';
+      const hasSubruns = Array.isArray(r.subruns) && r.subruns.length > 0;
+      const subrunsBadge = hasSubruns
+        ? `<span class="badge" style="background: rgba(163, 113, 247, 0.15); color: #d2a8ff; font-weight: 600;">${r.subruns.length} subruns (avg)</span>`
+        : '';
       const passBadge = (r.pass_rate >= 100)
         ? `<span class="badge badge-pass">✔ 100% (${r.passed_stages}/${r.total_stages})</span>`
         : `<span class="badge badge-fail">✕ ${Math.round(r.pass_rate)}% (${r.passed_stages}/${r.total_stages})</span>`;
+      const passAtK = (hasSubruns && r.pass_at_1 !== undefined && r.pass_at_k !== undefined)
+        ? `<div style="font-size: 0.72rem; color: var(--grn); font-weight: 600;">Pass@1: ${Math.round(r.pass_at_1)}% · Pass@${r.total_trials || r.subruns.length}: ${Math.round(r.pass_at_k)}%</div>`
+        : '';
       const effBadge = `<span class="badge badge-effort">effort: ${escapeHtml(r.effort || 'auto')}</span>`;
+
+      let subrunsHtml = '';
+      if (hasSubruns) {
+        subrunsHtml = `
+          <details style="margin-top: 5px; font-size: 0.72rem; color: var(--mut);">
+            <summary style="cursor: pointer; color: var(--acc); font-weight: 600;">View ${r.subruns.length} subruns breakdown ▾</summary>
+            <div style="margin-top: 4px; padding: 6px 8px; background: rgba(0,0,0,0.25); border-radius: 4px; border: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; gap: 4px;">
+              ${r.subruns.map((sr, sIdx) => `
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px dashed rgba(255,255,255,0.05); padding-bottom: 2px;">
+                  <span><strong>Trial ${sIdx + 1}:</strong> ${formatThroughput(sr.throughput_req_sec, sr.task)} · $${(sr.effective_cost_usd || sr.total_cost_usd).toFixed(4)} · ${formatDuration(sr.duration_seconds)} · ${sr.turns || '-'}t</span>
+                  <a href="runs/${escapeHtml(sr.id)}/" style="color: var(--primary); text-decoration: underline;">Inspect</a>
+                </div>
+              `).join('')}
+            </div>
+          </details>
+        `;
+      }
       const durStr = formatDuration(r.duration_seconds);
       const turnsStr = (r.turns !== undefined && r.turns !== null) ? `${r.turns}` : '-';
       const tpStr = formatThroughput(r.throughput_req_sec, r.task);
@@ -472,14 +496,17 @@ const PORTAL_JS: &str = r#"
             <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
               <a href="runs/${escapeHtml(r.id)}/" style="font-weight: 600; color: var(--primary);">${escapeHtml(r.model)}</a>
               ${taskBadge}
+              ${subrunsBadge}
               <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--grn);">${escapeHtml(r.language || 'Unknown')}</span>
             </div>
             <div style="font-size: 0.72rem; color: var(--mut);">${formatTimestamp(r.timestamp)}</div>
+            ${subrunsHtml}
           </div>
         </td>
         <td>
           <div style="display: flex; flex-direction: column; gap: 3px;">
             <div>${passBadge}</div>
+            ${passAtK}
             <div>${effBadge}</div>
           </div>
         </td>
@@ -675,7 +702,7 @@ const PORTAL_JS: &str = r#"
 
     container.querySelectorAll('tbody tr').forEach(row => {
       row.addEventListener('click', e => {
-        if (e.target.tagName === 'A' || e.target.closest('a')) return;
+        if (e.target.tagName === 'A' || e.target.closest('a') || e.target.tagName === 'SUMMARY' || e.target.closest('details')) return;
         const href = row.getAttribute('data-href');
         if (href) window.location.href = href;
       });
@@ -758,6 +785,15 @@ impl PortalExporter {
             live.insert(clean);
             if Self::export_run(runs_path, &runs_out, &r.id, &secrets).is_ok() {
                 count += 1;
+            }
+            for sub in &r.subruns {
+                let clean_sub = Path::new(&sub.id)
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or(&sub.id)
+                    .to_string();
+                live.insert(clean_sub);
+                let _ = Self::export_run(runs_path, &runs_out, &sub.id, &secrets);
             }
         }
         // Prune run pages (e.g. test residue) with no current result entry.
@@ -843,16 +879,52 @@ impl PortalExporter {
             };
             let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
 
+            let subruns_badge = if !r.subruns.is_empty() {
+                format!(" <span class=\"badge\" style=\"background:rgba(163,113,247,0.15);color:#d2a8ff;font-weight:600;\">{} subruns (avg)</span>", r.subruns.len())
+            } else {
+                String::new()
+            };
+            let pass_at_k_html = if !r.subruns.is_empty() {
+                if let (Some(p1), Some(pk)) = (r.pass_at_1, r.pass_at_k) {
+                    format!("<div style=\"font-size:0.72rem;color:var(--grn);font-weight:600;\">Pass@1: {:.0}% · Pass@{}: {:.0}%</div>", p1, r.subruns.len(), pk)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            let mut subruns_html = String::new();
+            if !r.subruns.is_empty() {
+                subruns_html.push_str(&format!(
+                    "<details style=\"margin-top:5px;font-size:0.72rem;color:var(--mut);\"><summary style=\"cursor:pointer;color:var(--acc);font-weight:600;\">View {} subruns breakdown ▾</summary><div style=\"margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.25);border-radius:4px;border:1px solid rgba(255,255,255,0.06);display:flex;flex-direction:column;gap:4px;\">",
+                    r.subruns.len()
+                ));
+                for (s_idx, sr) in r.subruns.iter().enumerate() {
+                    let s_tp = sr.throughput_req_sec.map(|v| format!("{:.0} {}", v, unit)).unwrap_or_else(|| "N/A".to_string());
+                    let s_cost = sr.effective_cost_usd.unwrap_or(sr.total_cost_usd);
+                    let s_dur = format_duration(sr.duration_seconds.unwrap_or(0.0));
+                    let s_turns = sr.turns.map(|t| format!("{}t", t)).unwrap_or_else(|| "-".to_string());
+                    subruns_html.push_str(&format!(
+                        "<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px dashed rgba(255,255,255,0.05);padding-bottom:2px;\"><span><strong>Trial {}:</strong> {} · ${:.4} · {} · {}</span><a href=\"runs/{}/\" style=\"color:var(--primary);text-decoration:underline;\">Inspect</a></div>",
+                        s_idx + 1, s_tp, s_cost, s_dur, s_turns, Self::esc(&sr.id)
+                    ));
+                }
+                subruns_html.push_str("</div></details>");
+            }
+
             initial_rows.push_str(&format!(
-                "<tr data-href=\"runs/{}/\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;\"><a href=\"runs/{}/\" style=\"font-weight:600;color:var(--primary);\">{}</a> <span class=\"badge badge-info\">{}</span> <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div></div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div><div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
+                "<tr data-href=\"runs/{}/\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><a href=\"runs/{}/\" style=\"font-weight:600;color:var(--primary);\">{}</a> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
                 Self::esc(&r.id),
                 medal,
                 Self::esc(&r.id),
                 Self::esc(&r.model),
                 Self::esc(&r.task),
+                subruns_badge,
                 Self::esc(&r.language),
                 Self::esc(&r.timestamp),
+                subruns_html,
                 pass_badge,
+                pass_at_k_html,
                 Self::esc(r.effort.as_deref().unwrap_or("auto")),
                 dur_txt,
                 turns_str,

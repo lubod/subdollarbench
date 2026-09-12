@@ -51,7 +51,7 @@ pub enum Commands {
         eval_only: bool,
 
         /// Number of repeated trials for statistical variance (Pass@k)
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 3)]
         trials: u32,
 
         /// Do not save results or archive run artifacts to disk

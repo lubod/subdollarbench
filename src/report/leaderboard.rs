@@ -1,3 +1,5 @@
+use chrono::Utc;
+use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
@@ -37,6 +39,14 @@ pub struct BenchmarkRunResult {
     pub throughput_score: Option<f64>,
     pub timestamp: String,
     pub method_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subruns: Vec<BenchmarkRunResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_trials: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_1: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_k: Option<f64>,
 }
 
 pub fn format_duration(secs: f64) -> String {
@@ -54,6 +64,118 @@ pub fn format_duration(secs: f64) -> String {
 impl BenchmarkRunResult {
     pub fn effective_cost(&self) -> f64 {
         self.effective_cost_usd.unwrap_or(self.total_cost_usd)
+    }
+
+    /// Merges multiple subruns into a single consolidated BenchmarkRunResult
+    /// with averaged metrics, while preserving the individual subrun records.
+    pub fn merge_subruns(parent_id: &str, subruns: Vec<BenchmarkRunResult>) -> Option<BenchmarkRunResult> {
+        if subruns.is_empty() {
+            return None;
+        }
+        if subruns.len() == 1 {
+            let mut single = subruns.into_iter().next().unwrap();
+            single.id = parent_id.to_string();
+            let p1 = if single.pass_rate >= 100.0 { 100.0 } else { 0.0 };
+            single.total_trials = Some(1);
+            single.pass_at_1 = Some(p1);
+            single.pass_at_k = Some(p1);
+            return Some(single);
+        }
+
+        let n = subruns.len();
+        let n_f64 = n as f64;
+
+        let first = &subruns[0];
+        let model = first.model.clone();
+        let task = first.task.clone();
+        let language = first.language.clone();
+        let effort = first.effort.clone();
+        let reference_tp = first.reference_throughput_req_sec;
+        let method_ver = first.method_version.clone();
+        let total_stages = first.total_stages;
+
+        let passing_trials = subruns.iter().filter(|r| r.pass_rate >= 100.0).count();
+        let pass_at_1 = compute_pass_at_k(n, passing_trials, 1) * 100.0;
+        let pass_at_k = compute_pass_at_k(n, passing_trials, n) * 100.0;
+
+        let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n_f64;
+        let avg_passed_stages = (subruns.iter().map(|r| r.passed_stages as f64).sum::<f64>() / n_f64).round() as u32;
+
+        let tp_count = subruns.iter().filter_map(|r| r.throughput_req_sec).count();
+        let avg_tp = if tp_count > 0 {
+            Some(subruns.iter().filter_map(|r| r.throughput_req_sec).sum::<f64>() / tp_count as f64)
+        } else {
+            None
+        };
+
+        let avg_prompt_tokens = (subruns.iter().map(|r| r.prompt_tokens as f64).sum::<f64>() / n_f64).round() as u64;
+        let avg_cached_tokens = (subruns.iter().map(|r| r.cached_tokens as f64).sum::<f64>() / n_f64).round() as u64;
+        let avg_completion_tokens = (subruns.iter().map(|r| r.completion_tokens as f64).sum::<f64>() / n_f64).round() as u64;
+        let avg_total_tokens = (subruns.iter().map(|r| r.total_tokens as f64).sum::<f64>() / n_f64).round() as u64;
+
+        let avg_total_cost = subruns.iter().map(|r| r.total_cost_usd).sum::<f64>() / n_f64;
+        let eff_cost_count = subruns.iter().filter_map(|r| r.effective_cost_usd).count();
+        let avg_effective_cost = if eff_cost_count > 0 {
+            Some(subruns.iter().filter_map(|r| r.effective_cost_usd).sum::<f64>() / eff_cost_count as f64)
+        } else {
+            None
+        };
+
+        let dur_count = subruns.iter().filter_map(|r| r.duration_seconds).count();
+        let avg_duration = if dur_count > 0 {
+            Some(subruns.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / dur_count as f64)
+        } else {
+            None
+        };
+
+        let turns_count = subruns.iter().filter_map(|r| r.turns).count();
+        let avg_turns = if turns_count > 0 {
+            Some((subruns.iter().filter_map(|r| r.turns).map(|t| t as f64).sum::<f64>() / turns_count as f64).round() as u32)
+        } else {
+            None
+        };
+
+        let avg_savings_percent = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n_f64;
+        let avg_efficiency_score = subruns.iter().map(|r| r.efficiency_score).sum::<f64>() / n_f64;
+
+        let tp_score_count = subruns.iter().filter_map(|r| r.throughput_score).count();
+        let avg_throughput_score = if tp_score_count > 0 {
+            Some(subruns.iter().filter_map(|r| r.throughput_score).sum::<f64>() / tp_score_count as f64)
+        } else {
+            None
+        };
+
+        let latest_timestamp = subruns.iter().map(|r| &r.timestamp).max().cloned().unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        Some(BenchmarkRunResult {
+            id: parent_id.to_string(),
+            model,
+            task,
+            language,
+            effort,
+            pass_rate: avg_pass_rate,
+            passed_stages: avg_passed_stages,
+            total_stages,
+            throughput_req_sec: avg_tp,
+            reference_throughput_req_sec: reference_tp,
+            prompt_tokens: avg_prompt_tokens,
+            cached_tokens: avg_cached_tokens,
+            completion_tokens: avg_completion_tokens,
+            total_tokens: avg_total_tokens,
+            total_cost_usd: avg_total_cost,
+            effective_cost_usd: avg_effective_cost,
+            duration_seconds: avg_duration,
+            turns: avg_turns,
+            savings_percent: avg_savings_percent,
+            efficiency_score: avg_efficiency_score,
+            throughput_score: avg_throughput_score,
+            timestamp: latest_timestamp,
+            method_version: method_ver,
+            subruns,
+            total_trials: Some(n as u32),
+            pass_at_1: Some(pass_at_1),
+            pass_at_k: Some(pass_at_k),
+        })
     }
 }
 
@@ -184,6 +306,42 @@ impl LeaderboardManager {
                 }
             }
         }
+
+        // Filter out any child subrun whose ID is already embedded in a parent run
+        let mut child_subrun_ids = HashSet::new();
+        for r in &list {
+            for sub in &r.subruns {
+                child_subrun_ids.insert(sub.id.clone());
+            }
+        }
+        list.retain(|r| !child_subrun_ids.contains(&r.id));
+
+        // Group loose trial runs (e.g. ..._trial1_...) into consolidated merged rows
+        let mut groups: HashMap<String, Vec<BenchmarkRunResult>> = HashMap::new();
+        let mut consolidated = Vec::new();
+        let trial_re = regex::Regex::new(r"_trial\d+").unwrap();
+
+        for r in list {
+            if r.subruns.is_empty() && r.id.contains("_trial") {
+                let group_key = trial_re.replace(&r.id, "").to_string();
+                groups.entry(group_key).or_default().push(r);
+            } else {
+                consolidated.push(r);
+            }
+        }
+
+        for (parent_id, mut subruns) in groups {
+            if subruns.len() > 1 {
+                subruns.sort_by(|a, b| a.id.cmp(&b.id));
+                if let Some(merged) = BenchmarkRunResult::merge_subruns(&parent_id, subruns) {
+                    consolidated.push(merged);
+                }
+            } else {
+                consolidated.extend(subruns);
+            }
+        }
+
+        list = consolidated;
         list.sort_by(|a, b| {
             let a_pass_100 = a.pass_rate >= 100.0;
             let b_pass_100 = b.pass_rate >= 100.0;
@@ -264,10 +422,24 @@ impl LeaderboardManager {
                 _ => "N/A".to_string(),
             };
 
-            let pass_str = format!(
-                "{:.0}% ({}/{})",
-                r.pass_rate, r.passed_stages, r.total_stages
-            );
+            let pass_str = if !r.subruns.is_empty() {
+                if let (Some(p1), Some(pk)) = (r.pass_at_1, r.pass_at_k) {
+                    format!("{:.0}% (P@1: {:.0}%, P@{}: {:.0}%)", r.pass_rate, p1, r.subruns.len(), pk)
+                } else {
+                    format!("{:.0}% ({} trials)", r.pass_rate, r.subruns.len())
+                }
+            } else {
+                format!(
+                    "{:.0}% ({}/{})",
+                    r.pass_rate, r.passed_stages, r.total_stages
+                )
+            };
+
+            let model_display = if !r.subruns.is_empty() {
+                format!("{} [{} trials avg]", r.model, r.subruns.len())
+            } else {
+                r.model.clone()
+            };
             let savings_str = format!("{:.0}%", r.savings_percent);
             let eff_str = r.effort.clone().unwrap_or_else(|| "auto".to_string());
             let dur_str = r
@@ -281,7 +453,7 @@ impl LeaderboardManager {
 
             table.add_row(Row::from(vec![
                 Cell::new(rank_str).fg(Color::Yellow),
-                Cell::new(&r.model).fg(Color::Cyan),
+                Cell::new(&model_display).fg(Color::Cyan),
                 Cell::new(eff_str).fg(Color::Yellow),
                 Cell::new(&r.task),
                 Cell::new(&r.language).fg(Color::Green),
@@ -359,6 +531,55 @@ impl LeaderboardManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_merge_subruns_computes_averages_and_pass_at_k() {
+        let make_run = |id: &str, tp: f64, dur: f64, turns: u32, cost: f64, pass: f64| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "test-model".to_string(),
+            task: "dns".to_string(),
+            language: "Python".to_string(),
+            effort: Some("auto".to_string()),
+            pass_rate: pass,
+            passed_stages: if pass >= 100.0 { 6 } else { 3 },
+            total_stages: 6,
+            throughput_req_sec: Some(tp),
+            reference_throughput_req_sec: Some(19000.0),
+            prompt_tokens: 1000,
+            cached_tokens: 2000,
+            completion_tokens: 500,
+            total_tokens: 3500,
+            total_cost_usd: cost,
+            effective_cost_usd: Some(cost * 2.0),
+            duration_seconds: Some(dur),
+            turns: Some(turns),
+            savings_percent: 50.0,
+            efficiency_score: 100.0,
+            throughput_score: Some(tp / 10.0),
+            timestamp: "2026-09-12T08:00:00Z".to_string(),
+            method_version: Some("0.2.0".to_string()),
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+        };
+
+        let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
+        let t2 = make_run("run_trial2", 6000.0, 30.0, 7, 0.002, 100.0);
+        let t3 = make_run("run_trial3", 7000.0, 50.0, 9, 0.003, 100.0);
+
+        let merged = BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3]).unwrap();
+        assert_eq!(merged.id, "run_parent");
+        assert_eq!(merged.total_trials, Some(3));
+        assert_eq!(merged.pass_rate, 100.0);
+        assert_eq!(merged.pass_at_1, Some(100.0));
+        assert_eq!(merged.pass_at_k, Some(100.0));
+        assert_eq!(merged.subruns.len(), 3);
+        assert_eq!(merged.throughput_req_sec.unwrap(), 6000.0);
+        assert_eq!(merged.duration_seconds.unwrap(), 40.0);
+        assert_eq!(merged.turns.unwrap(), 8);
+        assert_eq!(merged.total_cost_usd, 0.002);
+    }
+
     use super::*;
 
     #[test]
@@ -464,6 +685,10 @@ mod tests {
             throughput_score: Some(538.0),
             timestamp: "2026-09-04T12:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -499,6 +724,10 @@ mod tests {
             throughput_score: Some(0.0),
             timestamp: "2026-09-04T06:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -526,6 +755,10 @@ mod tests {
             throughput_score: Some(481.0),
             timestamp: "2026-09-04T06:05:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();

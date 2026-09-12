@@ -77,7 +77,7 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
 }
 
 fn default_trials() -> u32 {
-    1
+    3
 }
 
 fn default_max_turns() -> u32 {
@@ -1019,6 +1019,14 @@ async fn start_run(
     let handle = tokio::spawn(async move {
         let total_trials = req.trials.max(1);
         let mut passing_trials = 0;
+        let mut subrun_results = Vec::new();
+        let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let parent_run_id = format!(
+            "{}_{}_{}",
+            req.task,
+            req.model.replace(['/', ':'], "_"),
+            run_timestamp
+        );
 
         for trial_idx in 1..=total_trials {
             if state_clone.cancel_requested.load(Ordering::SeqCst) {
@@ -1028,20 +1036,9 @@ async fn start_run(
 
             let started_at = Utc::now().to_rfc3339();
             let run_id = if total_trials > 1 {
-                format!(
-                    "{}_{}_trial{}_{}",
-                    req.task,
-                    req.model.replace(['/', ':'], "_"),
-                    trial_idx,
-                    Utc::now().format("%Y%m%d_%H%M%S")
-                )
+                format!("{}_trial{}", parent_run_id, trial_idx)
             } else {
-                format!(
-                    "{}_{}_{}",
-                    req.task,
-                    req.model.replace(['/', ':'], "_"),
-                    Utc::now().format("%Y%m%d_%H%M%S")
-                )
+                parent_run_id.clone()
             };
 
             let effort_setting = req.effort.clone().unwrap_or_else(|| "auto".to_string());
@@ -1191,6 +1188,7 @@ async fn start_run(
                             trial_idx, total_trials, output.benchmark_result.pass_rate
                         ));
                     }
+                    subrun_results.push(output.benchmark_result);
                 }
                 Err(e) => {
                     if state_clone.cancel_requested.load(Ordering::SeqCst) {
@@ -1199,6 +1197,34 @@ async fn start_run(
                     }
                     logger.log(&format!("[PIPELINE ERROR] {}", e));
                     break;
+                }
+            }
+        }
+
+        if total_trials > 1 && !subrun_results.is_empty() {
+            if let Some(merged) = crate::report::leaderboard::BenchmarkRunResult::merge_subruns(&parent_run_id, subrun_results.clone()) {
+                if req.save_results.unwrap_or(true) {
+                    let results_dir_buf = crate::config::get_repo_root().join("results");
+                    let results_dir_str = results_dir_buf.to_str().unwrap_or("./results");
+                    let _ = LeaderboardManager::save_result(results_dir_str, &merged);
+
+                    for sub in &subrun_results {
+                        let _ = fs::remove_file(results_dir_buf.join(format!("{}.json", sub.id)));
+                    }
+
+                    let runs_dir = RunArchiver::resolve_runs_dir();
+                    let parent_dir = runs_dir.join(&parent_run_id);
+                    let _ = fs::create_dir_all(&parent_dir);
+                    if let Some(first_sub) = subrun_results.first() {
+                        let first_sub_dir = runs_dir.join(&first_sub.id);
+                        for file_name in ["manifest.json", "env.json", "console.log", "review.json"] {
+                            if let Ok(content) = fs::read_to_string(first_sub_dir.join(file_name)) {
+                                let _ = fs::write(parent_dir.join(file_name), content);
+                            }
+                        }
+                        let merged_data = serde_json::to_string_pretty(&merged).unwrap_or_default();
+                        let _ = fs::write(parent_dir.join("run.json"), merged_data);
+                    }
                 }
             }
         }
