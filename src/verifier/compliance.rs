@@ -307,6 +307,12 @@ impl ComplianceChecker {
         let cmd_token = tokens[idx].to_lowercase();
         let cmd_base = cmd_token.split('/').next_back().unwrap_or(&cmd_token);
 
+        // Check forbidden generic socket tunneling / proxy utilities
+        let forbidden_proxies = ["socat", "nc", "ncat", "netcat"];
+        if forbidden_proxies.contains(&cmd_base) {
+            return Some(format!("uses forbidden generic socket tunnel/proxy '{}'", cmd_base));
+        }
+
         // Check if the command itself is a forbidden daemon.
         // Explicit non-system paths (e.g. /tmp/redis-server, ./redis-server,
         // /workspace/..., /app/...) are the candidate's own build output and
@@ -510,9 +516,30 @@ impl ComplianceChecker {
 
 
     fn inspect_file(path: &Path, filename: &str, violations: &mut Vec<String>) {
+        // First check if it is an ELF binary with foreign precompiled signatures
+        if let Ok(raw_bytes) = fs::read(path) {
+            if raw_bytes.starts_with(b"\x7fELF") {
+                let lower_bytes = raw_bytes.to_ascii_lowercase();
+                let signatures: &[&[u8]] = &[
+                    b"redis-server", b"nginx/", b"pdftotext", b"coredns", b"lighttpd/", b"apache2"
+                ];
+                for sig in signatures {
+                    if lower_bytes.windows(sig.len()).any(|w| w == *sig) {
+                        violations.push(format!(
+                            "{}: precompiled binary contains forbidden vendor signature {:?}",
+                            filename,
+                            String::from_utf8_lossy(sig)
+                        ));
+                        break;
+                    }
+                }
+                return;
+            }
+        }
+
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return, // Ignore binary or unreadable files
+            Err(_) => return,
         };
 
         // 1. Dockerfile base-image and RUN/CMD/ENTRYPOINT daemon inspection
@@ -678,6 +705,9 @@ impl ComplianceChecker {
                 let lower = content.to_lowercase();
                 if content.contains("http.server") {
                     violations.push(format!("{}: imports built-in http.server", filename));
+                }
+                if content.contains("wsgiref.simple_server") {
+                    violations.push(format!("{}: imports built-in wsgiref.simple_server", filename));
                 }
                 if Self::imports_py_module(&content, "flask") {
                     violations.push(format!("{}: imports flask", filename));
@@ -1143,6 +1173,44 @@ RUN apk add redis
         fs::write(temp_dir.join("start.sh"), "#!/bin/bash\nsudo /usr/sbin/nginx\n")
         .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_err());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+    #[test]
+    fn test_compliance_checker_catches_proxies_and_elf_signatures() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_hardened_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        // 1. socat / nc proxy usage
+        fs::write(
+            temp_dir.join("start.sh"),
+            "#!/bin/bash\nsocat TCP-LISTEN:8080,fork TCP:127.0.0.1:80\n",
+        )
+        .unwrap();
+        let res_proxy = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_proxy.is_err());
+        assert!(res_proxy.unwrap_err().contains("socat"));
+        let _ = fs::remove_file(temp_dir.join("start.sh"));
+
+        // 2. Python wsgiref
+        fs::write(
+            temp_dir.join("app.py"),
+            "from wsgiref.simple_server import make_server\n",
+        )
+        .unwrap();
+        let res_wsgi = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_wsgi.is_err());
+        assert!(res_wsgi.unwrap_err().contains("wsgiref.simple_server"));
+        let _ = fs::remove_file(temp_dir.join("app.py"));
+
+        // 3. Opaque precompiled ELF containing forbidden vendor daemon signature
+        let mut fake_elf = b"\x7fELFfakeheader".to_vec();
+        fake_elf.extend_from_slice(b"some binary bytes redis-server version 7.2 some more bytes");
+        fs::write(temp_dir.join("my_server"), fake_elf).unwrap();
+        let res_elf = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_elf.is_err());
+        assert!(res_elf.unwrap_err().contains("forbidden vendor signature"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

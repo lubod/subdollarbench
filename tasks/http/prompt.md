@@ -4,24 +4,29 @@ You are building an RFC-compliant HTTP/1.1 web server from scratch.
 - **Strict Prohibition on Frameworks & Built-in HTTP Servers**: You CANNOT use any built-in HTTP server or third-party web framework from any language (e.g., **DO NOT USE** Python's `http.server`, `Flask`, `FastAPI`, Go's `net/http` `http.ListenAndServe` / `http.Server`, `Gin`, `Fiber`, Node.js `http.createServer`, `Express`, Rust's `actix-web`, `axum`, `warp`, `hyper::server`, etc.).
 - **Raw TCP Sockets Only**: You must build the server from scratch using raw TCP sockets and stream I/O (e.g., `net.Listen` / `net.Conn` in Go, `std::net::TcpListener` / `tokio::net::TcpListener` in Rust, `socket` module in Python, `net.createServer` in Node.js, POSIX sockets in C/C++).
 - **Custom Protocol Implementation**: You must implement your own raw HTTP/1.1 wire protocol parser (parsing request lines, HTTP methods, paths, HTTP headers, Content-Length, and body streams) and your own response formatter (status lines, headers, `\r\n\r\n` boundary framing, and body bytes) directly over raw TCP byte streams.
-- **Example of Raw Socket Pattern in Python**:
+- **Example of Raw Socket Pattern with Concurrency (Threading / Event Loop)**:
   ```python
-  import socket, os
+  import socket, os, threading
   os.makedirs('/tmp/files', exist_ok=True)
+
+  def handle_client(conn):
+      try:
+          data = conn.recv(4096).decode('utf-8', errors='ignore')
+          # parse request line, headers, path, method, and dispatch response:
+          conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+      finally:
+          conn.close()
+
   server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
   server.bind(('0.0.0.0', 8080))
   server.listen(128)
   while True:
       conn, addr = server.accept()
-      try:
-          data = conn.recv(4096).decode('utf-8', errors='ignore')
-          # parse request line and headers, then respond:
-          conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-      finally:
-          conn.close()
+      threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
   ```
-  DO NOT import or use `http.server`, `BaseHTTPRequestHandler`, or `HTTPServer`. Build the server directly with `socket.socket` and parse the raw HTTP wire stream!
+  DO NOT import or use `http.server`, `BaseHTTPRequestHandler`, `wsgiref`, or `HTTPServer`. Build the server directly with raw TCP sockets (`socket.socket`, Go `net.Listen`, Rust `TcpListener`, Node.js `net.createServer`).
+  **Performance & Concurrency Target**: Your server will be stress-tested with `wrk -t2 -c20 -d3s` (20 concurrent connections). A single-threaded synchronous server that blocks on `conn.recv()` sequentially will fail or time out under load. You must handle connections concurrently using thread pools, non-blocking I/O (epoll/select/asyncio over raw sockets), or goroutines.
 
 ### Software Engineering (SWE) & Code Quality Standards
 Your implementation must meet high professional software engineering standards:

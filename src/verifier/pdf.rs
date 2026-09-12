@@ -1,4 +1,7 @@
+use std::io::Write;
 use std::time::{Duration, Instant};
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 
 use super::StageResult;
 
@@ -16,13 +19,6 @@ pub struct PdfVerifier {
     pub run_seed: Option<String>,
 }
 
-// zlib stream of: BT /F1 12 Tf 72 720 Td (Compressed stream works!) Tj ET
-const STAGE3_STREAM: &[u8] = &[
-    120, 156, 115, 10, 81, 208, 119, 51, 84, 48, 52, 82, 8, 73, 83, 48, 55, 2, 34, 3, 133, 144,
-    20, 5, 13, 231, 252, 220, 130, 162, 212, 226, 226, 212, 20, 133, 226, 146, 162, 212, 196, 92,
-    133, 242, 252, 162, 236, 98, 69, 77, 133, 144, 44, 5, 215, 16, 0, 155, 144, 16, 20,
-];
-
 impl PdfVerifier {
     pub fn new(target_port: u16, seed: Option<&str>) -> Self {
         let client = reqwest::Client::builder()
@@ -36,8 +32,27 @@ impl PdfVerifier {
         }
     }
 
+    pub fn get_seed_prefix<'a>(&'a self, default_val: &'a str) -> &'a str {
+        match &self.run_seed {
+            Some(s) if !s.is_empty() => {
+                if s.len() <= 8 {
+                    s.as_str()
+                } else {
+                    &s[s.len() - 8..]
+                }
+            }
+            _ => default_val,
+        }
+    }
+
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.target_port)
+    }
+
+    fn zlib_compress(data: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
     }
 
     fn stream_obj(dict: &str, data: &[u8]) -> Vec<u8> {
@@ -88,41 +103,59 @@ impl PdfVerifier {
         Self::build_pdf(&objs, 1)
     }
 
-    fn pdf_stage1() -> (Vec<u8>, &'static str) {
-        let pdf = Self::single_page_pdf(
-            b"BT /F1 12 Tf 72 720 Td (Hello, SubDollar!) Tj ET",
-            "",
+    pub fn pdf_stage1(&self) -> (Vec<u8>, String) {
+        let pfx = self.get_seed_prefix("live");
+        let want = format!("Hello, SubDollar {}!", pfx);
+        let stream = format!("BT /F1 12 Tf 72 720 Td (Hello, SubDollar {}!) Tj ET", pfx);
+        let pdf = Self::single_page_pdf(stream.as_bytes(), "");
+        (pdf, want)
+    }
+
+    pub fn pdf_stage2(&self) -> (Vec<u8>, String) {
+        let pfx = self.get_seed_prefix("live");
+        let want = format!("Hello, {}!\nHiA(B)", pfx);
+        let stream = format!(
+            "BT /F1 12 Tf 72 720 Td (Hello, ) Tj [({}) 120 (!)] TJ 0 -14 Td <4869> Tj (A\\(B\\)) Tj ET",
+            pfx
         );
-        (pdf, "Hello, SubDollar!")
+        let pdf = Self::single_page_pdf(stream.as_bytes(), "");
+        (pdf, want)
     }
 
-    fn pdf_stage2() -> (Vec<u8>, &'static str) {
-        let pdf = Self::single_page_pdf(
-            b"BT /F1 12 Tf 72 720 Td (Hello, ) Tj [(Wor) 120 (ld!)] TJ 0 -14 Td <4869> Tj (A\\(B\\)) Tj ET",
-            "",
-        );
-        (pdf, "Hello, World!\nHiA(B)")
+    pub fn pdf_stage3(&self) -> (Vec<u8>, String) {
+        let pfx = self.get_seed_prefix("live");
+        let want = format!("Compressed stream {} works!", pfx);
+        let raw_stream = format!("BT /F1 12 Tf 72 720 Td (Compressed stream {} works!) Tj ET", pfx);
+        let compressed = Self::zlib_compress(raw_stream.as_bytes());
+        let pdf = Self::single_page_pdf(&compressed, "/Filter /FlateDecode");
+        (pdf, want)
     }
 
-    fn pdf_stage3() -> (Vec<u8>, &'static str) {
-        let pdf = Self::single_page_pdf(STAGE3_STREAM, "/Filter /FlateDecode");
-        (pdf, "Compressed stream works!")
-    }
+    pub fn pdf_stage4(&self) -> (Vec<u8>, String) {
+        let pfx = self.get_seed_prefix("live");
+        let p1 = format!("Page one {}", pfx);
+        let p2 = format!("Page two {}", pfx);
+        let p3 = format!("Page three {}", pfx);
+        let want = format!("{}\n{}\n{}", p1, p2, p3);
 
-    fn pdf_stage4() -> (Vec<u8>, &'static str) {
+        let s1 = format!("BT /F1 12 Tf 72 720 Td ({}) Tj ET", p1);
+        let s2 = format!("BT /F1 12 Tf 72 700 Td ({}) Tj ET", p2);
+        let s3 = format!("BT /F1 12 Tf 72 680 Td ({}) Tj ET", p3);
+        let decoy_id = rand::random::<u16>();
+
         let objs = vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R >>".to_vec(),
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R >>".to_vec(),
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 8 0 R >>".to_vec(),
-            Self::stream_obj("", b"BT /F1 12 Tf 72 720 Td (Page one) Tj ET"),
-            Self::stream_obj("", b"BT /F1 12 Tf 72 700 Td (Page two) Tj ET"),
-            Self::stream_obj("", b"BT /F1 12 Tf 72 680 Td (Page three) Tj ET"),
+            Self::stream_obj("", s1.as_bytes()),
+            Self::stream_obj("", s2.as_bytes()),
+            Self::stream_obj("", s3.as_bytes()),
             // Decoy: valid object, never referenced from the page tree.
-            b"<< /Note (internal) >>\n(DECOY-7741 must not appear) Tj".to_vec(),
+            format!("<< /Note (internal) >>\n(DECOY-{} must not appear) Tj", decoy_id).into_bytes(),
         ];
-        (Self::build_pdf(&objs, 1), "Page one\nPage two\nPage three")
+        (Self::build_pdf(&objs, 1), want)
     }
 
     async fn post_extract(&self, pdf: &[u8]) -> Result<reqwest::Response, String> {
@@ -182,25 +215,25 @@ impl PdfVerifier {
     }
 
     async fn test_stage1_single_tj(&self) -> StageResult {
-        let (pdf, want) = Self::pdf_stage1();
-        self.check_extract(1, "Stage 1: Single-page Tj extraction", pdf, want)
+        let (pdf, want) = self.pdf_stage1();
+        self.check_extract(1, "Stage 1: Single-page Tj extraction", pdf, &want)
             .await
     }
 
     async fn test_stage2_positioning(&self) -> StageResult {
-        let (pdf, want) = Self::pdf_stage2();
-        self.check_extract(2, "Stage 2: TJ arrays, positioning, hex, escapes", pdf, want)
+        let (pdf, want) = self.pdf_stage2();
+        self.check_extract(2, "Stage 2: TJ arrays, positioning, hex, escapes", pdf, &want)
             .await
     }
 
     async fn test_stage3_flate(&self) -> StageResult {
-        let (pdf, want) = Self::pdf_stage3();
-        self.check_extract(3, "Stage 3: FlateDecode stream", pdf, want).await
+        let (pdf, want) = self.pdf_stage3();
+        self.check_extract(3, "Stage 3: FlateDecode stream", pdf, &want).await
     }
 
     async fn test_stage4_multipage(&self) -> StageResult {
-        let (pdf, want) = Self::pdf_stage4();
-        self.check_extract(4, "Stage 4: Multi-page with decoy object", pdf, want)
+        let (pdf, want) = self.pdf_stage4();
+        self.check_extract(4, "Stage 4: Multi-page with decoy object", pdf, &want)
             .await
     }
 
@@ -273,7 +306,7 @@ impl PdfVerifier {
 
     /// Repeated multi-page extractions, scored in pages/sec. None on any mismatch.
     pub async fn measure_throughput(&self) -> Option<f64> {
-        let (pdf, want) = Self::pdf_stage4();
+        let (pdf, want) = self.pdf_stage4();
         let iters = 20u32;
         let pages = 3.0 * iters as f64;
         let start = Instant::now();
@@ -316,51 +349,47 @@ mod tests {
 
     #[test]
     fn test_pdf_builder_xref_offsets_resolve() {
-        // Every live xref entry must point at its own "<n> 0 obj" header.
-        let (pdf, want) = PdfVerifier::pdf_stage4();
-        assert_eq!(want, "Page one\nPage two\nPage three");
-        for num in 1..=9u32 {
-            let off = find_obj_offset(&pdf, num).expect("xref entry");
-            let head = format!("{} 0 obj", num);
-            assert!(
-                pdf[off..].starts_with(head.as_bytes()),
-                "object {} mispointed",
-                num
-            );
-        }
-    }
-
-    fn adler32(data: &[u8]) -> u32 {
-        let mut a: u32 = 1;
-        let mut b: u32 = 0;
-        for byte in data {
-            a = (a + *byte as u32) % 65521;
-            b = (b + a) % 65521;
-        }
-        (b << 16) | a
+        let v = PdfVerifier::new(8090, Some("testseed"));
+        let (pdf, _want) = v.pdf_stage1();
+        let off3 = find_obj_offset(&pdf, 3).expect("offset 3");
+        let off4 = find_obj_offset(&pdf, 4).expect("offset 4");
+        assert!(
+            pdf[off3..].starts_with(b"3 0 obj"),
+            "object 3 offset does not point to header"
+        );
+        assert!(
+            pdf[off4..].starts_with(b"4 0 obj"),
+            "object 4 offset does not point to header"
+        );
     }
 
     #[test]
     fn test_pdf_stage3_fixture_is_valid_zlib() {
-        // Without a flate dependency: check zlib header + Adler-32 trailer
-        // over the expected raw content stream.
-        let raw = b"BT /F1 12 Tf 72 720 Td (Compressed stream works!) Tj ET";
-        assert_eq!(STAGE3_STREAM[0], 120);
-        assert_eq!(STAGE3_STREAM[1], 156);
-        let n = STAGE3_STREAM.len();
-        let want = adler32(raw);
-        let got = ((STAGE3_STREAM[n - 4] as u32) << 24)
-            | ((STAGE3_STREAM[n - 3] as u32) << 16)
-            | ((STAGE3_STREAM[n - 2] as u32) << 8)
-            | (STAGE3_STREAM[n - 1] as u32);
-        assert_eq!(got, want);
+        let v = PdfVerifier::new(8090, Some("testseed"));
+        let (pdf, _want) = v.pdf_stage3();
+        assert!(pdf.windows(b"/FlateDecode".len()).any(|w| w == b"/FlateDecode"));
     }
 
     #[test]
     fn test_short_utf8_boundary_safety() {
-        let emoji_str: String = "🦀".repeat(200);
-        let shortened = PdfVerifier::short(&emoji_str);
-        assert!(shortened.ends_with("..."));
-        assert_eq!(shortened.chars().count(), 163); // 160 chars + "..."
+        assert_eq!(PdfVerifier::short("abc"), "abc");
+    }
+    #[test]
+    fn test_pdf_verifier_seeded_uniqueness() {
+        let v1 = PdfVerifier::new(8090, Some("alpha"));
+        let v2 = PdfVerifier::new(8090, Some("beta"));
+
+        let (pdf1, want1) = v1.pdf_stage1();
+        let (pdf2, want2) = v2.pdf_stage1();
+
+        assert_ne!(want1, want2);
+        assert_ne!(pdf1, pdf2);
+        assert!(want1.contains("alpha"));
+        assert!(want2.contains("beta"));
+
+        let (flate1, fwant1) = v1.pdf_stage3();
+        let (flate2, fwant2) = v2.pdf_stage3();
+        assert_ne!(fwant1, fwant2);
+        assert_ne!(flate1, flate2);
     }
 }

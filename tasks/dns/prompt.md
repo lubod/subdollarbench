@@ -32,6 +32,7 @@ You can inspect standard RFC 1035 response framing with `dig @ref-dns -p 53 exam
 
 ### Required Behavior & DNS Zone Records
 Your server must listen on UDP port 5353 and respond to standard queries (QR=1, AA=1):
+- **Dynamic Query ID Reflection**: The verifier dynamically generates randomized 16-bit transaction IDs and strictly validates RFC 1035 wire structures (Header ID reflection, QR=1, Question echo, Answer section TYPE, CLASS, TTL, RDLENGTH, and RDATA). All query IDs must be properly reflected.
 
 1. **Header Handshake**:
    - Reflect incoming query transaction `ID`. Set response flags `QR=1` (standard response).

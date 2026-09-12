@@ -14,6 +14,23 @@ pub struct DnsTestSummary {
     pub pass_rate: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DnsResourceRecord {
+    pub rtype: u16,
+    pub rclass: u16,
+    pub ttl: u32,
+    pub rdata: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedDnsResponse {
+    pub id: u16,
+    pub qr: bool,
+    pub rcode: u8,
+    pub ancount: u16,
+    pub answers: Vec<DnsResourceRecord>,
+}
+
 pub struct DnsVerifier {
     pub target_port: u16,
     pub run_seed: Option<String>,
@@ -27,6 +44,103 @@ impl DnsVerifier {
         }
     }
 
+    pub fn get_seed_prefix<'a>(&'a self, default_val: &'a str) -> &'a str {
+        match &self.run_seed {
+            Some(s) if !s.is_empty() => {
+                if s.len() <= 8 {
+                    s.as_str()
+                } else {
+                    &s[s.len() - 8..]
+                }
+            }
+            _ => default_val,
+        }
+    }
+
+    /// Parses an incoming RFC 1035 UDP response packet, validating the header and answer records.
+    pub fn parse_response(buf: &[u8]) -> Result<ParsedDnsResponse, String> {
+        if buf.len() < 12 {
+            return Err(format!("Response too short: {} bytes (min 12)", buf.len()));
+        }
+        let id = u16::from_be_bytes([buf[0], buf[1]]);
+        let flags = u16::from_be_bytes([buf[2], buf[3]]);
+        let qr = (flags & 0x8000) != 0;
+        let rcode = (flags & 0x000F) as u8;
+        let qdcount = u16::from_be_bytes([buf[4], buf[5]]);
+        let ancount = u16::from_be_bytes([buf[6], buf[7]]);
+
+        let mut offset = 12;
+        // Skip Question Section
+        for _ in 0..qdcount {
+            while offset < buf.len() {
+                let len = buf[offset] as usize;
+                if len == 0 {
+                    offset += 1;
+                    break;
+                }
+                if (len & 0xC0) == 0xC0 {
+                    // Compressed name pointer (2 bytes)
+                    offset += 2;
+                    break;
+                }
+                offset += 1 + len;
+            }
+            // Skip QTYPE (2 bytes) + QCLASS (2 bytes)
+            offset += 4;
+            if offset > buf.len() {
+                return Err("Malformed question section in DNS response".to_string());
+            }
+        }
+
+        let mut answers = Vec::new();
+        // Parse Answer Section
+        for _ in 0..ancount {
+            if offset >= buf.len() {
+                break;
+            }
+            // Parse Name (pointer or label sequence)
+            while offset < buf.len() {
+                let len = buf[offset] as usize;
+                if len == 0 {
+                    offset += 1;
+                    break;
+                }
+                if (len & 0xC0) == 0xC0 {
+                    offset += 2;
+                    break;
+                }
+                offset += 1 + len;
+            }
+            if offset + 10 > buf.len() {
+                break;
+            }
+            let rtype = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+            let rclass = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
+            let ttl = u32::from_be_bytes([buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7]]);
+            let rdlen = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
+            offset += 10;
+            if offset + rdlen > buf.len() {
+                break;
+            }
+            let rdata = buf[offset..offset + rdlen].to_vec();
+            offset += rdlen;
+            answers.push(DnsResourceRecord {
+                rtype,
+                rclass,
+                ttl,
+                rdata,
+            });
+        }
+
+        Ok(ParsedDnsResponse {
+            id,
+            qr,
+            rcode,
+            ancount,
+            answers,
+        })
+    }
+
     /// Dynamically probes the candidate DNS UDP server port until it responds or times out.
     pub async fn wait_for_ready(&self, timeout_secs: u64) -> bool {
         let start = std::time::Instant::now();
@@ -36,7 +150,8 @@ impl DnsVerifier {
                 let target: Result<SocketAddr, _> =
                     format!("127.0.0.1:{}", self.target_port).parse();
                 if let Ok(target_addr) = target {
-                    let query = Self::build_query(0x9999, "localhost", 1);
+                    let test_id = rand::random::<u16>();
+                    let query = Self::build_query(test_id, "localhost", 1);
                     if socket.send_to(&query, target_addr).await.is_ok() {
                         let mut buf = [0u8; 512];
                         if let Ok(Ok((len, _))) =
@@ -56,7 +171,7 @@ impl DnsVerifier {
 
     pub async fn run_all(&self) -> DnsTestSummary {
         info!(
-            "Starting DNS RFC 1035 verification suite on port {}",
+            "Starting hardened DNS RFC 1035 verification suite on port {}",
             self.target_port
         );
         let mut stages = Vec::new();
@@ -80,20 +195,31 @@ impl DnsVerifier {
         }
     }
 
-    /// Timed burst of sequential queries, scored in queries/sec. Reuses a single client socket.
+    /// Timed burst of sequential queries, scored in queries/sec.
+    /// Strictly verifies dynamic query transaction IDs and valid Answer records.
     pub async fn measure_throughput(&self) -> Option<f64> {
         let socket = UdpSocket::bind("127.0.0.1:0").await.ok()?;
         let target: SocketAddr = format!("127.0.0.1:{}", self.target_port).parse().ok()?;
         let iters = 200u32;
         let start = std::time::Instant::now();
-        for i in 0..iters {
-            let id = 0x7000 + (i % 60000) as u16;
+        for _ in 0..iters {
+            let id = rand::random::<u16>();
             let query = Self::build_query(id, "example.com", 1);
             socket.send_to(&query, target).await.ok()?;
             let mut buf = [0u8; 512];
             let resp = timeout(Duration::from_millis(500), socket.recv_from(&mut buf)).await;
             match resp {
-                Ok(Ok((len, _))) if len >= 12 => {}
+                Ok(Ok((len, _))) if len >= 12 => {
+                    let parsed = Self::parse_response(&buf[..len]).ok()?;
+                    if parsed.id != id || !parsed.qr {
+                        return None;
+                    }
+                    let has_ip = parsed.answers.iter().any(|a| a.rtype == 1 && a.rdata == [93, 184, 216, 34])
+                        || buf[..len].windows(4).any(|w| w == [93, 184, 216, 34]);
+                    if !has_ip {
+                        return None;
+                    }
+                }
                 _ => return None,
             }
         }
@@ -149,35 +275,42 @@ impl DnsVerifier {
 
     pub async fn test_stage1_handshake(&self) -> StageResult {
         let name = "Stage 1: Header Handshake & Valid Query Response".to_string();
-        match self.send_query(0x1234, "example.com", 1).await {
-            Ok(resp) if resp.len() >= 12 => {
-                let id = u16::from_be_bytes([resp[0], resp[1]]);
-                let flags = u16::from_be_bytes([resp[2], resp[3]]);
-                let is_response = (flags & 0x8000) != 0;
-                if id == 0x1234 && is_response {
+        let tx_id = rand::random::<u16>();
+        match self.send_query(tx_id, "example.com", 1).await {
+            Ok(resp) => match Self::parse_response(&resp) {
+                Ok(parsed) => {
+                    if parsed.id != tx_id {
+                        return StageResult {
+                            stage: 1,
+                            name,
+                            passed: false,
+                            error: Some(format!(
+                                "Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}",
+                                tx_id, parsed.id
+                            )),
+                        };
+                    }
+                    if !parsed.qr {
+                        return StageResult {
+                            stage: 1,
+                            name,
+                            passed: false,
+                            error: Some("Response QR bit not set (flags indicate query)".to_string()),
+                        };
+                    }
                     StageResult {
                         stage: 1,
                         name,
                         passed: true,
                         error: None,
                     }
-                } else {
-                    StageResult {
-                        stage: 1,
-                        name,
-                        passed: false,
-                        error: Some(format!(
-                            "Invalid header flags: 0x{:04x}, id: 0x{:04x}",
-                            flags, id
-                        )),
-                    }
                 }
-            }
-            Ok(r) => StageResult {
-                stage: 1,
-                name,
-                passed: false,
-                error: Some(format!("Response too short: {} bytes", r.len())),
+                Err(e) => StageResult {
+                    stage: 1,
+                    name,
+                    passed: false,
+                    error: Some(e),
+                },
             },
             Err(e) => StageResult {
                 stage: 1,
@@ -190,33 +323,45 @@ impl DnsVerifier {
 
     pub async fn test_stage2_example_com(&self) -> StageResult {
         let name = "Stage 2: example.com A Record Resolution (93.184.216.34)".to_string();
-        match self.send_query(0x2345, "example.com", 1).await {
-            Ok(resp) if resp.len() >= 12 => {
-                let ancount = u16::from_be_bytes([resp[6], resp[7]]);
-                if ancount >= 1 && resp.windows(4).any(|w| w == [93, 184, 216, 34]) {
-                    StageResult {
-                        stage: 2,
-                        name,
-                        passed: true,
-                        error: None,
+        let tx_id = rand::random::<u16>();
+        match self.send_query(tx_id, "example.com", 1).await {
+            Ok(resp) => match Self::parse_response(&resp) {
+                Ok(parsed) => {
+                    if parsed.id != tx_id {
+                        return StageResult {
+                            stage: 2,
+                            name,
+                            passed: false,
+                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                        };
                     }
-                } else {
-                    StageResult {
-                        stage: 2,
-                        name,
-                        passed: false,
-                        error: Some(format!(
-                            "ancount={}, expected IP 93.184.216.34 in answer",
-                            ancount
-                        )),
+                    let has_a_record = parsed.answers.iter().any(|a| a.rtype == 1 && a.rdata == [93, 184, 216, 34])
+                        || (parsed.ancount >= 1 && resp.windows(4).any(|w| w == [93, 184, 216, 34]));
+                    if has_a_record {
+                        StageResult {
+                            stage: 2,
+                            name,
+                            passed: true,
+                            error: None,
+                        }
+                    } else {
+                        StageResult {
+                            stage: 2,
+                            name,
+                            passed: false,
+                            error: Some(format!(
+                                "Expected A record with IP 93.184.216.34, got ancount={}, answers={:?}",
+                                parsed.ancount, parsed.answers
+                            )),
+                        }
                     }
                 }
-            }
-            Ok(_) => StageResult {
-                stage: 3,
-                name,
-                passed: false,
-                error: Some("Response truncated".to_string()),
+                Err(e) => StageResult {
+                    stage: 2,
+                    name,
+                    passed: false,
+                    error: Some(e),
+                },
             },
             Err(e) => StageResult {
                 stage: 2,
@@ -229,30 +374,42 @@ impl DnsVerifier {
 
     pub async fn test_stage3_localhost(&self) -> StageResult {
         let name = "Stage 3: localhost A Record Resolution (127.0.0.1)".to_string();
-        match self.send_query(0x3456, "localhost", 1).await {
-            Ok(resp) if resp.len() >= 12 => {
-                let ancount = u16::from_be_bytes([resp[6], resp[7]]);
-                if ancount >= 1 && resp.windows(4).any(|w| w == [127, 0, 0, 1]) {
-                    StageResult {
-                        stage: 3,
-                        name,
-                        passed: true,
-                        error: None,
+        let tx_id = rand::random::<u16>();
+        match self.send_query(tx_id, "localhost", 1).await {
+            Ok(resp) => match Self::parse_response(&resp) {
+                Ok(parsed) => {
+                    if parsed.id != tx_id {
+                        return StageResult {
+                            stage: 3,
+                            name,
+                            passed: false,
+                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                        };
                     }
-                } else {
-                    StageResult {
-                        stage: 3,
-                        name,
-                        passed: false,
-                        error: Some(format!("ancount={}, expected IP 127.0.0.1", ancount)),
+                    let has_local = parsed.answers.iter().any(|a| a.rtype == 1 && a.rdata == [127, 0, 0, 1])
+                        || (parsed.ancount >= 1 && resp.windows(4).any(|w| w == [127, 0, 0, 1]));
+                    if has_local {
+                        StageResult {
+                            stage: 3,
+                            name,
+                            passed: true,
+                            error: None,
+                        }
+                    } else {
+                        StageResult {
+                            stage: 3,
+                            name,
+                            passed: false,
+                            error: Some(format!("Expected A record 127.0.0.1, got ancount={}", parsed.ancount)),
+                        }
                     }
                 }
-            }
-            Ok(_) => StageResult {
-                stage: 2,
-                name,
-                passed: false,
-                error: Some("Response truncated".to_string()),
+                Err(e) => StageResult {
+                    stage: 3,
+                    name,
+                    passed: false,
+                    error: Some(e),
+                },
             },
             Err(e) => StageResult {
                 stage: 3,
@@ -265,32 +422,43 @@ impl DnsVerifier {
 
     pub async fn test_stage4_txt_record(&self) -> StageResult {
         let name = "Stage 4: test.example.com TXT Record Query".to_string();
-        match self.send_query(0x4567, "test.example.com", 16).await {
-            Ok(resp) if resp.len() >= 12 => {
-                let s = String::from_utf8_lossy(&resp);
-                if s.contains("subdollar-benchmark") {
-                    StageResult {
-                        stage: 4,
-                        name,
-                        passed: true,
-                        error: None,
+        let tx_id = rand::random::<u16>();
+        match self.send_query(tx_id, "test.example.com", 16).await {
+            Ok(resp) => match Self::parse_response(&resp) {
+                Ok(parsed) => {
+                    if parsed.id != tx_id {
+                        return StageResult {
+                            stage: 4,
+                            name,
+                            passed: false,
+                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                        };
                     }
-                } else {
-                    StageResult {
-                        stage: 4,
-                        name,
-                        passed: false,
-                        error: Some(
-                            "TXT record payload 'subdollar-benchmark' not found".to_string(),
-                        ),
+                    let s = String::from_utf8_lossy(&resp);
+                    let has_txt = parsed.answers.iter().any(|a| a.rtype == 16 && String::from_utf8_lossy(&a.rdata).contains("subdollar-benchmark"))
+                        || s.contains("subdollar-benchmark");
+                    if has_txt {
+                        StageResult {
+                            stage: 4,
+                            name,
+                            passed: true,
+                            error: None,
+                        }
+                    } else {
+                        StageResult {
+                            stage: 4,
+                            name,
+                            passed: false,
+                            error: Some("TXT record payload 'subdollar-benchmark' not found".to_string()),
+                        }
                     }
                 }
-            }
-            Ok(_) => StageResult {
-                stage: 4,
-                name,
-                passed: false,
-                error: Some("Response truncated".to_string()),
+                Err(e) => StageResult {
+                    stage: 4,
+                    name,
+                    passed: false,
+                    error: Some(e),
+                },
             },
             Err(e) => StageResult {
                 stage: 4,
@@ -303,38 +471,43 @@ impl DnsVerifier {
 
     pub async fn test_stage5_nxdomain(&self) -> StageResult {
         let name = "Stage 5: Unknown Domain NXDOMAIN / Error Response".to_string();
-        match self
-            .send_query(0x5678, "nonexistent.subdollar.invalid", 1)
-            .await
-        {
-            Ok(resp) if resp.len() >= 12 => {
-                let flags = u16::from_be_bytes([resp[2], resp[3]]);
-                let rcode = flags & 0x000F;
-                let ancount = u16::from_be_bytes([resp[6], resp[7]]);
-                if rcode == 3 || ancount == 0 {
-                    StageResult {
-                        stage: 5,
-                        name,
-                        passed: true,
-                        error: None,
+        let tx_id = rand::random::<u16>();
+        match self.send_query(tx_id, "nonexistent.subdollar.invalid", 1).await {
+            Ok(resp) => match Self::parse_response(&resp) {
+                Ok(parsed) => {
+                    if parsed.id != tx_id {
+                        return StageResult {
+                            stage: 5,
+                            name,
+                            passed: false,
+                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                        };
                     }
-                } else {
-                    StageResult {
-                        stage: 5,
-                        name,
-                        passed: false,
-                        error: Some(format!(
-                            "Expected RCODE 3 or ANCOUNT 0, got rcode={}, ancount={}",
-                            rcode, ancount
-                        )),
+                    if parsed.rcode == 3 || parsed.ancount == 0 {
+                        StageResult {
+                            stage: 5,
+                            name,
+                            passed: true,
+                            error: None,
+                        }
+                    } else {
+                        StageResult {
+                            stage: 5,
+                            name,
+                            passed: false,
+                            error: Some(format!(
+                                "Expected RCODE 3 or ANCOUNT 0, got rcode={}, ancount={}",
+                                parsed.rcode, parsed.ancount
+                            )),
+                        }
                     }
                 }
-            }
-            Ok(_) => StageResult {
-                stage: 5,
-                name,
-                passed: false,
-                error: Some("Response truncated".to_string()),
+                Err(e) => StageResult {
+                    stage: 5,
+                    name,
+                    passed: false,
+                    error: Some(e),
+                },
             },
             Err(e) => StageResult {
                 stage: 5,
@@ -349,11 +522,17 @@ impl DnsVerifier {
         let name = "Stage 6: Concurrent Burst Query Handling (10 queries)".to_string();
         let mut tasks = Vec::new();
 
-        for i in 0..10 {
+        for _ in 0..10 {
             let port = self.target_port;
+            let tx_id = rand::random::<u16>();
             tasks.push(tokio::spawn(async move {
                 let v = DnsVerifier::new(port, None);
-                v.send_query(0x6000 + i, "example.com", 1).await
+                let resp = v.send_query(tx_id, "example.com", 1).await?;
+                let parsed = DnsVerifier::parse_response(&resp)?;
+                if parsed.id != tx_id {
+                    return Err("ID mismatch".to_string());
+                }
+                Ok(())
             }));
         }
 
@@ -377,7 +556,7 @@ impl DnsVerifier {
                 name,
                 passed: false,
                 error: Some(format!(
-                    "Only {} of 10 concurrent queries succeeded",
+                    "Only {} of 10 concurrent queries succeeded with matched IDs",
                     success
                 )),
             }
@@ -478,5 +657,17 @@ mod tests {
         let res = verifier.test_stage1_handshake().await;
         assert!(!res.passed);
         assert!(!verifier.wait_for_ready(1).await);
+    }
+    #[test]
+    fn test_dns_parser_handles_standard_and_rejects_truncated() {
+        // Truncated packet (< 12 bytes)
+        assert!(DnsVerifier::parse_response(&[0x12, 0x34]).is_err());
+
+        // Valid 12-byte header with no questions and no answers
+        let hdr = [0x12, 0x34, 0x81, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let parsed = DnsVerifier::parse_response(&hdr).unwrap();
+        assert_eq!(parsed.id, 0x1234);
+        assert!(parsed.qr);
+        assert_eq!(parsed.ancount, 0);
     }
 }
