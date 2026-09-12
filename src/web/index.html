@@ -2309,7 +2309,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; flex-direction: column; gap: 4px;">
                 <div>${passBadge}</div>
                 <div>${effBadge}</div>
-                ${(() => { const kids = (allRunsCache || []).filter(x => x.run_id.startsWith(r.run_id + '_trial')); return kids.length ? `<span class="badge" style="background: rgba(210,168,255,0.15); color: #d2a8ff; font-size: 0.7rem;" title="Trial outcomes: ${kids.map(k => Math.round(k.pass_rate) + '%').join(' / ')}">\U0001F4E6 ${kids.length} subruns</span>` : ''; })()}
+                ${(() => { const kids = (allRunsCache || []).filter(x => x.run_id.startsWith(r.run_id + '_trial')); return kids.length ? `<span class="badge" style="background: rgba(210,168,255,0.15); color: #d2a8ff; font-size: 0.7rem;" title="Trial outcomes: ${kids.map(k => Math.round(k.pass_rate) + '%').join(' / ')}">📦 ${kids.length} subruns</span>` : ''; })()}
               </div>
             </td>
             <td>
@@ -2325,7 +2325,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; flex-direction: column; gap: 2px;">
                 <span style="font-weight: 700; color: var(--primary); font-size: 0.95rem;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)} <span style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">pts/¢</span></span>
                 ${(r.throughput_score !== undefined && r.throughput_score !== null && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100) ? `<span style="font-size: 0.7rem; color: var(--text-muted);">(base: ${r.efficiency_score.toFixed(1)})</span>` : ''}
-                ${(r.total_trials && r.total_trials > 1) ? `<span style="font-size: 0.7rem; color: #d2a8ff;" title="Trial outcomes: ${((r.subruns || []).map(t => Math.round(t.pass_rate) + '%').join(' / ') || 'n/a')}">\U0001F4E6 best of ${r.total_trials}${(r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? ` • avg ${Math.round(r.avg_pass_rate)}%` : ''}${(r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? ` • Pass@1 ${Math.round(r.pass_at_1)}%` : ''}</span>` : ''}
+                ${(r.total_trials && r.total_trials > 1) ? `<span style="font-size: 0.7rem; color: #d2a8ff;" title="Trial outcomes: ${((r.subruns || []).map(t => Math.round(t.pass_rate) + '%').join(' / ') || 'n/a')}">📦 best of ${r.total_trials}${(r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? ` • avg ${Math.round(r.avg_pass_rate)}%` : ''}${(r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? ` • Pass@1 ${Math.round(r.pass_at_1)}%` : ''}</span>` : ''}
                 <span style="font-size: 0.72rem; color: var(--text-muted);">${tp}</span>
               </div>
             </td>
@@ -2581,6 +2581,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <td style="text-align: right;">
             <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px;">
               <span style="font-weight: 800; color: var(--primary); font-size: 1.05rem;" title="Base Efficiency: ${r.efficiency_score.toFixed(1)} pts/¢">${scoreVal.toFixed(1)} <span style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">Score/¢</span></span>
+              ${(r.total_trials && r.total_trials > 1) ? `<span style="font-size: 0.7rem; color: #d2a8ff;" title="Trial outcomes: ${((r.subruns || []).map(t => Math.round(t.pass_rate) + '%').join(' / ') || 'n/a')}">📦 best of ${r.total_trials}${(r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? ` \u2022 avg ${Math.round(r.avg_pass_rate)}%` : ''}${(r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? ` \u2022 Pass@1 ${Math.round(r.pass_at_1)}%` : ''}</span>` : ''}
               <button class="btn-secondary" style="padding: 3px 10px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
             </div>
           </td>
