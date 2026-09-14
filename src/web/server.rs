@@ -124,6 +124,8 @@ pub struct SubDollarModel {
     #[serde(default)]
     pub is_reasoning: bool,
     #[serde(default)]
+    pub reasoning_mandatory: bool,
+    #[serde(default)]
     pub supports_max_tokens: bool,
 }
 
@@ -510,10 +512,14 @@ async fn get_models(
                     .and_then(|r| r.supports_max_tokens)
                     .unwrap_or(false);
 
+                let reasoning_mandatory = reasoning_obj
+                    .and_then(|r| r.mandatory)
+                    .unwrap_or(false);
+
                 let is_reasoning = has_reasoning_param
                     || !supported_efforts.is_empty()
                     || supports_max_tokens
-                    || reasoning_obj.and_then(|r| r.mandatory).unwrap_or(false)
+                    || reasoning_mandatory
                     || reasoning_obj.and_then(|r| r.default_enabled).unwrap_or(false);
 
                 if prompt_p <= 1.0 && comp_p <= 5.0 && (prompt_p > 0.0 || comp_p > 0.0) {
@@ -527,6 +533,7 @@ async fn get_models(
                         supported_efforts,
                         default_effort,
                         is_reasoning,
+                        reasoning_mandatory,
                         supports_max_tokens,
                     });
                 }
@@ -577,6 +584,7 @@ async fn get_models(
                 supported_efforts: Vec::new(),
                 default_effort: None,
                 is_reasoning: false,
+                reasoning_mandatory: false,
                 supports_max_tokens: false,
             },
         );

@@ -997,17 +997,21 @@
           </label>
           <div class="presets" id="effortPresets">
             <button type="button" class="preset-btn active" data-effort="auto" onclick="setEffort('auto', this)">Auto</button>
+            <button type="button" class="preset-btn" data-effort="minimal" onclick="setEffort('minimal', this)">Minimal</button>
             <button type="button" class="preset-btn" data-effort="low" onclick="setEffort('low', this)">Low</button>
             <button type="button" class="preset-btn" data-effort="medium" onclick="setEffort('medium', this)">Medium</button>
             <button type="button" class="preset-btn" data-effort="high" onclick="setEffort('high', this)">High</button>
+            <button type="button" class="preset-btn" data-effort="xhigh" onclick="setEffort('xhigh', this)">X-High</button>
             <button type="button" class="preset-btn" data-effort="max" onclick="setEffort('max', this)">Max</button>
             <button type="button" class="preset-btn" data-effort="off" onclick="setEffort('off', this)">Off</button>
           </div>
           <select id="effortSelect" onchange="onEffortDropdownChanged()" style="margin-top: 4px;">
             <option value="auto" selected>⚡ Auto (Default model reasoning level)</option>
+            <option value="minimal">🌱 Minimal (Lowest thinking token budget)</option>
             <option value="low">🔹 Low (Fast reasoning, minimal token budget)</option>
             <option value="medium">⚖️ Medium (Balanced reasoning & speed)</option>
             <option value="high">🔥 High (Thorough analysis & chain-of-thought)</option>
+            <option value="xhigh">⚡ X-High (Extra-deep reasoning analysis)</option>
             <option value="max">🚀 Max (Maximum reasoning budget)</option>
             <option value="off">🚫 Off (No thinking / Direct generation)</option>
           </select>
@@ -1374,7 +1378,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         }
       }
 
-      const tiers = ['low', 'medium', 'high', 'max'];
+      const tiers = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+      const isMandatory = !!model.reasoning_mandatory;
       let currentVal = selectEl ? selectEl.value : 'auto';
       let needFallback = false;
 
@@ -1382,11 +1387,35 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const effort = (btn.dataset.effort || btn.textContent.toLowerCase().trim());
         const opt = selectEl ? selectEl.querySelector(`option[value="${effort}"]`) : null;
 
-        if (effort === 'auto' || effort === 'off') {
+        if (effort === 'auto') {
           btn.disabled = false;
           btn.classList.remove('disabled');
-          btn.title = effort === 'auto' ? 'Use model default reasoning level' : 'Disable thinking tokens';
+          btn.title = 'Use model default reasoning level';
           if (opt) opt.disabled = false;
+          return;
+        }
+
+        if (effort === 'off') {
+          if (isMandatory) {
+            btn.disabled = true;
+            btn.classList.add('disabled');
+            btn.title = 'Reasoning is mandatory for this model and cannot be disabled';
+            if (opt) {
+              opt.disabled = true;
+              if (!opt.text.includes('(Mandatory)')) {
+                opt.text = `${opt.text} ⚠️ (Reasoning is mandatory)`;
+              }
+            }
+            if (currentVal === 'off') needFallback = true;
+          } else {
+            btn.disabled = false;
+            btn.classList.remove('disabled');
+            btn.title = 'Disable reasoning / thinking tokens';
+            if (opt) {
+              opt.disabled = false;
+              opt.text = opt.text.replace(' ⚠️ (Reasoning is mandatory)', '');
+            }
+          }
           return;
         }
 
@@ -1431,8 +1460,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (needFallback && selectEl) {
         let fallback = 'auto';
         if (supportedEfforts.length > 0) {
-          if (currentVal === 'max' && supportedEfforts.includes('high')) {
+          if (currentVal === 'max' && supportedEfforts.includes('xhigh')) {
+            fallback = 'xhigh';
+          } else if ((currentVal === 'max' || currentVal === 'xhigh') && supportedEfforts.includes('high')) {
             fallback = 'high';
+          } else if (currentVal === 'minimal' && supportedEfforts.includes('low')) {
+            fallback = 'low';
           } else if (defaultEffort && supportedEfforts.includes(defaultEffort)) {
             fallback = defaultEffort;
           } else {
