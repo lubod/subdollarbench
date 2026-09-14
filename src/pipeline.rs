@@ -164,6 +164,13 @@ impl BenchmarkPipeline {
             ));
         }
 
+        // Auto-update OMP sandbox image if needed
+        if !config.eval_only {
+            if let Err(e) = crate::sandbox::omp_updater::auto_update_if_needed().await {
+                logger.log(&format!("[OMP Auto-Update Warning] {}", e));
+            }
+        }
+
         // 3. Start reference containers (attached to the run network under stable aliases)
         logger.log("[SETUP] Starting official reference server in Docker...");
         match config.task {

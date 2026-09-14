@@ -284,6 +284,33 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("  Deploy: rsync -az --delete {}/ <vps>:/srv/bench/", out);
         }
 
+        Commands::Sandbox { command } => match command {
+            subdollarbench::config::SandboxCommands::Check => {
+                println!("{}", "Checking OMP Sandbox Status...".bold().cyan());
+                let status = subdollarbench::sandbox::omp_updater::check_status(true).await;
+                let installed = status.installed_version.as_deref().unwrap_or("Not installed");
+                let latest = status.latest_version.as_deref().unwrap_or("Unknown");
+                println!("--------------------------------------------------");
+                println!("  Docker Image:    {}", if status.image_exists { "Found (subdollar-sandbox)".green() } else { "Missing".red() });
+                println!("  Installed OMP:   {}", installed.cyan());
+                println!("  Latest on npm:   {}", latest.yellow());
+                println!("  Status:          {}", if status.up_to_date { "Up to date ✓".green() } else { "Update available ⚠️".yellow() });
+                if let Some(err) = status.last_error {
+                    println!("  Registry Notice: {}", err.dimmed());
+                }
+                println!("--------------------------------------------------");
+            }
+            subdollarbench::config::SandboxCommands::Update { version } => {
+                println!("{}", "Updating subdollar-sandbox image with OMP...".bold().cyan());
+                let new_status = subdollarbench::sandbox::omp_updater::update_sandbox_image(version.as_deref()).await?;
+                println!(
+                    "{} Installed OMP: {}",
+                    "✅ Sandbox successfully updated!".bold().green(),
+                    new_status.installed_version.as_deref().unwrap_or("Unknown").green()
+                );
+            }
+        },
+
         Commands::Ui { port, host } => {
             web::UiServer::start(&host, port).await?;
         }
@@ -621,5 +648,15 @@ mod tests {
             },
         };
         let _ = tokio::time::timeout(Duration::from_millis(150), run_cli(cli_ui)).await;
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_sandbox_check() {
+        let cli = Cli {
+            command: Commands::Sandbox {
+                command: subdollarbench::config::SandboxCommands::Check,
+            },
+        };
+        assert!(run_cli(cli).await.is_ok());
     }
 }

@@ -146,6 +146,11 @@ pub enum Commands {
     },
 
     /// Launch web-based GUI for configuring and running benchmarks
+    /// Manage the Docker sandbox image and OMP agent
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommands,
+    },
     Ui {
         /// Port to bind the web server
         #[arg(short, long, default_value_t = 3000)]
@@ -154,6 +159,18 @@ pub enum Commands {
         /// Host address to bind
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+    },
+}
+
+#[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum SandboxCommands {
+    /// Check current installed vs latest available OMP version
+    Check,
+    /// Automatically update subdollar-sandbox image to latest (or specified) OMP version
+    Update {
+        /// Target OMP version (optional, defaults to latest on npm)
+        #[arg(short, long)]
+        version: Option<String>,
     },
 }
 
@@ -524,6 +541,32 @@ mod tests {
                 assert_eq!(host, "127.0.0.1");
             }
             _ => panic!("Expected Ui command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_sandbox() {
+        let args_check = ["subdollarbench", "sandbox", "check"];
+        let cli_check = Cli::try_parse_from(args_check).unwrap();
+        match cli_check.command {
+            Commands::Sandbox { command } => {
+                assert_eq!(command, SandboxCommands::Check);
+            }
+            _ => panic!("Expected Sandbox check command"),
+        }
+
+        let args_update = ["subdollarbench", "sandbox", "update", "--version", "18.1.21"];
+        let cli_update = Cli::try_parse_from(args_update).unwrap();
+        match cli_update.command {
+            Commands::Sandbox { command } => {
+                assert_eq!(
+                    command,
+                    SandboxCommands::Update {
+                        version: Some("18.1.21".to_string())
+                    }
+                );
+            }
+            _ => panic!("Expected Sandbox update command"),
         }
     }
 }

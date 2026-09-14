@@ -884,6 +884,10 @@
         <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">🏆 Leaderboard (Portal) ↗</a>
         <button class="btn-secondary" onclick="rebuildPortalNow()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;" title="Regenerate the static portal from current runs">Rebuild portal</button>
         <button class="btn-secondary" id="toggleSidebarBtn" onclick="toggleSidebar()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;">◀ Hide Setup Panel</button>
+        <div class="status-badge" id="ompStatusBadge" title="OMP Agent Sandbox Status" style="cursor: pointer;" onclick="checkOrUpdateOmp()">
+          <span class="status-dot" id="ompDot" style="background: var(--primary);"></span>
+          <span id="ompText">OMP: checking...</span>
+        </div>
         <div class="status-badge">
           <span class="status-dot" id="statusDot"></span>
           <span id="statusText">Ready</span>
@@ -3781,7 +3785,78 @@ function copyRunId() {
     checkActiveRun();
     checkLocalModelStatus(false);
     setInterval(() => checkLocalModelStatus(false), 8000);
+
+    async function fetchOmpStatus() {
+      try {
+        const res = await fetch('/api/sandbox/omp');
+        if (!res.ok) return;
+        const status = await res.json();
+        const dot = document.getElementById('ompDot');
+        const text = document.getElementById('ompText');
+        const badge = document.getElementById('ompStatusBadge');
+        if (!dot || !text || !badge) return;
+
+        if (status.is_updating) {
+          dot.className = 'status-dot running';
+          dot.style.background = 'var(--warning)';
+          text.textContent = 'OMP: updating...';
+          badge.title = 'Sandbox image is updating to latest OMP...';
+        } else if (!status.image_exists) {
+          dot.className = 'status-dot';
+          dot.style.background = 'var(--danger)';
+          text.textContent = 'OMP: missing (click to build)';
+          badge.title = 'Docker image subdollar-sandbox missing. Click to build automatically.';
+        } else if (status.up_to_date) {
+          dot.className = 'status-dot';
+          dot.style.background = 'var(--success)';
+          text.textContent = `OMP v${status.installed_version || '?'} ✓`;
+          badge.title = `OMP harness is up to date (v${status.installed_version}). Click to re-check.`;
+        } else if (status.installed_version && status.latest_version) {
+          dot.className = 'status-dot';
+          dot.style.background = 'var(--warning)';
+          text.textContent = `OMP v${status.installed_version} (update: v${status.latest_version})`;
+          badge.title = `New OMP release available: v${status.latest_version}. Click to update now!`;
+        } else {
+          dot.className = 'status-dot';
+          dot.style.background = 'var(--primary)';
+          text.textContent = `OMP: v${status.installed_version || 'unknown'}`;
+          badge.title = 'Click to check OMP status';
+        }
+      } catch (e) {
+        console.error('Failed to fetch OMP status', e);
+      }
+    }
+
+    async function checkOrUpdateOmp() {
+      const text = document.getElementById('ompText');
+      const dot = document.getElementById('ompDot');
+      if (text && (text.textContent.includes('update:') || text.textContent.includes('missing'))) {
+        if (!confirm('Rebuild subdollar-sandbox image with the latest OMP release?')) return;
+        if (dot) { dot.className = 'status-dot running'; dot.style.background = 'var(--warning)'; }
+        if (text) text.textContent = 'OMP: updating...';
+        try {
+          const res = await fetch('/api/sandbox/omp/update', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: '{}'
+          });
+          if (!res.ok) {
+            const err = await res.text();
+            alert('Update failed: ' + err);
+          } else {
+            const data = await res.json();
+            alert(`OMP update finished! Current version: v${data.installed_version || 'unknown'}`);
+          }
+        } catch (e) {
+          alert('OMP update request failed: ' + e);
+        }
+      }
+      await fetchOmpStatus();
+    }
+
     setInterval(checkActiveRun, 5000);
+    fetchOmpStatus();
+    setInterval(fetchOmpStatus, 30000);
   </script>
   <!-- =========================================================================
        Run Inspector Modal Dialog

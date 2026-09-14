@@ -386,6 +386,8 @@ impl UiServer {
             .route("/api/runs/:id/review", get(get_run_review))
             .route("/api/runs/:id", delete(delete_run))
             .route("/portal/*path", get(serve_portal))
+            .route("/api/sandbox/omp", get(get_sandbox_omp_status))
+            .route("/api/sandbox/omp/update", post(update_sandbox_omp))
             .route("/api/env", get(get_env))
             .route("/v1/models", get(crate::sandbox::tool_normalizer::handle_models))
             .route("/v1/chat/completions", post(crate::sandbox::tool_normalizer::handle_chat_completions))
@@ -412,6 +414,13 @@ impl UiServer {
         };
 
         let app = Self::build_app(state);
+
+        // Background check and auto-update of sandbox OMP on server startup
+        tokio::spawn(async {
+            if let Err(e) = crate::sandbox::omp_updater::auto_update_if_needed().await {
+                eprintln!("[OMP Startup Check Warning] {}", e);
+            }
+        });
 
         let addr = format!("{}:{}", host, port);
         println!("🚀 SubDollarBench GUI listening on: http://{}", addr);
@@ -1380,6 +1389,27 @@ async fn stream_logs(
     Sse::new(combined).keep_alive(KeepAlive::default())
 }
 
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOmpRequest {
+    pub version: Option<String>,
+}
+
+async fn get_sandbox_omp_status() -> Json<crate::sandbox::OmpVersionStatus> {
+    let status = crate::sandbox::omp_updater::check_status(false).await;
+    Json(status)
+}
+
+async fn update_sandbox_omp(
+    payload: Option<Json<UpdateOmpRequest>>,
+) -> Result<Json<crate::sandbox::OmpVersionStatus>, (StatusCode, String)> {
+    let target = payload.and_then(|p| p.0.version);
+    match crate::sandbox::omp_updater::update_sandbox_image(target.as_deref()).await {
+        Ok(status) => Ok(Json(status)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1576,6 +1606,16 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), 200);
         assert_eq!(res.text().await.unwrap(), "Prompt saved successfully");
+
+        // 5b. GET /api/sandbox/omp
+        let res = client
+            .get(format!("{}/api/sandbox/omp", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let omp_status: crate::sandbox::OmpVersionStatus = res.json().await.unwrap();
+        assert!(omp_status.installed_version.is_some() || !omp_status.image_exists);
 
         // 5a. GET /api/prompt with traversal rejected (S3)
         let res = client
