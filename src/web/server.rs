@@ -417,6 +417,7 @@ impl UiServer {
 
         // Background check and auto-update of sandbox OMP on server startup
         tokio::spawn(async {
+            crate::sandbox::SandboxManager::prune_stale_networks();
             if let Err(e) = crate::sandbox::omp_updater::auto_update_if_needed().await {
                 eprintln!("[OMP Startup Check Warning] {}", e);
             }
@@ -844,14 +845,11 @@ async fn stop_run(State(state): State<AppState>) -> Response {
     let maybe_run = state.current_run.read().unwrap().clone();
     if let Some(info) = maybe_run {
         let sandbox = SandboxManager::with_id(&info.run_id);
-        sandbox.cleanup();
+        sandbox.cleanup_instance();
     } else {
         let sandbox = SandboxManager::new();
-        sandbox.cleanup();
+        sandbox.cleanup_instance();
     }
-
-    // Sweeping cleanup: ensure all subdollar containers are killed and removed
-    crate::sandbox::SandboxManager::cleanup_all_subdollar_containers();
 
     *state.current_run.write().unwrap() = None;
     state.is_running.store(false, Ordering::SeqCst);

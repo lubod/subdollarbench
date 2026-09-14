@@ -263,24 +263,26 @@ impl BenchmarkPipeline {
             let cancel_flag_watcher = cancel_flag.clone();
             let sandbox_clone = SandboxManager::with_id(&run_id_c);
 
+            let mut blocking_handle = tokio::task::spawn_blocking(move || {
+                let spec = AgentRunSpec {
+                    model: &model_c,
+                    prompt: &prompt_c,
+                    workdir: &work_path_buf,
+                    api_key: api_key_c.as_deref(),
+                    limits,
+                    effort: Some(&effort_c),
+                    network: Some(net_name.as_str()),
+                    task: Some(config.task),
+                    run_id: Some(&run_id_c),
+                    cancel_flag: cancel_flag_c,
+                };
+                OmpRunner::run_agent_with_logger(spec, move |line| {
+                    logger_sub.log(&line);
+                })
+            });
+
             let omp_res: Result<OmpSessionStats> = tokio::select! {
-                res = tokio::task::spawn_blocking(move || {
-                    let spec = AgentRunSpec {
-                        model: &model_c,
-                        prompt: &prompt_c,
-                        workdir: &work_path_buf,
-                        api_key: api_key_c.as_deref(),
-                        limits,
-                        effort: Some(&effort_c),
-                        network: Some(net_name.as_str()),
-                        task: Some(config.task),
-                        run_id: Some(&run_id_c),
-                        cancel_flag: cancel_flag_c,
-                    };
-                    OmpRunner::run_agent_with_logger(spec, move |line| {
-                        logger_sub.log(&line);
-                    })
-                }) => match res {
+                res = &mut blocking_handle => match res {
                     Ok(inner) => inner,
                     Err(e) => Err(anyhow!("OMP task execution error: {}", e)),
                 },
@@ -296,7 +298,8 @@ impl BenchmarkPipeline {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    sandbox_clone.cleanup();
+                    blocking_handle.abort();
+                    sandbox_clone.cleanup_instance();
                     Err(anyhow!("Benchmark run was cancelled by user"))
                 }
             };

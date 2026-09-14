@@ -76,6 +76,21 @@ impl SandboxManager {
         if stderr.contains("already exists") {
             return Ok(());
         }
+        if stderr.contains("could not find an available, non-overlapping IPv4 address pool")
+            || stderr.contains("Pool overlaps with other one on this address space")
+        {
+            warn!("Network pool exhausted. Attempting to prune stale subdollar networks and retrying...");
+            Self::prune_stale_networks();
+            let retry_out = Command::new("docker")
+                .args(["network", "create", &net])
+                .output()?;
+            if retry_out.status.success()
+                || String::from_utf8_lossy(&retry_out.stderr).contains("already exists")
+            {
+                info!("Created run network {} after pruning stale networks", net);
+                return Ok(());
+            }
+        }
         Err(anyhow!("docker network create failed: {}", stderr))
     }
 
@@ -530,11 +545,44 @@ impl SandboxManager {
         format!("subdollar-omp-agent-{}", clean)
     }
 
-    pub fn cleanup_all_subdollar_containers() {
+    pub fn cleanup_instance(&self) {
+        self.cleanup();
+    }
+
+    pub fn remove_network_retrying(net: &str) {
+        for _ in 0..5 {
+            let res = Command::new("docker")
+                .args(["network", "rm", net])
+                .output();
+            if let Ok(out) = res {
+                if out.status.success() {
+                    return;
+                }
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("No such network") || stderr.contains("not found") {
+                    return;
+                }
+                if stderr.contains("active endpoints") {
+                    let _ = Command::new("sh")
+                        .args([
+                            "-c",
+                            &format!(
+                                "docker network inspect {} --format '{{{{range .Containers}}}}{{{{.Name}}}} {{{{end}}}}' | xargs -r -n1 docker network disconnect -f {}",
+                                net, net
+                            ),
+                        ])
+                        .output();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    pub fn prune_stale_networks() {
         let _ = Command::new("sh")
             .args([
                 "-c",
-                "docker ps -q --filter 'name=subdollar-' | xargs -r docker rm -f",
+                "docker network ls --filter 'name=subdollar-net-' -q | xargs -r docker network rm 2>/dev/null || true",
             ])
             .output();
     }
@@ -570,9 +618,23 @@ impl SandboxManager {
         let _ = Command::new("docker")
             .args(&rm_args)
             .output();
-        let _ = Command::new("docker")
-            .args(["network", "rm", &net])
-            .output();
+
+        let clean = self
+            .instance_id
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "");
+        if !clean.is_empty() && clean != "default" {
+            let _ = Command::new("sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "docker ps -a --format '{{{{.Names}}}}' | grep -E '^subdollar-.*-{}' | xargs -r docker rm -f",
+                        clean
+                    ),
+                ])
+                .output();
+        }
+
+        Self::remove_network_retrying(&net);
         let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
     }
 }
