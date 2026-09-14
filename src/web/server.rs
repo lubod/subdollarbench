@@ -88,18 +88,27 @@ fn default_max_turns() -> u32 {
     50
 }
 
+fn default_budget() -> f64 {
+    1.00
+}
+
+fn default_timeout_min() -> Option<u64> {
+    Some(30)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunRequest {
     pub model: String,
     pub task: String,
     pub api_key: Option<String>,
+    #[serde(default = "default_budget")]
     pub budget_usd: f64,
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
     pub eval_only: bool,
     #[serde(default)]
     pub effort: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_timeout_min")]
     pub timeout_min: Option<u64>,
     #[serde(default = "default_trials")]
     pub trials: u32,
@@ -1238,7 +1247,7 @@ async fn start_run(
                 effort: effort_setting.clone(),
                 max_turns: req.max_turns,
                 budget_usd: req.budget_usd,
-                timeout_min: req.timeout_min.unwrap_or(15),
+                timeout_min: req.timeout_min.unwrap_or(30),
                 api_key: req.api_key.clone(),
                 workdir: work_path,
                 eval_only: req.eval_only,

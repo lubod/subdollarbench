@@ -30,12 +30,12 @@ pub enum Commands {
         #[arg(long, default_value_t = 100)]
         max_turns: u32,
 
-        /// Maximum cost budget in USD (e.g. 0.20 for 20 cents)
-        #[arg(short = 'b', long, default_value_t = 0.50)]
+        /// Maximum cost budget in USD (e.g. 1.00 for $1.00)
+        #[arg(short = 'b', long, default_value_t = 1.00)]
         budget_usd: f64,
 
-        /// Maximum execution time in minutes before stopping agent (e.g. 15 for 15m)
-        #[arg(long, default_value_t = 15)]
+        /// Maximum execution time in minutes before stopping agent (e.g. 30 for 30m)
+        #[arg(long, default_value_t = 30)]
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
@@ -311,9 +311,9 @@ mod tests {
                 assert_eq!(model, "test-model");
                 assert_eq!(task, TaskType::Redis);
                 assert_eq!(effort, "auto");
-                assert_eq!(budget_usd, 0.50);
+                assert_eq!(budget_usd, 1.00);
                 assert_eq!(max_turns, 100);
-                assert_eq!(timeout_min, 15);
+                assert_eq!(timeout_min, 30);
                 assert!(!eval_only);
             }
             _ => panic!("Expected Run command"),
