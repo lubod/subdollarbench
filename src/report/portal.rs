@@ -518,6 +518,11 @@ footer { margin-top: 2.5rem; color: var(--mut); font-size: .8rem; }
 
 const PORTAL_JS: &str = r#"
 (function() {
+  function shortModelName(modelName) {
+    if (!modelName) return '';
+    return modelName.split('/').pop() || modelName;
+  }
+
   function getModelMeta(modelName) {
     const m = (modelName || '').toLowerCase();
     if (m.includes('claude') || m.includes('anthropic')) {
@@ -915,7 +920,7 @@ const PORTAL_JS: &str = r#"
             <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
               <div class="model-pill" style="background: ${modelMeta.bg}; border: 1px solid ${modelMeta.border};">
                 <span class="model-icon" title="${modelMeta.family}">${modelMeta.icon}</span>
-                <a href="runs/${escapeHtml(r.id)}/" style="font-weight: 600; color: ${modelMeta.color}; text-decoration: none;">${escapeHtml(r.model)}</a>
+                <a href="runs/${escapeHtml(r.id)}/" title="${escapeHtml(r.model)}" style="font-weight: 600; color: ${modelMeta.color}; text-decoration: none;">${escapeHtml(shortModelName(r.model))}</a>
               </div>
               ${taskBadge}
               ${subrunsBadge}
@@ -970,7 +975,7 @@ const PORTAL_JS: &str = r#"
       return cA - cB;
     })[0];
 
-    const topModel = topRun ? topRun.model : 'None yet';
+    const topModel = topRun ? shortModelName(topRun.model) : 'None yet';
     const topScore = topRun ? (computeScore(topRun, currentWeights).toFixed(1) + ' pts/¢') : '-';
     const peakTpStr = peakTpRun ? formatThroughput(peakTpRun.throughput_req_sec, taskKey) : 'N/A';
     const peakRatioStr = (peakTpRun && peakTpRun.reference_throughput_req_sec && peakTpRun.throughput_req_sec)
@@ -1500,7 +1505,7 @@ impl PortalExporter {
 
             let (m_fam, m_icon, m_color, m_bg, m_border) = Self::get_model_meta(&r.model);
             initial_rows.push_str(&format!(
-                "<tr data-href=\"runs/{}/\" class=\"leaderboard-row\" style=\"border-left: 4px solid {}; background: linear-gradient(90deg, {} 0%, rgba(18, 23, 36, 0.6) 12%, transparent 100%);\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><div class=\"model-pill\" style=\"background:{};border:1px solid {};\"><span class=\"model-icon\" title=\"{}\">{}</span><a href=\"runs/{}/\" style=\"font-weight:600;color:{};text-decoration:none;\">{}</a></div> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
+                "<tr data-href=\"runs/{}/\" class=\"leaderboard-row\" style=\"border-left: 4px solid {}; background: linear-gradient(90deg, {} 0%, rgba(18, 23, 36, 0.6) 12%, transparent 100%);\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><div class=\"model-pill\" style=\"background:{};border:1px solid {};\"><span class=\"model-icon\" title=\"{}\">{}</span><a href=\"runs/{}/\" style=\"font-weight:600;color:{};text-decoration:none;\" title=\"{}\">{}</a></div> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
                 Self::esc(&r.id),
                 m_color,
                 m_bg,
@@ -1512,6 +1517,7 @@ impl PortalExporter {
                 Self::esc(&r.id),
                 m_color,
                 Self::esc(&r.model),
+                Self::esc(crate::report::LeaderboardManager::short_model_name(&r.model)),
                 Self::esc(&r.task),
                 subruns_badge,
                 Self::esc(&r.language),

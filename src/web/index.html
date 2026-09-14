@@ -2412,6 +2412,11 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       showHiddenRuns = show;
       renderRuns();
     }
+    function shortModelName(modelName) {
+      if (!modelName) return '';
+      return modelName.split('/').pop() || modelName;
+    }
+
     function getModelMeta(modelName) {
       const m = (modelName || '').toLowerCase();
       if (m.includes('claude') || m.includes('anthropic')) {
@@ -2521,7 +2526,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                   <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
                     <span class="model-icon" title="${meta.family}">${meta.icon}</span>
-                    <span style="font-weight: 600; color: ${meta.color}; font-size: 0.88rem;">${safeModel}</span>
+                    <span title="${safeModel}" style="font-weight: 600; color: ${meta.color}; font-size: 0.88rem;">${escapeHtml(shortModelName(r.model))}</span>
                   </div>
                   <span class="badge badge-info">${safeTask}</span>
                   <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
@@ -2583,7 +2588,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                   <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
                     <span class="model-icon" title="${meta.family}">${meta.icon}</span>
-                    <span style="font-weight: 600; color: ${meta.color}; font-size: 0.9rem;">${safeModel}</span>
+                    <span title="${safeModel}" style="font-weight: 600; color: ${meta.color}; font-size: 0.9rem;">${escapeHtml(shortModelName(r.model))}</span>
                   </div>
                   <span class="badge badge-info">${safeTask}</span>
                   <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>

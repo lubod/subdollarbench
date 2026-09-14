@@ -591,6 +591,10 @@ impl LeaderboardManager {
         list
     }
 
+    pub fn short_model_name(model: &str) -> &str {
+        model.rsplit('/').next().unwrap_or(model)
+    }
+
     pub fn get_model_cli_meta(model: &str) -> (&'static str, Color) {
         let m = model.to_lowercase();
         if m.contains("claude") || m.contains("anthropic") {
@@ -681,10 +685,11 @@ impl LeaderboardManager {
             };
 
             let (icon, model_color) = Self::get_model_cli_meta(&r.model);
+            let short_model = Self::short_model_name(&r.model);
             let model_display = if !r.subruns.is_empty() {
-                format!("{} {} [{} trials · Fair E[Score]]", icon, r.model, r.subruns.len())
+                format!("{} {} [{} trials · Fair E[Score]]", icon, short_model, r.subruns.len())
             } else {
-                format!("{} {}", icon, r.model)
+                format!("{} {}", icon, short_model)
             };
             let savings_str = format!("{:.0}%", r.savings_percent);
             let eff_str = r.effort.clone().unwrap_or_else(|| "auto".to_string());
@@ -1085,5 +1090,13 @@ mod tests {
     fn run_reconsolidate_historical_results() {
         let count = LeaderboardManager::reconsolidate_saved_results("results").unwrap();
         println!("Reconsolidated {} historical multi-trial runs in results/", count);
+    }
+
+    #[test]
+    fn test_short_model_name() {
+        assert_eq!(LeaderboardManager::short_model_name("openrouter/deepseek/deepseek-v4.1-flash"), "deepseek-v4.1-flash");
+        assert_eq!(LeaderboardManager::short_model_name("openrouter/meta/muse-spark-1.3-contributor"), "muse-spark-1.3-contributor");
+        assert_eq!(LeaderboardManager::short_model_name("openai/gpt-5.6-luna"), "gpt-5.6-luna");
+        assert_eq!(LeaderboardManager::short_model_name("gemini-3.8-flash"), "gemini-3.8-flash");
     }
 }
