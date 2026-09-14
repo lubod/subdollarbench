@@ -87,9 +87,15 @@ impl BenchmarkRunResult {
 
         let n = subruns.len();
 
-        // Best-of: headline metrics come from the strongest trial
-        // (highest pass rate, then highest score). The trial average is
-        // preserved separately so reliability stays visible.
+        // 1. Conformance & Reliability Metrics
+        let passing: Vec<&BenchmarkRunResult> = subruns.iter().filter(|r| r.pass_rate >= 100.0).collect();
+        let c = passing.len();
+        let pass_at_1 = (c as f64 / n as f64) * 100.0;
+        let pass_at_k = compute_pass_at_k(n, c, n) * 100.0;
+        let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n as f64;
+
+        // 2. Select the canonical best trial for code workspace inspection
+        // (highest pass rate, then highest score)
         let best = subruns
             .iter()
             .max_by(|a, b| {
@@ -104,25 +110,79 @@ impl BenchmarkRunResult {
             })
             .unwrap_or(&subruns[0]);
 
-        let passing_trials = subruns.iter().filter(|r| r.pass_rate >= 100.0).count();
-        let pass_at_1 = compute_pass_at_k(n, passing_trials, 1) * 100.0;
-        let pass_at_k = compute_pass_at_k(n, passing_trials, n) * 100.0;
-        let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n as f64;
+        // 3. Fair Throughput: Median throughput among passing trials
+        let fair_tp = if c > 0 {
+            let mut tps: Vec<f64> = passing
+                .iter()
+                .filter_map(|r| r.throughput_req_sec)
+                .collect();
+            tps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            if tps.is_empty() {
+                None
+            } else if tps.len() % 2 == 1 {
+                Some(tps[tps.len() / 2])
+            } else {
+                let mid = tps.len() / 2;
+                Some((tps[mid - 1] + tps[mid]) / 2.0)
+            }
+        } else {
+            None
+        };
 
-        let best_cost_for_score = best.effective_cost_usd.unwrap_or(best.total_cost_usd);
-        let recomputed_eff_score = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
-            best.pass_rate,
-            best_cost_for_score,
-        );
-        let recomputed_tp_score = crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
-            best.pass_rate,
-            best_cost_for_score,
-            best.throughput_req_sec,
-            best.reference_throughput_req_sec,
-            Some(&best.task),
-        );
+        // 4. Fair Cost: Mean cost among passing trials (or all trials if none passed)
+        let (fair_cost_usd, fair_eff_cost_usd) = if c > 0 {
+            let sum_cost: f64 = passing.iter().map(|r| r.total_cost_usd).sum();
+            let sum_eff: f64 = passing.iter().map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd)).sum();
+            (sum_cost / c as f64, sum_eff / c as f64)
+        } else {
+            let sum_cost: f64 = subruns.iter().map(|r| r.total_cost_usd).sum();
+            let sum_eff: f64 = subruns.iter().map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd)).sum();
+            (sum_cost / n as f64, sum_eff / n as f64)
+        };
+
+        // 5. Fair Duration, Turns, Tokens & Savings
+        let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) = if c > 0 {
+            let dur: f64 = passing.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / c as f64;
+            let turns: u32 = (passing.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / c as f64).round() as u32;
+            let p: u64 = passing.iter().map(|r| r.prompt_tokens).sum::<u64>() / c as u64;
+            let ca: u64 = passing.iter().map(|r| r.cached_tokens).sum::<u64>() / c as u64;
+            let co: u64 = passing.iter().map(|r| r.completion_tokens).sum::<u64>() / c as u64;
+            let tot: u64 = passing.iter().map(|r| r.total_tokens).sum::<u64>() / c as u64;
+            let sav: f64 = passing.iter().map(|r| r.savings_percent).sum::<f64>() / c as f64;
+            (Some(dur), Some(turns), p, ca, co, tot, sav)
+        } else {
+            let dur: f64 = subruns.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / n as f64;
+            let turns: u32 = (subruns.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / n as f64).round() as u32;
+            let p: u64 = subruns.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
+            let ca: u64 = subruns.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
+            let co: u64 = subruns.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
+            let tot: u64 = subruns.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
+            let sav: f64 = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
+            (Some(dur), Some(turns), p, ca, co, tot, sav)
+        };
+
+        // 6. Fair Expected Score: Scaled by Pass@1 (Expected Utility)
+        let (fair_eff_score, fair_tp_score) = if c > 0 {
+            let base_eff = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
+                100.0,
+                fair_eff_cost_usd,
+            );
+            let base_tp = crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
+                100.0,
+                fair_eff_cost_usd,
+                fair_tp,
+                best.reference_throughput_req_sec,
+                Some(&best.task),
+            );
+            let rel = pass_at_1 / 100.0;
+            (base_eff * rel, base_tp * rel)
+        } else {
+            (0.0, 0.0)
+        };
 
         let latest_timestamp = subruns.iter().map(|r| &r.timestamp).max().cloned().unwrap_or_else(|| Utc::now().to_rfc3339());
+        let headline_pass_rate = if c > 0 { 100.0 } else { avg_pass_rate };
+        let headline_passed_stages = if c > 0 { best.total_stages } else { best.passed_stages };
 
         Some(BenchmarkRunResult {
             id: parent_id.to_string(),
@@ -130,22 +190,22 @@ impl BenchmarkRunResult {
             task: best.task.clone(),
             language: best.language.clone(),
             effort: best.effort.clone(),
-            pass_rate: best.pass_rate,
-            passed_stages: best.passed_stages,
+            pass_rate: headline_pass_rate,
+            passed_stages: headline_passed_stages,
             total_stages: best.total_stages,
-            throughput_req_sec: best.throughput_req_sec,
+            throughput_req_sec: fair_tp,
             reference_throughput_req_sec: best.reference_throughput_req_sec,
-            prompt_tokens: best.prompt_tokens,
-            cached_tokens: best.cached_tokens,
-            completion_tokens: best.completion_tokens,
-            total_tokens: best.total_tokens,
-            total_cost_usd: best.total_cost_usd,
-            effective_cost_usd: best.effective_cost_usd,
-            duration_seconds: best.duration_seconds,
-            turns: best.turns,
-            savings_percent: best.savings_percent,
-            efficiency_score: recomputed_eff_score,
-            throughput_score: Some(recomputed_tp_score),
+            prompt_tokens: fair_prompt,
+            cached_tokens: fair_cached,
+            completion_tokens: fair_comp,
+            total_tokens: fair_tot_tok,
+            total_cost_usd: fair_cost_usd,
+            effective_cost_usd: Some(fair_eff_cost_usd),
+            duration_seconds: fair_dur,
+            turns: fair_turns,
+            savings_percent: fair_savings,
+            efficiency_score: fair_eff_score,
+            throughput_score: Some(fair_tp_score),
             timestamp: latest_timestamp,
             method_version: best.method_version.clone(),
             subruns,
@@ -379,8 +439,12 @@ impl LeaderboardManager {
             );
 
             // 5. Create multi-trial header in parent console.log
+            let total_spent: f64 = subrun_results
+                .iter()
+                .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
+                .sum();
             let mut parent_log = format!(
-                "=== Multi-Trial Benchmark Execution ===\nModel: {}\nTask: {}\nSubruns: {}\nPass@1: {:.1}%\nPass@{}: {:.1}%\nAverage Throughput: {:.0} req/s\nAverage Cost: ${:.4}\nBest Subrun: {}\n=========================================\n\n",
+                "=== Multi-Trial Benchmark Execution (Fair Expected Scoring) ===\n                 Model: {}\n                 Task: {}\n                 Subruns: {}\n                 Pass@1: {:.1}%\n                 Pass@{}: {:.1}%\n                 Expected Throughput (Median): {:.0} req/s\n                 Expected Cost (Passing Mean): ${:.4}\n                 Total Multi-Trial Spend: ${:.4}\n                 Canonical Best Workspace: {}\n                 ===============================================================\n\n",
                 merged.model,
                 merged.task,
                 subrun_results.len(),
@@ -388,7 +452,8 @@ impl LeaderboardManager {
                 subrun_results.len(),
                 merged.pass_at_k.unwrap_or(100.0),
                 merged.throughput_req_sec.unwrap_or(0.0),
-                merged.total_cost_usd,
+                merged.effective_cost_usd.unwrap_or(merged.total_cost_usd),
+                total_spent,
                 best_sub.id
             );
             if let Ok(best_log) = fs::read_to_string(best_sub_dir.join("console.log")) {
@@ -402,6 +467,28 @@ impl LeaderboardManager {
         }
 
         Some(merged)
+    }
+
+    pub fn reconsolidate_saved_results(results_dir: &str) -> Result<usize> {
+        let path = Path::new(results_dir);
+        let mut count = 0;
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let file_path = entry.path();
+                if file_path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if let Ok(content) = fs::read_to_string(&file_path) {
+                        if let Ok(run) = serde_json::from_str::<BenchmarkRunResult>(&content) {
+                            if !run.subruns.is_empty() {
+                                if let Some(_merged) = Self::consolidate_multi_trial_run(&run.id, &run.subruns, true) {
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(count)
     }
 
     pub fn save_result(results_dir: &str, result: &BenchmarkRunResult) -> Result<()> {
@@ -595,7 +682,7 @@ impl LeaderboardManager {
 
             let (icon, model_color) = Self::get_model_cli_meta(&r.model);
             let model_display = if !r.subruns.is_empty() {
-                format!("{} {} [{} trials avg]", icon, r.model, r.subruns.len())
+                format!("{} {} [{} trials · Fair E[Score]]", icon, r.model, r.subruns.len())
             } else {
                 format!("{} {}", icon, r.model)
             };
@@ -735,19 +822,21 @@ mod tests {
         assert_eq!(merged.pass_at_k, Some(100.0));
         assert_eq!(merged.avg_pass_rate, Some(100.0));
         assert_eq!(merged.subruns.len(), 3);
-        // Best-of: all pass, highest score (t3) headlines.
-        assert_eq!(merged.throughput_req_sec.unwrap(), 7000.0);
-        assert_eq!(merged.duration_seconds.unwrap(), 50.0);
-        assert_eq!(merged.turns.unwrap(), 9);
-        assert_eq!(merged.total_cost_usd, 0.003);
+        // Fair expected scoring: median TP (6000), mean passing cost (0.002)
+        assert_eq!(merged.throughput_req_sec.unwrap(), 6000.0);
+        assert_eq!(merged.duration_seconds.unwrap(), 40.0);
+        assert_eq!(merged.turns.unwrap(), 8);
+        assert_eq!(merged.total_cost_usd, 0.002);
 
-        // Mixed outcome: headline follows the best passing trial, average is kept.
+        // Mixed outcome: 2 of 3 pass. Median TP of passing (5500), mean passing cost (0.0015).
+        // Score scaled by Pass@1 (66.7%).
         let f1 = make_run("run_a", 5000.0, 40.0, 8, 0.001, 100.0);
         let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
         let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
         let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3]).unwrap();
         assert_eq!(mixed.pass_rate, 100.0);
-        assert_eq!(mixed.throughput_req_sec.unwrap(), 6000.0);
+        assert_eq!(mixed.throughput_req_sec.unwrap(), 5500.0);
+        assert_eq!(mixed.total_cost_usd, 0.0015);
         assert!((mixed.avg_pass_rate.unwrap() - 66.66666666666667).abs() < 1e-9);
         assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
         assert!(mixed.efficiency_score > 0.0);
@@ -980,5 +1069,21 @@ mod tests {
         assert_eq!(loaded[0].total_tokens, 2300); // 1200 + 800 + 300
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_reconsolidate_saved_results_empty() {
+        let temp = std::env::temp_dir().join(format!("test_reconsolidate_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp);
+        let count = LeaderboardManager::reconsolidate_saved_results(temp.to_str().unwrap()).unwrap();
+        assert_eq!(count, 0);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    #[ignore]
+    fn run_reconsolidate_historical_results() {
+        let count = LeaderboardManager::reconsolidate_saved_results("results").unwrap();
+        println!("Reconsolidated {} historical multi-trial runs in results/", count);
     }
 }

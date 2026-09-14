@@ -705,6 +705,7 @@ const PORTAL_JS: &str = r#"
     } else {
       confFactor = passRate / 100.0;
     }
+    const relFactor = (r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? (r.pass_at_1 / 100.0) : 1.0;
 
     const effCost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0.01);
     const costCents = Math.max(effCost * 100.0, 0.0001);
@@ -739,7 +740,7 @@ const PORTAL_JS: &str = r#"
       turnsFactor = Math.pow(8.0 / turns, w.wTurns);
     }
 
-    return confFactor * costFactor * tpFactor * durFactor * tokFactor * turnsFactor;
+    return confFactor * relFactor * costFactor * tpFactor * durFactor * tokFactor * turnsFactor;
   }
 
   function isCustomFormula(w) {
@@ -848,7 +849,7 @@ const PORTAL_JS: &str = r#"
         : '';
       const hasSubruns = Array.isArray(r.subruns) && r.subruns.length > 0;
       const subrunsBadge = hasSubruns
-        ? `<span class="badge" style="background: rgba(163, 113, 247, 0.15); color: #d2a8ff; font-weight: 600;">${r.subruns.length} subruns (avg)</span>`
+        ? `<span class="badge" style="background: rgba(163, 113, 247, 0.15); color: #d2a8ff; font-weight: 600;" title="Fair Expected Score: Median TP & Passing Mean Cost scaled by Pass@1">${r.subruns.length} trials (Fair)</span>`
         : '';
       const passBadge = (r.pass_rate >= 100)
         ? `<span class="badge badge-pass">✔ 100% (${r.passed_stages}/${r.total_stages})</span>`
@@ -860,16 +861,21 @@ const PORTAL_JS: &str = r#"
 
       let subrunsHtml = '';
       if (hasSubruns) {
+        const totalSpent = r.subruns.reduce((acc, sr) => acc + (sr.effective_cost_usd || sr.total_cost_usd || 0), 0);
+        const passingCount = r.subruns.filter(sr => (sr.pass_rate || 0) >= 100).length;
         subrunsHtml = `
           <details style="margin-top: 5px; font-size: 0.72rem; color: var(--mut);">
-            <summary style="cursor: pointer; color: var(--acc); font-weight: 600;">View ${r.subruns.length} subruns breakdown ▾</summary>
+            <summary style="cursor: pointer; color: var(--acc); font-weight: 600;">View ${r.subruns.length} trials breakdown ▾ (${passingCount}/${r.subruns.length} passed · Total spend: $${totalSpent.toFixed(4)})</summary>
             <div style="margin-top: 4px; padding: 6px 8px; background: rgba(0,0,0,0.25); border-radius: 4px; border: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; gap: 4px;">
-              ${r.subruns.map((sr, sIdx) => `
+              ${r.subruns.map((sr, sIdx) => {
+                const sPass = (sr.pass_rate || 0) >= 100;
+                const statusTag = sPass ? '<span style="color:var(--grn);font-weight:600;">✔ 100%</span>' : `<span style="color:var(--red);font-weight:600;">✕ ${Math.round(sr.pass_rate || 0)}%</span>`;
+                return `
                 <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px dashed rgba(255,255,255,0.05); padding-bottom: 2px;">
-                  <span><strong>Trial ${sIdx + 1}:</strong> ${formatThroughput(sr.throughput_req_sec, sr.task)} · $${(sr.effective_cost_usd || sr.total_cost_usd).toFixed(4)} · ${formatDuration(sr.duration_seconds)} · ${sr.turns || '-'}t</span>
+                  <span><strong>Trial ${sIdx + 1}:</strong> ${statusTag} · ${formatThroughput(sr.throughput_req_sec, sr.task)} · $${(sr.effective_cost_usd || sr.total_cost_usd).toFixed(4)} · ${formatDuration(sr.duration_seconds)} · ${sr.turns || '-'}t</span>
                   <a href="runs/${escapeHtml(sr.id)}/" style="color: var(--primary); text-decoration: underline;">Inspect</a>
                 </div>
-              `).join('')}
+              `;}).join('')}
             </div>
           </details>
         `;
@@ -1460,7 +1466,7 @@ impl PortalExporter {
             let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
 
             let subruns_badge = if !r.subruns.is_empty() {
-                format!(" <span class=\"badge\" style=\"background:rgba(163,113,247,0.15);color:#d2a8ff;font-weight:600;\">{} subruns (avg)</span>", r.subruns.len())
+                format!(" <span class=\"badge\" style=\"background:rgba(163,113,247,0.15);color:#d2a8ff;font-weight:600;\" title=\"Fair Expected Score: Median TP & Passing Mean Cost scaled by Pass@1\">{} trials (Fair)</span>", r.subruns.len())
             } else {
                 String::new()
             };
