@@ -222,6 +222,35 @@ tbody tr {
 }
 tbody tr:hover { background: #182032; }
 tbody tr:nth-child(even) { background: rgba(255,255,255,.015); }
+tbody tr.leaderboard-row {
+  cursor: pointer;
+  transition: all .15s ease;
+}
+tbody tr.leaderboard-row:hover {
+  filter: brightness(1.1);
+  box-shadow: inset 0 0 16px rgba(255,255,255,0.04);
+}
+.model-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: inherit;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  max-width: fit-content;
+}
+.model-pill:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.model-icon {
+  font-size: 0.95rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 code {
   font-size: .78rem;
   word-break: break-all;
@@ -489,6 +518,56 @@ footer { margin-top: 2.5rem; color: var(--mut); font-size: .8rem; }
 
 const PORTAL_JS: &str = r#"
 (function() {
+  function getModelMeta(modelName) {
+    const m = (modelName || '').toLowerCase();
+    if (m.includes('claude') || m.includes('anthropic')) {
+      return { family: 'Anthropic', icon: '✦', color: '#f27244', bg: 'rgba(242, 114, 68, 0.14)', border: 'rgba(242, 114, 68, 0.35)' };
+    }
+    if (m.includes('gpt') || m.includes('openai') || m.includes('o1') || m.includes('o3') || m.includes('o4')) {
+      return { family: 'OpenAI', icon: '✳️', color: '#10a37f', bg: 'rgba(16, 163, 127, 0.14)', border: 'rgba(16, 163, 127, 0.35)' };
+    }
+    if (m.includes('gemini') || m.includes('google')) {
+      return { family: 'Google', icon: '✨', color: '#4285f4', bg: 'rgba(66, 133, 244, 0.14)', border: 'rgba(66, 133, 244, 0.35)' };
+    }
+    if (m.includes('deepseek')) {
+      return { family: 'DeepSeek', icon: '🐋', color: '#0084ff', bg: 'rgba(0, 132, 255, 0.14)', border: 'rgba(0, 132, 255, 0.35)' };
+    }
+    if (m.includes('llama') || m.includes('meta')) {
+      return { family: 'Meta', icon: '🦙', color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.14)', border: 'rgba(139, 92, 246, 0.35)' };
+    }
+    if (m.includes('qwen')) {
+      return { family: 'Qwen', icon: '🔮', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.14)', border: 'rgba(168, 85, 247, 0.35)' };
+    }
+    if (m.includes('mistral') || m.includes('codestral') || m.includes('pixtral')) {
+      return { family: 'Mistral', icon: '🌪️', color: '#ff7000', bg: 'rgba(255, 112, 0, 0.14)', border: 'rgba(255, 112, 0, 0.35)' };
+    }
+    if (m.includes('minimax')) {
+      return { family: 'MiniMax', icon: '⚡', color: '#e11d48', bg: 'rgba(225, 29, 72, 0.14)', border: 'rgba(225, 29, 72, 0.35)' };
+    }
+    if (m.includes('nova') || m.includes('amazon')) {
+      return { family: 'Amazon', icon: '☀️', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)' };
+    }
+    if (m.includes('cohere') || m.includes('command')) {
+      return { family: 'Cohere', icon: '🌿', color: '#14b8a6', bg: 'rgba(20, 184, 166, 0.14)', border: 'rgba(20, 184, 166, 0.35)' };
+    }
+    if (m.includes('local') || m.includes('ollama') || m.includes('llama.cpp') || m.includes('vllm')) {
+      return { family: 'Local', icon: '💻', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)' };
+    }
+    let hash = 0;
+    for (let i = 0; i < m.length; i++) hash = (hash * 31 + m.charCodeAt(i)) & 0xffffffff;
+    const PALETTE = [
+      { color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.14)', border: 'rgba(6, 182, 212, 0.35)' },
+      { color: '#ec4899', bg: 'rgba(236, 72, 153, 0.14)', border: 'rgba(236, 72, 153, 0.35)' },
+      { color: '#84cc16', bg: 'rgba(132, 204, 22, 0.14)', border: 'rgba(132, 204, 22, 0.35)' },
+      { color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.14)', border: 'rgba(59, 130, 246, 0.35)' },
+      { color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.14)', border: 'rgba(244, 63, 94, 0.35)' },
+      { color: '#6366f1', bg: 'rgba(99, 102, 241, 0.14)', border: 'rgba(99, 102, 241, 0.35)' },
+      { color: '#10b981', bg: 'rgba(16, 185, 129, 0.14)', border: 'rgba(16, 185, 129, 0.35)' },
+      { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)' }
+    ];
+    const choice = PALETTE[Math.abs(hash) % PALETTE.length];
+    return { family: 'Other', icon: '🤖', color: choice.color, bg: choice.bg, border: choice.border };
+  }
   const RUNS_DATA = window.__SUBDOLLAR_RUNS__ || [];
   
   const TASK_SPECS = {
@@ -822,12 +901,16 @@ const PORTAL_JS: &str = r#"
         scoreSub = bonusBase;
       }
 
-      return `<tr data-href="runs/${escapeHtml(r.id)}/">
+      const modelMeta = getModelMeta(r.model);
+      return `<tr data-href="runs/${escapeHtml(r.id)}/" class="leaderboard-row" style="border-left: 4px solid ${modelMeta.color}; background: linear-gradient(90deg, ${modelMeta.bg} 0%, rgba(18, 23, 36, 0.6) 12%, transparent 100%);">
         <td style="text-align: center;">${rankBadge}</td>
         <td>
-          <div style="display: flex; flex-direction: column; gap: 3px;">
+          <div style="display: flex; flex-direction: column; gap: 4px;">
             <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-              <a href="runs/${escapeHtml(r.id)}/" style="font-weight: 600; color: var(--primary);">${escapeHtml(r.model)}</a>
+              <div class="model-pill" style="background: ${modelMeta.bg}; border: 1px solid ${modelMeta.border};">
+                <span class="model-icon" title="${modelMeta.family}">${modelMeta.icon}</span>
+                <a href="runs/${escapeHtml(r.id)}/" style="font-weight: 600; color: ${modelMeta.color}; text-decoration: none;">${escapeHtml(r.model)}</a>
+              </div>
               ${taskBadge}
               ${subrunsBadge}
               <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--grn);">${escapeHtml(r.language || 'Unknown')}</span>
@@ -1295,6 +1378,46 @@ impl PortalExporter {
             .replace('"', "&quot;")
     }
 
+    pub fn get_model_meta(model: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str) {
+        let m = model.to_lowercase();
+        if m.contains("claude") || m.contains("anthropic") {
+            ("Anthropic", "✦", "#f27244", "rgba(242, 114, 68, 0.14)", "rgba(242, 114, 68, 0.35)")
+        } else if m.contains("gpt") || m.contains("openai") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
+            ("OpenAI", "✳️", "#10a37f", "rgba(16, 163, 127, 0.14)", "rgba(16, 163, 127, 0.35)")
+        } else if m.contains("gemini") || m.contains("google") {
+            ("Google", "✨", "#4285f4", "rgba(66, 133, 244, 0.14)", "rgba(66, 133, 244, 0.35)")
+        } else if m.contains("deepseek") {
+            ("DeepSeek", "🐋", "#0084ff", "rgba(0, 132, 255, 0.14)", "rgba(0, 132, 255, 0.35)")
+        } else if m.contains("llama") || m.contains("meta") {
+            ("Meta", "🦙", "#8b5cf6", "rgba(139, 92, 246, 0.14)", "rgba(139, 92, 246, 0.35)")
+        } else if m.contains("qwen") {
+            ("Qwen", "🔮", "#a855f7", "rgba(168, 85, 247, 0.14)", "rgba(168, 85, 247, 0.35)")
+        } else if m.contains("mistral") || m.contains("codestral") || m.contains("pixtral") {
+            ("Mistral", "🌪️", "#ff7000", "rgba(255, 112, 0, 0.14)", "rgba(255, 112, 0, 0.35)")
+        } else if m.contains("minimax") {
+            ("MiniMax", "⚡", "#e11d48", "rgba(225, 29, 72, 0.14)", "rgba(225, 29, 72, 0.35)")
+        } else if m.contains("nova") || m.contains("amazon") {
+            ("Amazon", "☀️", "#f59e0b", "rgba(245, 158, 11, 0.14)", "rgba(245, 158, 11, 0.35)")
+        } else if m.contains("cohere") || m.contains("command") {
+            ("Cohere", "🌿", "#14b8a6", "rgba(20, 184, 166, 0.14)", "rgba(20, 184, 166, 0.35)")
+        } else if m.contains("local") || m.contains("ollama") || m.contains("llama.cpp") || m.contains("vllm") {
+            ("Local", "💻", "#94a3b8", "rgba(148, 163, 184, 0.14)", "rgba(148, 163, 184, 0.35)")
+        } else {
+            let colors = [
+                ("Other", "🤖", "#06b6d4", "rgba(6, 182, 212, 0.14)", "rgba(6, 182, 212, 0.35)"),
+                ("Other", "🤖", "#ec4899", "rgba(236, 72, 153, 0.14)", "rgba(236, 72, 153, 0.35)"),
+                ("Other", "🤖", "#84cc16", "rgba(132, 204, 22, 0.14)", "rgba(132, 204, 22, 0.35)"),
+                ("Other", "🤖", "#3b82f6", "rgba(59, 130, 246, 0.14)", "rgba(59, 130, 246, 0.35)"),
+                ("Other", "🤖", "#f43f5e", "rgba(244, 63, 94, 0.14)", "rgba(244, 63, 94, 0.35)"),
+                ("Other", "🤖", "#6366f1", "rgba(99, 102, 241, 0.14)", "rgba(99, 102, 241, 0.35)"),
+                ("Other", "🤖", "#10b981", "rgba(16, 185, 129, 0.14)", "rgba(16, 185, 129, 0.35)"),
+                ("Other", "🤖", "#f59e0b", "rgba(245, 158, 11, 0.14)", "rgba(245, 158, 11, 0.35)"),
+            ];
+            let hash: usize = m.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+            colors[hash % colors.len()]
+        }
+    }
+
     fn render_index(results: &[crate::report::leaderboard::BenchmarkRunResult], base_url: &str) -> String {
         let http_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("http")).count();
         let redis_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("redis")).count();
@@ -1369,11 +1492,19 @@ impl PortalExporter {
                 subruns_html.push_str("</div></details>");
             }
 
+            let (m_fam, m_icon, m_color, m_bg, m_border) = Self::get_model_meta(&r.model);
             initial_rows.push_str(&format!(
-                "<tr data-href=\"runs/{}/\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><a href=\"runs/{}/\" style=\"font-weight:600;color:var(--primary);\">{}</a> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
+                "<tr data-href=\"runs/{}/\" class=\"leaderboard-row\" style=\"border-left: 4px solid {}; background: linear-gradient(90deg, {} 0%, rgba(18, 23, 36, 0.6) 12%, transparent 100%);\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><div class=\"model-pill\" style=\"background:{};border:1px solid {};\"><span class=\"model-icon\" title=\"{}\">{}</span><a href=\"runs/{}/\" style=\"font-weight:600;color:{};text-decoration:none;\">{}</a></div> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
                 Self::esc(&r.id),
+                m_color,
+                m_bg,
                 medal,
+                m_bg,
+                m_border,
+                m_fam,
+                m_icon,
                 Self::esc(&r.id),
+                m_color,
                 Self::esc(&r.model),
                 Self::esc(&r.task),
                 subruns_badge,

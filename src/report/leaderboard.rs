@@ -504,6 +504,35 @@ impl LeaderboardManager {
         list
     }
 
+    pub fn get_model_cli_meta(model: &str) -> (&'static str, Color) {
+        let m = model.to_lowercase();
+        if m.contains("claude") || m.contains("anthropic") {
+            ("✦", Color::Red)
+        } else if m.contains("gpt") || m.contains("openai") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
+            ("✳️", Color::Green)
+        } else if m.contains("gemini") || m.contains("google") {
+            ("✨", Color::Blue)
+        } else if m.contains("deepseek") {
+            ("🐋", Color::Cyan)
+        } else if m.contains("llama") || m.contains("meta") {
+            ("🦙", Color::Magenta)
+        } else if m.contains("qwen") {
+            ("🔮", Color::DarkMagenta)
+        } else if m.contains("mistral") || m.contains("codestral") || m.contains("pixtral") {
+            ("🌪️", Color::DarkYellow)
+        } else if m.contains("minimax") {
+            ("⚡", Color::DarkRed)
+        } else if m.contains("nova") || m.contains("amazon") {
+            ("☀️", Color::Yellow)
+        } else if m.contains("cohere") || m.contains("command") {
+            ("🌿", Color::DarkCyan)
+        } else if m.contains("local") || m.contains("ollama") || m.contains("llama.cpp") || m.contains("vllm") {
+            ("💻", Color::White)
+        } else {
+            ("🤖", Color::Cyan)
+        }
+    }
+
     pub fn print_table(results: &[BenchmarkRunResult]) {
         Self::print_table_with_title("Benchmark Leaderboard", results);
     }
@@ -564,10 +593,11 @@ impl LeaderboardManager {
                 )
             };
 
+            let (icon, model_color) = Self::get_model_cli_meta(&r.model);
             let model_display = if !r.subruns.is_empty() {
-                format!("{} [{} trials avg]", r.model, r.subruns.len())
+                format!("{} {} [{} trials avg]", icon, r.model, r.subruns.len())
             } else {
-                r.model.clone()
+                format!("{} {}", icon, r.model)
             };
             let savings_str = format!("{:.0}%", r.savings_percent);
             let eff_str = r.effort.clone().unwrap_or_else(|| "auto".to_string());
@@ -582,7 +612,7 @@ impl LeaderboardManager {
 
             table.add_row(Row::from(vec![
                 Cell::new(rank_str).fg(Color::Yellow),
-                Cell::new(&model_display).fg(Color::Cyan),
+                Cell::new(&model_display).fg(model_color),
                 Cell::new(eff_str).fg(Color::Yellow),
                 Cell::new(&r.task),
                 Cell::new(&r.language).fg(Color::Green),

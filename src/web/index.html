@@ -329,8 +329,33 @@
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    .responsive-runs-table tr:hover {
-      background: #161b22;
+    .responsive-runs-table tbody tr {
+      transition: all 0.15s ease;
+    }
+    .responsive-runs-table tbody tr:hover {
+      filter: brightness(1.1);
+      background: rgba(255, 255, 255, 0.04) !important;
+    }
+    .model-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-weight: 600;
+      transition: all 0.15s ease;
+      max-width: 100%;
+    }
+    .model-pill:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .model-icon {
+      font-size: 0.95rem;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .btn-toggle {
       background: #161b22;
@@ -2387,6 +2412,57 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       showHiddenRuns = show;
       renderRuns();
     }
+    function getModelMeta(modelName) {
+      const m = (modelName || '').toLowerCase();
+      if (m.includes('claude') || m.includes('anthropic')) {
+        return { family: 'Anthropic', icon: '✦', color: '#f27244', bg: 'rgba(242, 114, 68, 0.14)', border: 'rgba(242, 114, 68, 0.35)' };
+      }
+      if (m.includes('gpt') || m.includes('openai') || m.includes('o1') || m.includes('o3') || m.includes('o4')) {
+        return { family: 'OpenAI', icon: '✳️', color: '#10a37f', bg: 'rgba(16, 163, 127, 0.14)', border: 'rgba(16, 163, 127, 0.35)' };
+      }
+      if (m.includes('gemini') || m.includes('google')) {
+        return { family: 'Google', icon: '✨', color: '#4285f4', bg: 'rgba(66, 133, 244, 0.14)', border: 'rgba(66, 133, 244, 0.35)' };
+      }
+      if (m.includes('deepseek')) {
+        return { family: 'DeepSeek', icon: '🐋', color: '#0084ff', bg: 'rgba(0, 132, 255, 0.14)', border: 'rgba(0, 132, 255, 0.35)' };
+      }
+      if (m.includes('llama') || m.includes('meta')) {
+        return { family: 'Meta', icon: '🦙', color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.14)', border: 'rgba(139, 92, 246, 0.35)' };
+      }
+      if (m.includes('qwen')) {
+        return { family: 'Qwen', icon: '🔮', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.14)', border: 'rgba(168, 85, 247, 0.35)' };
+      }
+      if (m.includes('mistral') || m.includes('codestral') || m.includes('pixtral')) {
+        return { family: 'Mistral', icon: '🌪️', color: '#ff7000', bg: 'rgba(255, 112, 0, 0.14)', border: 'rgba(255, 112, 0, 0.35)' };
+      }
+      if (m.includes('minimax')) {
+        return { family: 'MiniMax', icon: '⚡', color: '#e11d48', bg: 'rgba(225, 29, 72, 0.14)', border: 'rgba(225, 29, 72, 0.35)' };
+      }
+      if (m.includes('nova') || m.includes('amazon')) {
+        return { family: 'Amazon', icon: '☀️', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)' };
+      }
+      if (m.includes('cohere') || m.includes('command')) {
+        return { family: 'Cohere', icon: '🌿', color: '#14b8a6', bg: 'rgba(20, 184, 166, 0.14)', border: 'rgba(20, 184, 166, 0.35)' };
+      }
+      if (m.includes('local') || m.includes('ollama') || m.includes('llama.cpp') || m.includes('vllm')) {
+        return { family: 'Local', icon: '💻', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)' };
+      }
+      let hash = 0;
+      for (let i = 0; i < m.length; i++) hash = (hash * 31 + m.charCodeAt(i)) & 0xffffffff;
+      const PALETTE = [
+        { color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.14)', border: 'rgba(6, 182, 212, 0.35)' },
+        { color: '#ec4899', bg: 'rgba(236, 72, 153, 0.14)', border: 'rgba(236, 72, 153, 0.35)' },
+        { color: '#84cc16', bg: 'rgba(132, 204, 22, 0.14)', border: 'rgba(132, 204, 22, 0.35)' },
+        { color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.14)', border: 'rgba(59, 130, 246, 0.35)' },
+        { color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.14)', border: 'rgba(244, 63, 94, 0.35)' },
+        { color: '#6366f1', bg: 'rgba(99, 102, 241, 0.14)', border: 'rgba(99, 102, 241, 0.35)' },
+        { color: '#10b981', bg: 'rgba(16, 185, 129, 0.14)', border: 'rgba(16, 185, 129, 0.35)' },
+        { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)' }
+      ];
+      const choice = PALETTE[Math.abs(hash) % PALETTE.length];
+      return { family: 'Other', icon: '🤖', color: choice.color, bg: choice.bg, border: choice.border };
+    }
+
     function renderRuns() {
       const q = currentRunsFilter;
       const runs = allRunsCache.filter(r => {
@@ -2434,13 +2510,19 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const shortId = r.run_id.length > 14 ? r.run_id.slice(-8) : r.run_id;
 
         // 1. Table row
+        const meta = getModelMeta(r.model);
         if (tbody) {
           const tr = document.createElement('tr');
+          tr.style.borderLeft = `4px solid ${meta.color}`;
+          tr.style.background = `linear-gradient(90deg, ${meta.bg} 0%, rgba(22, 27, 34, 0.5) 15%, transparent 100%)`;
           tr.innerHTML = `
             <td>
               <div style="display: flex; flex-direction: column; gap: 4px;">
                 <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <span style="font-weight: 600; color: var(--primary); font-size: 0.88rem;">${safeModel}</span>
+                  <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
+                    <span class="model-icon" title="${meta.family}">${meta.icon}</span>
+                    <span style="font-weight: 600; color: ${meta.color}; font-size: 0.88rem;">${safeModel}</span>
+                  </div>
                   <span class="badge badge-info">${safeTask}</span>
                   <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
                 </div>
@@ -2494,12 +2576,15 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         // 2. Cards element
         if (cardsContainer) {
           const card = document.createElement('div');
-          card.style.cssText = 'background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px;';
+          card.style.cssText = `background: #161b22; border: 1px solid var(--border); border-left: 4px solid ${meta.color}; border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px;`;
           card.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
               <div>
                 <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <span style="font-weight: 600; color: var(--primary); font-size: 0.9rem;">${safeModel}</span>
+                  <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
+                    <span class="model-icon" title="${meta.family}">${meta.icon}</span>
+                    <span style="font-weight: 600; color: ${meta.color}; font-size: 0.9rem;">${safeModel}</span>
+                  </div>
                   <span class="badge badge-info">${safeTask}</span>
                   <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
                 </div>
