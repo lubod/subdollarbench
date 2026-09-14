@@ -450,8 +450,18 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         if let Some(eff) = effort {
             let eff_clean = eff.trim().to_lowercase();
-            if !eff_clean.is_empty() && eff_clean != "default" {
-                cmd.arg(format!("--thinking={}", eff_clean));
+            if !eff_clean.is_empty() && eff_clean != "default" && eff_clean != "auto" {
+                // OpenAI models (o1, o3, gpt-5) support reasoning level "max".
+                // Meta and other providers only support up to "high" and reject "max" with HTTP 400.
+                let eff_effective = if eff_clean == "max"
+                    && !effective_model.starts_with("openai/")
+                    && !effective_model.contains("/openai/")
+                {
+                    "high"
+                } else {
+                    eff_clean.as_str()
+                };
+                cmd.arg(format!("--thinking={}", eff_effective));
             }
             cmd.arg("--print-thoughts");
         } else {
