@@ -14,13 +14,13 @@ Your implementation must meet high professional software engineering standards:
 - **Black-Box Testing**: You may test runtime behavior against the running reference server using CLI tools (`redis-cli -h ref-redis -p 6379 <cmd>`).
 - **Originality**: All code must be your own original implementation designed from specifications and observable behavior. Any access to reference source code invalidates the benchmark run.
 
-### Constraints & Packaging Freedom (Dockerfile or start.sh)
-- You are free to choose ANY programming language of your choice (Go, Python, Rust, Node.js, C, C++, etc.).
-- Choose the language and design that maximizes reliability, simplicity, and throughput.
+### Programming Language Freedom & Packaging (Dockerfile or start.sh)
+- **Choose ANY Programming Language Freely**: You are completely free to choose ANY programming language of your choice (Go, Python, Rust, Node.js, C, C++, etc.). There is NO preferred language—choose the language and concurrency architecture that you believe best maximizes reliability, implementation speed, and throughput.
+- **Pre-installed Toolchains**: Our pre-configured test sandbox has Rust (cargo), Go, Python 3, Node.js, and C/C++ pre-installed and available in PATH.
 - All code and configuration must reside in the current workspace.
 - **Entrypoint / Execution Options (You can choose either)**:
   1. **Working Dockerfile (Recommended)**: Create a working `Dockerfile` that builds and packages your server and exposes port 6379. If a `Dockerfile` is present in the workspace, the test harness will automatically build and run your Docker container directly!
-  2. **Executable `./start.sh`**: Alternatively, create an executable `./start.sh` script that launches your server listening on `0.0.0.0:6379`. Our pre-configured test sandbox has Rust (cargo), Go, Python 3, Node.js, and C/C++ pre-installed.
+  2. **Executable `./start.sh`**: Alternatively, create an executable `./start.sh` script that launches your server listening on `0.0.0.0:6379`.
   (Both options are fully supported by the benchmark runner!)
 
 ### Reference Server Available for Testing

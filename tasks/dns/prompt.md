@@ -18,8 +18,9 @@ Your implementation must meet high professional software engineering standards:
 - **Allowed Resources**: You may consult official RFC specifications (e.g., RFC 1035).
 - **Originality**: All code must be your own original implementation.
 
-### Constraints & Packaging Freedom (Dockerfile or start.sh)
-- You are free to choose ANY programming language (Go, Python, Rust, Node.js, C, C++, etc.).
+### Programming Language Freedom & Packaging (Dockerfile or start.sh)
+- **Choose ANY Programming Language Freely**: You are completely free to choose ANY programming language of your choice (Go, Python, Rust, Node.js, C, C++, etc.). There is NO preferred language—choose the language and architecture that best suits rapid implementation and reliable datagram processing.
+- **Pre-installed Toolchains**: Our pre-configured test sandbox has Rust (cargo), Go, Python 3, Node.js, and C/C++ pre-installed and available in PATH.
 - All code and configuration must reside in the current workspace.
 - **Entrypoint / Execution Options**:
   1. **Working Dockerfile (Recommended)**: Create a working `Dockerfile` exposing UDP port 5353.

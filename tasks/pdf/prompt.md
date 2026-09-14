@@ -28,8 +28,9 @@ Your implementation must meet high professional standards:
 - **Black-Box Testing**: Craft your own test PDFs (a minimal valid example is sketched below) and POST them to your service.
 - **Originality**: All code must be your own original implementation. Any use of a PDF library or binary invalidates the run.
 
-### Constraints & Packaging Freedom (Dockerfile or start.sh)
-- ANY programming language (Go, Python, Rust, Node.js, C, C++, etc.).
+### Programming Language Freedom & Packaging (Dockerfile or start.sh)
+- **Choose ANY Programming Language Freely**: You are completely free to choose ANY programming language of your choice (Go, Python, Rust, Node.js, C, C++, etc.). There is NO preferred language—choose the language that best supports binary stream parsing, decompression, and concurrency.
+- **Pre-installed Toolchains**: Our pre-configured test sandbox has Rust (cargo), Go, Python 3, Node.js, and C/C++ pre-installed and available in PATH.
 - All code and configuration must reside in the current workspace.
 - **Entrypoint (choose either)**:
   1. **Working Dockerfile (Recommended)**: Builds your service, exposes port 8090.

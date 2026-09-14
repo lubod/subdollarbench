@@ -4,29 +4,8 @@ You are building an RFC-compliant HTTP/1.1 web server from scratch.
 - **Strict Prohibition on Frameworks & Built-in HTTP Servers**: You CANNOT use any built-in HTTP server or third-party web framework from any language (e.g., **DO NOT USE** Python's `http.server`, `Flask`, `FastAPI`, Go's `net/http` `http.ListenAndServe` / `http.Server`, `Gin`, `Fiber`, Node.js `http.createServer`, `Express`, Rust's `actix-web`, `axum`, `warp`, `hyper::server`, etc.).
 - **Raw TCP Sockets Only**: You must build the server from scratch using raw TCP sockets and stream I/O (e.g., `net.Listen` / `net.Conn` in Go, `std::net::TcpListener` / `tokio::net::TcpListener` in Rust, `socket` module in Python, `net.createServer` in Node.js, POSIX sockets in C/C++).
 - **Custom Protocol Implementation**: You must implement your own raw HTTP/1.1 wire protocol parser (parsing request lines, HTTP methods, paths, HTTP headers, Content-Length, and body streams) and your own response formatter (status lines, headers, `\r\n\r\n` boundary framing, and body bytes) directly over raw TCP byte streams.
-- **Example of Raw Socket Pattern with Concurrency (Threading / Event Loop)**:
-  ```python
-  import socket, os, threading
-  os.makedirs('/tmp/files', exist_ok=True)
-
-  def handle_client(conn):
-      try:
-          data = conn.recv(4096).decode('utf-8', errors='ignore')
-          # parse request line, headers, path, method, and dispatch response:
-          conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-      finally:
-          conn.close()
-
-  server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-  server.bind(('0.0.0.0', 8080))
-  server.listen(128)
-  while True:
-      conn, addr = server.accept()
-      threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
-  ```
-  DO NOT import or use `http.server`, `BaseHTTPRequestHandler`, `wsgiref`, or `HTTPServer`. Build the server directly with raw TCP sockets (`socket.socket`, Go `net.Listen`, Rust `TcpListener`, Node.js `net.createServer`).
-  **Performance & Concurrency Target**: Your server will be stress-tested with `wrk -t2 -c20 -d3s` (20 concurrent connections). A single-threaded synchronous server that blocks on `conn.recv()` sequentially will fail or time out under load. You must handle connections concurrently using thread pools, non-blocking I/O (epoll/select/asyncio over raw sockets), or goroutines.
+- **Raw Socket Concurrency Requirement**: DO NOT import or use high-level HTTP servers (such as Python's `http.server`, `BaseHTTPRequestHandler`, Go's `net/http` `http.Server`, Node's `http.createServer`). Build the server directly from raw stream sockets (`net.Listen` in Go, `socket.socket` in Python, `TcpListener` in Rust, `net.createServer` in Node.js, POSIX sockets in C/C++).
+- **Performance & Concurrency Target**: Your server will be stress-tested with `wrk -t2 -c20 -d3s` (20 concurrent connections). A single-threaded synchronous server that blocks on sequential requests will fail or time out under load. You must handle connections concurrently using your chosen language's concurrency model (e.g., goroutines `go handleConn(conn)` in Go, thread pools or async event loops in Python, asynchronous tasks `tokio::spawn` in Rust, non-blocking stream handlers in Node.js).
 
 ### Software Engineering (SWE) & Code Quality Standards
 Your implementation must meet high professional software engineering standards:
@@ -42,12 +21,13 @@ Your implementation must meet high professional software engineering standards:
 - **Black-Box Testing**: You may test runtime behavior against the running reference server using CLI tools (`curl -v http://ref-http/...`).
 - **Originality**: All code must be your own original implementation designed from specifications and observable behavior. Any access to reference source code invalidates the benchmark run.
 
-### Constraints & Packaging Freedom (Dockerfile or start.sh)
-- You are free to choose ANY programming language (Go, Python, Rust, Node.js, C, etc.).
+### Programming Language Freedom & Packaging (Dockerfile or start.sh)
+- **Choose ANY Programming Language Freely**: You are completely free to choose ANY programming language of your choice (Go, Python, Rust, Node.js, C, C++, etc.). There is NO preferred language—choose the language and concurrency architecture that you believe best optimizes correctness, development speed, and raw throughput under concurrent load.
+- **Pre-installed Toolchains**: Our pre-configured test sandbox has Rust (cargo), Go, Python 3, Node.js, and C/C++ pre-installed and available in PATH.
 - All code and configuration must reside in the current workspace.
 - **Entrypoint / Execution Options (You can choose either)**:
   1. **Working Dockerfile (Recommended)**: Create a working `Dockerfile` that builds and packages your server and exposes port 8080. If a `Dockerfile` is present in the workspace, the test harness will automatically build and run your Docker container directly!
-  2. **Executable `./start.sh`**: Alternatively, create an executable `./start.sh` script that launches your server listening on `0.0.0.0:8080`. Our pre-configured test sandbox has Rust (cargo), Go, Python 3, Node.js, and C/C++ pre-installed.
+  2. **Executable `./start.sh`**: Alternatively, create an executable `./start.sh` script that launches your server listening on `0.0.0.0:8080`.
   (Both options are fully supported by the benchmark runner!)
 
 ### Reference Server Available for Testing
