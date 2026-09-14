@@ -299,6 +299,192 @@ footer { margin-top: 2.5rem; color: var(--mut); font-size: .8rem; }
   flex-direction: column;
   gap: 3px;
 }
+
+/* Formula Customizer Panel */
+.btn-formula {
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  color: var(--acc);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+.btn-formula:hover {
+  background: rgba(88, 166, 255, 0.22);
+  border-color: var(--acc);
+  color: #fff;
+}
+.btn-formula.active {
+  background: var(--acc);
+  color: #000;
+  font-weight: 700;
+  border-color: var(--acc);
+}
+.formula-panel {
+  background: #0d121c;
+  border: 1px solid rgba(88, 166, 255, 0.25);
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+}
+.formula-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.formula-presets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.preset-pill {
+  background: #161b22;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 0.74rem;
+  color: var(--mut);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-weight: 500;
+}
+.preset-pill:hover {
+  background: #1f2736;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.preset-pill.active {
+  background: rgba(88, 166, 255, 0.2);
+  border-color: var(--acc);
+  color: var(--acc);
+  font-weight: 700;
+}
+.formula-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.param-card {
+  background: #111722;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.param-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+}
+.param-title {
+  font-weight: 600;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.param-val {
+  font-family: monospace;
+  font-size: 0.78rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--acc);
+  font-weight: 700;
+}
+.param-desc {
+  font-size: 0.7rem;
+  color: var(--mut);
+  line-height: 1.3;
+}
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.formula-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  height: 5px;
+  border-radius: 3px;
+  background: #212836;
+  outline: none;
+  cursor: pointer;
+}
+.formula-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--acc);
+  cursor: pointer;
+  border: 1px solid #fff;
+  box-shadow: 0 0 5px rgba(88, 166, 255, 0.5);
+}
+.formula-slider::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--acc);
+  cursor: pointer;
+  border: 1px solid #fff;
+}
+.formula-math {
+  background: #090d14;
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.74rem;
+  color: #c9d1d9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+}
+.rank-delta-up {
+  color: var(--grn);
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: rgba(63, 185, 80, 0.15);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 3px;
+}
+.rank-delta-down {
+  color: var(--red);
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: rgba(248, 81, 73, 0.15);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 3px;
+}
+.rank-delta-same {
+  color: var(--mut);
+  font-size: 0.7rem;
+  margin-left: 3px;
+}
+
 "#;
 
 const PORTAL_JS: &str = r#"
@@ -340,11 +526,57 @@ const PORTAL_JS: &str = r#"
     }
   };
 
+  const DEFAULT_WEIGHTS = {
+    wCost: 1.0,
+    wTp: 1.0,
+    wDur: 0.0,
+    wTok: 0.0,
+    wTurns: 0.0,
+    strictPass: true
+  };
+
+  const PRESETS = {
+    default: { wCost: 1.0, wTp: 1.0, wDur: 0.0, wTok: 0.0, wTurns: 0.0, strictPass: true },
+    speed:   { wCost: 0.5, wTp: 2.5, wDur: 0.5, wTok: 0.0, wTurns: 0.0, strictPass: true },
+    frugal:  { wCost: 2.5, wTp: 0.2, wDur: 0.0, wTok: 1.5, wTurns: 0.0, strictPass: true },
+    agentic: { wCost: 0.8, wTp: 0.5, wDur: 1.2, wTok: 0.5, wTurns: 2.0, strictPass: true },
+    lenient: { wCost: 1.0, wTp: 1.0, wDur: 0.0, wTok: 0.0, wTurns: 0.0, strictPass: false }
+  };
+
+  function loadStoredWeights() {
+    try {
+      const raw = localStorage.getItem('subdollarbench_formula_weights');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          wCost: typeof parsed.wCost === 'number' ? parsed.wCost : DEFAULT_WEIGHTS.wCost,
+          wTp: typeof parsed.wTp === 'number' ? parsed.wTp : DEFAULT_WEIGHTS.wTp,
+          wDur: typeof parsed.wDur === 'number' ? parsed.wDur : DEFAULT_WEIGHTS.wDur,
+          wTok: typeof parsed.wTok === 'number' ? parsed.wTok : DEFAULT_WEIGHTS.wTok,
+          wTurns: typeof parsed.wTurns === 'number' ? parsed.wTurns : DEFAULT_WEIGHTS.wTurns,
+          strictPass: typeof parsed.strictPass === 'boolean' ? parsed.strictPass : DEFAULT_WEIGHTS.strictPass
+        };
+      }
+    } catch (e) {}
+    return Object.assign({}, DEFAULT_WEIGHTS);
+  }
+
+  function saveStoredWeights(w) {
+    try {
+      localStorage.setItem('subdollarbench_formula_weights', JSON.stringify(w));
+    } catch (e) {}
+  }
+
+  let currentWeights = loadStoredWeights();
   let currentTab = 'all';
   let searchQuery = '';
   let passOnly = false;
   let sortCol = 'score';
   let sortDir = -1;
+  let formulaPanelOpen = false;
+  try {
+    formulaPanelOpen = localStorage.getItem('subdollarbench_formula_open') === '1';
+  } catch (e) {}
 
   function escapeHtml(s) {
     if (s === null || s === undefined) return '';
@@ -377,6 +609,83 @@ const PORTAL_JS: &str = r#"
     }
   }
 
+  function getBaseline(task) {
+    const t = (task || 'http').toLowerCase();
+    if (t === 'redis') return 71000;
+    if (t === 'dns') return 19000;
+    if (t === 'pdf') return 4600;
+    return 33000;
+  }
+
+  function computeScore(r, weights) {
+    const w = weights || DEFAULT_WEIGHTS;
+    let confFactor = 1.0;
+    const passRate = (r.pass_rate !== undefined && r.pass_rate !== null) ? r.pass_rate : 0;
+    if (w.strictPass) {
+      if (passRate < 100) return 0.0;
+    } else {
+      confFactor = passRate / 100.0;
+    }
+
+    const effCost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0.01);
+    const costCents = Math.max(effCost * 100.0, 0.0001);
+    const baseCost = 100.0 / costCents;
+    const costFactor = Math.pow(baseCost, w.wCost);
+
+    const candTp = Math.max(r.throughput_req_sec || 0, 0);
+    const refTp = (r.reference_throughput_req_sec && r.reference_throughput_req_sec > 0) ? r.reference_throughput_req_sec : getBaseline(r.task);
+    const speedRatio = refTp > 0 ? (candTp / refTp) : 0;
+    let tpFactor = 1.0;
+    if (w.wTp > 0) {
+      if (speedRatio <= 0) return 0.0;
+      const normRatio = (speedRatio * (1.0 + 2.0 * speedRatio)) / 3.0;
+      tpFactor = Math.pow(normRatio, w.wTp) * 3.0;
+    }
+
+    let durFactor = 1.0;
+    if (w.wDur > 0) {
+      const dur = Math.max(r.duration_seconds || 60, 5.0);
+      durFactor = Math.pow(60.0 / dur, w.wDur);
+    }
+
+    let tokFactor = 1.0;
+    if (w.wTok > 0) {
+      const totalTokens = Math.max(r.total_tokens || ((r.prompt_tokens || 0) + (r.cached_tokens || 0) + (r.completion_tokens || 0)), 5000);
+      tokFactor = Math.pow(50000.0 / totalTokens, w.wTok);
+    }
+
+    let turnsFactor = 1.0;
+    if (w.wTurns > 0) {
+      const turns = Math.max(r.turns || 8, 1);
+      turnsFactor = Math.pow(8.0 / turns, w.wTurns);
+    }
+
+    return confFactor * costFactor * tpFactor * durFactor * tokFactor * turnsFactor;
+  }
+
+  function isCustomFormula(w) {
+    if (!w) return false;
+    return Math.abs(w.wCost - DEFAULT_WEIGHTS.wCost) > 0.001 ||
+           Math.abs(w.wTp - DEFAULT_WEIGHTS.wTp) > 0.001 ||
+           Math.abs(w.wDur - DEFAULT_WEIGHTS.wDur) > 0.001 ||
+           Math.abs(w.wTok - DEFAULT_WEIGHTS.wTok) > 0.001 ||
+           Math.abs(w.wTurns - DEFAULT_WEIGHTS.wTurns) > 0.001 ||
+           w.strictPass !== DEFAULT_WEIGHTS.strictPass;
+  }
+
+  function computeDefaultRanks(runs, tab) {
+    let list = runs.slice();
+    if (tab && tab !== 'all' && tab !== 'grouped') {
+      list = list.filter(r => (r.task || '').toLowerCase() === tab.toLowerCase());
+    }
+    list.sort((a, b) => computeScore(b, DEFAULT_WEIGHTS) - computeScore(a, DEFAULT_WEIGHTS));
+    const map = {};
+    list.forEach((r, idx) => {
+      map[r.id] = idx + 1;
+    });
+    return map;
+  }
+
   function getSortedFilteredRuns(runs, tab, query, onlyPassed) {
     let filtered = runs.slice();
     if (tab && tab !== 'all' && tab !== 'grouped') {
@@ -397,8 +706,8 @@ const PORTAL_JS: &str = r#"
     filtered.sort((a, b) => {
       let vA, vB;
       if (sortCol === 'score') {
-        vA = (a.throughput_score !== undefined && a.throughput_score !== null) ? a.throughput_score : a.efficiency_score;
-        vB = (b.throughput_score !== undefined && b.throughput_score !== null) ? b.throughput_score : b.efficiency_score;
+        vA = computeScore(a, currentWeights);
+        vB = computeScore(b, currentWeights);
       } else if (sortCol === 'model') {
         vA = (a.model || '').toLowerCase();
         vB = (b.model || '').toLowerCase();
@@ -427,20 +736,36 @@ const PORTAL_JS: &str = r#"
     return filtered;
   }
 
-  function renderRowsHtml(runs, showTaskCol) {
+  function renderRowsHtml(runs, showTaskCol, defaultRanks) {
     if (!runs || runs.length === 0) {
       const colSpan = showTaskCol ? 9 : 8;
       return `<tr><td colspan="${colSpan}" style="text-align: center; color: var(--mut); padding: 28px;">No matching runs recorded.</td></tr>`;
     }
 
+    const isCustom = isCustomFormula(currentWeights);
+
     return runs.map((r, idx) => {
-      let rankBadge = `<span style="font-weight: 700; color: var(--mut);">#${idx + 1}</span>`;
-      if (idx === 0) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: var(--gold);">🥇 #1</span>`;
-      else if (idx === 1) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #c0c0c0;">🥈 #2</span>`;
-      else if (idx === 2) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #cd7f32;">🥉 #3</span>`;
+      const curRank = idx + 1;
+      let deltaBadge = '';
+      if (isCustom && defaultRanks && defaultRanks[r.id] !== undefined) {
+        const defRank = defaultRanks[r.id];
+        const delta = defRank - curRank;
+        if (delta > 0) {
+          deltaBadge = `<span class="rank-delta-up" title="Up ${delta} rank(s) vs default formula">▲ +${delta}</span>`;
+        } else if (delta < 0) {
+          deltaBadge = `<span class="rank-delta-down" title="Down ${Math.abs(delta)} rank(s) vs default formula">▼ ${delta}</span>`;
+        } else {
+          deltaBadge = `<span class="rank-delta-same" title="Rank unchanged vs default formula">=</span>`;
+        }
+      }
+
+      let rankBadge = `<span style="font-weight: 700; color: var(--mut);">#${curRank}</span>${deltaBadge}`;
+      if (curRank === 1) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: var(--gold);">🥇 #1</span>${deltaBadge}`;
+      else if (curRank === 2) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #c0c0c0;">🥈 #2</span>${deltaBadge}`;
+      else if (curRank === 3) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #cd7f32;">🥉 #3</span>${deltaBadge}`;
 
       const taskBadge = showTaskCol
-        ? `<span class="badge badge-info" style="text-transform: uppercase;">${escapeHtml(r.task)}</span>`
+        ? `<span class="badge" style="background: rgba(88, 166, 255, 0.15); color: var(--acc); font-weight: 600;">${(r.task || 'http').toUpperCase()}</span>`
         : '';
       const hasSubruns = Array.isArray(r.subruns) && r.subruns.length > 0;
       const subrunsBadge = hasSubruns
@@ -484,10 +809,18 @@ const PORTAL_JS: &str = r#"
       const totalTokens = r.total_tokens || ((r.prompt_tokens || 0) + (r.cached_tokens || 0) + (r.completion_tokens || 0));
       const tokStr = `${(totalTokens / 1000).toFixed(1)}k tokens`;
 
-      const score = (r.throughput_score !== undefined && r.throughput_score !== null) ? r.throughput_score : r.efficiency_score;
-      const bonusBase = (r.throughput_score !== undefined && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100)
-        ? `<div style="font-size: 0.72rem; color: var(--mut);">base: ${r.efficiency_score.toFixed(1)}</div>`
-        : '';
+      const curScore = computeScore(r, currentWeights);
+      const defScore = computeScore(r, DEFAULT_WEIGHTS);
+      
+      let scoreSub = '';
+      if (isCustom) {
+        scoreSub = `<div style="font-size: 0.7rem; color: var(--mut);">default: ${defScore.toFixed(1)}</div>`;
+      } else {
+        const bonusBase = (r.throughput_score !== undefined && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100)
+          ? `<div style="font-size: 0.72rem; color: var(--mut);">base: ${r.efficiency_score.toFixed(1)}</div>`
+          : '';
+        scoreSub = bonusBase;
+      }
 
       return `<tr data-href="runs/${escapeHtml(r.id)}/">
         <td style="text-align: center;">${rankBadge}</td>
@@ -526,8 +859,8 @@ const PORTAL_JS: &str = r#"
           </div>
         </td>
         <td class="score">
-          <div style="font-size: 0.95rem; font-weight: 700;">${score.toFixed(1)} <small style="font-size: 0.72rem; color: var(--mut);">pts/¢</small></div>
-          ${bonusBase}
+          <div style="font-size: 0.95rem; font-weight: 700;">${curScore.toFixed(1)} <small style="font-size: 0.72rem; color: var(--mut);">pts/¢</small></div>
+          ${scoreSub}
         </td>
         <td><a href="runs/${escapeHtml(r.id)}/" class="badge badge-info" style="text-decoration: none; padding: 4px 8px;">Inspect &rarr;</a></td>
       </tr>`;
@@ -538,12 +871,8 @@ const PORTAL_JS: &str = r#"
     const spec = TASK_SPECS[taskKey];
     if (!spec) return '';
     const taskRuns = runs.filter(r => (r.task || '').toLowerCase() === taskKey.toLowerCase());
-    const passRuns = taskRuns.filter(r => r.pass_rate >= 100);
-    const topRun = passRuns.slice().sort((a, b) => {
-      const sA = a.throughput_score !== undefined && a.throughput_score !== null ? a.throughput_score : a.efficiency_score;
-      const sB = b.throughput_score !== undefined && b.throughput_score !== null ? b.throughput_score : b.efficiency_score;
-      return sB - sA;
-    })[0];
+    const passRuns = taskRuns.filter(r => currentWeights.strictPass ? (r.pass_rate >= 100) : ((r.pass_rate || 0) > 0));
+    const topRun = passRuns.slice().sort((a, b) => computeScore(b, currentWeights) - computeScore(a, currentWeights))[0];
 
     const peakTpRun = passRuns.slice().sort((a, b) => (b.throughput_req_sec || 0) - (a.throughput_req_sec || 0))[0];
     const lowestCostRun = passRuns.slice().sort((a, b) => {
@@ -553,7 +882,7 @@ const PORTAL_JS: &str = r#"
     })[0];
 
     const topModel = topRun ? topRun.model : 'None yet';
-    const topScore = topRun ? ((topRun.throughput_score !== undefined && topRun.throughput_score !== null ? topRun.throughput_score : topRun.efficiency_score).toFixed(1) + ' pts/¢') : '-';
+    const topScore = topRun ? (computeScore(topRun, currentWeights).toFixed(1) + ' pts/¢') : '-';
     const peakTpStr = peakTpRun ? formatThroughput(peakTpRun.throughput_req_sec, taskKey) : 'N/A';
     const peakRatioStr = (peakTpRun && peakTpRun.reference_throughput_req_sec && peakTpRun.throughput_req_sec)
       ? `${Math.round((peakTpRun.throughput_req_sec / peakTpRun.reference_throughput_req_sec) * 100)}% of reference`
@@ -601,7 +930,7 @@ const PORTAL_JS: &str = r#"
     `;
   }
 
-  function renderTableContainer(runs, showTaskCol, title, subtitle) {
+  function renderTableContainer(runs, showTaskCol, title, subtitle, defaultRanks) {
     const headerHtml = title ? `
       <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
         <span style="font-weight: 700; color: #fff; font-size: 0.95rem;">${title}</span>
@@ -626,7 +955,7 @@ const PORTAL_JS: &str = r#"
             </tr>
           </thead>
           <tbody>
-            ${renderRowsHtml(runs, showTaskCol)}
+            ${renderRowsHtml(runs, showTaskCol, defaultRanks)}
           </tbody>
         </table>
       </div>
@@ -634,15 +963,98 @@ const PORTAL_JS: &str = r#"
   }
 
   function renderCalibrationNote() {
+    const isCustom = isCustomFormula(currentWeights);
+    const customBadge = isCustom
+      ? `<span class="badge badge-info" style="margin-left: auto;">🎛️ Custom Formula Active</span>`
+      : '';
+
     return `
-      <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px;">
+      <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span>📐</span>
         <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>
+        ${customBadge}
       </div>
     `;
   }
 
+  function renderMathExpression(w) {
+    const parts = [];
+    parts.push(w.strictPass ? '<strong>StrictPass(100%)</strong>' : `(Pass% / 100)`);
+    if (w.wCost > 0) {
+      parts.push(`(100 / Cost<sub>¢</sub>)<sup>${Number(w.wCost).toFixed(1)}</sup>`);
+    }
+    if (w.wTp > 0) {
+      parts.push(`(NormSpeed)<sup>${Number(w.wTp).toFixed(1)}</sup> &times; 3.0`);
+    }
+    if (w.wDur > 0) {
+      parts.push(`(60s / Dur)<sup>${Number(w.wDur).toFixed(1)}</sup>`);
+    }
+    if (w.wTok > 0) {
+      parts.push(`(50k / Tokens)<sup>${Number(w.wTok).toFixed(1)}</sup>`);
+    }
+    if (w.wTurns > 0) {
+      parts.push(`(8 / Turns)<sup>${Number(w.wTurns).toFixed(1)}</sup>`);
+    }
+    return 'Score = ' + (parts.length > 0 ? parts.join(' &times; ') : '1.0');
+  }
+
+  function syncFormulaControls() {
+    const panel = document.getElementById('formulaPanel');
+    const toggleBtn = document.getElementById('formulaToggleBtn');
+    const badge = document.getElementById('formulaStatusBadge');
+    const math = document.getElementById('formulaMathDisplay');
+
+    if (panel) {
+      panel.style.display = formulaPanelOpen ? 'block' : 'none';
+    }
+    if (toggleBtn) {
+      if (formulaPanelOpen) toggleBtn.classList.add('active');
+      else toggleBtn.classList.remove('active');
+    }
+
+    const isCustom = isCustomFormula(currentWeights);
+    if (badge) {
+      badge.style.display = isCustom ? 'inline-block' : 'none';
+    }
+
+    ['wCost', 'wTp', 'wDur', 'wTok', 'wTurns'].forEach(k => {
+      const slider = document.getElementById('slider_' + k);
+      const valEl = document.getElementById('val_' + k);
+      if (slider) slider.value = currentWeights[k];
+      if (valEl) valEl.textContent = Number(currentWeights[k]).toFixed(1) + '×';
+    });
+
+    const radioStrict = document.getElementById('radio_strict');
+    const radioLenient = document.getElementById('radio_lenient');
+    const valStrict = document.getElementById('val_strictPass');
+    if (radioStrict) radioStrict.checked = !!currentWeights.strictPass;
+    if (radioLenient) radioLenient.checked = !currentWeights.strictPass;
+    if (valStrict) valStrict.textContent = currentWeights.strictPass ? 'Strict' : 'Lenient';
+
+    if (math) {
+      math.innerHTML = renderMathExpression(currentWeights);
+    }
+
+    // Sync presets highlighting
+    Object.keys(PRESETS).forEach(pKey => {
+      const p = PRESETS[pKey];
+      const btn = document.getElementById('preset_' + pKey);
+      if (btn) {
+        const matches = Math.abs(p.wCost - currentWeights.wCost) < 0.001 &&
+                        Math.abs(p.wTp - currentWeights.wTp) < 0.001 &&
+                        Math.abs(p.wDur - currentWeights.wDur) < 0.001 &&
+                        Math.abs(p.wTok - currentWeights.wTok) < 0.001 &&
+                        Math.abs(p.wTurns - currentWeights.wTurns) < 0.001 &&
+                        p.strictPass === currentWeights.strictPass;
+        if (matches) btn.classList.add('active');
+        else btn.classList.remove('active');
+      }
+    });
+  }
+
   function updateLeaderboardView() {
+    syncFormulaControls();
+
     const container = document.getElementById('portalDynamicContainer');
     if (!container) return;
 
@@ -661,42 +1073,50 @@ const PORTAL_JS: &str = r#"
       const pdfRuns = getSortedFilteredRuns(RUNS_DATA, 'pdf', searchQuery, passOnly);
       const allRuns = getSortedFilteredRuns(RUNS_DATA, 'all', searchQuery, passOnly);
 
+      const defHttp = computeDefaultRanks(RUNS_DATA, 'http');
+      const defRedis = computeDefaultRanks(RUNS_DATA, 'redis');
+      const defDns = computeDefaultRanks(RUNS_DATA, 'dns');
+      const defPdf = computeDefaultRanks(RUNS_DATA, 'pdf');
+      const defAll = computeDefaultRanks(RUNS_DATA, 'all');
+
       container.innerHTML = `
         ${renderCalibrationNote()}
         <div style="display: flex; flex-direction: column; gap: 16px;">
           <div>
             ${renderTaskBanner('http', RUNS_DATA)}
-            ${renderTableContainer(httpRuns, false, '🌐 Task 2: HTTP/1.1 Web Server Rankings', 'RFC 7230/7231 Conformance')}
+            ${renderTableContainer(httpRuns, false, '🌐 Task 2: HTTP/1.1 Web Server Rankings', 'RFC 7230/7231 Conformance', defHttp)}
           </div>
           <div>
             ${renderTaskBanner('redis', RUNS_DATA)}
-            ${renderTableContainer(redisRuns, false, '⚡ Task 1: Redis Server Rankings', 'RESP2 Protocol Conformance')}
+            ${renderTableContainer(redisRuns, false, '⚡ Task 1: Redis Server Rankings', 'RESP2 Protocol Conformance', defRedis)}
           </div>
           <div>
             ${renderTaskBanner('dns', RUNS_DATA)}
-            ${renderTableContainer(dnsRuns, false, '📡 Task 3: DNS Server Rankings', 'RFC 1035 UDP 5353 Conformance')}
+            ${renderTableContainer(dnsRuns, false, '📡 Task 3: DNS Server Rankings', 'RFC 1035 UDP 5353 Conformance', defDns)}
           </div>
           <div>
             ${renderTaskBanner('pdf', RUNS_DATA)}
-            ${renderTableContainer(pdfRuns, false, '📄 Task 4: PDF Microservice Rankings', 'Port 8090 Raw Parser Conformance')}
+            ${renderTableContainer(pdfRuns, false, '📄 Task 4: PDF Microservice Rankings', 'Port 8090 Raw Parser Conformance', defPdf)}
           </div>
           <div>
-            ${renderTableContainer(allRuns, true, '🏆 Consolidated Global Leaderboard (All Runs)', 'Global multi-task ranking')}
+            ${renderTableContainer(allRuns, true, '🏆 Consolidated Global Leaderboard (All Runs)', 'Global multi-task ranking', defAll)}
           </div>
         </div>
       `;
     } else if (currentTab === 'all') {
       const runs = getSortedFilteredRuns(RUNS_DATA, 'all', searchQuery, passOnly);
+      const defAll = computeDefaultRanks(RUNS_DATA, 'all');
       container.innerHTML = `
         ${renderCalibrationNote()}
-        ${renderTableContainer(runs, true, '', '')}
+        ${renderTableContainer(runs, true, '', '', defAll)}
       `;
     } else {
       const runs = getSortedFilteredRuns(RUNS_DATA, currentTab, searchQuery, passOnly);
+      const defTask = computeDefaultRanks(RUNS_DATA, currentTab);
       container.innerHTML = `
         ${renderCalibrationNote()}
         ${renderTaskBanner(currentTab, RUNS_DATA)}
-        ${renderTableContainer(runs, false, '', '')}
+        ${renderTableContainer(runs, false, '', '', defTask)}
       `;
     }
 
@@ -731,6 +1151,40 @@ const PORTAL_JS: &str = r#"
       sortCol = col;
       sortDir = -1;
     }
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_toggle_formula = function() {
+    formulaPanelOpen = !formulaPanelOpen;
+    try {
+      localStorage.setItem('subdollarbench_formula_open', formulaPanelOpen ? '1' : '0');
+    } catch (e) {}
+    syncFormulaControls();
+  };
+
+  window.__subdollar_apply_preset = function(presetKey) {
+    if (PRESETS[presetKey]) {
+      currentWeights = Object.assign({}, PRESETS[presetKey]);
+      saveStoredWeights(currentWeights);
+      updateLeaderboardView();
+    }
+  };
+
+  window.__subdollar_weight_change = function(param, val) {
+    currentWeights[param] = parseFloat(val);
+    saveStoredWeights(currentWeights);
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_strict_change = function(isStrict) {
+    currentWeights.strictPass = !!isStrict;
+    saveStoredWeights(currentWeights);
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_reset_formula = function() {
+    currentWeights = Object.assign({}, DEFAULT_WEIGHTS);
+    saveStoredWeights(currentWeights);
     updateLeaderboardView();
   };
 
@@ -943,7 +1397,7 @@ impl PortalExporter {
         };
 
         format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📡 DNS Server</div><div class=\"v\">{dns}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                 <button id=\"tabBtn_all\" class=\"btn-toggle active\" onclick=\"window.__subdollar_set_tab('all')\">🌐 Consolidated (All Tasks)</button>                 <button id=\"tabBtn_http\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('http')\">🌐 HTTP/1.1 Server <span class=\"badge-count\">{http}</span></button>                 <button id=\"tabBtn_redis\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('redis')\">⚡ Redis Clone <span class=\"badge-count\">{redis}</span></button>                 <button id=\"tabBtn_dns\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('dns')\">📡 DNS Server <span class=\"badge-count\">{dns}</span></button>                 <button id=\"tabBtn_pdf\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pdf')\">📄 PDF Microservice <span class=\"badge-count\">{pdf}</span></button>                 <button id=\"tabBtn_grouped\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('grouped')\">📑 Grouped View</button>               </div>               <div style=\"display:flex;gap:10px;align-items:center;flex-wrap:wrap;\">                 <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>             <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             <script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📡 DNS Server</div><div class=\"v\">{dns}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                 <button id=\"tabBtn_all\" class=\"btn-toggle active\" onclick=\"window.__subdollar_set_tab('all')\">🌐 Consolidated (All Tasks)</button>                 <button id=\"tabBtn_http\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('http')\">🌐 HTTP/1.1 Server <span class=\"badge-count\">{http}</span></button>                 <button id=\"tabBtn_redis\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('redis')\">⚡ Redis Clone <span class=\"badge-count\">{redis}</span></button>                 <button id=\"tabBtn_dns\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('dns')\">📡 DNS Server <span class=\"badge-count\">{dns}</span></button>                 <button id=\"tabBtn_pdf\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pdf')\">📄 PDF Microservice <span class=\"badge-count\">{pdf}</span></button>                 <button id=\"tabBtn_grouped\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('grouped')\">📑 Grouped View</button>               </div>               <div style=\"display:flex;gap:10px;align-items:center;flex-wrap:wrap;\">                 <button id=\"formulaToggleBtn\" class=\"btn-formula\" onclick=\"window.__subdollar_toggle_formula()\">                   <span>🎛️ Customize Formula</span>                   <span id=\"formulaStatusBadge\" class=\"badge\" style=\"background:rgba(88,166,255,0.2);color:var(--acc);font-size:0.68rem;padding:1px 5px;display:none;\">Custom</span>                 </button>                 <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>             <div id=\"formulaPanel\" class=\"formula-panel\" style=\"display:none;\">               <div class=\"formula-header\">                 <div>                   <div style=\"display:flex;align-items:center;gap:8px;\">                     <span style=\"font-size:1.1rem;\">🎛️</span>                     <span style=\"font-size:0.95rem;font-weight:700;color:#fff;\">Interactive Scoring Formula Customizer</span>                     <span class=\"badge badge-info\">Live Dynamic Re-scoring</span>                   </div>                   <div style=\"font-size:0.74rem;color:var(--mut);margin-top:3px;\">                     Adjust the relative importance of cost, throughput, duration, tokens, turns, and test conformance. Scores, medals, and KPI leaderboards update in real time.                   </div>                 </div>                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <button class=\"btn-toggle\" onclick=\"window.__subdollar_reset_formula()\" style=\"border:1px solid var(--line);border-radius:4px;font-size:0.72rem;padding:4px 10px;\">🔄 Reset Defaults</button>                 </div>               </div>               <div style=\"font-size:0.72rem;font-weight:600;color:var(--mut);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;\">Quick Presets:</div>               <div class=\"formula-presets\">                 <button class=\"preset-pill active\" id=\"preset_default\" onclick=\"window.__subdollar_apply_preset('default')\">🎯 SubDollar Balanced (Default)</button>                 <button class=\"preset-pill\" id=\"preset_speed\" onclick=\"window.__subdollar_apply_preset('speed')\">⚡ Speed Demon (Throughput King)</button>                 <button class=\"preset-pill\" id=\"preset_frugal\" onclick=\"window.__subdollar_apply_preset('frugal')\">💰 Extreme Frugal (Cost &amp; Tokens)</button>                 <button class=\"preset-pill\" id=\"preset_agentic\" onclick=\"window.__subdollar_apply_preset('agentic')\">🤖 Agentic One-Shot (Turns &amp; Latency)</button>                 <button class=\"preset-pill\" id=\"preset_lenient\" onclick=\"window.__subdollar_apply_preset('lenient')\">🎓 Lenient Conformance (Partial Credit)</button>               </div>               <div class=\"formula-grid\">                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">💰 Cost Importance (W<sub>cost</sub>)</span>                     <span class=\"param-val\" id=\"val_wCost\">1.0×</span>                   </div>                   <div class=\"param-desc\">Cost sensitivity: <code>(100 / cost_¢)<sup>W</sup></code>. Higher values punish high-cost runs.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wCost\" min=\"0\" max=\"3\" step=\"0.1\" value=\"1.0\" oninput=\"window.__subdollar_weight_change('wCost', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">3.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">⚡ Throughput Importance (W<sub>tp</sub>)</span>                     <span class=\"param-val\" id=\"val_wTp\">1.0×</span>                   </div>                   <div class=\"param-desc\">Speed factor vs reference: <code>(speed_ratio·(1+2·speed)/3)<sup>W</sup></code>. 0 ignores speed.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTp\" min=\"0\" max=\"3\" step=\"0.1\" value=\"1.0\" oninput=\"window.__subdollar_weight_change('wTp', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">3.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">⏱️ Duration / Latency (W<sub>dur</sub>)</span>                     <span class=\"param-val\" id=\"val_wDur\">0.0×</span>                   </div>                   <div class=\"param-desc\">Wall-clock reward vs 60s median: <code>(60s / duration)<sup>W</sup></code>. Rewards fast synthesis.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wDur\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wDur', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🪙 Token Economy (W<sub>tok</sub>)</span>                     <span class=\"param-val\" id=\"val_wTok\">0.0×</span>                   </div>                   <div class=\"param-desc\">Token frugality reward vs 50k median: <code>(50k / total_tokens)<sup>W</sup></code>. Rewards brevity.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTok\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wTok', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🔄 Agent Turns (W<sub>turns</sub>)</span>                     <span class=\"param-val\" id=\"val_wTurns\">0.0×</span>                   </div>                   <div class=\"param-desc\">Turn efficiency reward vs 8 turns median: <code>(8 / turns)<sup>W</sup></code>. Rewards one-shot code.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTurns\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wTurns', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🎯 Conformance Strictness</span>                     <span class=\"param-val\" id=\"val_strictPass\">Strict</span>                   </div>                   <div class=\"param-desc\">Choose whether 100% passing tests is required or partial pass rates earn partial score credit.</div>                   <div style=\"display:flex;gap:12px;margin-top:6px;font-size:0.74rem;\">                     <label style=\"display:flex;align-items:center;gap:5px;cursor:pointer;\">                       <input type=\"radio\" name=\"strictPassRadio\" id=\"radio_strict\" value=\"strict\" checked onchange=\"window.__subdollar_strict_change(true)\">                       <span><strong>Strict</strong> (100% or 0 pts)</span>                     </label>                     <label style=\"display:flex;align-items:center;gap:5px;cursor:pointer;\">                       <input type=\"radio\" name=\"strictPassRadio\" id=\"radio_lenient\" value=\"lenient\" onchange=\"window.__subdollar_strict_change(false)\">                       <span><strong>Lenient</strong> (Pass% &times; pts)</span>                     </label>                   </div>                 </div>               </div>               <div class=\"formula-math\">                 <span style=\"color:var(--gold);font-weight:700;\">Active Formula:</span>                 <span id=\"formulaMathDisplay\">Score = Conformance &times; (100 / Cost<sub>&cent;</sub>)<sup>1.0</sup> &times; (NormSpeed)<sup>1.0</sup> &times; 3.0</span>               </div>             </div>             <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             <script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
             css = PORTAL_CSS,
             js = PORTAL_JS,
             n = results.len(),
