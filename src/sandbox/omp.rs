@@ -175,18 +175,18 @@ impl OmpRunner {
                 &host_cache_dir,
                 &host_run_dir,
             ] {
-                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777));
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
             }
             if let Ok(entries) = std::fs::read_dir(&host_agent_dir) {
                 for entry in entries.flatten() {
                     if let Ok(ft) = entry.file_type() {
                         if ft.is_file() {
-                            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o666));
+                            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o644));
                         }
                     }
                 }
             }
-            let _ = std::fs::set_permissions(&canonical_workdir, std::fs::Permissions::from_mode(0o777));
+            let _ = std::fs::set_permissions(&canonical_workdir, std::fs::Permissions::from_mode(0o755));
         }
         let mount_omp = format!("{}:/home/ubuntu/.omp", host_omp_dir.display());
 
@@ -431,7 +431,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&agents_md_path, std::fs::Permissions::from_mode(0o666));
+            let _ = std::fs::set_permissions(&agents_md_path, std::fs::Permissions::from_mode(0o644));
         }
 
         cmd.arg("subdollar-sandbox")

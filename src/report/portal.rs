@@ -1268,9 +1268,12 @@ impl PortalExporter {
     fn secret_patterns() -> Vec<Regex> {
         [
             r"sk-or-v1-[A-Za-z0-9_-]+",
+            r"sk-proj-[A-Za-z0-9_-]+",
+            r"sk-ant-[A-Za-z0-9_-]+",
+            r"hf_[A-Za-z0-9_-]{16,}",
             r"(?i)bearer\s+[A-Za-z0-9_\-\.~\+/=]+",
-            r"(?i)openrouter_api_key\s*=\s*\S+",
-            r"--api-key\s+\S+",
+            r"(?i)(?:openrouter_api_key|openai_api_key|anthropic_api_key)\s*=\s*\S+",
+            r"--api-key(?:\s+|=)\S+",
         ]
         .iter()
         .filter_map(|p| Regex::new(p).ok())
@@ -1689,11 +1692,14 @@ mod tests {
     #[test]
     fn test_portal_redaction_strips_secrets() {
         let patterns = PortalExporter::secret_patterns();
-        let dirty = "export OPENROUTER_API_KEY=sk-or-v1-abc123XYZ here\nAuthorization: Bearer tok456\nrun --api-key sk-or-v1-other ok";
+        let dirty = "export OPENROUTER_API_KEY=sk-or-v1-abc123XYZ here\nAuthorization: Bearer tok456\nrun --api-key sk-or-v1-other ok\nOPENAI_API_KEY=sk-proj-xyz987\nhf_token=hf_abcdef12345678901234\nsk-ant-secret";
         let clean = PortalExporter::redact(dirty, &patterns);
         assert!(!clean.contains("abc123XYZ"));
         assert!(!clean.contains("tok456"));
         assert!(!clean.contains("sk-or-v1-other"));
+        assert!(!clean.contains("sk-proj-xyz987"));
+        assert!(!clean.contains("hf_abcdef12345678901234"));
+        assert!(!clean.contains("sk-ant-secret"));
         assert!(clean.contains("***REDACTED***"));
         // Ordinary text survives redaction.
         assert!(clean.contains("export"));

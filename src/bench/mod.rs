@@ -1,15 +1,22 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use std::process::Command;
+use std::sync::LazyLock;
 
 pub struct BenchmarkRunner;
 
+static REDIS_BENCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\d+\.?\d*)\s+requests per second").expect("valid redis benchmark regex")
+});
+
+static WRK_BENCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Requests/sec:\s+(\d+\.?\d*)").expect("valid wrk benchmark regex")
+});
+
 impl BenchmarkRunner {
     pub fn parse_redis_benchmark_output(stdout: &str) -> Result<f64> {
-        let re = Regex::new(r"(\d+\.?\d*)\s+requests per second").unwrap();
-
         let mut rates = Vec::new();
-        for cap in re.captures_iter(stdout) {
+        for cap in REDIS_BENCH_RE.captures_iter(stdout) {
             if let Some(m) = cap.get(1) {
                 if let Ok(val) = m.as_str().parse::<f64>() {
                     rates.push(val);
@@ -29,9 +36,7 @@ impl BenchmarkRunner {
     }
 
     pub fn parse_wrk_output(stdout: &str) -> Result<f64> {
-        let re = Regex::new(r"Requests/sec:\s+(\d+\.?\d*)").unwrap();
-
-        if let Some(cap) = re.captures(stdout) {
+        if let Some(cap) = WRK_BENCH_RE.captures(stdout) {
             if let Some(m) = cap.get(1) {
                 if let Ok(val) = m.as_str().parse::<f64>() {
                     return Ok(val);

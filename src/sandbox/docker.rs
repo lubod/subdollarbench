@@ -2,10 +2,12 @@ use anyhow::{anyhow, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 pub struct SandboxManager {
     pub instance_id: String,
+    pub needs_cleanup: AtomicBool,
 }
 
 impl Default for SandboxManager {
@@ -30,6 +32,7 @@ impl SandboxManager {
             } else {
                 safe_id
             },
+            needs_cleanup: AtomicBool::new(false),
         }
     }
 
@@ -60,6 +63,7 @@ impl SandboxManager {
     /// so the agent can probe ground truth by hostname while remaining
     /// isolated from host-network services.
     pub fn ensure_network(&self) -> Result<()> {
+        self.needs_cleanup.store(true, Ordering::SeqCst);
         let net = self.network_name();
         let out = Command::new("docker")
             .args(["network", "create", &net])
@@ -520,32 +524,46 @@ impl SandboxManager {
     }
 
     pub fn cleanup(&self) {
+        self.needs_cleanup.store(false, Ordering::SeqCst);
         let cand = self.candidate_container_name();
         let ref_redis = self.ref_redis_name();
         let ref_http = self.ref_http_name();
         let ref_dns = self.ref_dns_name();
         let net = self.network_name();
         let agent_pid = format!("subdollar-omp-agent-{}", std::process::id());
-        let _ = Command::new("docker")
-            .args([
-                "rm",
-                "-f",
-                &cand,
-                &ref_redis,
-                &ref_http,
-                &ref_dns,
-                &agent_pid,
+        let mut rm_args: Vec<&str> = vec![
+            "rm",
+            "-f",
+            &cand,
+            &ref_redis,
+            &ref_http,
+            &ref_dns,
+            &agent_pid,
+        ];
+        if self.instance_id == "default" {
+            rm_args.extend_from_slice(&[
                 "subdollar-ref-redis",
                 "subdollar-ref-http",
                 "subdollar-ref-dns",
                 "subdollar-candidate",
                 "subdollar-omp-agent",
-            ])
+            ]);
+        }
+        let _ = Command::new("docker")
+            .args(&rm_args)
             .output();
         let _ = Command::new("docker")
             .args(["network", "rm", &net])
             .output();
         let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
+    }
+}
+
+impl Drop for SandboxManager {
+    fn drop(&mut self) {
+        if self.needs_cleanup.load(Ordering::SeqCst) {
+            self.cleanup();
+        }
     }
 }
 
