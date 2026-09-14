@@ -184,6 +184,14 @@
       font-weight: 600;
       animation: btnPop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
     }
+    .preset-btn:disabled, .preset-btn.disabled {
+      opacity: 0.35 !important;
+      cursor: not-allowed !important;
+      text-decoration: line-through !important;
+      pointer-events: none !important;
+      transform: none !important;
+      border-color: var(--border) !important;
+    }
     .btn-action-pulse {
       animation: btnPop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }
@@ -988,12 +996,12 @@
             <span class="hint" id="effortHint">Thinking depth for reasoning models</span>
           </label>
           <div class="presets" id="effortPresets">
-            <button type="button" class="preset-btn active" onclick="setEffort('auto', this)">Auto</button>
-            <button type="button" class="preset-btn" onclick="setEffort('low', this)">Low</button>
-            <button type="button" class="preset-btn" onclick="setEffort('medium', this)">Medium</button>
-            <button type="button" class="preset-btn" onclick="setEffort('high', this)">High</button>
-            <button type="button" class="preset-btn" onclick="setEffort('max', this)">Max</button>
-            <button type="button" class="preset-btn" onclick="setEffort('off', this)">Off</button>
+            <button type="button" class="preset-btn active" data-effort="auto" onclick="setEffort('auto', this)">Auto</button>
+            <button type="button" class="preset-btn" data-effort="low" onclick="setEffort('low', this)">Low</button>
+            <button type="button" class="preset-btn" data-effort="medium" onclick="setEffort('medium', this)">Medium</button>
+            <button type="button" class="preset-btn" data-effort="high" onclick="setEffort('high', this)">High</button>
+            <button type="button" class="preset-btn" data-effort="max" onclick="setEffort('max', this)">Max</button>
+            <button type="button" class="preset-btn" data-effort="off" onclick="setEffort('off', this)">Off</button>
           </div>
           <select id="effortSelect" onchange="onEffortDropdownChanged()" style="margin-top: 4px;">
             <option value="auto" selected>⚡ Auto (Default model reasoning level)</option>
@@ -1302,18 +1310,141 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     });
 
     function setEffort(val, btn) {
-      document.getElementById('effortSelect').value = val;
-      if (btn) {
-        document.querySelectorAll('#effortPresets .preset-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-      }
+      if (btn && (btn.disabled || btn.classList.contains('disabled'))) return;
+      const select = document.getElementById('effortSelect');
+      const opt = select ? select.querySelector(`option[value="${val}"]`) : null;
+      if (opt && opt.disabled) return;
+      if (select) select.value = val;
+      document.querySelectorAll('#effortPresets .preset-btn').forEach(b => {
+        const bEff = (b.dataset.effort || b.textContent.toLowerCase().trim());
+        b.classList.toggle('active', bEff === val);
+      });
     }
 
     function onEffortDropdownChanged() {
       const val = document.getElementById('effortSelect').value;
       document.querySelectorAll('#effortPresets .preset-btn').forEach(b => {
-        b.classList.toggle('active', b.textContent.toLowerCase() === val);
+        const bEff = (b.dataset.effort || b.textContent.toLowerCase().trim());
+        b.classList.toggle('active', bEff === val);
       });
+    }
+
+    function updateEffortControlsForModel(targetModelId) {
+      if (!targetModelId) return;
+      const cleanId = targetModelId.replace(/^openrouter\//, '').replace(/^openai\//, '');
+      const model = allModels.find(m => m.id === targetModelId || m.id === cleanId || cleanId.endsWith(m.id));
+
+      const hintEl = document.getElementById('effortHint');
+      const selectEl = document.getElementById('effortSelect');
+      const presetBtns = document.querySelectorAll('#effortPresets .preset-btn');
+
+      if (!model) {
+        presetBtns.forEach(b => {
+          b.disabled = false;
+          b.classList.remove('disabled');
+          b.title = '';
+        });
+        if (selectEl) {
+          Array.from(selectEl.options).forEach(opt => {
+            opt.disabled = false;
+            opt.text = opt.text.replace(' ⚠️ (Unsupported by model)', '');
+          });
+        }
+        if (hintEl) hintEl.textContent = 'Thinking depth for reasoning models';
+        return;
+      }
+
+      const isReasoning = !!model.is_reasoning;
+      const supportedEfforts = (model.supported_efforts || []).map(e => e.toLowerCase());
+      const defaultEffort = model.default_effort ? model.default_effort.toLowerCase() : null;
+      const supportsMaxTokens = !!model.supports_max_tokens;
+
+      // Update effort hint text
+      if (hintEl) {
+        if (isReasoning && supportedEfforts.length > 0) {
+          const effortList = supportedEfforts.map(e => e.toUpperCase()).join(', ');
+          const defStr = defaultEffort ? ` · default: <b>${defaultEffort.toUpperCase()}</b>` : '';
+          hintEl.innerHTML = `<span style="color:#58a6ff;">Supported by API: <b>${effortList}</b>${defStr}</span>`;
+        } else if (isReasoning && supportsMaxTokens) {
+          hintEl.innerHTML = `<span style="color:#d2a8ff;">Token-budget reasoning model (thinking tokens supported)</span>`;
+        } else if (isReasoning) {
+          hintEl.innerHTML = `<span style="color:#58a6ff;">Reasoning model (Auto / Default recommended)</span>`;
+        } else {
+          hintEl.innerHTML = `<span style="color:var(--text-muted);">Standard LLM (non-reasoning · effort parameter omitted/off)</span>`;
+        }
+      }
+
+      const tiers = ['low', 'medium', 'high', 'max'];
+      let currentVal = selectEl ? selectEl.value : 'auto';
+      let needFallback = false;
+
+      presetBtns.forEach(btn => {
+        const effort = (btn.dataset.effort || btn.textContent.toLowerCase().trim());
+        const opt = selectEl ? selectEl.querySelector(`option[value="${effort}"]`) : null;
+
+        if (effort === 'auto' || effort === 'off') {
+          btn.disabled = false;
+          btn.classList.remove('disabled');
+          btn.title = effort === 'auto' ? 'Use model default reasoning level' : 'Disable thinking tokens';
+          if (opt) opt.disabled = false;
+          return;
+        }
+
+        if (tiers.includes(effort)) {
+          let isSupported = true;
+          let reason = '';
+
+          if (!isReasoning) {
+            isSupported = false;
+            reason = `Model does not support reasoning effort`;
+          } else if (supportedEfforts.length > 0) {
+            isSupported = supportedEfforts.includes(effort);
+            if (!isSupported) {
+              reason = `Effort '${effort.toUpperCase()}' not supported by ${model.name} (valid: ${supportedEfforts.join(', ')})`;
+            }
+          }
+
+          btn.disabled = !isSupported;
+          btn.classList.toggle('disabled', !isSupported);
+          if (!isSupported) {
+            btn.title = reason;
+            if (opt) {
+              opt.disabled = true;
+              if (!opt.text.includes('(Unsupported)')) {
+                opt.text = `${opt.text} ⚠️ (Unsupported by model)`;
+              }
+            }
+            if (currentVal === effort) {
+              needFallback = true;
+            }
+          } else {
+            btn.title = `Supported reasoning level: ${effort.toUpperCase()}`;
+            if (opt) {
+              opt.disabled = false;
+              opt.text = opt.text.replace(' ⚠️ (Unsupported by model)', '');
+            }
+          }
+        }
+      });
+
+      // If current selection is unsupported, gracefully clamp to best supported or auto
+      if (needFallback && selectEl) {
+        let fallback = 'auto';
+        if (supportedEfforts.length > 0) {
+          if (currentVal === 'max' && supportedEfforts.includes('high')) {
+            fallback = 'high';
+          } else if (defaultEffort && supportedEfforts.includes(defaultEffort)) {
+            fallback = defaultEffort;
+          } else {
+            fallback = supportedEfforts[0];
+          }
+        }
+        selectEl.value = fallback;
+        presetBtns.forEach(b => {
+          const bEff = (b.dataset.effort || b.textContent.toLowerCase().trim());
+          b.classList.toggle('active', bEff === fallback);
+        });
+      }
     }
 
     async function fetchModels() {
@@ -1333,6 +1464,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         badge.textContent = `${allModels.length} models < $1.00`;
         badge.className = 'badge badge-pass';
         filterModelsList();
+        updateEffortControlsForModel(document.getElementById('model').value.trim());
       } catch (e) {
         console.error('Failed to load models:', e);
         badge.textContent = 'Failed to load models';
@@ -1404,7 +1536,18 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           opt.dataset.relDate = 'N/A';
         }
 
-        opt.textContent = `${dateBadge}${m.name} — [In: $${m.prompt_price_per_m.toFixed(2)} / Out: $${m.completion_price_per_m.toFixed(2)}]`;
+        let effortTag = '';
+        if (m.is_reasoning) {
+          if (m.supported_efforts && m.supported_efforts.length > 0) {
+            effortTag = ` · 🧠 [${m.supported_efforts.join('/')}]`;
+          } else if (m.supports_max_tokens) {
+            effortTag = ` · 🧠 [tokens]`;
+          } else {
+            effortTag = ` · 🧠 [reasoning]`;
+          }
+        }
+
+        opt.textContent = `${dateBadge}${m.name}${effortTag} — [In: $${m.prompt_price_per_m.toFixed(2)} / Out: $${m.completion_price_per_m.toFixed(2)}]`;
         select.appendChild(opt);
       });
 
@@ -1446,12 +1589,27 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (modelId.includes('local') || modelId.startsWith('openai/')) {
         checkLocalModelStatus(false);
       }
+
+      let effortBadge = '';
+      const mData = allModels.find(x => x.id === modelId);
+      if (mData) {
+        if (mData.supported_efforts && mData.supported_efforts.length > 0) {
+          effortBadge = ` • <span>⚡ Effort: <b>${escapeHtml(mData.supported_efforts.join('/'))}</b></span>`;
+        } else if (mData.supports_max_tokens) {
+          effortBadge = ` • <span>⚡ Thinking: <b>Token budget</b></span>`;
+        } else if (mData.is_reasoning) {
+          effortBadge = ` • <span>⚡ Reasoning: <b>Yes</b></span>`;
+        }
+      }
+
       pill.innerHTML = `
         <span>📅 Released: <b>${escapeHtml(opt.dataset.relDate)}</b></span> • 
         <span>📥 Input: <b>$${escapeHtml(opt.dataset.promptPrice)}/1M</b></span> • 
         <span>📤 Output: <b>$${escapeHtml(opt.dataset.compPrice)}/1M</b></span> • 
-        <span>🧠 Ctx: <b>${parseInt(opt.dataset.context || 0).toLocaleString()}</b></span>
+        <span>🧠 Ctx: <b>${parseInt(opt.dataset.context || 0).toLocaleString()}</b></span>${effortBadge}
       `;
+
+      updateEffortControlsForModel(targetModel);
     }
 
     function switchTab(name) {
@@ -3555,9 +3713,11 @@ function copyRunId() {
           <span>🦙 <b>Local llama.cpp</b></span> • 
           <span>📥 Input: <b>$0.00/1M</b></span> • 
           <span>📤 Output: <b>$0.00/1M</b></span> • 
-          <span>🧠 Ctx: <b>16,384</b></span>
+          <span>🧠 Ctx: <b>16,384</b></span> • 
+          <span>⚪ Standard LLM</span>
         `;
       }
+      updateEffortControlsForModel(modelId);
     }
 
     function resetStatus() {
@@ -3570,9 +3730,13 @@ function copyRunId() {
 
     // Initial load & persistent status sync
     const savedModel = localStorage.getItem('selected_benchmark_model');
-    if (savedModel) {
-      const modelInput = document.getElementById('model');
-      if (modelInput) modelInput.value = savedModel;
+    const modelInput = document.getElementById('model');
+    if (savedModel && modelInput) {
+      modelInput.value = savedModel;
+    }
+    if (modelInput) {
+      modelInput.addEventListener('input', (e) => updateEffortControlsForModel(e.target.value.trim()));
+      modelInput.addEventListener('change', (e) => updateEffortControlsForModel(e.target.value.trim()));
     }
     fetchModels();
     const initialSavedTask = localStorage.getItem('selected_benchmark_task') || 'redis';

@@ -109,7 +109,7 @@ pub struct RunRequest {
     pub review_model: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubDollarModel {
     pub id: String,
     pub name: String,
@@ -117,6 +117,28 @@ pub struct SubDollarModel {
     pub completion_price_per_m: f64,
     pub context_length: u64,
     pub created: i64,
+    #[serde(default)]
+    pub supported_efforts: Vec<String>,
+    #[serde(default)]
+    pub default_effort: Option<String>,
+    #[serde(default)]
+    pub is_reasoning: bool,
+    #[serde(default)]
+    pub supports_max_tokens: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterReasoning {
+    #[serde(default)]
+    pub mandatory: Option<bool>,
+    #[serde(default)]
+    pub default_enabled: Option<bool>,
+    #[serde(default)]
+    pub supported_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    pub default_effort: Option<String>,
+    #[serde(default)]
+    pub supports_max_tokens: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +148,10 @@ struct OpenRouterModelItem {
     context_length: Option<u64>,
     pricing: Option<OpenRouterPricing>,
     created: Option<i64>,
+    #[serde(default)]
+    pub supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    pub reasoning: Option<OpenRouterReasoning>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,6 +489,33 @@ async fn get_models(
                     .unwrap_or(0.0)
                     * 1_000_000.0;
 
+                let supported_params = item.supported_parameters.as_ref();
+                let has_reasoning_param = supported_params
+                    .map(|params| params.iter().any(|p| p == "reasoning" || p == "reasoning_effort"))
+                    .unwrap_or(false);
+
+                let reasoning_obj = item.reasoning.as_ref();
+                let mut supported_efforts = reasoning_obj
+                    .and_then(|r| r.supported_efforts.clone())
+                    .unwrap_or_default();
+
+                // Upstream providers (like Meta) reject "max" with 400 invalid_request_error.
+                // Sanitize: clamp out "max" if upstream endpoint strictly forbids it
+                if item.id.starts_with("meta/") {
+                    supported_efforts.retain(|e| e != "max");
+                }
+
+                let default_effort = reasoning_obj.and_then(|r| r.default_effort.clone());
+                let supports_max_tokens = reasoning_obj
+                    .and_then(|r| r.supports_max_tokens)
+                    .unwrap_or(false);
+
+                let is_reasoning = has_reasoning_param
+                    || !supported_efforts.is_empty()
+                    || supports_max_tokens
+                    || reasoning_obj.and_then(|r| r.mandatory).unwrap_or(false)
+                    || reasoning_obj.and_then(|r| r.default_enabled).unwrap_or(false);
+
                 if prompt_p <= 1.0 && comp_p <= 5.0 && (prompt_p > 0.0 || comp_p > 0.0) {
                     models.push(SubDollarModel {
                         id: item.id,
@@ -471,6 +524,10 @@ async fn get_models(
                         completion_price_per_m: comp_p,
                         context_length: item.context_length.unwrap_or(0),
                         created: item.created.unwrap_or(0),
+                        supported_efforts,
+                        default_effort,
+                        is_reasoning,
+                        supports_max_tokens,
                     });
                 }
             }
@@ -517,6 +574,10 @@ async fn get_models(
                 completion_price_per_m: 0.0,
                 context_length: 16384,
                 created: 1720000000 + idx as i64,
+                supported_efforts: Vec::new(),
+                default_effort: None,
+                is_reasoning: false,
+                supports_max_tokens: false,
             },
         );
     }
@@ -1967,5 +2028,71 @@ mod tests {
         assert_eq!(validate_task_name("redis").unwrap(), "redis");
         assert!(validate_task_name("../bad").is_err());
         assert!(validate_task_name("bad/slash").is_err());
+    }
+
+    #[test]
+    fn test_openrouter_reasoning_metadata_parsing() {
+        let sample_json = r#"{
+            "data": [
+                {
+                    "id": "google/gemini-3.8-flash",
+                    "name": "Google: Gemini 3.8 Flash",
+                    "context_length": 1048576,
+                    "pricing": { "prompt": "0.00000015", "completion": "0.00000060" },
+                    "created": 1740000000,
+                    "supported_parameters": ["reasoning", "reasoning_effort"],
+                    "reasoning": {
+                        "mandatory": true,
+                        "default_enabled": true,
+                        "supported_efforts": ["high", "medium", "low"],
+                        "default_effort": "medium",
+                        "supports_max_tokens": false
+                    }
+                },
+                {
+                    "id": "meta/muse-spark-1.3-contributor",
+                    "name": "Meta: Muse Spark 1.3",
+                    "context_length": 131072,
+                    "pricing": { "prompt": "0.00000020", "completion": "0.00000040" },
+                    "created": 1740000100,
+                    "supported_parameters": ["reasoning", "reasoning_effort"],
+                    "reasoning": {
+                        "mandatory": true,
+                        "supported_efforts": ["max", "high", "medium", "low"],
+                        "default_effort": "medium"
+                    }
+                },
+                {
+                    "id": "qwen/qwen3.8-flash",
+                    "name": "Qwen: Qwen 3.8 Flash",
+                    "context_length": 131072,
+                    "pricing": { "prompt": "0.00000010", "completion": "0.00000030" },
+                    "created": 1740000200,
+                    "supported_parameters": ["reasoning"],
+                    "reasoning": {
+                        "supports_max_tokens": true
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed: OpenRouterResponse = serde_json::from_str(sample_json).expect("deserialize sample");
+        assert_eq!(parsed.data.len(), 3);
+
+        let gemini = &parsed.data[0];
+        assert_eq!(gemini.id, "google/gemini-3.8-flash");
+        let r = gemini.reasoning.as_ref().unwrap();
+        assert_eq!(r.supported_efforts.as_ref().unwrap(), &vec!["high", "medium", "low"]);
+        assert_eq!(r.default_effort.as_deref(), Some("medium"));
+
+        let meta = &parsed.data[1];
+        let mut meta_efforts = meta.reasoning.as_ref().unwrap().supported_efforts.clone().unwrap();
+        if meta.id.starts_with("meta/") {
+            meta_efforts.retain(|e| e != "max");
+        }
+        assert_eq!(meta_efforts, vec!["high", "medium", "low"]);
+
+        let qwen = &parsed.data[2];
+        assert_eq!(qwen.reasoning.as_ref().unwrap().supports_max_tokens, Some(true));
     }
 }
