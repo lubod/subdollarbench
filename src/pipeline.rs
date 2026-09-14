@@ -29,13 +29,15 @@ pub trait PipelineLogger: Send + Sync {
 struct BufferingPipelineLogger {
     inner: Arc<dyn PipelineLogger>,
     buffer: std::sync::Mutex<Vec<String>>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl BufferingPipelineLogger {
-    fn new(inner: Arc<dyn PipelineLogger>) -> Self {
+    fn new(inner: Arc<dyn PipelineLogger>, cancel_flag: Option<Arc<AtomicBool>>) -> Self {
         Self {
             inner,
             buffer: std::sync::Mutex::new(Vec::new()),
+            cancel_flag,
         }
     }
 
@@ -46,6 +48,17 @@ impl BufferingPipelineLogger {
 
 impl PipelineLogger for BufferingPipelineLogger {
     fn log(&self, msg: &str) {
+        if let Some(ref cf) = self.cancel_flag {
+            if cf.load(Ordering::SeqCst)
+                && !msg.contains("[USER ACTION]")
+                && !msg.contains("[DONE]")
+                && !msg.contains("[STOP]")
+                && !msg.contains("[PIPELINE] Run cancelled")
+                && !msg.contains("[PIPELINE] Cancellation")
+            {
+                return;
+            }
+        }
         self.inner.log(msg);
         let ts = Utc::now().format("%H:%M:%S").to_string();
         self.buffer
@@ -96,7 +109,7 @@ impl BenchmarkPipeline {
         logger: Arc<dyn PipelineLogger>,
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<PipelineOutput> {
-        let buffering_logger = Arc::new(BufferingPipelineLogger::new(logger));
+        let buffering_logger = Arc::new(BufferingPipelineLogger::new(logger, cancel_flag.clone()));
         let logger: Arc<dyn PipelineLogger> = buffering_logger.clone();
 
         let start_time = Instant::now();
@@ -246,26 +259,50 @@ impl BenchmarkPipeline {
             let run_id_c = run_id.clone();
             let net_name = sandbox.network_name();
 
-            let omp_res = tokio::task::spawn_blocking(move || {
-                let spec = AgentRunSpec {
-                    model: &model_c,
-                    prompt: &prompt_c,
-                    workdir: &work_path_buf,
-                    api_key: api_key_c.as_deref(),
-                    limits,
-                    effort: Some(&effort_c),
-                    network: Some(net_name.as_str()),
-                    task: Some(config.task),
-                    run_id: Some(&run_id_c),
-                };
-                OmpRunner::run_agent_with_logger(spec, move |line| {
-                    logger_sub.log(&line);
-                })
-            })
-            .await;
+            let cancel_flag_c = cancel_flag.clone();
+            let cancel_flag_watcher = cancel_flag.clone();
+            let sandbox_clone = SandboxManager::with_id(&run_id_c);
+
+            let omp_res: Result<OmpSessionStats> = tokio::select! {
+                res = tokio::task::spawn_blocking(move || {
+                    let spec = AgentRunSpec {
+                        model: &model_c,
+                        prompt: &prompt_c,
+                        workdir: &work_path_buf,
+                        api_key: api_key_c.as_deref(),
+                        limits,
+                        effort: Some(&effort_c),
+                        network: Some(net_name.as_str()),
+                        task: Some(config.task),
+                        run_id: Some(&run_id_c),
+                        cancel_flag: cancel_flag_c,
+                    };
+                    OmpRunner::run_agent_with_logger(spec, move |line| {
+                        logger_sub.log(&line);
+                    })
+                }) => match res {
+                    Ok(inner) => inner,
+                    Err(e) => Err(anyhow!("OMP task execution error: {}", e)),
+                },
+                _ = async {
+                    if let Some(ref cf) = cancel_flag_watcher {
+                        loop {
+                            if cf.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    sandbox_clone.cleanup();
+                    Err(anyhow!("Benchmark run was cancelled by user"))
+                }
+            };
 
             match omp_res {
-                Ok(Ok(stats)) => {
+                Ok(stats) => {
                     logger.log(&format!(
                         "[OMP] Finished! Tokens: prompt={}, cached={}, completion={}",
                         stats.prompt_tokens, stats.cached_tokens, stats.completion_tokens
@@ -275,22 +312,19 @@ impl BenchmarkPipeline {
                     let comp = stats.completion_tokens;
                     (stats, p, c, comp)
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
+                    if let Some(ref cf) = cancel_flag {
+                        if cf.load(Ordering::SeqCst) {
+                            sandbox.cleanup();
+                            return Err(anyhow!("Benchmark run was cancelled by user"));
+                        }
+                    }
                     logger.log(&format!("[OMP ERROR] Agent execution failed: {}", e));
                     agent_failed = true;
                     let partial_stats = e
                         .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
                         .map(|oe| oe.partial_stats.clone())
                         .unwrap_or_default();
-                    let p = partial_stats.prompt_tokens;
-                    let c = partial_stats.cached_tokens;
-                    let comp = partial_stats.completion_tokens;
-                    (partial_stats, p, c, comp)
-                }
-                Err(join_err) => {
-                    logger.log(&format!("[OMP ERROR] Task execution error: {}", join_err));
-                    agent_failed = true;
-                    let partial_stats = OmpSessionStats::default();
                     let p = partial_stats.prompt_tokens;
                     let c = partial_stats.cached_tokens;
                     let comp = partial_stats.completion_tokens;

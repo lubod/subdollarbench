@@ -3158,6 +3158,8 @@ function copyRunId() {
         if (res.ok) {
           appendLog('[STOP] Benchmark cancellation requested by user.');
           stopElapsedTimer();
+          resetStatus();
+          checkActiveRun();
         } else {
           const err = await res.text();
           alert(`Failed to stop run: ${err}`);

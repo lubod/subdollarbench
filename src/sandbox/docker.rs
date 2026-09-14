@@ -523,6 +523,22 @@ impl SandboxManager {
         }
     }
 
+    pub fn agent_container_name(&self) -> String {
+        let clean = self
+            .instance_id
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "");
+        format!("subdollar-omp-agent-{}", clean)
+    }
+
+    pub fn cleanup_all_subdollar_containers() {
+        let _ = Command::new("sh")
+            .args([
+                "-c",
+                "docker ps -q --filter 'name=subdollar-' | xargs -r docker rm -f",
+            ])
+            .output();
+    }
+
     pub fn cleanup(&self) {
         self.needs_cleanup.store(false, Ordering::SeqCst);
         let cand = self.candidate_container_name();
@@ -530,6 +546,7 @@ impl SandboxManager {
         let ref_http = self.ref_http_name();
         let ref_dns = self.ref_dns_name();
         let net = self.network_name();
+        let agent_name = self.agent_container_name();
         let agent_pid = format!("subdollar-omp-agent-{}", std::process::id());
         let mut rm_args: Vec<&str> = vec![
             "rm",
@@ -538,6 +555,7 @@ impl SandboxManager {
             &ref_redis,
             &ref_http,
             &ref_dns,
+            &agent_name,
             &agent_pid,
         ];
         if self.instance_id == "default" {

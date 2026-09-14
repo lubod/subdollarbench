@@ -850,16 +850,8 @@ async fn stop_run(State(state): State<AppState>) -> Response {
         sandbox.cleanup();
     }
 
-    let agent_pid = format!("subdollar-omp-agent-{}", std::process::id());
-    let _ = std::process::Command::new("docker")
-        .args([
-            "rm",
-            "-f",
-            "subdollar-omp-agent",
-            &agent_pid,
-            "subdollar-candidate",
-        ])
-        .output();
+    // Sweeping cleanup: ensure all subdollar containers are killed and removed
+    crate::sandbox::SandboxManager::cleanup_all_subdollar_containers();
 
     *state.current_run.write().unwrap() = None;
     state.is_running.store(false, Ordering::SeqCst);

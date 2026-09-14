@@ -52,6 +52,7 @@ pub struct TailSessionContext {
     pub accumulated_tokens: Arc<std::sync::atomic::AtomicU64>,
     pub limit_reached: Arc<AtomicBool>,
     pub limit_reason: Arc<Mutex<Option<String>>>,
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// All launch parameters for one agent session. Bundled in a struct so the
@@ -67,6 +68,7 @@ pub struct AgentRunSpec<'a> {
     pub network: Option<&'a str>,
     pub task: Option<crate::config::TaskType>,
     pub run_id: Option<&'a str>,
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,7 @@ impl OmpRunner {
             network,
             task,
             run_id,
+            cancel_flag,
         } = spec;
         info!(
             "Launching OMP agent in Docker sandbox with model: {}, effort: {:?}, limits: {:?}",
@@ -525,6 +528,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             accumulated_tokens: accumulated_tokens.clone(),
             limit_reached: limit_reached.clone(),
             limit_reason: limit_reason.clone(),
+            cancel_flag: cancel_flag.clone(),
         };
 
         let tailer_handle = thread::spawn(move || {
@@ -578,6 +582,18 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         let start_instant = std::time::Instant::now();
         let status = loop {
+            // Check cancellation request immediately
+            if let Some(ref cf) = cancel_flag {
+                if cf.load(Ordering::SeqCst) {
+                    let msg = "[PIPELINE] Cancellation requested. Terminating agent container immediately...".to_string();
+                    log_fn(msg.clone());
+                    limit_reached.store(true, Ordering::SeqCst);
+                    *limit_reason.lock().unwrap() = Some(msg);
+                    kill_agent();
+                    let _ = child.kill();
+                    break None;
+                }
+            }
             // Check wall-clock timeout watchdog
             if let Some(max_secs) = limits.timeout_seconds {
                 if start_instant.elapsed().as_secs() >= max_secs {
@@ -746,6 +762,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         let mut last_heartbeat = std::time::Instant::now();
 
         while ctx.running.load(Ordering::SeqCst) {
+            if let Some(ref cf) = ctx.cancel_flag {
+                if cf.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
             line_buf.clear();
             match reader.read_line(&mut line_buf) {
                 Ok(0) => {
@@ -1526,6 +1547,7 @@ mod tests {
             accumulated_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             limit_reached,
             limit_reason,
+            cancel_flag: None,
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -1673,6 +1695,7 @@ mod tests {
             accumulated_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             limit_reached: lim_reached,
             limit_reason,
+            cancel_flag: None,
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -1709,6 +1732,7 @@ mod tests {
             network: None,
             task: None,
             run_id: None,
+            cancel_flag: None,
         });
 
         // omp should fail on nonexistent model with error
@@ -1738,6 +1762,7 @@ mod tests {
             network: None,
             task: None,
             run_id: None,
+            cancel_flag: None,
         });
 
         if let Err(e) = res {
