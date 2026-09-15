@@ -80,7 +80,10 @@ export default function (pi) {
               { content: "Wrap up now: finish and test.", customType: "steer" },
               { deliverAs: "steer" }
             );
+          } else {
+            throw new Error("no steer API");
           }
+          tel("steer: wrap-up injected at turn " + turns + "/" + maxTurns);
         } catch (_) {
           /* steer is best-effort */
         }
