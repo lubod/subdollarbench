@@ -39,6 +39,46 @@ pub struct OmpSessionStats {
     pub steps_taken: u32,
 }
 
+/// Embedded spike extension: bench anti-cheat policy, turn budget steer,
+/// per-turn telemetry. Shipped inside the binary and written to the shared
+/// OMP agent dir at launch so it is visible inside the sandbox container.
+const BENCH_POLICY_JS: &str = include_str!("../../extensions/bench-policy.js");
+
+/// Container-visible path of the installed policy extension. `host_omp_dir`
+/// is mounted at `/home/ubuntu/.omp` inside the sandbox, so
+/// `<host_omp_dir>/agent/bench-policy.js` is addressable at this path.
+const BENCH_POLICY_CONTAINER_PATH: &str = "/home/ubuntu/.omp/agent/bench-policy.js";
+
+/// Spike gate: on unless explicitly disabled via `SDB_BENCH_POLICY=0|off|false|no`.
+fn bench_policy_enabled() -> bool {
+    match std::env::var("SDB_BENCH_POLICY") {
+        Err(_) => true,
+        Ok(v) => !matches!(
+            v.trim().to_lowercase().as_str(),
+            "0" | "off" | "false" | "no" | "disabled"
+        ),
+    }
+}
+
+/// Write the embedded extension into the shared agent dir. Returns the
+/// container-visible `-e` path on success, `None` when disabled or on I/O error
+/// (bench must degrade to no-policy, never fail the run here).
+fn install_bench_policy_extension(host_agent_dir: &Path) -> Option<String> {
+    if !bench_policy_enabled() {
+        return None;
+    }
+    let dest = host_agent_dir.join("bench-policy.js");
+    if std::fs::write(&dest, BENCH_POLICY_JS).is_err() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644));
+    }
+    Some(BENCH_POLICY_CONTAINER_PATH.to_string())
+}
+
 #[derive(Clone)]
 pub struct TailSessionContext {
     pub start_time: SystemTime,
@@ -53,6 +93,9 @@ pub struct TailSessionContext {
     pub limit_reached: Arc<AtomicBool>,
     pub limit_reason: Arc<Mutex<Option<String>>>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Set when the spike extension streams BENCH-EVENT lines: the tailer
+    /// then renders assistant/tool session lines as token stats only.
+    pub extension_feed_active: Arc<AtomicBool>,
 }
 
 /// All launch parameters for one agent session. Bundled in a struct so the
@@ -282,6 +325,12 @@ impl OmpRunner {
             .arg("PI_NO_PTY=1")
             .arg("-e")
             .arg("HOME=/home/ubuntu");
+        if bench_policy_path.is_some() {
+            cmd.arg("-e").arg(format!(
+                "SDB_BENCH_MAX_TURNS={}",
+                limits.max_turns.unwrap_or(0)
+            ));
+        }
 
         // Attach to the run's private network (reference aliases ref-redis/ref-http/ref-dns)
         // when provided; fall back to the default bridge. The agent is never on the host
@@ -447,6 +496,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             .arg("--cwd=/workspace")
             .arg("--session-dir=/home/ubuntu/.omp/agent/sessions");
 
+        // Spike: bench policy extension (opt-out via SDB_BENCH_POLICY=0).
+        if let Some(policy_path) = bench_policy_path {
+            cmd.arg("-e").arg(&policy_path);
+        }
+
         if let Some(max_secs) = limits.timeout_seconds {
             cmd.arg(format!("--max-time={}s", max_secs));
         }
@@ -515,6 +569,10 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             let _ = tx.send(format!("  | {}", Self::cap_line(clean)));
         }
 
+        // Extension event feed (spike): extension BENCH-EVENT lines become
+        // the primary console feed; the tailer below renders assistant/tool
+        // session lines as token stats only once the feed proves live.
+        let extension_feed = Arc::new(AtomicBool::new(false));
         // Spawn thread to tail the active session .jsonl file in real-time
         let tail_ctx = TailSessionContext {
             start_time,
@@ -529,6 +587,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             limit_reached: limit_reached.clone(),
             limit_reason: limit_reason.clone(),
             cancel_flag: cancel_flag.clone(),
+            extension_feed_active: extension_feed.clone(),
         };
 
         let tailer_handle = thread::spawn(move || {
@@ -538,19 +597,19 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         // Spawn thread to read stdout
         if let Some(stdout) = child.stdout.take() {
             let tx_out = tx.clone();
+            let ext_flag = extension_feed.clone();
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
+                    if let Some(tagged) = Self::convert_bench_event(trimmed) {
+                        ext_flag.store(true, Ordering::SeqCst);
+                        for t in tagged {
+                            let _ = tx_out.send(t);
+                        }
+                    } else if let Some(out) = Self::forward_stdout_line(trimmed) {
+                        let _ = tx_out.send(out);
                     }
-                    // JSON lines are covered by the session-file tailer; forward
-                    // everything else (thoughts, progress, errors) verbatim.
-                    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
-                        continue;
-                    }
-                    let _ = tx_out.send(format!("[OMP] {}", Self::cap_line(trimmed)));
                 }
             });
         }
@@ -865,10 +924,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                             }
                         }
 
-                        if let Some(events) = Self::format_session_line(&line_buf) {
-                            for ev in events {
-                                let _ = ctx.tx.send(ev);
-                            }
+                        for ev in Self::render_tail_line(
+                            &line_buf,
+                            ctx.extension_feed_active.load(Ordering::SeqCst),
+                        ) {
+                            let _ = ctx.tx.send(ev);
                         }
                     } else {
                         let len = line_buf.len() as i64;
@@ -889,10 +949,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 Ok(0) => break,
                 Ok(_) => {
                     if line_buf.ends_with('\n') {
-                        if let Some(events) = Self::format_session_line(&line_buf) {
-                            for ev in events {
-                                let _ = ctx.tx.send(ev);
-                            }
+                        for ev in Self::render_tail_line(
+                            &line_buf,
+                            ctx.extension_feed_active.load(Ordering::SeqCst),
+                        ) {
+                            let _ = ctx.tx.send(ev);
                         }
                     } else {
                         break;
@@ -970,6 +1031,126 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 count - MAX
             )
         }
+    }
+
+    /// Decide whether a captured stdout line is forwarded to the bench log.
+    /// JSON lines belong to the session-file tailer; everything else —
+    /// thoughts, progress, `[BENCH-POLICY]` status, `[BENCH-EVENT]` structured
+    /// extension events, errors — is forwarded verbatim (capped).
+    fn forward_stdout_line(trimmed: &str) -> Option<String> {
+        if trimmed.is_empty() {
+            return None;
+        }
+        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+            return None;
+        }
+        Some(format!("[OMP] {}", Self::cap_line(trimmed)))
+    }
+
+    /// Convert an extension `[BENCH-EVENT] {...}` line into console tag lines
+    /// (`[THOUGHT]`/`[RESPONSE]`/`[RESULT]`). Returns None for non-event lines
+    /// (caller falls back to verbatim forwarding) and for unknown shapes.
+    /// `role=user` events are skipped: launch-time prompt lines already carry
+    /// the task prompt.
+    fn convert_bench_event(trimmed: &str) -> Option<Vec<String>> {
+        let body = trimmed.strip_prefix("[BENCH-EVENT] ")?;
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        if v.get("v")?.as_u64()? != 1 {
+            return None;
+        }
+        let mut out = Vec::new();
+        match v.get("kind").and_then(|k| k.as_str())? {
+            "message" => {
+                if v.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                    return Some(out);
+                }
+                for line in v.get("thinking").and_then(|t| t.as_str()).unwrap_or("").lines() {
+                    let clean = line.trim();
+                    if !clean.is_empty() {
+                        out.push(format!("[THOUGHT] {}", clean));
+                    }
+                }
+                for line in v.get("text").and_then(|t| t.as_str()).unwrap_or("").lines() {
+                    let clean = line.trim();
+                    if !clean.is_empty() {
+                        out.push(format!("[RESPONSE] {}", clean));
+                    }
+                }
+            }
+            "tool_result" => {
+                let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+                let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(true);
+                out.push(format!("[RESULT] {} ({})", tool, if ok { "OK" } else { "FAIL" }));
+                let lines: Vec<&str> = v
+                    .get("output")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .lines()
+                    .collect();
+                if lines.is_empty() {
+                    out.push("  (empty output)".to_string());
+                } else {
+                    for (idx, l) in lines.iter().enumerate() {
+                        if idx < 40 {
+                            out.push(format!("  > {}", l));
+                        } else {
+                            out.push(format!("  > ... (+{} more lines)", lines.len() - 40));
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
+    }
+
+    /// Mirror of the `[TOKENS]` block in `format_session_line`, kept so the
+    /// gated tail still reports per-turn usage after its content rendering
+    /// retires to the extension feed.
+    fn extract_token_line(v: &serde_json::Value) -> Option<String> {
+        let usage = v.get("message")?.get("usage")?;
+        let tin = usage
+            .get("input")
+            .or_else(|| usage.get("prompt_tokens"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let tout = usage
+            .get("output")
+            .or_else(|| usage.get("completion_tokens"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let tcached = usage
+            .get("cacheRead")
+            .or_else(|| usage.get("cache_read_input_tokens"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        if tin > 0 || tout > 0 || tcached > 0 {
+            Some(format!(
+                "[TOKENS] Turn usage - input: {}, output: {}, cached: {}",
+                tin, tout, tcached
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Single choke point for session-file rendering. Accounting (turns, cost,
+    /// tokens, TELEMETRY) happens upstream and is untouched; only the human
+    /// rendering retires to the extension feed once it proves live.
+    fn render_tail_line(line: &str, extension_active: bool) -> Vec<String> {
+        if extension_active {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                let role = v
+                    .get("message")
+                    .and_then(|m| m.get("role"))
+                    .and_then(|r| r.as_str());
+                if matches!(role, Some("assistant") | Some("toolResult") | Some("tool")) {
+                    return Self::extract_token_line(&v).map(|t| vec![t]).unwrap_or_default();
+                }
+            }
+        }
+        Self::format_session_line(line).unwrap_or_default()
     }
 
     fn format_session_line(line: &str) -> Option<Vec<String>> {
@@ -1358,6 +1539,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_convert_bench_event_to_tags() {
+        // Assistant message splits into thought + response lines.
+        let line = "[BENCH-EVENT] {\"v\":1,\"kind\":\"message\",\"role\":\"assistant\",\"text\":\"did X\\n\\nmore\",\"thinking\":\"plan Y\"}";
+        let out = OmpRunner::convert_bench_event(line).unwrap();
+        assert!(out.iter().any(|l| l == "[THOUGHT] plan Y"));
+        assert!(out.iter().any(|l| l == "[RESPONSE] did X"));
+        assert!(out.iter().any(|l| l == "[RESPONSE] more"));
+        // Tool result mirrors the tailer shape.
+        let line = "[BENCH-EVENT] {\"v\":1,\"kind\":\"tool_result\",\"tool\":\"bash\",\"ok\":false,\"output\":\"boom\\nline2\"}";
+        let out = OmpRunner::convert_bench_event(line).unwrap();
+        assert!(out.iter().any(|l| l == "[RESULT] bash (FAIL)"));
+        assert!(out.iter().any(|l| l == "  > boom"));
+        // User prompt already logged at launch: skipped, not dropped to fallback.
+        let line = "[BENCH-EVENT] {\"v\":1,\"kind\":\"message\",\"role\":\"user\",\"text\":\"hi\",\"thinking\":\"\"}";
+        assert!(OmpRunner::convert_bench_event(line).unwrap().is_empty());
+        // Non-events and unknown shapes fall back / are rejected.
+        assert!(OmpRunner::convert_bench_event("just thinking").is_none());
+        assert!(OmpRunner::convert_bench_event("[BENCH-EVENT] {\"v\":1,\"kind\":\"nope\"}").is_none());
+        assert!(OmpRunner::convert_bench_event("[BENCH-EVENT] not-json").is_none());
+    }
+
+    #[test]
+    fn test_render_tail_line_gating() {
+        let assistant = r#"{"message":{"role":"assistant","usage":{"input":1500,"output":250,"cacheRead":500},"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"hi"}]}}"#;
+        // Feed down: full legacy render.
+        let full = OmpRunner::render_tail_line(assistant, false);
+        assert!(full.iter().any(|l| l.contains("[THOUGHT] hmm")));
+        assert!(full.iter().any(|l| l.contains("[TOKENS] Turn usage")));
+        // Feed live: content retired, token stats preserved.
+        let gated = OmpRunner::render_tail_line(assistant, true);
+        assert_eq!(gated.len(), 1);
+        assert!(gated[0].contains("[TOKENS] Turn usage"));
+        // User lines never covered.
+        let user = r#"{"message":{"role":"user","content":[{"type":"text","text":"do X"}]}}"#;
+        assert!(OmpRunner::render_tail_line(user, true)
+            .iter()
+            .any(|l| l.contains("[PROMPT]")));
+        // Non-JSON tail lines are never extension-covered: still forwarded.
+        assert!(OmpRunner::render_tail_line("not-json", true)
+            .iter()
+            .any(|l| l.contains("[OMP]")));
+    }
+
+    #[test]
+    fn test_forward_stdout_line_contract() {
+        // Contract is over pre-trimmed input (the reader trims first).
+        assert!(OmpRunner::forward_stdout_line("").is_none());
+        // Raw session JSON stays with the file tailer.
+        assert!(OmpRunner::forward_stdout_line("{\"a\":1}").is_none());
+        // Plain thoughts forward.
+        let plain = OmpRunner::forward_stdout_line("just thinking out loud").unwrap();
+        assert!(plain.contains("[OMP] just thinking out loud"));
+        // Structured extension events forward with their tag intact.
+        let ev = OmpRunner::forward_stdout_line(
+            "[BENCH-EVENT] {\"v\":1,\"kind\":\"message\",\"role\":\"assistant\"}",
+        )
+        .unwrap();
+        assert!(ev.contains("[BENCH-EVENT]"));
+        assert!(ev.contains("\"kind\":\"message\""));
+    }
+
+    #[test]
+    fn test_bench_policy_gate_and_install() {
+        // Env-gate truth table (single test: env mutation is process-global).
+        let prev = std::env::var("SDB_BENCH_POLICY").ok();
+        std::env::remove_var("SDB_BENCH_POLICY");
+        assert!(bench_policy_enabled(), "default must be on");
+        for off in ["0", "off", "false", "no", "disabled", "OFF"] {
+            std::env::set_var("SDB_BENCH_POLICY", off);
+            assert!(!bench_policy_enabled(), "must be off for {off}");
+        }
+        std::env::set_var("SDB_BENCH_POLICY", "1");
+        assert!(bench_policy_enabled());
+
+        // Installer writes the embedded source and returns the container path.
+        std::env::remove_var("SDB_BENCH_POLICY");
+        let dir =
+            std::env::temp_dir().join(format!("test_bench_policy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let got = install_bench_policy_extension(&dir);
+        assert_eq!(got.as_deref(), Some(BENCH_POLICY_CONTAINER_PATH));
+        let content = std::fs::read_to_string(dir.join("bench-policy.js")).unwrap();
+        assert!(content.contains("tool_call"), "must hook tool calls");
+        assert!(content.contains("[BENCH-POLICY]"), "must emit tagged telemetry");
+
+        // Disabled gate installs nothing.
+        std::env::set_var("SDB_BENCH_POLICY", "0");
+        assert!(install_bench_policy_extension(&dir).is_none());
+
+        match prev {
+            Some(v) => std::env::set_var("SDB_BENCH_POLICY", v),
+            None => std::env::remove_var("SDB_BENCH_POLICY"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_format_session_line_user_prompt() {
         let json_user = r#"{
             "message": {
@@ -1548,6 +1827,7 @@ mod tests {
             limit_reached,
             limit_reason,
             cancel_flag: None,
+            extension_feed_active: Arc::new(AtomicBool::new(false)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -1696,6 +1976,7 @@ mod tests {
             limit_reached: lim_reached,
             limit_reason,
             cancel_flag: None,
+            extension_feed_active: Arc::new(AtomicBool::new(false)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
