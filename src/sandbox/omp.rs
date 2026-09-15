@@ -236,77 +236,21 @@ impl OmpRunner {
         }
         let mount_omp = format!("{}:/home/ubuntu/.omp", host_omp_dir.display());
 
-        let is_local_openai = model.starts_with("openai/qwen")
-            || model.starts_with("openai/llama")
-            || model.starts_with("openai/deepseek")
-            || model.starts_with("openai/glm")
-            || model.starts_with("openai/gemma")
-            || model.starts_with("openai/phi")
-            || model.starts_with("openai/starcoder")
-            || model.starts_with("openai/local")
-            || model == "openai/local-llama"
-            || model.starts_with("local/");
-
-        let effective_model = if model.starts_with("local/") {
-            format!("openai/{}", model.trim_start_matches("local/"))
-        } else if is_local_openai {
+        // Cloud-only: every model resolves to OpenRouter. Local backends
+        // (llama.cpp, Ollama, openai/* shims) were removed as dead complexity.
+        let effective_model = if model.starts_with("openrouter/") {
             model.to_string()
-        } else if !model.starts_with("openrouter/") && !model.starts_with("ollama/") {
-            format!("openrouter/{}", model)
         } else {
-            model.to_string()
+            format!(
+                "openrouter/{}",
+                model
+                    .trim_start_matches("ollama/")
+                    .trim_start_matches("local/")
+            )
         };
 
-        if is_local_openai {
-            let model_id_short = effective_model.trim_start_matches("openai/");
-            let models_yml_path = host_agent_dir.join("models.yml");
-            let models_yaml_content = format!(
-                r#"providers:
-  openai:
-    baseUrl: http://host.docker.internal:3000/v1
-    api: openai-completions
-    apiKey: dummy
-    models:
-      - id: "{}"
-        name: "{}"
-        contextWindow: 16384
-        maxTokens: 4096
-        supportsTools: true
-      - id: qwen2.5-coder-1.5b
-        name: Qwen 2.5 Coder 1.5B
-        contextWindow: 16384
-        maxTokens: 4096
-        supportsTools: true
-      - id: qwen2.5-coder-7b
-        name: Qwen 2.5 Coder 7B
-        contextWindow: 16384
-        maxTokens: 4096
-        supportsTools: true
-      - id: local-llama
-        name: Local Llama
-        contextWindow: 16384
-        maxTokens: 4096
-        supportsTools: true
-      - id: llama-3.2-3b
-        name: Llama 3.2 3B
-        contextWindow: 16384
-        maxTokens: 4096
-        supportsTools: true
-"#,
-                model_id_short, model_id_short
-            );
-            let _ = std::fs::write(&models_yml_path, models_yaml_content);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &models_yml_path,
-                    std::fs::Permissions::from_mode(0o666),
-                );
-            }
-        }
-
         let mut cmd = Command::new("docker");
+        let bench_policy_path = install_bench_policy_extension(&host_agent_dir);
         cmd.arg("run")
             .arg("--rm")
             .arg("--name")
@@ -348,27 +292,6 @@ impl OmpRunner {
             cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
         }
 
-        // Support local Ollama & OpenAI-compatible backends
-        if let Ok(ollama_url) = std::env::var("OLLAMA_BASE_URL") {
-            cmd.arg("-e").arg(format!("OLLAMA_BASE_URL={}", ollama_url));
-        } else if model.starts_with("ollama/") {
-            cmd.arg("-e")
-                .arg("OLLAMA_BASE_URL=http://host.docker.internal:11434");
-        }
-
-        if let Ok(openai_base) = std::env::var("OPENAI_BASE_URL") {
-            cmd.arg("-e")
-                .arg(format!("OPENAI_BASE_URL={}", openai_base));
-        } else if is_local_openai {
-            cmd.arg("-e")
-                .arg("OPENAI_BASE_URL=http://host.docker.internal:3000/v1");
-        }
-
-        if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
-            cmd.arg("-e").arg(format!("OPENAI_API_KEY={}", openai_key));
-        } else if is_local_openai {
-            cmd.arg("-e").arg("OPENAI_API_KEY=dummy");
-        }
 
         let (target_port, test_cmd, guidance_snippet) = match task {
             Some(crate::config::TaskType::Pdf) => (

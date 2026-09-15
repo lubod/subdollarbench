@@ -938,32 +938,6 @@
           <span class="hint">Stored in your browser. Used to query models & run OMP.</span>
         </div>
 
-        <!-- Local Model Runner (llama.cpp) -->
-        <div class="form-group" style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: var(--radius); padding: 12px; margin-bottom: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <span style="font-weight: 600; font-size: 0.85rem; color: #10b981; display: flex; align-items: center; gap: 6px;">
-              <span>🦙 Local llama.cpp</span>
-              <span id="localModelStatusBadge" class="badge" style="background: rgba(100,116,139,0.2); color: var(--text-muted); font-size: 0.65rem;">Checking...</span>
-            </span>
-            <button type="button" class="btn-secondary" style="padding: 2px 8px; font-size: 0.7rem;" onclick="checkLocalModelStatus(true)">🔄 Check</button>
-          </div>
-          
-          <div style="font-size: 0.72rem; color: var(--text-muted); margin-bottom: 8px;">
-            Run 100% free zero-cost local benchmarks ($0.00 / 1M tokens) on CPU/GPU via Docker.
-          </div>
-
-          <div style="display: flex; gap: 8px; margin-bottom: 6px;">
-            <button type="button" id="btnStartLocalModel" class="btn-primary" style="flex: 1; padding: 7px 12px; font-size: 0.78rem; background: #059669; display: flex; align-items: center; justify-content: center; gap: 5px;" onclick="startLocalModel()">
-              <span>▶</span> Start Server
-            </button>
-            <button type="button" id="btnStopLocalModel" class="btn-secondary" style="flex: 1; padding: 7px 12px; font-size: 0.78rem; display: flex; align-items: center; justify-content: center; gap: 5px;" onclick="stopLocalModel()">
-              <span>⏹</span> Stop Server
-            </button>
-          </div>
-
-          <div id="localModelLogs" style="font-family: monospace; font-size: 0.65rem; color: var(--text-muted); background: rgba(0,0,0,0.3); padding: 6px; border-radius: 4px; max-height: 70px; overflow-y: auto; white-space: pre-wrap; display: none;"></div>
-        </div>
-
         <!-- Model Filter & Selector -->
         <div class="form-group">
           <label for="modelSelect">
@@ -974,7 +948,6 @@
           <!-- Quick Family Filters -->
           <div class="presets">
             <button class="preset-btn active" onclick="filterByFamily('all', this)">All</button>
-            <button class="preset-btn" onclick="filterByFamily('local', this)">Local (🦙)</button>
             <button class="preset-btn" onclick="filterByFamily('google', this)">Google</button>
             <button class="preset-btn" onclick="filterByFamily('deepseek', this)">DeepSeek</button>
             <button class="preset-btn" onclick="filterByFamily('qwen', this)">Qwen</button>
@@ -1015,7 +988,7 @@
         <div class="form-group">
           <label for="reviewModel">Review Judge Model (end-of-run code review)</label>
           <input type="text" id="reviewModel" value="openrouter/meta/muse-spark-1.3-contributor" />
-          <span class="hint">Clear to fall back to the default judge. Cloud judges need the OpenRouter key; local/ needs llama-server.</span>
+          <span class="hint">Clear to fall back to the default judge. Judging uses the OpenRouter key.</span>
         </div>
 
         <!-- Reasoning Effort / Thinking Level Selector -->
@@ -1552,9 +1525,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
       let filtered = allModels.filter(m => {
         let matchesFam = (activeFamily === 'all');
-        if (activeFamily === 'local') {
-          matchesFam = m.id.toLowerCase().includes('local') || m.name.toLowerCase().includes('local') || (m.prompt_price_per_m === 0 && m.completion_price_per_m === 0);
-        } else if (activeFamily === 'claude') {
+        if (activeFamily === 'claude') {
           matchesFam = m.id.toLowerCase().includes('claude') || m.id.toLowerCase().includes('anthropic') || m.name.toLowerCase().includes('claude');
         } else if (activeFamily === 'glm') {
           matchesFam = m.id.toLowerCase().includes('glm') || m.id.toLowerCase().includes('zhipu') || m.id.toLowerCase().includes('thudm') || m.name.toLowerCase().includes('glm');
@@ -1647,10 +1618,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       pill.classList.remove('btn-action-pulse');
       void pill.offsetWidth;
       pill.classList.add('btn-action-pulse');
-
-      if (modelId.includes('local') || modelId.startsWith('openai/')) {
-        checkLocalModelStatus(false);
-      }
 
       let effortBadge = '';
       const mData = allModels.find(x => x.id === modelId);
@@ -3574,8 +3541,7 @@ function copyRunId() {
       const trials = parseInt(document.getElementById('trials').value, 10) || 3;
       const evalOnly = document.getElementById('evalOnly').checked;
 
-      const isLocal = model.includes('local') || model.startsWith('openai/qwen');
-      if (!evalOnly && !apiKey && !isLocal) {
+      if (!evalOnly && !apiKey) {
         alert('Please provide your OpenRouter API Key before starting the benchmark.');
         return;
       }
@@ -3643,212 +3609,6 @@ function copyRunId() {
     }
 
 
-    async function checkLocalModelStatus(manual = false) {
-      const badge = document.getElementById('localModelStatusBadge');
-      const logBox = document.getElementById('localModelLogs');
-      const startBtn = document.getElementById('btnStartLocalModel');
-      const stopBtn = document.getElementById('btnStopLocalModel');
-
-      if (manual && badge) {
-        badge.textContent = 'Checking...';
-        badge.style.background = 'rgba(100,116,139,0.2)';
-        badge.style.color = 'var(--text-muted)';
-      }
-
-      try {
-        const res = await fetch('/api/local-model/status');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-
-        if (badge) {
-          if (data.running) {
-            const shortModel = data.model ? data.model.replace(/-GGUF:.*$/i, '').replace(/^[^\/]+\//, '') : 'Ready';
-            badge.textContent = `🟢 Running (${shortModel})`;
-            badge.style.background = 'rgba(16, 185, 129, 0.2)';
-            badge.style.color = '#10b981';
-            if (stopBtn) stopBtn.disabled = false;
-
-            const currentModelVal = (document.getElementById('model').value || '').toLowerCase();
-            const modelLoaded = (data.model || '').toLowerCase();
-            const isLocalSelected = currentModelVal.startsWith('openai/') || currentModelVal.startsWith('local/');
-
-            let isCurrentRunning = false;
-            if (isLocalSelected) {
-              const baseName = currentModelVal.replace(/^openai\//, '').replace(/^local\//, '');
-              if (baseName === 'local-llama' || modelLoaded.includes(baseName.replace('qwen2.5-', '').replace('-instruct', '')) || modelLoaded.includes(baseName)) {
-                isCurrentRunning = true;
-              }
-            }
-
-            if (startBtn) {
-              if (isLocalSelected && !isCurrentRunning) {
-                startBtn.disabled = false;
-                startBtn.innerHTML = '🔄 Switch Model';
-                startBtn.style.background = '#d97706';
-              } else {
-                startBtn.disabled = true;
-                startBtn.innerHTML = '✔ Running';
-                startBtn.style.background = '#059669';
-              }
-            }
-          } else if (data.status_text && data.status_text.includes('Loading')) {
-            badge.textContent = '🟡 Loading';
-            badge.style.background = 'rgba(245, 158, 11, 0.2)';
-            badge.style.color = '#f59e0b';
-            if (startBtn) {
-              startBtn.disabled = true;
-              startBtn.innerHTML = '⏳ Loading...';
-              startBtn.style.background = '#059669';
-            }
-            if (stopBtn) stopBtn.disabled = false;
-          } else {
-            badge.textContent = '⚪ Stopped';
-            badge.style.background = 'rgba(100, 116, 139, 0.2)';
-            badge.style.color = 'var(--text-muted)';
-            if (startBtn) {
-              startBtn.disabled = false;
-              startBtn.innerHTML = '▶ Start Server';
-              startBtn.style.background = '#059669';
-            }
-            if (stopBtn) stopBtn.disabled = true;
-          }
-        }
-
-        if (logBox) {
-          if (data.logs && data.logs.trim().length > 0) {
-            logBox.style.display = 'block';
-            logBox.textContent = data.logs.trim();
-          } else {
-            logBox.style.display = 'none';
-          }
-        }
-
-        return data;
-      } catch (e) {
-        console.warn('Failed to check local model status:', e);
-        if (badge && manual) {
-          badge.textContent = 'Error';
-          badge.style.background = 'rgba(239, 68, 68, 0.2)';
-          badge.style.color = '#ef4444';
-        }
-      }
-    }
-
-    async function startLocalModel() {
-      const currentModel = (document.getElementById('model').value || '').trim();
-      let preset = 'qwen2.5-coder-7b';
-      if (currentModel.startsWith('openai/') || currentModel.startsWith('local/')) {
-        const raw = currentModel.replace(/^openai\//, '').replace(/^local\//, '');
-        if (raw && raw !== 'local-llama') {
-          preset = raw;
-        }
-      }
-
-      const startBtn = document.getElementById('btnStartLocalModel');
-      const badge = document.getElementById('localModelStatusBadge');
-      if (startBtn) {
-        startBtn.disabled = true;
-        startBtn.innerHTML = '⏳ Starting...';
-      }
-      if (badge) {
-        badge.textContent = '🟡 Starting...';
-        badge.style.background = 'rgba(245, 158, 11, 0.2)';
-        badge.style.color = '#f59e0b';
-      }
-
-      try {
-        const res = await fetch('/api/local-model/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: preset })
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(err || `HTTP ${res.status}`);
-        }
-
-        let attempts = 0;
-        const poll = setInterval(async () => {
-          attempts++;
-          const st = await checkLocalModelStatus(false);
-          if ((st && st.running) || attempts > 30) {
-            clearInterval(poll);
-            fetchModels();
-          }
-        }, 1500);
-      } catch (e) {
-        alert(`Failed to start local llama-server: ${e.message}`);
-        checkLocalModelStatus(true);
-      }
-    }
-
-    async function stopLocalModel() {
-      const stopBtn = document.getElementById('btnStopLocalModel');
-      if (stopBtn) stopBtn.disabled = true;
-
-      try {
-        const res = await fetch('/api/local-model/stop', { method: 'POST' });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(err || `HTTP ${res.status}`);
-        }
-        checkLocalModelStatus(true);
-        fetchModels();
-      } catch (e) {
-        alert(`Failed to stop local model: ${e.message}`);
-        checkLocalModelStatus(true);
-      }
-    }
-
-    function selectLocalModel(preset = 'qwen2.5-coder-7b') {
-      const modelId = preset.startsWith('openai/') ? preset : `openai/${preset}`;
-      const modelInput = document.getElementById('model');
-      if (modelInput) {
-        modelInput.value = modelId;
-        localStorage.setItem('selected_benchmark_model', modelId);
-      }
-
-      const localPresetBtn = Array.from(document.querySelectorAll('.presets .preset-btn')).find(b =>
-        b.textContent.includes('Local')
-      );
-      if (localPresetBtn) {
-        document.querySelectorAll('.presets .preset-btn').forEach(b => {
-          if (b.parentElement && b.parentElement.id !== 'effortPresets') {
-            b.classList.remove('active');
-          }
-        });
-        localPresetBtn.classList.add('active');
-        activeFamily = 'local';
-        filterModelsList();
-      }
-
-      const select = document.getElementById('modelSelect');
-      if (select) {
-        for (let i = 0; i < select.options.length; i++) {
-          if (select.options[i].value === modelId || select.options[i].value.includes(preset)) {
-            select.selectedIndex = i;
-            break;
-          }
-        }
-      }
-
-      const pill = document.getElementById('selectedPricePill');
-      if (pill) {
-        pill.style.display = 'inline-flex';
-        pill.classList.remove('btn-action-pulse');
-        void pill.offsetWidth;
-        pill.classList.add('btn-action-pulse');
-        pill.innerHTML = `
-          <span>🦙 <b>Local llama.cpp</b></span> • 
-          <span>📥 Input: <b>$0.00/1M</b></span> • 
-          <span>📤 Output: <b>$0.00/1M</b></span> • 
-          <span>🧠 Ctx: <b>16,384</b></span> • 
-          <span>⚪ Standard LLM</span>
-        `;
-      }
-      updateEffortControlsForModel(modelId);
-    }
-
     function resetStatus() {
       document.getElementById('startBtn').disabled = false;
       const stopBtn = document.getElementById('stopBtn');
@@ -3875,8 +3635,6 @@ function copyRunId() {
     setRunsViewMode(currentRunsView);
     setPromptViewMode(currentPromptViewMode);
     checkActiveRun();
-    checkLocalModelStatus(false);
-    setInterval(() => checkLocalModelStatus(false), 8000);
 
     async function fetchOmpStatus() {
       try {

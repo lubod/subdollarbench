@@ -365,10 +365,6 @@ impl UiServer {
             .route("/api/prompt/:task", get(get_prompt).post(save_prompt))
             .route("/api/leaderboard", get(get_leaderboard))
             .route("/api/status", get(get_status))
-            .route("/api/local-model/status", get(get_local_model_status))
-            .route("/api/local-model/start", post(start_local_model))
-            .route("/api/local-model/stop", post(stop_local_model))
-            .route("/api/local-model/logs", get(get_local_model_logs))
             .route("/api/run", post(start_run))
             .route("/api/run/stop", post(stop_run))
             .route("/api/compare", get(compare_runs))
@@ -389,11 +385,6 @@ impl UiServer {
             .route("/api/sandbox/omp", get(get_sandbox_omp_status))
             .route("/api/sandbox/omp/update", post(update_sandbox_omp))
             .route("/api/env", get(get_env))
-            .route("/v1/models", get(crate::sandbox::tool_normalizer::handle_models))
-            .route("/v1/chat/completions", post(crate::sandbox::tool_normalizer::handle_chat_completions))
-            .route("/api/local-llm/v1/models", get(crate::sandbox::tool_normalizer::handle_models))
-            .route("/api/local-llm/v1/chat/completions", post(crate::sandbox::tool_normalizer::handle_chat_completions))
-            .route("/api/local-llm/health", get(crate::sandbox::tool_normalizer::handle_health))
             .with_state(state)
     }
 
@@ -565,49 +556,6 @@ async fn get_models(
             .partial_cmp(&b.prompt_price_per_m)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    // Prepend comprehensive local llama.cpp models ($0.00 / free offline)
-    let llama_st = crate::sandbox::llama_server::LlamaServerManager::status().await;
-    let running_tag = if llama_st.running { " [🟢 Server Running]" } else { "" };
-    let local_name = if let Some(ref m) = llama_st.model {
-        format!("Local: llama.cpp ({}){}", m, running_tag)
-    } else if llama_st.running {
-        "Local: llama.cpp Active Server (🟢 Running · $0.00)".to_string()
-    } else {
-        "Local: llama.cpp (Auto-start · $0.00)".to_string()
-    };
-
-    let local_presets: &[(&str, &str)] = &[
-        ("openai/local-llama", local_name.as_str()),
-        ("openai/qwen2.5-coder-1.5b", "Local: Qwen 2.5 Coder 1.5B (llama.cpp · $0.00)"),
-        ("openai/qwen2.5-coder-7b", "Local: Qwen 2.5 Coder 7B (llama.cpp · $0.00)"),
-        ("openai/qwen2.5-coder-14b", "Local: Qwen 2.5 Coder 14B (llama.cpp · $0.00)"),
-        ("openai/llama-3.2-3b", "Local: Llama 3.2 3B (llama.cpp · $0.00)"),
-        ("openai/llama-3.1-8b", "Local: Meta Llama 3.1 8B (llama.cpp · $0.00)"),
-        ("openai/deepseek-coder-6.7b", "Local: DeepSeek Coder 6.7B (llama.cpp · $0.00)"),
-        ("openai/glm-4-9b", "Local: GLM-4 9B Chat (llama.cpp · $0.00)"),
-        ("openai/gemma-2-9b", "Local: Gemma 2 9B (llama.cpp · $0.00)"),
-        ("openai/phi-3.5-mini", "Local: Phi 3.5 Mini (llama.cpp · $0.00)"),
-    ];
-
-    for (idx, (id, name)) in local_presets.iter().enumerate() {
-        models.insert(
-            idx,
-            SubDollarModel {
-                id: id.to_string(),
-                name: name.to_string(),
-                prompt_price_per_m: 0.0,
-                completion_price_per_m: 0.0,
-                context_length: 16384,
-                created: 1720000000 + idx as i64,
-                supported_efforts: Vec::new(),
-                default_effort: None,
-                is_reasoning: false,
-                reasoning_mandatory: false,
-                supports_max_tokens: false,
-            },
-        );
-    }
 
     Json(models)
 }
@@ -970,43 +918,6 @@ async fn compare_runs(
     }))
 }
 
-#[derive(Deserialize)]
-struct LocalModelStartRequest {
-    pub model: Option<String>,
-}
-
-async fn get_local_model_status() -> Json<crate::sandbox::llama_server::LlamaServerStatus> {
-    Json(crate::sandbox::llama_server::LlamaServerManager::status().await)
-}
-
-async fn start_local_model(
-    Json(req): Json<LocalModelStartRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let preset = req.model.as_deref().unwrap_or("qwen2.5-coder-1.5b");
-    crate::sandbox::llama_server::LlamaServerManager::start(preset)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "status": "starting",
-        "model": preset,
-        "message": format!("Started llama-server with preset {}", preset)
-    })))
-}
-
-async fn stop_local_model() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    crate::sandbox::llama_server::LlamaServerManager::stop()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "status": "stopped",
-        "message": "llama-server stopped"
-    })))
-}
-
-async fn get_local_model_logs() -> Json<serde_json::Value> {
-    let logs =
-        crate::sandbox::llama_server::LlamaServerManager::get_recent_logs(50).unwrap_or_default();
-    Json(serde_json::json!({ "logs": logs }))
-}
-
 async fn start_run(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
@@ -1021,31 +932,6 @@ async fn start_run(
             "Benchmark is already running",
         )
             .into_response());
-    }
-
-    let is_local = req.model.contains("local")
-        || req.model.starts_with("openai/qwen")
-        || req.model.starts_with("openai/llama")
-        || req.model.starts_with("openai/deepseek")
-        || req.model.starts_with("openai/glm")
-        || req.model.starts_with("openai/gemma")
-        || req.model.starts_with("openai/phi")
-        || req.model.starts_with("openai/starcoder")
-        || req.model.starts_with("local/");
-    if is_local {
-        if let Err(e) =
-            crate::sandbox::llama_server::LlamaServerManager::ensure_running_for_model(
-                &req.model,
-            )
-            .await
-        {
-            state.is_running.store(false, Ordering::SeqCst);
-            return Err((
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to auto-start llama-server: {}", e),
-            )
-                .into_response());
-        }
     }
 
     if !matches!(
@@ -1207,35 +1093,6 @@ async fn start_run(
                 "pdf" => TaskType::Pdf,
                 _ => TaskType::Redis,
             };
-
-            if trial_idx == 1 && is_local {
-                logger.log("[LOCAL RUNNER] Local model selected. Ensuring llama.cpp server is ready...");
-                let st = crate::sandbox::llama_server::LlamaServerManager::status().await;
-                if !st.running {
-                    logger.log(&format!("[LOCAL RUNNER] Auto-starting llama-server for model '{}'...", req.model));
-                    let _ = crate::sandbox::llama_server::LlamaServerManager::start(&req.model);
-                }
-                let mut ready = false;
-                for i in 1..=120 {
-                    let st = crate::sandbox::llama_server::LlamaServerManager::status().await;
-                    if st.running {
-                        ready = true;
-                        break;
-                    }
-                    if i % 10 == 0 {
-                        logger.log(&format!(
-                            "[LOCAL RUNNER] Status: {} (waiting {}s/120s)...",
-                            st.status_text, i
-                        ));
-                    }
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
-                }
-                if ready {
-                    logger.log("[LOCAL RUNNER] llama-server is healthy via hardware GPU normalizer at http://host.docker.internal:3000/v1 ($0.00 / free)!");
-                } else {
-                    logger.log("[LOCAL RUNNER WARNING] llama-server still initializing, proceeding with run...");
-                }
-            }
 
             let repo_root = crate::config::get_repo_root();
             let work_path = repo_root.join("workspace");
@@ -1732,21 +1589,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 400);
-
-        // 18. Local model runner endpoints
-        let res = client
-            .get(format!("{}/api/local-model/status", base))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status(), 200);
-
-        let res = client
-            .get(format!("{}/api/local-model/logs", base))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status(), 200);
 
         // 18. POST /api/run eval_only mode with multi-trials
         let eval_req = RunRequest {

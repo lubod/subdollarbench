@@ -14,7 +14,6 @@ pub struct ReviewJson {
 pub const MAX_WORKSPACE_CHARS: usize = 24_000;
 pub const MAX_PROMPT_CHARS: usize = 8_000;
 const JUDGE_TIMEOUT_SECS: u64 = 120;
-const JUDGE_LOCAL_TIMEOUT_SECS: u64 = 600;
 
 pub struct RunJudge;
 
@@ -133,21 +132,14 @@ impl RunJudge {
         if m.is_empty() {
             anyhow::bail!("empty review model");
         }
-        if let Some(short) = m.strip_prefix("openai/").or_else(|| m.strip_prefix("local/")) {
-            Ok((
-                format!(
-                    "http://127.0.0.1:{}/v1/chat/completions",
-                    crate::sandbox::llama_server::LLAMA_PORT
-                ),
-                short.to_string(),
-            ))
-        } else if m.starts_with("openrouter/") || m.starts_with("ollama/") || !m.contains('/') {
+        // Cloud-only: local judge backends (llama.cpp, Ollama) were removed.
+        if m.starts_with("openrouter/") || !m.contains('/') {
             Ok((
                 "https://openrouter.ai/api/v1/chat/completions".to_string(),
                 m.trim_start_matches("openrouter/").to_string(),
             ))
         } else {
-            anyhow::bail!("unsupported judge model {}: use openrouter/<id> or local/<id>", m)
+            anyhow::bail!("unsupported judge model {}: use openrouter/<id>", m)
         }
     }
 
@@ -239,17 +231,9 @@ impl RunJudge {
         })
         .to_string();
         let prompt = Self::build_prompt(task, task_prompt, &files, &metrics);
-        let mut urls = vec![url];
-        if urls[0].contains("127.0.0.1:8000") {
-            urls.push(urls[0].replace("127.0.0.1:8000", "127.0.0.1:8001"));
-        }
-        let local = urls.iter().any(|u| u.contains("127.0.0.1"));
+        let urls = vec![url];
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(if local {
-                JUDGE_LOCAL_TIMEOUT_SECS
-            } else {
-                JUDGE_TIMEOUT_SECS
-            }))
+            .timeout(std::time::Duration::from_secs(JUDGE_TIMEOUT_SECS))
             .build()?;
 
         let mut last_err = anyhow::anyhow!("no judge endpoint attempted");
@@ -358,9 +342,8 @@ mod tests {
         let (url, model) = RunJudge::resolve_target("openrouter/meta/model-x").unwrap();
         assert!(url.contains("openrouter.ai"));
         assert_eq!(model, "meta/model-x");
-        let (url, model) = RunJudge::resolve_target("local/qwen3").unwrap();
-        assert!(url.contains("127.0.0.1"));
-        assert_eq!(model, "qwen3");
+        assert!(RunJudge::resolve_target("local/qwen3").is_err());
+        assert!(RunJudge::resolve_target("ollama/qwen3").is_err());
         assert!(RunJudge::resolve_target("bogus-provider/x").is_err());
     }
 

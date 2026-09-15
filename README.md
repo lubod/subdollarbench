@@ -190,11 +190,9 @@ $$C_{\text{eff}} = C_{\text{API}} + C_{\text{compute}}$$
 
 - **Time Rate ($R_{\text{time}}$)**: $0.00003 / sec ($\\approx \$0.108 / hr$ container compute equivalent).
 - **Token Baseline ($R_{\text{token}}$)**: $0.00000005 / token ($0.05 / 1M tokens).
-- **Unified Local & Cloud Scoring**: Local models ($0.00 API cost) receive realistic, measurable efficiency scores instead of 0 or infinity, rewarding fast, token-efficient models.
 
 ### Example Rankings:
 - Fast Cloud Model: 100% pass rate, $0.003 API + $0.002 compute = $0.005 (0.5¢) $\rightarrow$ **200.0 pts/¢**
-- Fast Local Model: 100% pass rate, $0.000 API + $0.003 compute = $0.003 (0.3¢) $\rightarrow$ **333.3 pts/¢**
 - Slow Looping Model: 100% pass rate, $0.002 API + $0.025 compute = $0.027 (2.7¢) $\rightarrow$ **37.0 pts/¢**
 
 ### ⚡ Throughput-Adjusted Scoring
