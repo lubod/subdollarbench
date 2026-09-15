@@ -122,24 +122,7 @@ impl ModelPricing {
 
     pub fn for_model(model_name: &str) -> Self {
         let m = model_name.to_lowercase();
-        if m.starts_with("ollama/")
-            || m.starts_with("local/")
-            || m.starts_with("openai/qwen")
-            || m.starts_with("openai/local")
-            || m.starts_with("openai/llama")
-            || m.starts_with("openai/deepseek")
-            || m.starts_with("openai/glm")
-            || m.starts_with("openai/gemma")
-            || m.starts_with("openai/phi")
-            || m.starts_with("openai/starcoder")
-            || m == "openai/local-llama"
-        {
-            ModelPricing {
-                prompt_per_million: 0.0,
-                completion_per_million: 0.0,
-                cache_read_per_million: 0.0,
-            }
-        } else if m.contains("gemini-2.5-flash") {
+        if m.contains("gemini-2.5-flash") {
             ModelPricing {
                 prompt_per_million: 0.15,
                 completion_per_million: 0.60,
@@ -297,21 +280,6 @@ impl ModelPricing {
 
     /// Asynchronously resolve pricing, querying OpenRouter live catalog first with fallback to hardcoded rates
     pub async fn for_model_async(model_name: &str) -> Self {
-        let m = model_name.to_lowercase();
-        if m.starts_with("ollama/")
-            || m.starts_with("local/")
-            || m.starts_with("openai/qwen")
-            || m.starts_with("openai/local")
-            || m.starts_with("openai/llama")
-            || m.starts_with("openai/deepseek")
-            || m.starts_with("openai/glm")
-            || m.starts_with("openai/gemma")
-            || m.starts_with("openai/phi")
-            || m.starts_with("openai/starcoder")
-            || m == "openai/local-llama"
-        {
-            return Self::for_model(model_name);
-        }
         if let Some(pricing) = Self::fetch_openrouter_model_pricing(model_name).await {
             pricing
         } else {
@@ -538,35 +506,4 @@ mod tests {
         assert!((tp_double - (score * 10.0)).abs() < 1e-3);
     }
 
-    #[test]
-    fn test_pricing_for_local_models() {
-        let p_ollama = ModelPricing::for_model("ollama/qwen2.5-coder:7b");
-        assert_eq!(p_ollama.prompt_per_million, 0.0);
-        assert_eq!(p_ollama.completion_per_million, 0.0);
-        assert_eq!(p_ollama.cache_read_per_million, 0.0);
-
-        let p_local = ModelPricing::for_model("local/my-model");
-        assert_eq!(p_local.prompt_per_million, 0.0);
-        assert_eq!(p_local.completion_per_million, 0.0);
-
-        let p_llama = ModelPricing::for_model("openai/local-llama");
-        assert_eq!(p_llama.prompt_per_million, 0.0);
-        assert_eq!(p_llama.completion_per_million, 0.0);
-
-        let p_qwen = ModelPricing::for_model("openai/qwen2.5-coder-1.5b");
-        assert_eq!(p_qwen.prompt_per_million, 0.0);
-        assert_eq!(p_qwen.completion_per_million, 0.0);
-
-        let p_glm = ModelPricing::for_model("openai/glm-4-9b");
-        assert_eq!(p_glm.prompt_per_million, 0.0);
-        assert_eq!(p_glm.completion_per_million, 0.0);
-
-        let p_deepseek = ModelPricing::for_model("openai/deepseek-coder-6.7b");
-        assert_eq!(p_deepseek.prompt_per_million, 0.0);
-        assert_eq!(p_deepseek.completion_per_million, 0.0);
-
-        let p_llama3 = ModelPricing::for_model("openai/llama-3.2-3b");
-        assert_eq!(p_llama3.prompt_per_million, 0.0);
-        assert_eq!(p_llama3.completion_per_million, 0.0);
-    }
 }

@@ -555,9 +555,6 @@ const PORTAL_JS: &str = r#"
     if (m.includes('cohere') || m.includes('command')) {
       return { family: 'Cohere', icon: '🌿', color: '#14b8a6', bg: 'rgba(20, 184, 166, 0.14)', border: 'rgba(20, 184, 166, 0.35)' };
     }
-    if (m.includes('local') || m.includes('ollama') || m.includes('llama.cpp') || m.includes('vllm')) {
-      return { family: 'Local', icon: '💻', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)' };
-    }
     let hash = 0;
     for (let i = 0; i < m.length; i++) hash = (hash * 31 + m.charCodeAt(i)) & 0xffffffff;
     const PALETTE = [
