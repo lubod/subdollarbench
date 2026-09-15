@@ -57,32 +57,6 @@ export default function (pi) {
     /* event surface drift: ignore */
   }
 
-  try {
-    pi.on("tool_call", async (event) => {
-      try {
-        const name = String((event && (event.toolName || event.name)) || "").toLowerCase();
-        let text = "";
-        try {
-          text = JSON.stringify((event && (event.input || event.args || event.arguments)) || "");
-        } catch (_) {
-          text = "";
-        }
-        const hay = (name + " " + text).toLowerCase();
-        for (const d of forbidden) {
-          if (hay.includes(d)) {
-            return {
-              block: true,
-              reason: "[BENCH-POLICY] forbidden daemon/tool '" + d + "' blocked (anti-cheat)",
-            };
-          }
-        }
-      } catch (_) {
-        /* ignore */
-      }
-    });
-  } catch (_) {
-    /* ignore */
-  }
 
   try {
     pi.on("turn_end", async (_event, ctx) => {
@@ -169,6 +143,68 @@ export default function (pi) {
       } catch (_) {
         /* ignore */
       }
+    });
+  } catch (_) {
+    /* ignore */
+  }
+
+  try {
+    pi.on("tool_call", async (event) => {
+      // Console feed: mirror the call header the bench used to render from
+      // the session tail (tool name, intent, command/path/code preview).
+      // Emitted BEFORE the policy check below: a block verdict
+      // short-circuits later tool_call handlers, so telemetry first.
+      let blocked = null;
+      try {
+        const e = event || {};
+        const tool = String(e.toolName || e.name || "tool");
+        const input = e.input || e.args || e.arguments || {};
+        const intent = String(
+          (input && (input.intent || input.i)) || e.intent || ""
+        );
+        let command = "";
+        let path = "";
+        let code = "";
+        try {
+          const args = typeof input === "string" ? JSON.parse(input) : input;
+          if (args && typeof args === "object") {
+            if (typeof args.command === "string") command = args.command;
+            if (typeof args.path === "string") path = args.path;
+            const body =
+              typeof args.content === "string"
+                ? args.content
+                : typeof args.code === "string"
+                  ? args.code
+                  : "";
+            if (body) code = body;
+          }
+        } catch (_) {
+          /* keep defaults */
+        }
+        emit({
+          v: 1,
+          kind: "tool_call",
+          tool,
+          intent: clip(intent, 200),
+          command: clip(command, 500),
+          path: clip(path, 300),
+          code: clip(code, 1500),
+        });
+        const hay = (tool + " " + command + " " + path + " " + code).toLowerCase();
+        for (const d of forbidden) {
+          if (hay.includes(d)) {
+            blocked = {
+              block: true,
+              reason:
+                "[BENCH-POLICY] forbidden daemon/tool '" + d + "' blocked (anti-cheat)",
+            };
+            break;
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      if (blocked) return blocked;
     });
   } catch (_) {
     /* ignore */

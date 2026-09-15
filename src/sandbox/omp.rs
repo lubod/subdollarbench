@@ -1000,6 +1000,43 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                     }
                 }
             }
+            "tool_call" => {
+                let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+                let intent = v.get("intent").and_then(|i| i.as_str()).unwrap_or("");
+                if intent.is_empty() {
+                    out.push(format!("[ACTION] {}", tool));
+                } else {
+                    out.push(format!("[ACTION] {}: {}", tool, intent));
+                }
+                for line in v.get("command").and_then(|c| c.as_str()).unwrap_or("").lines() {
+                    let t = line.trim();
+                    if !t.is_empty() {
+                        out.push(format!("  $ {}", t));
+                    }
+                }
+                if let Some(path) = v.get("path").and_then(|q| q.as_str()) {
+                    if !path.is_empty() {
+                        out.push(format!("  path: {}", path));
+                    }
+                }
+                let code_lines: Vec<&str> = v
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .lines()
+                    .collect();
+                for (idx, c_line) in code_lines.iter().enumerate() {
+                    if idx < 35 {
+                        out.push(format!("  | {}", c_line));
+                    } else {
+                        out.push(format!(
+                            "  | ... (+{} lines omitted)",
+                            code_lines.len() - 35
+                        ));
+                        break;
+                    }
+                }
+            }
             "tool_result" => {
                 let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
                 let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(true);
@@ -1064,6 +1101,13 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
     fn render_tail_line(line: &str, extension_active: bool) -> Vec<String> {
         if extension_active {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                if v
+                    .get("customType")
+                    .and_then(|c| c.as_str())
+                    == Some("tool_execution_start")
+                {
+                    return Vec::new();
+                }
                 let role = v
                     .get("message")
                     .and_then(|m| m.get("role"))
@@ -1481,6 +1525,31 @@ mod tests {
         assert!(OmpRunner::convert_bench_event("just thinking").is_none());
         assert!(OmpRunner::convert_bench_event("[BENCH-EVENT] {\"v\":1,\"kind\":\"nope\"}").is_none());
         assert!(OmpRunner::convert_bench_event("[BENCH-EVENT] not-json").is_none());
+    }
+
+    #[test]
+    fn test_convert_bench_event_tool_call() {
+        let line = "[BENCH-EVENT] {\"v\":1,\"kind\":\"tool_call\",\"tool\":\"bash\",\"intent\":\"run tests\",\"command\":\"cargo test\\necho done\",\"path\":\"\",\"code\":\"line1\\nline2\"}";
+        let out = OmpRunner::convert_bench_event(line).unwrap();
+        assert!(out.iter().any(|l| l == "[ACTION] bash: run tests"));
+        assert!(out.iter().any(|l| l == "  $ cargo test"));
+        assert!(out.iter().any(|l| l == "  | line1"));
+        // Path-only call.
+        let line = "[BENCH-EVENT] {\"v\":1,\"kind\":\"tool_call\",\"tool\":\"read\",\"intent\":\"\",\"command\":\"\",\"path\":\"/workspace/main.rs\",\"code\":\"\"}";
+        let out = OmpRunner::convert_bench_event(line).unwrap();
+        assert!(out.iter().any(|l| l == "[ACTION] read"));
+        assert!(out.iter().any(|l| l == "  path: /workspace/main.rs"));
+    }
+
+    #[test]
+    fn test_render_tail_line_drops_start_events_when_live() {
+        let start = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"run tests","args":{"command":"cargo test"}}}"#;
+        // Feed down: legacy ACTION render.
+        assert!(OmpRunner::render_tail_line(start, false)
+            .iter()
+            .any(|l| l.contains("[ACTION] bash: run tests")));
+        // Feed live: dropped (converter owns it now).
+        assert!(OmpRunner::render_tail_line(start, true).is_empty());
     }
 
     #[test]
