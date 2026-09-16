@@ -84,16 +84,16 @@ impl ModelPricing {
         // - Redis: 71,000 req/s (Redis:alpine live container reference via redis-benchmark)
         // - DNS: 19,000 queries/s (Reference Python RFC 1035 UDP resolver on testbed)
         // - PDF: 4,600 pages/s (Reference Python PDF extractor microservice on testbed)
-        // - WAL: 10,000 msgs/s PROVISIONAL (fsync-bound append; recalibrate after measured batches)
+        // - WAL: 1,000 msgs/s (fsync-bound append on disk; calibrated from empirical batches)
         // - Proxy: 33,000 req/s (same nginx denominator as http: a proxy cannot beat direct)
-        // - PubSub: 5,000 deliveries/s PROVISIONAL (fan-out soak; recalibrate after measured batches)
+        // - PubSub: 80,000 deliveries/s (fan-out soak; calibrated from empirical batches)
         let fallback_baseline = match task.unwrap_or("http").to_lowercase().as_str() {
             "redis" => 71_000.0,
             "dns" => 19_000.0,
             "pdf" => 4_600.0,
-            "wal" => 10_000.0,
+            "wal" => 1_000.0,
             "proxy" => 33_000.0,
-            "pubsub" => 5_000.0,
+            "pubsub" => 80_000.0,
             _ => 33_000.0,
         };
         let speed_ratio = if ref_tp > 0.0 {
@@ -496,6 +496,15 @@ mod tests {
 
         let tp_pdf = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(4_600.0), None, Some("pdf"));
         assert!((tp_pdf - (score * 3.0)).abs() < 1e-3);
+
+        let tp_wal = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(1_000.0), None, Some("wal"));
+        assert!((tp_wal - (score * 3.0)).abs() < 1e-3);
+
+        let tp_proxy = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(33_000.0), None, Some("proxy"));
+        assert!((tp_proxy - (score * 3.0)).abs() < 1e-3);
+
+        let tp_pubsub = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(80_000.0), None, Some("pubsub"));
+        assert!((tp_pubsub - (score * 3.0)).abs() < 1e-3);
 
         // Zero throughput or missing throughput yields 0.0
         let tp_zero = ModelPricing::calculate_throughput_score(100.0, eff, Some(0.0), Some(30_000.0));

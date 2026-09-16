@@ -437,6 +437,17 @@ impl BenchmarkPipeline {
         } else {
             let _ = sandbox.start_candidate_in_docker(&config.workdir, port);
 
+            if config.task == TaskType::Proxy {
+                if let Err(e) = sandbox.connect_candidate_to_network() {
+                    logger.log(&format!(
+                        "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
+                        e
+                    ));
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+
             logger.log(&format!(
                 "[SETUP] Waiting for server port {} to become ready (timeout: 25s)...",
                 port

@@ -291,10 +291,12 @@ impl SandboxManager {
         if out.status.success() {
             Ok(())
         } else {
-            Err(anyhow!(
-                "network connect failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ))
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("already exists") {
+                Ok(())
+            } else {
+                Err(anyhow!("network connect failed: {}", stderr))
+            }
         }
     }
 
