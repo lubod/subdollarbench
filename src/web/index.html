@@ -1334,7 +1334,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
     }
 
-    function updateEffortControlsForModel(targetModelId) {
+    function updateEffortControlsForModel(targetModelId, opts) {
+      const applyDefault = !!(opts && opts.applyDefault);
       if (!targetModelId) return;
       const cleanId = targetModelId.replace(/^openrouter\//, '').replace(/^openai\//, '');
       const model = allModels.find(m => m.id === targetModelId || m.id === cleanId || cleanId.endsWith(m.id));
@@ -1384,6 +1385,14 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       let currentVal = selectEl ? selectEl.value : 'high';
       if (currentVal === 'auto' || currentVal === 'default') currentVal = 'high';
       let needFallback = false;
+      // Prefer the model's own catalog default on (re)selection; bench
+      // default 'high' holds when the catalog is silent. Runs through
+      // the same support filter below, so a disallowed default clamps.
+      let wantDefault = false;
+      if (applyDefault && defaultEffort && supportedEfforts.includes(defaultEffort)) {
+        currentVal = defaultEffort;
+        wantDefault = true;
+      }
 
       presetBtns.forEach(btn => {
         const effort = (btn.dataset.effort || btn.textContent.toLowerCase().trim());
@@ -1450,10 +1459,13 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         }
       });
 
-      // If current selection is unsupported, gracefully clamp to best supported or high
-      if (needFallback && selectEl) {
+      // Unsupported selection clamps to best supported (or high); a model
+      // default from (re)selection applies directly when it needs no clamp.
+      if ((needFallback || wantDefault) && selectEl) {
         let fallback = 'high';
-        if (supportedEfforts.length > 0) {
+        if (wantDefault && !needFallback) {
+          fallback = currentVal;
+        } else if (supportedEfforts.length > 0) {
           if (currentVal === 'max' && supportedEfforts.includes('xhigh')) {
             fallback = 'xhigh';
           } else if ((currentVal === 'max' || currentVal === 'xhigh') && supportedEfforts.includes('high')) {
@@ -1630,7 +1642,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         <span>🧠 Ctx: <b>${parseInt(opt.dataset.context || 0).toLocaleString()}</b></span>${effortBadge}
       `;
 
-      updateEffortControlsForModel(targetModel);
+      updateEffortControlsForModel(targetModel, { applyDefault: true });
     }
 
     function switchTab(name) {
@@ -3613,8 +3625,8 @@ function copyRunId() {
       modelInput.value = savedModel;
     }
     if (modelInput) {
-      modelInput.addEventListener('input', (e) => updateEffortControlsForModel(e.target.value.trim()));
-      modelInput.addEventListener('change', (e) => updateEffortControlsForModel(e.target.value.trim()));
+      modelInput.addEventListener('input', (e) => updateEffortControlsForModel(e.target.value.trim(), { applyDefault: true }));
+      modelInput.addEventListener('change', (e) => updateEffortControlsForModel(e.target.value.trim(), { applyDefault: true }));
     }
     fetchModels();
     const initialSavedTask = localStorage.getItem('selected_benchmark_task') || 'redis';
