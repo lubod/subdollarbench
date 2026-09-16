@@ -975,7 +975,7 @@ async fn start_run(
                 parent_run_id.clone()
             };
 
-            let effort_setting = req.effort.clone().unwrap_or_else(|| "auto".to_string());
+            let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
 
             *state_clone.current_run.write().unwrap() = Some(ActiveRunInfo {
                 run_id: run_id.clone(),

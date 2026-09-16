@@ -998,21 +998,19 @@
             <span class="hint" id="effortHint">Thinking depth for reasoning models</span>
           </label>
           <div class="presets" id="effortPresets">
-            <button type="button" class="preset-btn active" data-effort="auto" onclick="setEffort('auto', this)">Auto</button>
             <button type="button" class="preset-btn" data-effort="minimal" onclick="setEffort('minimal', this)">Minimal</button>
             <button type="button" class="preset-btn" data-effort="low" onclick="setEffort('low', this)">Low</button>
             <button type="button" class="preset-btn" data-effort="medium" onclick="setEffort('medium', this)">Medium</button>
-            <button type="button" class="preset-btn" data-effort="high" onclick="setEffort('high', this)">High</button>
+            <button type="button" class="preset-btn active" data-effort="high" onclick="setEffort('high', this)">High</button>
             <button type="button" class="preset-btn" data-effort="xhigh" onclick="setEffort('xhigh', this)">X-High</button>
             <button type="button" class="preset-btn" data-effort="max" onclick="setEffort('max', this)">Max</button>
             <button type="button" class="preset-btn" data-effort="off" onclick="setEffort('off', this)">Off</button>
           </div>
           <select id="effortSelect" onchange="onEffortDropdownChanged()" style="margin-top: 4px;">
-            <option value="auto" selected>⚡ Auto (Default model reasoning level)</option>
             <option value="minimal">🌱 Minimal (Lowest thinking token budget)</option>
             <option value="low">🔹 Low (Fast reasoning, minimal token budget)</option>
             <option value="medium">⚖️ Medium (Balanced reasoning & speed)</option>
-            <option value="high">🔥 High (Thorough analysis & chain-of-thought)</option>
+            <option value="high" selected>🔥 High (Thorough analysis & chain-of-thought)</option>
             <option value="xhigh">⚡ X-High (Extra-deep reasoning analysis)</option>
             <option value="max">🚀 Max (Maximum reasoning budget)</option>
             <option value="off">🚫 Off (No thinking / Direct generation)</option>
@@ -1316,6 +1314,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     });
 
     function setEffort(val, btn) {
+      if (val === 'auto' || val === 'default') val = 'high';
       if (btn && (btn.disabled || btn.classList.contains('disabled'))) return;
       const select = document.getElementById('effortSelect');
       const opt = select ? select.querySelector(`option[value="${val}"]`) : null;
@@ -1382,20 +1381,13 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
       const tiers = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
       const isMandatory = !!model.reasoning_mandatory;
-      let currentVal = selectEl ? selectEl.value : 'auto';
+      let currentVal = selectEl ? selectEl.value : 'high';
+      if (currentVal === 'auto' || currentVal === 'default') currentVal = 'high';
       let needFallback = false;
 
       presetBtns.forEach(btn => {
         const effort = (btn.dataset.effort || btn.textContent.toLowerCase().trim());
         const opt = selectEl ? selectEl.querySelector(`option[value="${effort}"]`) : null;
-
-        if (effort === 'auto') {
-          btn.disabled = false;
-          btn.classList.remove('disabled');
-          btn.title = 'Use model default reasoning level';
-          if (opt) opt.disabled = false;
-          return;
-        }
 
         if (effort === 'off') {
           if (isMandatory) {
@@ -1458,9 +1450,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         }
       });
 
-      // If current selection is unsupported, gracefully clamp to best supported or auto
+      // If current selection is unsupported, gracefully clamp to best supported or high
       if (needFallback && selectEl) {
-        let fallback = 'auto';
+        let fallback = 'high';
         if (supportedEfforts.length > 0) {
           if (currentVal === 'max' && supportedEfforts.includes('xhigh')) {
             fallback = 'xhigh';
@@ -2467,7 +2459,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const safeModel = escapeHtml(r.model);
         const safeTask = escapeHtml(r.task);
         const safeLanguage = escapeHtml(r.language);
-        const safeEffort = escapeHtml(r.effort || 'auto');
+        const safeEffort = escapeHtml(r.effort || 'high');
         const effBadge = `<span class="badge badge-effort">effort: ${safeEffort}</span>`;
         const pubBadge = r.portal_hidden 
           ? `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.72rem;padding:2px 8px;">Hidden</span>` 
@@ -2710,7 +2702,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         document.getElementById('modalInspectThroughput').textContent = formatThroughput(m.throughput_req_sec, m.task);
         document.getElementById('modalInspectDuration').textContent = formatDuration(m.duration_seconds || 0);
         document.getElementById('modalInspectTurns').textContent = (m.turns !== undefined && m.turns !== null) ? m.turns : '-';
-        document.getElementById('modalInspectEffort').innerHTML = `${escapeHtml(m.effort || 'auto')} <span style="color:var(--text-muted); font-size:0.72rem;">· ${escapeHtml(m.task)}</span>`;
+        document.getElementById('modalInspectEffort').innerHTML = `${escapeHtml(m.effort || 'high')} <span style="color:var(--text-muted); font-size:0.72rem;">· ${escapeHtml(m.task)}</span>`;
 
         // Render Test Stages
         renderInspectStages(m);

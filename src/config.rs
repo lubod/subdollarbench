@@ -22,8 +22,8 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value_t = TaskType::Redis)]
         task: TaskType,
 
-        /// Reasoning effort / thinking level (auto, off, low, medium, high, max)
-        #[arg(short = 'e', long, default_value = "auto")]
+        /// Reasoning effort / thinking level (off, minimal, low, medium, high, xhigh, max)
+        #[arg(short = 'e', long, default_value = "high")]
         effort: String,
 
         /// Maximum turns/steps allowed for OMP
@@ -327,7 +327,7 @@ mod tests {
             } => {
                 assert_eq!(model, "test-model");
                 assert_eq!(task, TaskType::Redis);
-                assert_eq!(effort, "auto");
+                assert_eq!(effort, "high");
                 assert_eq!(budget_usd, 1.00);
                 assert_eq!(max_turns, 100);
                 assert_eq!(timeout_min, 30);

@@ -79,6 +79,30 @@ fn install_bench_policy_extension(host_agent_dir: &Path) -> Option<String> {
     Some(BENCH_POLICY_CONTAINER_PATH.to_string())
 }
 
+/// Resolve the requested reasoning effort to the explicit `--thinking`
+/// level sent to omp, plus a console note when the request was rewritten.
+/// There is no `auto`: the legacy alias meant "omit the flag", which omp
+/// resolves to its own default (`high`) — so `high` is spelled out instead.
+/// `max` is clamped to `high` for non-OpenAI providers (HTTP 400 otherwise).
+fn resolve_thinking_level(effort: Option<&str>, effective_model: &str) -> (String, String) {
+    let requested = effort.map(|e| e.trim().to_lowercase()).unwrap_or_default();
+    let level = match requested.as_str() {
+        "" | "default" | "auto" => "high".to_string(),
+        other => other.to_string(),
+    };
+    if level == "max"
+        && !effective_model.starts_with("openai/")
+        && !effective_model.contains("/openai/")
+    {
+        (
+            "high".to_string(),
+            " (requested max, clamped for provider)".to_string(),
+        )
+    } else {
+        (level, String::new())
+    }
+}
+
 #[derive(Clone)]
 pub struct TailSessionContext {
     pub start_time: SystemTime,
@@ -428,25 +452,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             cmd.arg(format!("--max-time={}s", max_secs));
         }
 
-        if let Some(eff) = effort {
-            let eff_clean = eff.trim().to_lowercase();
-            if !eff_clean.is_empty() && eff_clean != "default" && eff_clean != "auto" {
-                // OpenAI models (o1, o3, gpt-5) support reasoning level "max".
-                // Meta and other providers only support up to "high" and reject "max" with HTTP 400.
-                let eff_effective = if eff_clean == "max"
-                    && !effective_model.starts_with("openai/")
-                    && !effective_model.contains("/openai/")
-                {
-                    "high"
-                } else {
-                    eff_clean.as_str()
-                };
-                cmd.arg(format!("--thinking={}", eff_effective));
-            }
-            cmd.arg("--print-thoughts");
-        } else {
-            cmd.arg("--print-thoughts");
-        }
+        let (eff_level, eff_note) = resolve_thinking_level(effort, &effective_model);
+        cmd.arg(format!("--thinking={}", eff_level));
+        cmd.arg("--print-thoughts");
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -481,8 +489,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             limits.max_budget_usd.unwrap_or(0.0)
         ));
         let _ = tx.send(format!(
-            "[OMP-PROMPT] model={} cwd=/workspace",
-            effective_model
+            "[OMP-PROMPT] model={} thinking={}{} cwd=/workspace",
+            effective_model, eff_level, eff_note
         ));
         for prompt_line in effective_prompt.lines() {
             let clean = prompt_line.trim_end();
@@ -1590,6 +1598,37 @@ mod tests {
         .unwrap();
         assert!(ev.contains("[BENCH-EVENT]"));
         assert!(ev.contains("\"kind\":\"message\""));
+    }
+
+    #[test]
+    fn test_resolve_thinking_level() {
+        // Legacy aliases resolve to the explicit previous behavior.
+        assert_eq!(
+            resolve_thinking_level(None, "openrouter/meta/m"),
+            ("high".to_string(), String::new())
+        );
+        assert_eq!(
+            resolve_thinking_level(Some("auto"), "openrouter/meta/m"),
+            ("high".to_string(), String::new())
+        );
+        assert_eq!(
+            resolve_thinking_level(Some("  DEFAULT "), "openrouter/meta/m"),
+            ("high".to_string(), String::new())
+        );
+        // Plain levels pass through untouched.
+        assert_eq!(
+            resolve_thinking_level(Some("low"), "openrouter/meta/m"),
+            ("low".to_string(), String::new())
+        );
+        // Max survives for OpenAI models, clamps elsewhere with a note.
+        let (lvl, note) =
+            resolve_thinking_level(Some("max"), "openai/gpt-5.2");
+        assert_eq!(lvl, "max");
+        assert!(note.is_empty());
+        let (lvl, note) =
+            resolve_thinking_level(Some("max"), "openrouter/meta/m");
+        assert_eq!(lvl, "high");
+        assert!(note.contains("clamped"));
     }
 
     #[test]
