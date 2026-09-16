@@ -936,12 +936,12 @@ async fn start_run(
 
     if !matches!(
         req.task.as_str(),
-        "redis" | "http" | "dns" | "pdf"
+        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub"
     ) {
         state.is_running.store(false, Ordering::SeqCst);
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            format!("Unknown task '{}': expected redis, http, dns, or pdf", req.task),
+            format!("Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, or pubsub", req.task),
         )
             .into_response());
     }
