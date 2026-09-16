@@ -25,6 +25,8 @@ pub struct BenchmarkRunResult {
     pub baseline_source: Option<String>,
     #[serde(default)]
     pub ref_drift: Option<bool>,
+    #[serde(default)]
+    pub ref_image: Option<String>,
     pub prompt_tokens: u64,
     pub cached_tokens: u64,
     pub completion_tokens: u64,
@@ -70,6 +72,24 @@ pub fn format_duration(secs: f64) -> String {
 impl BenchmarkRunResult {
     pub fn effective_cost(&self) -> f64 {
         self.effective_cost_usd.unwrap_or(self.total_cost_usd)
+    }
+
+    /// First 12 hex chars of the digest (or trailing image tag when unpinned).
+    fn short_digest(img: &str) -> String {
+        let hex = img.rsplit('@').next().unwrap_or(img);
+        let hex = hex.strip_prefix("sha256:").unwrap_or(hex);
+        hex.chars().take(12).collect()
+    }
+
+    /// Measurement regime of a run: short image digest, `+drift` when the
+    /// post-batch bracket flagged host movement, `legacy` for runs from before
+    /// digest pinning. Same task + same regime = comparable ratios.
+    pub fn regime_of(r: &BenchmarkRunResult) -> String {
+        match (&r.ref_image, r.ref_drift) {
+            (Some(img), Some(true)) => format!("{}+drift", Self::short_digest(img)),
+            (Some(img), _) => Self::short_digest(img),
+            (None, _) => "legacy".to_string(),
+        }
     }
 
     /// Merges multiple subruns into a single consolidated BenchmarkRunResult
@@ -201,6 +221,7 @@ impl BenchmarkRunResult {
             reference_throughput_req_sec: best.reference_throughput_req_sec,
             baseline_source: best.baseline_source.clone(),
             ref_drift: batch_drift,
+            ref_image: best.ref_image.clone(),
             prompt_tokens: fair_prompt,
             cached_tokens: fair_cached,
             completion_tokens: fair_comp,
@@ -401,6 +422,7 @@ impl LeaderboardManager {
                     manifest.reference_throughput_req_sec = merged.reference_throughput_req_sec;
                     manifest.baseline_source = merged.baseline_source.clone();
                     manifest.ref_drift = merged.ref_drift;
+                    manifest.ref_image = merged.ref_image.clone();
                     manifest.cost_usd = merged.total_cost_usd;
                     manifest.effective_cost_usd = merged.effective_cost_usd;
                     manifest.savings_percent = merged.savings_percent;
@@ -658,6 +680,7 @@ impl LeaderboardManager {
                 "Duration",
                 "Turns",
                 "Throughput",
+                "Regime",
                 "Cost ($)",
                 "Cache Savings",
                 "Score / ¢",
@@ -725,6 +748,7 @@ impl LeaderboardManager {
                 Cell::new(dur_str).fg(Color::White),
                 Cell::new(turns_str).fg(Color::Cyan),
                 Cell::new(tp),
+                Cell::new(BenchmarkRunResult::regime_of(r)),
                 Cell::new(format!("${:.4}", r.total_cost_usd)).fg(Color::Magenta),
                 Cell::new(savings_str).fg(Color::Green),
                 Cell::new(format!("{:.1}", r.throughput_score.unwrap_or(r.efficiency_score))).fg(Color::Cyan),
@@ -791,6 +815,71 @@ impl LeaderboardManager {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::sandbox::docker::{
+        BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE,
+        REF_REDIS_IMAGE,
+    };
+
+    #[test]
+    fn test_ref_images_pinned_by_digest() {
+        for img in [
+            REF_REDIS_IMAGE,
+            REF_NGINX_IMAGE,
+            REF_DNS_IMAGE,
+            BENCH_REDIS_CLIENT_IMAGE,
+            BENCH_WRK_IMAGE,
+        ] {
+            assert!(img.contains("@sha256:"), "unpinned image: {}", img);
+        }
+    }
+
+    #[test]
+    fn test_regime_of() {
+        let base = BenchmarkRunResult {
+            id: "r".to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: Some(70000.0),
+            reference_throughput_req_sec: Some(71000.0),
+            baseline_source: Some("batch".to_string()),
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: String::new(),
+            method_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+        };
+        assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
+        let mut pinned = base;
+        pinned.ref_image = Some(REF_REDIS_IMAGE.to_string());
+        assert_eq!(
+            BenchmarkRunResult::regime_of(&pinned).as_str(),
+            &REF_REDIS_IMAGE["docker.io/library/redis@sha256:".len()..][..12]
+        );
+        pinned.ref_drift = Some(true);
+        assert!(BenchmarkRunResult::regime_of(&pinned).ends_with("+drift"));
+    }
+
     #[test]
     fn test_merge_subruns_best_of_and_pass_at_k() {
         let make_run = |id: &str, tp: f64, dur: f64, turns: u32, cost: f64, pass: f64| BenchmarkRunResult {
@@ -806,6 +895,7 @@ mod tests {
             reference_throughput_req_sec: Some(19000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             prompt_tokens: 1000,
             cached_tokens: 2000,
             completion_tokens: 500,
@@ -953,6 +1043,7 @@ mod tests {
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             prompt_tokens: 1000,
             cached_tokens: 500,
             completion_tokens: 100,
@@ -995,6 +1086,7 @@ mod tests {
             reference_throughput_req_sec: None,
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             prompt_tokens: 1000,
             cached_tokens: 500,
             completion_tokens: 200,
@@ -1029,6 +1121,7 @@ mod tests {
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             prompt_tokens: 2000,
             cached_tokens: 1500,
             completion_tokens: 300,

@@ -1,5 +1,7 @@
 pub mod batch_ref;
 
+use crate::sandbox::docker::{BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE};
+
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use std::fs;
@@ -154,7 +156,7 @@ impl BenchmarkRunner {
                     "--rm",
                     "--network",
                     "host",
-                    "redis:alpine",
+                    BENCH_REDIS_CLIENT_IMAGE,
                     "redis-benchmark",
                     "-h",
                     "127.0.0.1",
@@ -206,7 +208,7 @@ impl BenchmarkRunner {
                     "--rm",
                     "--network",
                     "host",
-                    "williamyeh/wrk",
+                    BENCH_WRK_IMAGE,
                     "-t2",
                     "-c20",
                     "-d3s",

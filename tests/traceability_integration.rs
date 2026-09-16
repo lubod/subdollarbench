@@ -78,6 +78,7 @@ func main() {
         reference_throughput_req_sec: Some(71000.0),
         baseline_source: None,
         ref_drift: None,
+        ref_image: None,
         tokens: RunTokenUsage {
             prompt_tokens: 18500,
             cached_tokens: 14000,

@@ -376,6 +376,7 @@ mod tests {
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             prompt_tokens: 100,
             cached_tokens: 50,
             completion_tokens: 20,
@@ -465,6 +466,7 @@ mod tests {
             reference_throughput_req_sec: None,
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 100,
                 cached_tokens: 50,

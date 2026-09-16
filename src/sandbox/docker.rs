@@ -5,6 +5,27 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
+/// Pinned reference images (content-addressed). Floating tags let upstream
+/// rebuilds silently move the denominator: a digest change is a declared new
+/// measurement regime, not silent drift. Re-pin quarterly or on CVE fixes.
+pub const REF_REDIS_IMAGE: &str = "docker.io/library/redis@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576";
+pub const REF_NGINX_IMAGE: &str = "docker.io/library/nginx@sha256:17ad11d84df6c69e327c0894125f712ec1f1de627b5e5ed7e12ca2ed8cd5daf8";
+pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
+/// Benchmark *client* images are pinned too: the client binary is half the
+/// measurement apparatus.
+pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
+pub const BENCH_WRK_IMAGE: &str = "docker.io/williamyeh/wrk@sha256:78adc0d9d51a99e6759e702a08d03eaece81c890ffcc9790ef9e5b199d54f091";
+
+/// Reference image for a task name ("redis"/"http"/"dns"), if it has one.
+pub fn ref_image_for_task(task: &str) -> Option<&'static str> {
+    match task {
+        "redis" => Some(REF_REDIS_IMAGE),
+        "http" => Some(REF_NGINX_IMAGE),
+        "dns" => Some(REF_DNS_IMAGE),
+        _ => None,
+    }
+}
+
 pub struct SandboxManager {
     pub instance_id: String,
     pub needs_cleanup: AtomicBool,
@@ -120,7 +141,7 @@ impl SandboxManager {
                 "--pids-limit=256",
                 "-p",
                 &format!("{}:6379", port),
-                "redis:alpine",
+                REF_REDIS_IMAGE,
             ])
             .output();
 
@@ -153,7 +174,7 @@ impl SandboxManager {
                 "--pids-limit=256",
                 "-p",
                 &format!("{}:80", port),
-                "nginx:alpine",
+                REF_NGINX_IMAGE,
             ])
             .output();
 
@@ -197,7 +218,7 @@ impl SandboxManager {
                 &format!("{}:53/udp", port),
                 "-v",
                 &format!("{}:/Corefile:ro", corefile.display()),
-                "coredns/coredns",
+                REF_DNS_IMAGE,
                 "-conf",
                 "/Corefile",
             ])
@@ -747,7 +768,7 @@ mod tests {
                 "--rm",
                 "--network",
                 &net,
-                "redis:alpine",
+                BENCH_REDIS_CLIENT_IMAGE,
                 "redis-cli",
                 "-h",
                 "ref-redis",

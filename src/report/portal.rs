@@ -697,6 +697,13 @@ const PORTAL_JS: &str = r#"
     if (t === 'pdf') return 4600;
     return 33000;
   }
+  function regimeOf(r) {
+    if (r.ref_image) {
+      const hex = (r.ref_image.split('@')[1] || r.ref_image).replace(/^sha256:/, '');
+      return r.ref_drift ? hex.slice(0, 12) + '+drift' : hex.slice(0, 12);
+    }
+    return 'legacy';
+  }
 
   function computeScore(r, weights) {
     const w = weights || DEFAULT_WEIGHTS;
@@ -886,7 +893,7 @@ const PORTAL_JS: &str = r#"
       const turnsStr = (r.turns !== undefined && r.turns !== null) ? `${r.turns}` : '-';
       const tpStr = formatThroughput(r.throughput_req_sec, r.task);
       const refRatio = (r.reference_throughput_req_sec && r.throughput_req_sec)
-        ? `<div style="font-size: 0.72rem; color: var(--grn); font-weight: 600;">${Math.round((r.throughput_req_sec / r.reference_throughput_req_sec) * 100)}% of Ref</div>`
+        ? `<div style="font-size: 0.72rem; color: var(--grn); font-weight: 600;">${Math.round((r.throughput_req_sec / r.reference_throughput_req_sec) * 100)}% of Ref · <span title="Measurement regime: same task + same regime = comparable">${regimeOf(r)}</span></div>`
         : '';
       
       const effCost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.total_cost_usd;
@@ -976,7 +983,7 @@ const PORTAL_JS: &str = r#"
     const topScore = topRun ? (computeScore(topRun, currentWeights).toFixed(1) + ' pts/¢') : '-';
     const peakTpStr = peakTpRun ? formatThroughput(peakTpRun.throughput_req_sec, taskKey) : 'N/A';
     const peakRatioStr = (peakTpRun && peakTpRun.reference_throughput_req_sec && peakTpRun.throughput_req_sec)
-      ? `${Math.round((peakTpRun.throughput_req_sec / peakTpRun.reference_throughput_req_sec) * 100)}% of reference`
+      ? `${Math.round((peakTpRun.throughput_req_sec / peakTpRun.reference_throughput_req_sec) * 100)}% of reference · regime ${regimeOf(peakTpRun)}`
       : '';
     const lowestCostStr = lowestCostRun
       ? `$${((lowestCostRun.effective_cost_usd !== undefined && lowestCostRun.effective_cost_usd !== null) ? lowestCostRun.effective_cost_usd : lowestCostRun.total_cost_usd).toFixed(4)}`

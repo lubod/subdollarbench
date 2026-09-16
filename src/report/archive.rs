@@ -48,6 +48,10 @@ pub struct RunManifest {
     /// Post-batch bracket result. None per-trial; set on merged parent records.
     #[serde(default)]
     pub ref_drift: Option<bool>,
+    /// Content-addressed reference image (e.g. redis@sha256:…). None = legacy
+    /// run from before digest pinning; such runs form their own regime.
+    #[serde(default)]
+    pub ref_image: Option<String>,
     pub tokens: RunTokenUsage,
     pub cost_usd: f64,
     #[serde(default)]
@@ -310,6 +314,7 @@ mod tests {
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 10000,
                 cached_tokens: 8000,

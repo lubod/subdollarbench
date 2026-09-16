@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::bench::BenchmarkRunner;
 use crate::config::{get_repo_root, TaskType};
-use crate::sandbox::docker::SandboxManager;
+use crate::sandbox::docker::{SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE};
 
 /// Batch-port assignments. Deliberately offset from the per-trial ref ports
 /// (6380/8081) so the batch ref can live across the whole batch while trial
@@ -31,8 +31,8 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
 
 fn ref_image(task: &TaskType) -> &'static str {
     match task {
-        TaskType::Redis => "redis:alpine",
-        TaskType::Http => "nginx:alpine",
+        TaskType::Redis => REF_REDIS_IMAGE,
+        TaskType::Http => REF_NGINX_IMAGE,
         _ => "none",
     }
 }
@@ -46,7 +46,7 @@ fn wait_redis_ready(port: u16) -> bool {
                 "--rm",
                 "--network",
                 "host",
-                "redis:alpine",
+                BENCH_REDIS_CLIENT_IMAGE,
                 "redis-cli",
                 "-h",
                 "127.0.0.1",

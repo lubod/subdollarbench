@@ -1713,6 +1713,7 @@ mod tests {
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1000,
                 cached_tokens: 500,
@@ -1749,6 +1750,7 @@ mod tests {
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
             ref_drift: None,
+            ref_image: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1500,
                 cached_tokens: 600,

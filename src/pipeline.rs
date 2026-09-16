@@ -652,6 +652,8 @@ impl BenchmarkPipeline {
             reference_throughput_req_sec: reference_throughput,
             baseline_source: baseline_source.clone(),
             ref_drift: None,
+            ref_image: crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
+                .map(|s| s.to_string()),
             tokens: RunTokenUsage {
                 prompt_tokens,
                 cached_tokens,
@@ -683,6 +685,8 @@ impl BenchmarkPipeline {
             reference_throughput_req_sec: reference_throughput,
             baseline_source: baseline_source.clone(),
             ref_drift: None,
+            ref_image: crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
+                .map(|s| s.to_string()),
             prompt_tokens,
             cached_tokens,
             completion_tokens,
