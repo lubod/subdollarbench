@@ -949,7 +949,6 @@ mod tests {
         assert!(mixed.throughput_score.unwrap() > 0.0);
     }
 
-    use super::*;
 
     #[test]
     fn test_compute_pass_at_k() {

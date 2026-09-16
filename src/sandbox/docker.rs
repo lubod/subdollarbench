@@ -15,6 +15,8 @@ pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03ef
 /// measurement apparatus.
 pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
 pub const BENCH_WRK_IMAGE: &str = "docker.io/williamyeh/wrk@sha256:78adc0d9d51a99e6759e702a08d03eaece81c890ffcc9790ef9e5b199d54f091";
+/// Fixed upstream ports for the proxy task (also baked into tasks/proxy/prompt.md).
+pub const PROXY_UPSTREAM_PORTS: [u16; 3] = [8101, 8102, 8103];
 
 /// Reference image for a task name ("redis"/"http"/"dns"), if it has one.
 pub fn ref_image_for_task(task: &str) -> Option<&'static str> {
@@ -178,6 +180,103 @@ impl SandboxManager {
             ])
             .output();
 
+        Ok(())
+    }
+
+    /// SIGKILL the candidate (crash-consistency tests). Container persists (no --rm).
+    pub fn kill_candidate(&self) -> Result<()> {
+        let out = Command::new("docker")
+            .args(["kill", "-s", "KILL", &self.candidate_container_name()])
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "docker kill failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
+    /// Restart a killed candidate container.
+    pub fn restart_candidate(&self) -> Result<()> {
+        let out = Command::new("docker")
+            .args(["start", &self.candidate_container_name()])
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "docker start failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
+    pub fn upstream_name(&self, idx: u8) -> String {
+        format!("subdollar-upstream{}-{}", idx, self.instance_id)
+    }
+
+    fn upstream_marker_path(&self, idx: u8) -> PathBuf {
+        std::env::temp_dir().join(format!("subdollar-upstream-{}-{}.html", self.instance_id, idx))
+    }
+
+    /// Start nginx upstreams with distinct marker bodies for the proxy task.
+    /// Marker files live in tempdir (never in the candidate workspace).
+    pub fn start_upstream_pool(&self, ports: &[u16]) -> Result<()> {
+        let net = self.network_name();
+        self.ensure_network()?;
+        for (i, port) in ports.iter().enumerate() {
+            let idx = (i + 1) as u8;
+            self.start_upstream_on(idx, *port, &net)?;
+        }
+        Ok(())
+    }
+    pub fn start_upstream(&self, idx: u8, port: u16) -> Result<()> {
+        let net = self.network_name();
+        self.ensure_network()?;
+        self.start_upstream_on(idx, port, &net)
+    }
+
+    fn start_upstream_on(&self, idx: u8, port: u16, net: &str) -> Result<()> {
+        let name = self.upstream_name(idx);
+        fs::write(
+            self.upstream_marker_path(idx),
+            format!("upstream-{} marker\n", idx),
+        )?;
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--name",
+                &name,
+                "--network",
+                net,
+                "--memory=512m",
+                "--cpus=1.0",
+                "-p",
+                &format!("{}:80", port),
+                "-v",
+                &format!("{}:/usr/share/nginx/html/index.html:ro", self.upstream_marker_path(idx).display()),
+                REF_NGINX_IMAGE,
+            ])
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "upstream {} start failed: {}",
+                idx,
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
+    pub fn stop_upstream(&self, idx: u8) -> Result<()> {
+        let _ = Command::new("docker")
+            .args(["stop", &self.upstream_name(idx)])
+            .output()?;
         Ok(())
     }
 
@@ -657,6 +756,9 @@ impl SandboxManager {
 
         Self::remove_network_retrying(&net);
         let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
+        for idx in 1..=8u8 {
+            let _ = fs::remove_file(self.upstream_marker_path(idx));
+        }
     }
 }
 

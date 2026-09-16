@@ -47,6 +47,7 @@ impl RedisVerifier {
         stages.push(self.test_stage2_key_value().await);
         stages.push(self.test_stage3_expiration().await);
         stages.push(self.test_stage4_counters().await);
+        stages.push(self.test_stage5_pubsub().await);
 
         let passed_count = stages.iter().filter(|s| s.passed).count() as u32;
         let total_stages = stages.len() as u32;
@@ -127,6 +128,11 @@ impl RedisVerifier {
         stream.write_all(payload.as_bytes()).await?;
         stream.flush().await?;
 
+        Self::read_resp_reply(stream).await
+    }
+
+    /// Read one complete RESP frame (used for server-pushed messages too).
+    async fn read_resp_reply(stream: &mut TcpStream) -> Result<String> {
         let mut buf = Vec::new();
         let mut temp = [0u8; 1024];
         let start = std::time::Instant::now();
@@ -625,6 +631,88 @@ impl RedisVerifier {
             error: None,
         }
     }
+
+    pub async fn test_stage5_pubsub(&self) -> StageResult {
+        let name = "Stage 5: PUB/SUB fan-out".to_string();
+        let fail = |e: String| StageResult {
+            stage: 5,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let chan = format!("chan_{}", self.get_seed_prefix("fan"));
+        let mut sub = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("subscriber connect: {}", e)),
+        };
+        let conf = match Self::send_resp_cmd(&mut sub, &["SUBSCRIBE", &chan]).await {
+            Ok(r) => r,
+            Err(e) => return fail(format!("SUBSCRIBE: {}", e)),
+        };
+        let conf_low = conf.to_lowercase();
+        if !(conf_low.contains("subscribe") && conf.contains(&chan)) {
+            return fail(format!("bad subscribe-confirm: {:?}", conf));
+        }
+        let mut pb = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("publisher connect: {}", e)),
+        };
+        let n = match Self::send_resp_cmd(&mut pb, &["PUBLISH", &chan, "hello-fanout"]).await {
+            Ok(r) => r,
+            Err(e) => return fail(format!("PUBLISH: {}", e)),
+        };
+        if n.trim() != ":1" {
+            return fail(format!("PUBLISH receivers: expected :1, got {:?}", n));
+        }
+        let pushed = match Self::read_resp_reply(&mut sub).await {
+            Ok(r) => r,
+            Err(e) => return fail(format!("broadcast read: {}", e)),
+        };
+        if !(pushed.contains("message") && pushed.contains(&chan) && pushed.contains("hello-fanout")) {
+            return fail(format!("bad broadcast frame: {:?}", pushed));
+        }
+        StageResult { stage: 5, name, passed: true, error: None }
+    }
+
+    /// AOF probe keypair (seeded so parallel runs never collide).
+    pub fn probe_pair(&self) -> (String, String) {
+        let seed = self.get_seed_prefix("aof").to_string();
+        (format!("persist_probe_{}", seed), format!("smoked-{}", seed))
+    }
+
+    pub async fn write_probe_key(&self) -> Result<()> {
+        let (k, v) = self.probe_pair();
+        let mut stream = self.connect().await?;
+        let r = Self::send_resp_cmd(&mut stream, &["SET", &k, &v]).await?;
+        if r.trim() != "+OK" {
+            return Err(anyhow!("SET probe: {:?}", r));
+        }
+        Ok(())
+    }
+
+    /// Stage 6: run AFTER the harness SIGKILL+restarts the candidate.
+    pub async fn check_persistence(&self) -> StageResult {
+        let name = "Stage 6: AOF crash recovery".to_string();
+        let fail = |e: String| StageResult {
+            stage: 6,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let (k, v) = self.probe_pair();
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("reconnect: {}", e)),
+        };
+        let got = match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+            Ok(r) => r,
+            Err(e) => return fail(format!("GET probe: {}", e)),
+        };
+        if !got.contains(&v) {
+            return fail(format!("probe key lost or wrong: {:?}", got));
+        }
+        StageResult { stage: 6, name, passed: true, error: None }
+    }
 }
 
 #[cfg(test)]
@@ -796,6 +884,30 @@ mod tests {
                             let _ = socket
                                 .write_all(b"-ERR value is not an integer or out of range\r\n")
                                 .await;
+                        } else if upper.contains("PUBLISH") {
+                            let _ = socket.write_all(b":1\r\n").await;
+                        } else if upper.contains("SUBSCRIBE") {
+                            // Echo channel, confirm, then push a canned broadcast.
+                            let parts: Vec<&str> = req.split("\r\n").collect();
+                            let mut chan = "chan".to_string();
+                            if let Some(i) = parts.iter().position(|x| x.to_uppercase() == "SUBSCRIBE") {
+                                if let Some(c) = parts.get(i + 2) {
+                                    chan = c.to_string();
+                                }
+                            }
+                            let conf = format!(
+                                "*3\r\n$9\r\nsubscribe\r\n${}\r\n{}\r\n:1\r\n",
+                                chan.len(),
+                                chan
+                            );
+                            let _ = socket.write_all(conf.as_bytes()).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            let push = format!(
+                                "*3\r\n$7\r\nmessage\r\n${}\r\n{}\r\n$12\r\nhello-fanout\r\n",
+                                chan.len(),
+                                chan
+                            );
+                            let _ = socket.write_all(push.as_bytes()).await;
                         } else {
                             let _ = socket.write_all(b"+OK\r\n").await;
                         }
@@ -807,7 +919,7 @@ mod tests {
         let verifier = RedisVerifier::new(port, None);
         let summary = verifier.run_all().await;
         assert_eq!(
-            summary.passed_count, 4,
+            summary.passed_count, 5,
             "Summary failed: {:?}",
             summary.stages
         );
@@ -891,6 +1003,30 @@ mod tests {
                             let _ = socket
                                 .write_all(b"-ERR value is not an integer or out of range\r\n")
                                 .await;
+                        } else if upper.contains("PUBLISH") {
+                            let _ = socket.write_all(b":1\r\n").await;
+                        } else if upper.contains("SUBSCRIBE") {
+                            // Echo channel, confirm, then push a canned broadcast.
+                            let parts: Vec<&str> = req.split("\r\n").collect();
+                            let mut chan = "chan".to_string();
+                            if let Some(i) = parts.iter().position(|x| x.to_uppercase() == "SUBSCRIBE") {
+                                if let Some(c) = parts.get(i + 2) {
+                                    chan = c.to_string();
+                                }
+                            }
+                            let conf = format!(
+                                "*3\r\n$9\r\nsubscribe\r\n${}\r\n{}\r\n:1\r\n",
+                                chan.len(),
+                                chan
+                            );
+                            let _ = socket.write_all(conf.as_bytes()).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            let push = format!(
+                                "*3\r\n$7\r\nmessage\r\n${}\r\n{}\r\n$12\r\nhello-fanout\r\n",
+                                chan.len(),
+                                chan
+                            );
+                            let _ = socket.write_all(push.as_bytes()).await;
                         } else {
                             let _ = socket.write_all(b"+OK\r\n").await;
                         }
@@ -902,7 +1038,7 @@ mod tests {
         let verifier = RedisVerifier::new(port, Some(seed));
         let summary = verifier.run_all().await;
         assert_eq!(
-            summary.passed_count, 4,
+            summary.passed_count, 5,
             "Seeded summary failed: {:?}",
             summary.stages
         );

@@ -275,6 +275,46 @@ impl PdfVerifier {
         done(true, None)
     }
 
+    pub async fn test_stage6_concurrent_burst(&self) -> StageResult {
+        // 16 concurrent multi-page extractions, all byte-exact.
+        let name = "Stage 6: Concurrent Burst (16-way)".to_string();
+        let (pdf, want) = self.pdf_stage4();
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let port = self.target_port;
+            let pdf_c = pdf.clone();
+            let want_c = want.clone();
+            tasks.push(tokio::spawn(async move {
+                let v = PdfVerifier::new(port, None);
+                let resp = v.post_extract(&pdf_c).await.map_err(|e| e.to_string())?;
+                if resp.status().as_u16() != 200 {
+                    return Err(format!("status {}", resp.status()));
+                }
+                let body = resp.bytes().await.map_err(|e| e.to_string())?;
+                if body.as_ref() != want_c.as_bytes() {
+                    return Err("body mismatch".to_string());
+                }
+                Ok::<(), String>(())
+            }));
+        }
+        let mut fails = Vec::new();
+        for t in tasks {
+            if let Err(e) = t.await.unwrap_or(Err("join failed".to_string())) {
+                fails.push(e);
+            }
+        }
+        if fails.is_empty() {
+            StageResult { stage: 6, name, passed: true, error: None }
+        } else {
+            StageResult {
+                stage: 6,
+                name,
+                passed: false,
+                error: Some(format!("{} of 16 burst extractions failed: {}", fails.len(), fails[0])),
+            }
+        }
+    }
+
     pub async fn run_all(&self) -> PdfTestSummary {
         let mut stages = Vec::new();
         stages.push(self.test_stage1_single_tj().await);
@@ -282,6 +322,7 @@ impl PdfVerifier {
         stages.push(self.test_stage3_flate().await);
         stages.push(self.test_stage4_multipage().await);
         stages.push(self.test_stage5_bad_input().await);
+        stages.push(self.test_stage6_concurrent_burst().await);
 
         let passed_count = stages.iter().filter(|s| s.passed).count() as u32;
         let total_stages = stages.len() as u32;

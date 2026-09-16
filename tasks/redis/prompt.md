@@ -51,6 +51,15 @@ Your server must accept TCP connections on port 6379 and parse the Redis Seriali
    - If key does not exist, initialize it as 0 before incrementing/decrementing.
    - **Error Handling**: If `INCR` or `DECR` is called on a key whose value cannot be parsed as a 64-bit signed integer, return a standard RESP error: `-ERR value is not an integer or out of range\r\n` (any RESP error line starting with `-ERR`).
 
+### Durability & Pub/Sub (Stages 5-6)
+7. **PUB/SUB Channels**:
+   - `SUBSCRIBE <channel>` -> confirm `*3\r\n$9\r\nsubscribe\r\n$<n>\r\n<channel>\r\n:1\r\n`, then block for pushed messages.
+   - `PUBLISH <channel> <message>` -> `:<receivers>\r\n`; every subscriber receives `*3\r\n$7\r\nmessage\r\n$<n>\r\n<channel>\r\n$<m>\r\n<message>\r\n`.
+   - Support multiple concurrent subscribers per channel.
+8. **Append-Only Persistence (AOF)**:
+   - Persist EVERY write (SET/DEL/INCR/...) to `./appendonly.log` with fsync before replying.
+   - On startup, replay the log to rebuild the dataset. The harness will `kill -9` your server, restart it, and verify a probe key survives byte-identical.
+
 ### Verification Criteria
 1. Your server will be tested by an automated raw TCP byte-exact RESP2 protocol verification test suite, including **TCP Pipelining** (processing multiple commands batched inside a single TCP read buffer).
 2. Your server will undergo a concurrency and throughput test using `redis-benchmark -p 6379 -n 5000 -c 10 -t get,set -q` across 10 concurrent connections. Ensure thread-safety and non-blocking I/O.

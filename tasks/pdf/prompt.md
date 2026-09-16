@@ -61,6 +61,9 @@ Your server must listen on port 8090:
 2. **Extract**: `POST /extract` with raw PDF bytes as the request body (`Content-Type: application/pdf`) -> `200 OK`, `Content-Type: text/plain`, body = extracted text per the assembly rules above.
 3. **Bad input**: Non-PDF bytes or unparseable PDF -> `400 Bad Request`. Unknown paths -> `404 Not Found`.
 
+### Concurrency
+- The harness fires 16 concurrent multi-page extractions; all must be byte-exact. No shared mutable state across requests without synchronization.
+
 ### Verification Criteria
 1. Byte-exact extraction tests: single-page `Tj`, `TJ` arrays + positioning + hex + escapes, `FlateDecode` streams, and multi-page documents with decoy text outside page streams (only true `xref`-following page content counts).
 2. Load test: repeated multi-page extractions, scored in pages/sec.

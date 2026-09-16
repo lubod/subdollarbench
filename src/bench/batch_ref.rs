@@ -24,15 +24,15 @@ use crate::sandbox::docker::{SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_NGINX
 pub fn batch_port(task: &TaskType) -> Option<u16> {
     match task {
         TaskType::Redis => Some(6389),
-        TaskType::Http => Some(8089),
-        TaskType::Dns | TaskType::Pdf => None,
+        TaskType::Http | TaskType::Proxy => Some(8089),
+        TaskType::Dns | TaskType::Pdf | TaskType::Wal | TaskType::Pubsub => None,
     }
 }
 
 fn ref_image(task: &TaskType) -> &'static str {
     match task {
         TaskType::Redis => REF_REDIS_IMAGE,
-        TaskType::Http => REF_NGINX_IMAGE,
+        TaskType::Http | TaskType::Proxy => REF_NGINX_IMAGE,
         _ => "none",
     }
 }
@@ -82,7 +82,7 @@ fn wait_http_ready(port: u16) -> bool {
 fn measure(task: &TaskType, port: u16) -> Result<f64> {
     match task {
         TaskType::Redis => BenchmarkRunner::run_redis_benchmark(port),
-        TaskType::Http => BenchmarkRunner::run_wrk_benchmark(port),
+        TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark(port),
         _ => Err(anyhow!("no external reference for {:?}", task)),
     }
 }
@@ -112,7 +112,7 @@ impl BatchRef {
         sandbox.ensure_network()?;
         let start_res = match task {
             TaskType::Redis => sandbox.start_reference_redis(port),
-            TaskType::Http => sandbox.start_reference_http(port),
+            TaskType::Http | TaskType::Proxy => sandbox.start_reference_http(port),
             _ => return Ok(None),
         };
         if let Err(e) = start_res {
@@ -121,7 +121,7 @@ impl BatchRef {
         }
         let ready = match task {
             TaskType::Redis => wait_redis_ready(port),
-            TaskType::Http => wait_http_ready(port),
+            TaskType::Http | TaskType::Proxy => wait_http_ready(port),
             _ => false,
         };
         if !ready {

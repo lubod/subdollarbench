@@ -8,7 +8,7 @@ use std::sync::Arc;
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest};
-use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, RedisVerifier};
+use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier, WalVerifier};
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
 
@@ -179,6 +179,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Http => 8080,
                 TaskType::Dns => 5353,
                 TaskType::Pdf => 8090,
+                TaskType::Wal => 6390,
+                TaskType::Proxy => 8091,
+                TaskType::Pubsub => 8092,
             });
             println!("Evaluating {} on port {}...", task, p);
             match task {
@@ -208,6 +211,30 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
                 TaskType::Pdf => {
                     let v = PdfVerifier::new(p, None);
+                    let res = v.run_all().await;
+                    println!(
+                        "Pass rate: {:.1}% ({}/{})",
+                        res.pass_rate, res.passed_count, res.total_stages
+                    );
+                }
+                TaskType::Wal => {
+                    let v = WalVerifier::new(p, None);
+                    let res = v.run_basic().await;
+                    println!(
+                        "Pass rate: {:.1}% ({}/{})",
+                        res.pass_rate, res.passed_count, res.total_stages
+                    );
+                }
+                TaskType::Proxy => {
+                    let v = ProxyVerifier::new(p, None, vec![]);
+                    let res = v.run_routing().await;
+                    println!(
+                        "Pass rate: {:.1}% ({}/{})",
+                        res.pass_rate, res.passed_count, res.total_stages
+                    );
+                }
+                TaskType::Pubsub => {
+                    let v = PubsubVerifier::new(p, None);
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",

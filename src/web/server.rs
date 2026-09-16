@@ -973,6 +973,9 @@ async fn start_run(
                 "http" => TaskType::Http,
                 "dns" => TaskType::Dns,
                 "pdf" => TaskType::Pdf,
+                "wal" => TaskType::Wal,
+                "proxy" => TaskType::Proxy,
+                "pubsub" => TaskType::Pubsub,
                 _ => TaskType::Redis,
             };
             match crate::bench::batch_ref::BatchRef::start(
@@ -1122,6 +1125,9 @@ async fn start_run(
                 "http" => TaskType::Http,
                 "dns" => TaskType::Dns,
                 "pdf" => TaskType::Pdf,
+                "wal" => TaskType::Wal,
+                "proxy" => TaskType::Proxy,
+                "pubsub" => TaskType::Pubsub,
                 _ => TaskType::Redis,
             };
 

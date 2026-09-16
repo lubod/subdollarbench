@@ -14,13 +14,16 @@ use crate::report::archive::{RunArchiver, RunManifest, RunTokenUsage};
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
 use crate::report::portal::PortalExporter;
 use crate::report::judge::RunJudge;
-use crate::sandbox::docker::SandboxManager;
+use crate::sandbox::docker::{SandboxManager, PROXY_UPSTREAM_PORTS};
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::verifier::compliance::ComplianceChecker;
 use crate::verifier::dns::DnsVerifier;
 use crate::verifier::http::HttpVerifier;
 use crate::verifier::pdf::PdfVerifier;
+use crate::verifier::proxy::ProxyVerifier;
+use crate::verifier::pubsub::PubsubVerifier;
 use crate::verifier::redis::RedisVerifier;
+use crate::verifier::wal::WalVerifier;
 
 pub trait PipelineLogger: Send + Sync {
     fn log(&self, msg: &str);
@@ -103,6 +106,31 @@ pub struct PipelineOutput {
     pub benchmark_result: BenchmarkRunResult,
     pub agent_failed: bool,
     pub disqualified: bool,
+}
+
+/// Publish the WAL crash-recovery probe: 2000 MSGs on `recovery_probe`,
+/// counting acks. The caller SIGKILLs the candidate next; `check_recovery`
+/// then requires this state back.
+async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let (rh, mut wh) = stream.into_split();
+    let mut rd = tokio::io::BufReader::new(rh);
+    let mut acks = 0usize;
+    for i in 0..2000usize {
+        wh.write_all(format!("PUB recovery_probe msg-{}\n", i).as_bytes())
+            .await?;
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rd.read_line(&mut line),
+        )
+        .await??;
+        if line.starts_with("+OK") {
+            acks += 1;
+        }
+    }
+    Ok(acks)
 }
 
 pub struct BenchmarkPipeline;
@@ -217,6 +245,18 @@ impl BenchmarkPipeline {
             }
             TaskType::Pdf => {
                 logger.log("[SETUP] PDF task uses verifier-generated fixtures; no reference container.");
+            }
+            TaskType::Proxy => {
+                match sandbox.start_upstream_pool(&PROXY_UPSTREAM_PORTS) {
+                    Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
+                    Err(e) => logger.log(&format!(
+                        "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
+                        e
+                    )),
+                }
+            }
+            TaskType::Wal | TaskType::Pubsub => {
+                logger.log("[SETUP] No reference container for this task (verifier-timed).");
             }
         }
 
@@ -373,6 +413,8 @@ impl BenchmarkPipeline {
 
         let mut throughput = None;
         let mut reference_throughput = None;
+        // Verifier-measured rate (wal/proxy/pubsub soak); step 8 prefers it.
+        let mut extra_throughput: Option<f64> = None;
         let mut baseline_source: Option<String> = None;
         let (pass_rate, passed_stages, total_stages, stage_results) = if disqualified {
             let reason = disqualification_reason
@@ -419,6 +461,7 @@ impl BenchmarkPipeline {
                 TaskType::Redis => {
                     let verifier = RedisVerifier::new(port, Some(&verifier_seed));
                     let summary = verifier.run_all().await;
+                    let mut stages = summary.stages.clone();
                     for s in &summary.stages {
                         let status_str = if s.passed { "PASS" } else { "FAIL" };
                         let err_str = s.error.as_deref().unwrap_or("");
@@ -427,12 +470,50 @@ impl BenchmarkPipeline {
                             s.stage, s.name, status_str, err_str
                         ));
                     }
-                    (
-                        summary.pass_rate,
-                        summary.passed_count,
-                        summary.total_stages,
-                        summary.stages,
-                    )
+                    // Stage 6: AOF crash recovery on full pass (mirrors the WAL flow).
+                    if summary.pass_rate == 100.0 {
+                        let fail6 = |e: String| crate::verifier::StageResult {
+                            stage: 6,
+                            name: "Stage 6: AOF crash recovery".to_string(),
+                            passed: false,
+                            error: Some(e),
+                        };
+                        match verifier.write_probe_key().await {
+                            Ok(()) => {
+                                logger.log("[BENCH] AOF probe written; SIGKILLing candidate...");
+                                let st = match sandbox.kill_candidate() {
+                                    Ok(()) => {
+                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                        match sandbox.restart_candidate() {
+                                            Ok(()) => {
+                                                if sandbox.wait_for_port(port, 25).await {
+                                                    verifier.check_persistence().await
+                                                } else {
+                                                    fail6("candidate did not reopen port after restart".to_string())
+                                                }
+                                            }
+                                            Err(e) => fail6(format!("restart failed: {}", e)),
+                                        }
+                                    }
+                                    Err(e) => fail6(format!("SIGKILL failed: {}", e)),
+                                };
+                                let status_str = if st.passed { "PASS" } else { "FAIL" };
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> {} {}",
+                                    st.stage, st.name, status_str, st.error.as_deref().unwrap_or("")
+                                ));
+                                stages.push(st);
+                            }
+                            Err(e) => logger.log(&format!(
+                                "  AOF probe write failed (skipping crash stage): {}",
+                                e
+                            )),
+                        }
+                    }
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    let pr = ps as f64 / ts as f64 * 100.0;
+                    (pr, ps, ts, stages)
                 }
                 TaskType::Http => {
                     let verifier = HttpVerifier::new(port, Some(&verifier_seed));
@@ -470,6 +551,84 @@ impl BenchmarkPipeline {
                         summary.stages,
                     )
                 }
+                TaskType::Wal => {
+                    let log_stage = |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage, s.name, status_str, err_str
+                        ));
+                    };
+                    let fail = |n: u32, name: &str, err: String| crate::verifier::StageResult {
+                        stage: n,
+                        name: name.to_string(),
+                        passed: false,
+                        error: Some(err),
+                    };
+                    let verifier = WalVerifier::new(port, Some(&verifier_seed));
+                    let basic = verifier.run_basic().await;
+                    let mut stages = basic.stages.clone();
+                    for s in &basic.stages {
+                        log_stage(&logger, s);
+                    }
+                    // Seed crash state, SIGKILL, restart, verify.
+                    let mut probe_acks = 0usize;
+                    match publish_wal_probe(port).await {
+                        Ok(n) => {
+                            probe_acks = n;
+                            logger.log(&format!("  Probe: {}/2000 acks on recovery_probe", n));
+                        }
+                        Err(e) => logger.log(&format!(
+                            "  Probe publish failed (recovery unlikely): {}",
+                            e
+                        )),
+                    }
+                    let rec = if probe_acks >= 2000 {
+                        match sandbox.kill_candidate() {
+                            Ok(()) => {
+                                logger.log("[BENCH] Candidate SIGKILLed; restarting...");
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                                match sandbox.restart_candidate() {
+                                    Ok(()) => {
+                                        if sandbox.wait_for_port(port, 25).await {
+                                            logger.log("[BENCH] Candidate back; checking recovery...");
+                                            verifier.check_recovery().await
+                                        } else {
+                                            fail(4, "Stage 4: Crash recovery", "candidate did not reopen port after restart".to_string())
+                                        }
+                                    }
+                                    Err(e) => fail(4, "Stage 4: Crash recovery", format!("restart failed: {}", e)),
+                                }
+                            }
+                            Err(e) => fail(4, "Stage 4: Crash recovery", format!("SIGKILL failed: {}", e)),
+                        }
+                    } else {
+                        fail(4, "Stage 4: Crash recovery", "probe had no full acks; skipping kill".to_string())
+                    };
+                    log_stage(&logger, &rec);
+                    stages.push(rec);
+                    let tp = verifier.measure_throughput().await;
+                    extra_throughput = tp;
+                    let tp_stage = crate::verifier::StageResult {
+                        stage: 5,
+                        name: "Stage 5: PUB burst throughput".to_string(),
+                        passed: tp.is_some(),
+                        error: match tp {
+                            Some(v) => {
+                                logger.log(&format!("  Candidate burst: {:.0} msgs/sec", v));
+                                None
+                            }
+                            None => Some("no throughput measurement".to_string()),
+                        },
+                    };
+                    log_stage(&logger, &tp_stage);
+                    stages.push(tp_stage);
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    let pr = ps as f64 / ts as f64 * 100.0;
+                    (pr, ps, ts, stages)
+                }
                 TaskType::Pdf => {
                     let verifier = PdfVerifier::new(port, Some(&verifier_seed));
                     let summary = verifier.run_all().await;
@@ -481,6 +640,75 @@ impl BenchmarkPipeline {
                             s.stage, s.name, status_str, err_str
                         ));
                     }
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
+                TaskType::Proxy => {
+                    let log_stage = |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage, s.name, status_str, err_str
+                        ));
+                    };
+                    let ups: Vec<(String, u16)> = (1u8..=3u8)
+                        .map(|i| {
+                            (
+                                sandbox.upstream_name(i),
+                                PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                            )
+                        })
+                        .collect();
+                    let verifier = ProxyVerifier::new(port, Some(&verifier_seed), ups);
+                    let routing = verifier.run_routing().await;
+                    let mut stages = routing.stages.clone();
+                    for s in &routing.stages {
+                        log_stage(&logger, s);
+                    }
+                    let fo = verifier.run_failover().await;
+                    log_stage(&logger, &fo);
+                    stages.push(fo);
+                    let tp = verifier.measure_throughput().await;
+                    extra_throughput = tp;
+                    let tp_stage = crate::verifier::StageResult {
+                        stage: 5,
+                        name: "Stage 5: Concurrent GET throughput".to_string(),
+                        passed: tp.is_some(),
+                        error: match tp {
+                            Some(v) => {
+                                logger.log(&format!("  Candidate load: {:.0} req/sec", v));
+                                None
+                            }
+                            None => Some("no throughput measurement".to_string()),
+                        },
+                    };
+                    log_stage(&logger, &tp_stage);
+                    stages.push(tp_stage);
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    let pr = ps as f64 / ts as f64 * 100.0;
+                    (pr, ps, ts, stages)
+                }
+                TaskType::Pubsub => {
+                    let verifier = PubsubVerifier::new(port, Some(&verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage, s.name, status_str, err_str
+                        ));
+                    }
+                    if let Some(p99) = summary.soak_p99_ms {
+                        logger.log(&format!("  Soak p99 broadcast latency: {:.1}ms", p99));
+                    }
+                    extra_throughput = summary.soak_msgs_per_sec;
                     (
                         summary.pass_rate,
                         summary.passed_count,
@@ -528,6 +756,25 @@ impl BenchmarkPipeline {
                                 logger.log(&format!("  Official Reference Nginx: {:.0} req/sec", ref_tp));
                                 reference_throughput = Some(ref_tp);
                             }
+                        }
+                    }
+                    TaskType::Wal | TaskType::Pubsub => {
+                        if let Some(tp) = extra_throughput {
+                            logger.log(&format!(
+                                "  Candidate Throughput (verifier soak, median-grade): {:.0} msgs/sec",
+                                tp
+                            ));
+                            throughput = Some(tp);
+                        }
+                        logger.log("[BENCH] No external reference for this task; score uses fallback baseline.");
+                    }
+                    TaskType::Proxy => {
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(port) {
+                            logger.log(&format!("  Candidate Throughput (median of 3): {:.0} req/sec", tp));
+                            throughput = Some(tp);
+                        }
+                        if config.batch_reference.is_none() {
+                            logger.log("[BENCH] No batch reference; score uses pinned nginx fallback baseline.");
                         }
                     }
                     TaskType::Dns => {

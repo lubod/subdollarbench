@@ -46,6 +46,9 @@ Your server must listen on UDP port 5353 and respond to standard queries (QR=1, 
 5. **NXDOMAIN / Non-Existent Domain**:
    - For unknown queries (e.g. `nonexistent.subdollar.invalid`), respond with `RCODE=3 (NXDOMAIN)` or `ANCOUNT=0`.
 6. **Burst Handling**:
-   - Efficiently handle bursts of concurrent UDP queries.
+   - Efficiently handle bursts of concurrent UDP queries: the harness fires 800 queries across 16 concurrent clients with zero tolerance for ID mixups.
+
+### Recursion & Scale (SHOULD-have, judge-reviewed)
+- **Upstream Forwarding**: Forward queries for names outside your 3 static records to the upstream resolver at hostname `ref-dns`, port `53`. Cache answers honoring TTL; serve repeats from memory.
 
 Test your DNS server thoroughly with `dig @127.0.0.1 -p 5353 example.com` before finishing!

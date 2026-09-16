@@ -695,6 +695,9 @@ const PORTAL_JS: &str = r#"
     if (t === 'redis') return 71000;
     if (t === 'dns') return 19000;
     if (t === 'pdf') return 4600;
+    if (t === 'wal') return 10000;
+    if (t === 'proxy') return 33000;
+    if (t === 'pubsub') return 5000;
     return 33000;
   }
   function regimeOf(r) {
@@ -1449,6 +1452,8 @@ impl PortalExporter {
             let unit = match r.task.to_lowercase().as_str() {
                 "pdf" => "pages/s",
                 "dns" => "queries/s",
+                "wal" => "msgs/s",
+                "pubsub" => "deliveries/s",
                 _ => "req/s",
             };
             let tp = r
@@ -1684,6 +1689,8 @@ impl PortalExporter {
         let unit = match m.task.to_lowercase().as_str() {
             "pdf" => "pages/s",
             "dns" => "queries/s",
+            "wal" => "msgs/s",
+            "pubsub" => "deliveries/s",
             _ => "req/s",
         };
         let (tp_txt, tp_bar) = match (m.throughput_req_sec, m.reference_throughput_req_sec) {

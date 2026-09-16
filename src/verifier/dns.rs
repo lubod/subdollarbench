@@ -510,31 +510,42 @@ impl DnsVerifier {
     }
 
     pub async fn test_stage6_concurrency(&self) -> StageResult {
-        let name = "Stage 6: Concurrent Burst Query Handling (10 queries)".to_string();
+        // 16 tasks x 50 queries: loss and ID-mismatch budget 5%.
+        // Verifies per-query transaction IDs under true concurrency.
+        let name = "Stage 6: Concurrent Burst (800 queries, 16-way)".to_string();
         let mut tasks = Vec::new();
 
-        for _ in 0..10 {
+        for _ in 0..16 {
             let port = self.target_port;
-            let tx_id = rand::random::<u16>();
             tasks.push(tokio::spawn(async move {
                 let v = DnsVerifier::new(port, None);
-                let resp = v.send_query(tx_id, "example.com", 1).await?;
-                let parsed = DnsVerifier::parse_response(&resp)?;
-                if parsed.id != tx_id {
-                    return Err("ID mismatch".to_string());
+                let mut ok = 0u32;
+                for _ in 0..50 {
+                    let tx_id = rand::random::<u16>();
+                    let resp = match v.send_query(tx_id, "example.com", 1).await {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let parsed = match DnsVerifier::parse_response(&resp) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    if parsed.id == tx_id {
+                        ok += 1;
+                    }
                 }
-                Ok(())
+                ok
             }));
         }
 
-        let mut success = 0;
+        let mut success = 0u32;
         for t in tasks {
-            if let Ok(Ok(_)) = t.await {
-                success += 1;
+            if let Ok(n) = t.await {
+                success += n;
             }
         }
 
-        if success >= 8 {
+        if success >= 760 {
             StageResult {
                 stage: 6,
                 name,
@@ -547,7 +558,7 @@ impl DnsVerifier {
                 name,
                 passed: false,
                 error: Some(format!(
-                    "Only {} of 10 concurrent queries succeeded with matched IDs",
+                    "Only {} of 800 burst queries succeeded with matched IDs",
                     success
                 )),
             }
