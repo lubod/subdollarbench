@@ -324,12 +324,12 @@ impl WalVerifier {
     /// the candidate.
     ///
     /// # Recovery contract (parent pipeline responsibility)
-    /// Between `run_basic` and the kill, the parent publishes 2000 messages to
-    /// the FIXED topic [`RECOVERY_TOPIC`] (`recovery_probe`). This method cannot
-    /// know the pre-kill state itself, so it `SUB`s `recovery_probe` from offset
-    /// 0 and passes if **at least one** message survived (a correct WAL replays
-    /// its log on boot). An empty log, or any connection/protocol error, fails.
-    pub async fn check_recovery(&self) -> StageResult {
+    /// Between `run_basic` and the kill, the parent publishes N messages to
+    /// the FIXED topic [`RECOVERY_TOPIC`] (`recovery_probe`) and passes N as
+    /// `min_msgs`. This method `SUB`s `recovery_probe` from offset 0 and
+    /// passes iff **all** acknowledged pre-kill messages replayed: durability
+    /// means zero acked-message loss, not merely a non-empty log.
+    pub async fn check_recovery(&self, min_msgs: usize) -> StageResult {
         let stage = 4;
         let name = "Stage 4: Recovery (durable log survives SIGKILL+restart)".to_string();
         let mut conn = match WalConn::connect(self.target_port).await {
@@ -340,11 +340,15 @@ impl WalVerifier {
             Ok(m) => m,
             Err(e) => return Self::fail(stage, name, anyhow!("SUB {RECOVERY_TOPIC} failed: {e}")),
         };
-        if msgs.is_empty() {
+        if msgs.len() < min_msgs {
             return Self::fail(
                 stage,
                 name,
-                anyhow!("No messages survived on `{RECOVERY_TOPIC}` (expected >=1)"),
+                anyhow!(
+                    "Only {}/{} acked messages survived on `{RECOVERY_TOPIC}`",
+                    msgs.len(),
+                    min_msgs
+                ),
             );
         }
         Self::pass(stage, name)

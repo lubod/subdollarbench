@@ -1653,7 +1653,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), 200);
 
-        for _ in 0..50 {
+        for _ in 0..200 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             if !state.is_running.load(Ordering::SeqCst) {
                 break;

@@ -471,6 +471,8 @@ impl BenchmarkPipeline {
                         ));
                     }
                     // Stage 6: AOF crash recovery on full pass (mirrors the WAL flow).
+                    // Denominator stays 6 either way: a skipped crash stage is
+                    // recorded failed, never silently dropped.
                     if summary.pass_rate == 100.0 {
                         let fail6 = |e: String| crate::verifier::StageResult {
                             stage: 6,
@@ -483,7 +485,7 @@ impl BenchmarkPipeline {
                                 logger.log("[BENCH] AOF probe written; SIGKILLing candidate...");
                                 let st = match sandbox.kill_candidate() {
                                     Ok(()) => {
-                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                         match sandbox.restart_candidate() {
                                             Ok(()) => {
                                                 if sandbox.wait_for_port(port, 25).await {
@@ -509,6 +511,15 @@ impl BenchmarkPipeline {
                                 e
                             )),
                         }
+                    } else {
+                        let st = crate::verifier::StageResult {
+                            stage: 6,
+                            name: "Stage 6: AOF crash recovery".to_string(),
+                            passed: false,
+                            error: Some("skipped due to failure in earlier stages".to_string()),
+                        };
+                        logger.log("  Stage 6: AOF crash recovery -> FAIL skipped due to failure in earlier stages");
+                        stages.push(st);
                     }
                     let ps = stages.iter().filter(|s| s.passed).count() as u32;
                     let ts = stages.len() as u32;
@@ -584,16 +595,18 @@ impl BenchmarkPipeline {
                             e
                         )),
                     }
-                    let rec = if probe_acks >= 2000 {
+                    // Proceed on majority quorum (fsync-storm losses stay visible:
+                    // check_recovery demands every acked message back).
+                    let rec = if probe_acks >= 1500 {
                         match sandbox.kill_candidate() {
                             Ok(()) => {
                                 logger.log("[BENCH] Candidate SIGKILLed; restarting...");
-                                std::thread::sleep(std::time::Duration::from_secs(2));
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                 match sandbox.restart_candidate() {
                                     Ok(()) => {
                                         if sandbox.wait_for_port(port, 25).await {
                                             logger.log("[BENCH] Candidate back; checking recovery...");
-                                            verifier.check_recovery().await
+                                            verifier.check_recovery(probe_acks).await
                                         } else {
                                             fail(4, "Stage 4: Crash recovery", "candidate did not reopen port after restart".to_string())
                                         }

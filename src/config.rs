@@ -191,7 +191,7 @@ impl TaskType {
         match self {
             TaskType::Redis => 6,
             TaskType::Http => 5,
-            TaskType::Dns => 7,
+            TaskType::Dns => 6,
             TaskType::Pdf => 6,
             TaskType::Wal => 5,
             TaskType::Proxy => 5,
@@ -283,7 +283,7 @@ mod tests {
 
         assert_eq!(TaskType::Redis.total_stages(), 6);
         assert_eq!(TaskType::Http.total_stages(), 5);
-        assert_eq!(TaskType::Dns.total_stages(), 7);
+        assert_eq!(TaskType::Dns.total_stages(), 6);
         assert_eq!(TaskType::Pdf.total_stages(), 6);
         assert_eq!(TaskType::Wal.total_stages(), 5);
         assert_eq!(TaskType::Proxy.total_stages(), 5);

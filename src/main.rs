@@ -226,7 +226,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
                 TaskType::Proxy => {
-                    let v = ProxyVerifier::new(p, None, vec![]);
+                    let ups: Vec<(String, u16)> = (1u8..=3u8)
+                        .map(|i| {
+                            (
+                                format!("subdollar-upstream{}-manual", i),
+                                subdollarbench::sandbox::docker::PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                            )
+                        })
+                        .collect();
+                    let v = ProxyVerifier::new(p, None, ups);
                     let res = v.run_routing().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
