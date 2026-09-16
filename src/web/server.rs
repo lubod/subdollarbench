@@ -81,7 +81,7 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
 }
 
 fn default_trials() -> u32 {
-    3
+    10
 }
 
 fn default_max_turns() -> u32 {

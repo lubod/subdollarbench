@@ -1047,7 +1047,7 @@
               <span>Subruns</span>
               <span class="badge" style="background: rgba(163, 113, 247, 0.2); color: #d2a8ff; font-size: 0.65rem;">Default: 3</span>
             </label>
-            <input type="number" id="trials" value="3" min="1" max="10" title="Number of subruns/trials to run and average (Pass@k)" />
+            <input type="number" id="trials" value="10" min="1" max="30" title="Number of subruns/trials to run and average (Pass@k)" />
           </div>
         </div>
         <span class="hint" style="margin-top: -4px; margin-bottom: 8px; display: block;">Runs 3 subruns (3× cost &amp; runtime) by default to compute Pass@k and average throughput. Set to 1 for quick single-shot runs.</span>
@@ -3539,7 +3539,7 @@ function copyRunId() {
       const budget = parseFloat(document.getElementById('budget').value) || 1.00;
       const turns = parseInt(document.getElementById('turns').value, 10) || 100;
       const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 30;
-      const trials = parseInt(document.getElementById('trials').value, 10) || 3;
+      const trials = parseInt(document.getElementById('trials').value, 10) || 10;
       const evalOnly = document.getElementById('evalOnly').checked;
 
       if (!evalOnly && !apiKey) {
