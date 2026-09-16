@@ -11,7 +11,7 @@ Your implementation must meet high professional software engineering standards:
 ### CRITICAL INTEGRITY RULE: NO ACCESSING OR CONSULTING SOURCE CODE
 - **Strict Prohibition**: You are strictly FORBIDDEN from downloading, curling, scraping, cloning, reading, or consulting the source code of any external proxy implementation (e.g., Nginx, HAProxy, Envoy, Traefik sources).
 - **Allowed Resources**: Official HTTP/1.1 documentation (RFC 7230), your knowledge of load balancing algorithms.
-- **Black-Box Testing**: You may `curl http://127.0.0.1:8101/`, `:8102/`, `:8103/` (the three upstream reference servers) at any time to observe ground-truth responses.
+- **Black-Box Testing**: You may `curl http://upstream1/`, `http://upstream2/`, `http://upstream3/` (the three upstream reference servers) at any time to observe ground-truth responses.
 - **Originality**: All code must be your own original implementation. Any access to external proxy source code invalidates the benchmark run.
 
 ### Programming Language Freedom & Packaging (Dockerfile or start.sh)
@@ -23,8 +23,9 @@ Your implementation must meet high professional software engineering standards:
   2. **Executable `./start.sh`**: launches your proxy on `0.0.0.0:8091`.
 
 ### Upstream Topology (fixed, always available during testing)
-- Three upstream HTTP servers listen on `127.0.0.1:8101`, `:8102`, `:8103`, each serving a distinct static body on `GET /`.
+- Three upstream HTTP servers are reachable from your container at `upstream1:80`, `upstream2:80`, `upstream3:80`, each serving a distinct static body on `GET /`. Always dial these hostnames (port 80). `127.0.0.1:8101-8103` are host-published mirrors for the operator only: from inside your container `127.0.0.1` is yourself and those ports refuse connections.
 - Your proxy listens on `0.0.0.0:8091` and forwards client `GET /` requests to the upstreams.
+- Self-test tip: for local stub upstreams bind `127.0.0.1:8101` inside your own workspace; never expect the real upstreams there.
 
 ### Requirements
 1. **Reverse proxying**: `GET /` on :8091 returns an upstream's body with HTTP 200. Preserve the upstream status code and body byte-exactly.

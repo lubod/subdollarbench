@@ -661,6 +661,15 @@ impl BenchmarkPipeline {
                     )
                 }
                 TaskType::Proxy => {
+                    if let Err(e) = sandbox.connect_candidate_to_network() {
+                        logger.log(&format!(
+                            "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
+                            e
+                        ));
+                    } else {
+                        // Alias propagation after connect.
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
                     let log_stage = |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
                         let status_str = if s.passed { "PASS" } else { "FAIL" };
                         let err_str = s.error.as_deref().unwrap_or("");

@@ -379,8 +379,7 @@ Content-Length: 0
             ),
             Some(crate::config::TaskType::Proxy) => (
                 8091,
-                "curl -v http://localhost:8091/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+                "curl http://upstream1/ ; curl -v http://localhost:8091/",                r#"ANTI-CHEAT REQUIREMENT (STRICT):
 - Proxy frameworks/gateways (nginx, envoy, traefik libs) are FORBIDDEN; raw TCP sockets only.
 - Build an HTTP reverse proxy on 8091 over upstreams 127.0.0.1:8101/8102/8103: round-robin, upstream keep-alive pooling, X-Forwarded-For injection, failover with zero dropped requests."#,
             ),

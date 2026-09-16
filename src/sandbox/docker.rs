@@ -253,6 +253,8 @@ impl SandboxManager {
                 &name,
                 "--network",
                 net,
+                "--network-alias",
+                &format!("upstream{}", idx),
                 "--memory=512m",
                 "--cpus=1.0",
                 "-p",
@@ -268,6 +270,29 @@ impl SandboxManager {
             Err(anyhow!(
                 "upstream {} start failed: {}",
                 idx,
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
+    /// Attach the candidate container to the run network so it can dial
+    /// run-scoped aliases (proxy upstreams). Candidates launch on the default
+    /// bridge (no --network flag), where neither 127.0.0.1-published ports
+    /// (own loopback) nor run-net aliases resolve.
+    pub fn connect_candidate_to_network(&self) -> Result<()> {
+        let out = Command::new("docker")
+            .args([
+                "network",
+                "connect",
+                &self.network_name(),
+                &self.candidate_container_name(),
+            ])
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "network connect failed: {}",
                 String::from_utf8_lossy(&out.stderr)
             ))
         }
