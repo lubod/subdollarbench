@@ -91,6 +91,10 @@ pub struct BenchmarkConfig {
     pub run_id: Option<String>,
     pub save_results: bool,
     pub review_model: Option<String>,
+    /// Pre-batch shared reference (median). When present, the trial skips its
+    /// own ref measurement and scores against this denominator. Per-trial ref
+    /// containers still start: the agent keeps its black-box oracle.
+    pub batch_reference: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -369,6 +373,7 @@ impl BenchmarkPipeline {
 
         let mut throughput = None;
         let mut reference_throughput = None;
+        let mut baseline_source: Option<String> = None;
         let (pass_rate, passed_stages, total_stages, stage_results) = if disqualified {
             let reason = disqualification_reason
                 .unwrap_or_else(|| "Anti-cheat compliance violation".to_string());
@@ -501,24 +506,28 @@ impl BenchmarkPipeline {
                 match config.task {
                     TaskType::Redis => {
                         if let Ok(tp) = BenchmarkRunner::run_redis_benchmark(port) {
-                            logger.log(&format!("  Candidate Throughput: {:.0} req/sec", tp));
+                            logger.log(&format!("  Candidate Throughput (median of 3): {:.0} req/sec", tp));
                             throughput = Some(tp);
                         }
-                        logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
-                        if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(6380) {
-                            logger.log(&format!("  Official Reference Redis: {:.0} req/sec", ref_tp));
-                            reference_throughput = Some(ref_tp);
+                        if config.batch_reference.is_none() {
+                            logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
+                            if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(6380) {
+                                logger.log(&format!("  Official Reference Redis: {:.0} req/sec", ref_tp));
+                                reference_throughput = Some(ref_tp);
+                            }
                         }
                     }
                     TaskType::Http => {
                         if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(port) {
-                            logger.log(&format!("  Candidate Throughput: {:.0} req/sec", tp));
+                            logger.log(&format!("  Candidate Throughput (median of 3): {:.0} req/sec", tp));
                             throughput = Some(tp);
                         }
-                        logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                        if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(8081) {
-                            logger.log(&format!("  Official Reference Nginx: {:.0} req/sec", ref_tp));
-                            reference_throughput = Some(ref_tp);
+                        if config.batch_reference.is_none() {
+                            logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
+                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(8081) {
+                                logger.log(&format!("  Official Reference Nginx: {:.0} req/sec", ref_tp));
+                                reference_throughput = Some(ref_tp);
+                            }
                         }
                     }
                     TaskType::Dns => {
@@ -538,6 +547,21 @@ impl BenchmarkPipeline {
                         logger.log("[BENCH] No external reference for PDF extraction; score uses verifier timing.");
                     }
                 }
+
+                // Batch denominator wins when present: every trial of the batch
+                // scores against the same pre-batch median; the per-trial live
+                // measurement above is skipped in that case.
+                if let Some(batch) = config.batch_reference {
+                    logger.log(&format!("  Batch reference (shared pre-batch median): {:.0} req/sec", batch));
+                    reference_throughput = Some(batch);
+                }
+                baseline_source = if config.batch_reference.is_some() {
+                    Some("batch".to_string())
+                } else if reference_throughput.is_some() {
+                    Some("live".to_string())
+                } else {
+                    None
+                };
 
                 if let (Some(cand_tp), Some(ref_tp)) = (throughput, reference_throughput) {
                     if ref_tp > 0.0 {
@@ -626,6 +650,8 @@ impl BenchmarkPipeline {
             stages: stage_results,
             throughput_req_sec: throughput,
             reference_throughput_req_sec: reference_throughput,
+            baseline_source: baseline_source.clone(),
+            ref_drift: None,
             tokens: RunTokenUsage {
                 prompt_tokens,
                 cached_tokens,
@@ -655,6 +681,8 @@ impl BenchmarkPipeline {
             total_stages,
             throughput_req_sec: throughput,
             reference_throughput_req_sec: reference_throughput,
+            baseline_source: baseline_source.clone(),
+            ref_drift: None,
             prompt_tokens,
             cached_tokens,
             completion_tokens,
@@ -789,6 +817,7 @@ mod tests {
             run_id: Some("test_cancel_run".to_string()),
             save_results: false,
             review_model: None,
+            batch_reference: None,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -816,6 +845,7 @@ mod tests {
             run_id: Some(run_id.clone()),
             save_results: true,
             review_model: None,
+            batch_reference: None,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);

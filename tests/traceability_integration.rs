@@ -76,6 +76,8 @@ func main() {
         stages,
         throughput_req_sec: Some(68500.0),
         reference_throughput_req_sec: Some(71000.0),
+        baseline_source: None,
+        ref_drift: None,
         tokens: RunTokenUsage {
             prompt_tokens: 18500,
             cached_tokens: 14000,

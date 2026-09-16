@@ -41,6 +41,13 @@ pub struct RunManifest {
     pub throughput_req_sec: Option<f64>,
     #[serde(default)]
     pub reference_throughput_req_sec: Option<f64>,
+    /// Where the reference came from: "batch" (shared pre-batch median),
+    /// "live" (per-trial measurement, single-trial runs), or None (pinned fallback).
+    #[serde(default)]
+    pub baseline_source: Option<String>,
+    /// Post-batch bracket result. None per-trial; set on merged parent records.
+    #[serde(default)]
+    pub ref_drift: Option<bool>,
     pub tokens: RunTokenUsage,
     pub cost_usd: f64,
     #[serde(default)]
@@ -301,6 +308,8 @@ mod tests {
             }],
             throughput_req_sec: Some(45000.0),
             reference_throughput_req_sec: Some(71000.0),
+            baseline_source: None,
+            ref_drift: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 10000,
                 cached_tokens: 8000,

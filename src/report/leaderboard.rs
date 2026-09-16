@@ -21,6 +21,10 @@ pub struct BenchmarkRunResult {
     pub throughput_req_sec: Option<f64>,
     #[serde(default)]
     pub reference_throughput_req_sec: Option<f64>,
+    #[serde(default)]
+    pub baseline_source: Option<String>,
+    #[serde(default)]
+    pub ref_drift: Option<bool>,
     pub prompt_tokens: u64,
     pub cached_tokens: u64,
     pub completion_tokens: u64,
@@ -70,7 +74,7 @@ impl BenchmarkRunResult {
 
     /// Merges multiple subruns into a single consolidated BenchmarkRunResult
     /// with averaged metrics, while preserving the individual subrun records.
-    pub fn merge_subruns(parent_id: &str, subruns: Vec<BenchmarkRunResult>) -> Option<BenchmarkRunResult> {
+    pub fn merge_subruns(parent_id: &str, subruns: Vec<BenchmarkRunResult>, batch_drift: Option<bool>) -> Option<BenchmarkRunResult> {
         if subruns.is_empty() {
             return None;
         }
@@ -195,6 +199,8 @@ impl BenchmarkRunResult {
             total_stages: best.total_stages,
             throughput_req_sec: fair_tp,
             reference_throughput_req_sec: best.reference_throughput_req_sec,
+            baseline_source: best.baseline_source.clone(),
+            ref_drift: batch_drift,
             prompt_tokens: fair_prompt,
             cached_tokens: fair_cached,
             completion_tokens: fair_comp,
@@ -320,12 +326,13 @@ impl LeaderboardManager {
         parent_run_id: &str,
         subrun_results: &[BenchmarkRunResult],
         save_results: bool,
+        batch_drift: Option<bool>,
     ) -> Option<BenchmarkRunResult> {
         if subrun_results.is_empty() {
             return None;
         }
 
-        let merged = BenchmarkRunResult::merge_subruns(parent_run_id, subrun_results.to_vec())?;
+        let merged = BenchmarkRunResult::merge_subruns(parent_run_id, subrun_results.to_vec(), batch_drift)?;
 
         if save_results {
             let repo_root = crate::config::get_repo_root();
@@ -392,6 +399,8 @@ impl LeaderboardManager {
                     manifest.turns = merged.turns;
                     manifest.throughput_req_sec = merged.throughput_req_sec;
                     manifest.reference_throughput_req_sec = merged.reference_throughput_req_sec;
+                    manifest.baseline_source = merged.baseline_source.clone();
+                    manifest.ref_drift = merged.ref_drift;
                     manifest.cost_usd = merged.total_cost_usd;
                     manifest.effective_cost_usd = merged.effective_cost_usd;
                     manifest.savings_percent = merged.savings_percent;
@@ -479,7 +488,7 @@ impl LeaderboardManager {
                     if let Ok(content) = fs::read_to_string(&file_path) {
                         if let Ok(run) = serde_json::from_str::<BenchmarkRunResult>(&content) {
                             if !run.subruns.is_empty() {
-                                if let Some(_merged) = Self::consolidate_multi_trial_run(&run.id, &run.subruns, true) {
+                                if let Some(_merged) = Self::consolidate_multi_trial_run(&run.id, &run.subruns, true, None) {
                                     count += 1;
                                 }
                             }
@@ -549,7 +558,7 @@ impl LeaderboardManager {
         for (parent_id, mut subruns) in groups {
             if subruns.len() > 1 {
                 subruns.sort_by(|a, b| a.id.cmp(&b.id));
-                if let Some(merged) = BenchmarkRunResult::merge_subruns(&parent_id, subruns) {
+                if let Some(merged) = BenchmarkRunResult::merge_subruns(&parent_id, subruns, None) {
                     consolidated.push(merged);
                 }
             } else {
@@ -795,6 +804,8 @@ mod tests {
             total_stages: 6,
             throughput_req_sec: Some(tp),
             reference_throughput_req_sec: Some(19000.0),
+            baseline_source: None,
+            ref_drift: None,
             prompt_tokens: 1000,
             cached_tokens: 2000,
             completion_tokens: 500,
@@ -819,7 +830,7 @@ mod tests {
         let t2 = make_run("run_trial2", 6000.0, 30.0, 7, 0.002, 100.0);
         let t3 = make_run("run_trial3", 7000.0, 50.0, 9, 0.003, 100.0);
 
-        let merged = BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3]).unwrap();
+        let merged = BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3], None).unwrap();
         assert_eq!(merged.id, "run_parent");
         assert_eq!(merged.total_trials, Some(3));
         assert_eq!(merged.pass_rate, 100.0);
@@ -838,7 +849,7 @@ mod tests {
         let f1 = make_run("run_a", 5000.0, 40.0, 8, 0.001, 100.0);
         let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
         let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
-        let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3]).unwrap();
+        let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3], None).unwrap();
         assert_eq!(mixed.pass_rate, 100.0);
         assert_eq!(mixed.throughput_req_sec.unwrap(), 5500.0);
         assert_eq!(mixed.total_cost_usd, 0.0015);
@@ -940,6 +951,8 @@ mod tests {
             total_stages: 4,
             throughput_req_sec: Some(60000.0),
             reference_throughput_req_sec: Some(71000.0),
+            baseline_source: None,
+            ref_drift: None,
             prompt_tokens: 1000,
             cached_tokens: 500,
             completion_tokens: 100,
@@ -980,6 +993,8 @@ mod tests {
             total_stages: 4,
             throughput_req_sec: None,
             reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
             prompt_tokens: 1000,
             cached_tokens: 500,
             completion_tokens: 200,
@@ -1012,6 +1027,8 @@ mod tests {
             total_stages: 4,
             throughput_req_sec: Some(50000.0),
             reference_throughput_req_sec: Some(71000.0),
+            baseline_source: None,
+            ref_drift: None,
             prompt_tokens: 2000,
             cached_tokens: 1500,
             completion_tokens: 300,

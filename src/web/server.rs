@@ -962,6 +962,37 @@ async fn start_run(
             run_timestamp
         );
 
+        let batch_log = |m: &str| {
+            let _ = tx.send(m.to_string());
+        };
+        // Batch reference: one shared denominator for all trials.
+        // Fallback is live per-trial measurement inside the pipeline.
+        let batch_ref = if total_trials > 1 {
+            let task_type_pre = match req.task.as_str() {
+                "redis" => TaskType::Redis,
+                "http" => TaskType::Http,
+                "dns" => TaskType::Dns,
+                "pdf" => TaskType::Pdf,
+                _ => TaskType::Redis,
+            };
+            match crate::bench::batch_ref::BatchRef::start(
+                &task_type_pre,
+                &parent_run_id,
+                &batch_log,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    batch_log(&format!(
+                        "[BATCH-REF] setup failed ({}); trials use live refs.",
+                        e
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         for trial_idx in 1..=total_trials {
             if state_clone.cancel_requested.load(Ordering::SeqCst) {
                 let _ = tx.send("[STOP] Run cancelled by user before next trial.".to_string());
@@ -1110,6 +1141,7 @@ async fn start_run(
                 run_id: Some(run_id.clone()),
                 save_results: req.save_results.unwrap_or(true),
                 review_model: req.review_model.clone(),
+                batch_reference: batch_ref.as_ref().map(|b| b.reference()),
             };
 
             let pipe_res = BenchmarkPipeline::execute(
@@ -1155,11 +1187,14 @@ async fn start_run(
             }
         }
 
+        let batch_drift = batch_ref.map(|b| b.finish(&batch_log).drift);
+
         if total_trials > 1 && !subrun_results.is_empty() {
             let _ = LeaderboardManager::consolidate_multi_trial_run(
                 &parent_run_id,
                 &subrun_results,
                 req.save_results.unwrap_or(true),
+                batch_drift,
             );
         }
 
@@ -1676,6 +1711,8 @@ mod tests {
             stages: Vec::new(),
             throughput_req_sec: Some(40000.0),
             reference_throughput_req_sec: Some(71000.0),
+            baseline_source: None,
+            ref_drift: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1000,
                 cached_tokens: 500,
@@ -1710,6 +1747,8 @@ mod tests {
             stages: Vec::new(),
             throughput_req_sec: Some(55000.0),
             reference_throughput_req_sec: Some(71000.0),
+            baseline_source: None,
+            ref_drift: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1500,
                 cached_tokens: 600,

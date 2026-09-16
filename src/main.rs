@@ -62,6 +62,24 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             );
             let mut subrun_results = Vec::new();
 
+            // Batch reference: one shared denominator for all trials.
+            // Single-trial runs keep live per-trial measurement.
+            let batch_ref = if total_trials > 1 {
+                match subdollarbench::bench::batch_ref::BatchRef::start(
+                    &task,
+                    &parent_run_id,
+                    &|m| println!("{}", m),
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             for trial_idx in 1..=total_trials {
                 if total_trials > 1 {
                     println!(
@@ -91,6 +109,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     run_id: Some(run_id.clone()),
                     save_results: !no_save,
                     review_model: review_model.clone(),
+                    batch_reference: batch_ref.as_ref().map(|b| b.reference()),
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;
@@ -119,11 +138,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
             }
 
+            let batch_drift = batch_ref.map(|b| {
+                b.finish(&|m| println!("{}", m)).drift
+            });
+
             if total_trials > 1 && !subrun_results.is_empty() {
                 let _ = LeaderboardManager::consolidate_multi_trial_run(
                     &parent_run_id,
                     &subrun_results,
                     !no_save,
+                    batch_drift,
                 );
             }
 
@@ -350,6 +374,8 @@ mod tests {
             total_stages: 4,
             throughput_req_sec: Some(1000.0),
             reference_throughput_req_sec: Some(71000.0),
+            baseline_source: None,
+            ref_drift: None,
             prompt_tokens: 100,
             cached_tokens: 50,
             completion_tokens: 20,
@@ -437,6 +463,8 @@ mod tests {
             stages: Vec::new(),
             throughput_req_sec: None,
             reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 100,
                 cached_tokens: 50,

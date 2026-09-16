@@ -1,7 +1,11 @@
+pub mod batch_ref;
+
 use anyhow::{anyhow, Result};
 use regex::Regex;
+use std::fs;
 use std::process::Command;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 pub struct BenchmarkRunner;
 
@@ -12,6 +16,90 @@ static REDIS_BENCH_RE: LazyLock<Regex> = LazyLock::new(|| {
 static WRK_BENCH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Requests/sec:\s+(\d+\.?\d*)").expect("valid wrk benchmark regex")
 });
+
+/// Median of measured samples. Empty input yields 0.0 (callers only pass
+/// non-empty success sets; all-failure runs return Err before reaching here).
+pub fn median(mut xs: Vec<f64>) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = xs.len() / 2;
+    if xs.len() % 2 == 1 {
+        xs[mid]
+    } else {
+        (xs[mid - 1] + xs[mid]) / 2.0
+    }
+}
+
+/// Number of benchmark repetitions per window; the median is reported.
+/// Kills single-shot outliers (the 137k-type reading) at ~seconds of cost.
+pub const BENCH_REPS: usize = 3;
+
+/// True when `pre`/`post` batch references disagree beyond host jitter.
+/// A drifted batch is scored but flagged, never silently trusted.
+pub fn ref_drifted(pre: f64, post: f64) -> bool {
+    if pre <= 0.0 || post <= 0.0 {
+        return false;
+    }
+    ((post - pre) / pre).abs() > 0.10
+}
+
+/// RAII guard for the host-global benchmark lock. Only one load-test window
+/// runs at a time across processes; agent work is unaffected. Drop releases.
+pub struct BenchLock {
+    path: std::path::PathBuf,
+    owned: bool,
+}
+
+impl Drop for BenchLock {
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Acquire the benchmark lock, fail-open after 90s (a run must never deadlock
+/// on a stale lock; callers log the fallback). Stale holders (>180s, longer
+/// than any window) are treated as crashed and evicted.
+pub fn acquire_bench_lock() -> BenchLock {
+    let path = std::env::temp_dir().join("subdollar-bench.lock");
+    let start = Instant::now();
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = writeln!(f, "pid={}", std::process::id());
+                return BenchLock { path, owned: true };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().unwrap_or(Duration::ZERO) > Duration::from_secs(180))
+                    .unwrap_or(true);
+                if stale {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                if start.elapsed() > Duration::from_secs(90) {
+                    eprintln!(
+                        "[BENCH] lock wait exceeded 90s; proceeding without lock (contention possible)"
+                    );
+                    return BenchLock { path, owned: false };
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(_) => {
+                return BenchLock { path, owned: false };
+            }
+        }
+    }
+}
 
 impl BenchmarkRunner {
     pub fn parse_redis_benchmark_output(stdout: &str) -> Result<f64> {
@@ -48,62 +136,98 @@ impl BenchmarkRunner {
     }
 
     pub fn run_redis_benchmark(port: u16) -> Result<f64> {
-        let output = Command::new("timeout")
-            .args([
-                "15",
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "host",
-                "redis:alpine",
-                "redis-benchmark",
-                "-h",
-                "127.0.0.1",
-                "-p",
-                &port.to_string(),
-                "-n",
-                "5000",
-                "-c",
-                "10",
-                "-t",
-                "get,set",
-                "-q",
-            ])
-            .output()
-            .map_err(|e| anyhow!("Failed to execute docker redis-benchmark: {}", e))?;
+        Self::run_redis_benchmark_reps(port, BENCH_REPS)
+    }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Self::parse_redis_benchmark_output(&stdout).map_err(|e| {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow!("{}, stderr: '{}'", e, stderr)
-        })
+    /// Median over `reps` windows under the host-global lock. Partial success
+    /// still yields a median; total failure returns the last error.
+    pub fn run_redis_benchmark_reps(port: u16, reps: usize) -> Result<f64> {
+        let _lock = acquire_bench_lock();
+        let mut ok = Vec::new();
+        let mut last_err = anyhow!("no benchmark repetitions attempted");
+        for _ in 0..reps.max(1) {
+            let output = Command::new("timeout")
+                .args([
+                    "15",
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "host",
+                    "redis:alpine",
+                    "redis-benchmark",
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    &port.to_string(),
+                    "-n",
+                    "5000",
+                    "-c",
+                    "10",
+                    "-t",
+                    "get,set",
+                    "-q",
+                ])
+                .output()
+                .map_err(|e| anyhow!("Failed to execute docker redis-benchmark: {}", e))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match Self::parse_redis_benchmark_output(&stdout) {
+                Ok(v) => ok.push(v),
+                Err(e) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    last_err = anyhow!("{}, stderr: '{}'", e, stderr);
+                }
+            }
+        }
+        if ok.is_empty() {
+            return Err(last_err);
+        }
+        Ok(median(ok))
     }
 
     pub fn run_wrk_benchmark(port: u16) -> Result<f64> {
-        let url = format!("http://127.0.0.1:{}/", port);
-        let output = Command::new("timeout")
-            .args([
-                "15",
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "host",
-                "williamyeh/wrk",
-                "-t2",
-                "-c20",
-                "-d3s",
-                &url,
-            ])
-            .output()
-            .map_err(|e| anyhow!("Failed to execute docker wrk: {}", e))?;
+        Self::run_wrk_benchmark_reps(port, BENCH_REPS)
+    }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Self::parse_wrk_output(&stdout).map_err(|e| {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow!("{}, stderr: '{}'", e, stderr)
-        })
+    /// Median over `reps` windows under the host-global lock. Partial success
+    /// still yields a median; total failure returns the last error.
+    pub fn run_wrk_benchmark_reps(port: u16, reps: usize) -> Result<f64> {
+        let _lock = acquire_bench_lock();
+        let url = format!("http://127.0.0.1:{}/", port);
+        let mut ok = Vec::new();
+        let mut last_err = anyhow!("no benchmark repetitions attempted");
+        for _ in 0..reps.max(1) {
+            let output = Command::new("timeout")
+                .args([
+                    "15",
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "host",
+                    "williamyeh/wrk",
+                    "-t2",
+                    "-c20",
+                    "-d3s",
+                    &url,
+                ])
+                .output()
+                .map_err(|e| anyhow!("Failed to execute docker wrk: {}", e))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match Self::parse_wrk_output(&stdout) {
+                Ok(v) => ok.push(v),
+                Err(e) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    last_err = anyhow!("{}, stderr: '{}'", e, stderr);
+                }
+            }
+        }
+        if ok.is_empty() {
+            return Err(last_err);
+        }
+        Ok(median(ok))
     }
 }
 
@@ -131,6 +255,36 @@ mod tests {
 
         let err = BenchmarkRunner::parse_wrk_output("Socket error: connect failed");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_median() {
+        assert_eq!(median(vec![]), 0.0);
+        assert_eq!(median(vec![5.0]), 5.0);
+        assert_eq!(median(vec![3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median(vec![137218.0, 66251.0, 69565.0]), 69565.0);
+        assert_eq!(median(vec![1.0, 4.0]), 2.5);
+    }
+
+    #[test]
+    fn test_ref_drifted() {
+        assert!(!ref_drifted(70000.0, 73500.0));
+        assert!(ref_drifted(70000.0, 80000.0));
+        assert!(!ref_drifted(0.0, 70000.0));
+        assert!(!ref_drifted(70000.0, 0.0));
+    }
+
+    #[test]
+    fn test_bench_lock_acquire_release() {
+        {
+            let _g = acquire_bench_lock();
+            // Second create_new must fail while held (unless fail-open path).
+            let path = std::env::temp_dir().join("subdollar-bench.lock");
+            assert!(path.exists() || !_g.owned);
+        }
+        // Drop released: a fresh acquire must own the lock promptly.
+        let g = acquire_bench_lock();
+        assert!(g.owned);
     }
 
     #[test]
