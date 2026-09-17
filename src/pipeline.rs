@@ -948,6 +948,10 @@ impl BenchmarkPipeline {
             files: scanned_files,
             env: None,
             git_commit: None,
+            total_trials: None,
+            pass_at_1: None,
+            stability: None,
+            trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };

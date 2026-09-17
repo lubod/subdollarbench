@@ -476,6 +476,11 @@ impl LeaderboardManager {
                         "failed_tests".to_string()
                     };
                     manifest.pass_rate = merged.pass_rate;
+                    manifest.total_trials = merged.total_trials;
+                    manifest.pass_at_1 = merged.pass_at_1;
+                    manifest.stability = merged.stability.clone();
+                    manifest.trial_pass_rates =
+                        merged.subruns.iter().map(|s| s.pass_rate).collect();
                     manifest.passed_stages = merged.passed_stages;
                     manifest.total_stages = merged.total_stages;
                     manifest.duration_seconds = merged.duration_seconds.unwrap_or(0.0);

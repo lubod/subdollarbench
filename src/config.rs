@@ -187,7 +187,7 @@ pub enum Commands {
         runs_dir: String,
     },
 
-    /// [operate] List recent runs (newest first)
+    /// [operate] List recent runs (newest first; merged-away trials hidden)
     Runs {
         /// Filter by task ('http', 'redis', 'dns', ...)
         #[arg(short, long)]
@@ -196,6 +196,10 @@ pub enum Commands {
         /// Maximum rows to show
         #[arg(long, default_value_t = 20)]
         limit: usize,
+
+        /// Include merged-away trial subruns
+        #[arg(long, default_value_t = false)]
+        all: bool,
 
         /// Path to runs directory
         #[arg(long, default_value = "./runs")]

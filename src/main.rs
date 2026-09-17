@@ -659,12 +659,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             task,
             limit,
             runs_dir,
+            all,
         } => {
             let path = Path::new(&runs_dir);
             let mut rows: Vec<RunManifest> = std::fs::read_dir(path)
                 .with_context(|| format!("read runs dir {runs_dir}"))?
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter(|e| all || !e.path().join(".portal_hidden").exists())
                 .filter_map(|e| {
                     std::fs::read_to_string(e.path().join("manifest.json"))
                         .ok()
@@ -699,6 +701,18 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     "stages:  {}/{} ({:.1}%)",
                     m.passed_stages, m.total_stages, m.pass_rate
                 );
+                if let Some(n) = m.total_trials {
+                    if n > 1 {
+                        let p1 = m
+                            .pass_at_1
+                            .map(|v| format!(" P@1 {v:.0}%"))
+                            .unwrap_or_default();
+                        println!("trials:  {n} merged{p1}");
+                    }
+                }
+                if let Some(st) = m.stability.as_deref() {
+                    println!("stability: {st}");
+                }
                 if let Some(tp) = m.throughput_req_sec {
                     match m.reference_throughput_req_sec {
                         Some(r) => println!("tput:    {tp:.0} req/s vs ref {r:.0}"),
@@ -1128,6 +1142,10 @@ mod tests {
             files: Vec::new(),
             env: None,
             git_commit: None,
+            total_trials: None,
+            pass_at_1: None,
+            stability: None,
+            trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
         };

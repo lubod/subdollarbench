@@ -65,6 +65,18 @@ pub struct RunManifest {
     pub env: Option<EnvironmentInfo>,
     #[serde(default)]
     pub git_commit: Option<String>,
+    /// Trial count for consolidated parent manifests (None on single-trial records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_trials: Option<u32>,
+    /// Pass@1 across trials for consolidated parents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_1: Option<f64>,
+    /// Trial-stability verdict (stable | watch | unstable) for consolidated parents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<String>,
+    /// Per-trial pass rates for consolidated parents (trial order).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trial_pass_rates: Vec<f64>,
     #[serde(default)]
     pub is_published: Option<bool>,
     #[serde(default)]
@@ -329,6 +341,10 @@ mod tests {
             files: scanned,
             env: None,
             git_commit: None,
+            total_trials: None,
+            pass_at_1: None,
+            stability: None,
+            trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
         };
