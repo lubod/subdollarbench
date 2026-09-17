@@ -695,9 +695,9 @@ const PORTAL_JS: &str = r#"
     if (t === 'redis') return 71000;
     if (t === 'dns') return 19000;
     if (t === 'pdf') return 4600;
-    if (t === 'wal') return 10000;
+    if (t === 'wal') return 1000;
     if (t === 'proxy') return 33000;
-    if (t === 'pubsub') return 5000;
+    if (t === 'pubsub') return 80000;
     return 33000;
   }
   function regimeOf(r) {
