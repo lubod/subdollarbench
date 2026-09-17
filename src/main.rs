@@ -27,6 +27,54 @@ async fn main() -> Result<()> {
     run_cli(cli).await
 }
 
+fn resolve_run_id(runs_dir: &str, prefix: &str) -> Result<String> {
+    let path = Path::new(runs_dir);
+    if path.join(prefix).is_dir() {
+        return Ok(prefix.to_string());
+    }
+    let mut hits: Vec<String> = std::fs::read_dir(path)
+        .with_context(|| format!("read runs dir {runs_dir}"))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|id| id.starts_with(prefix))
+        .collect();
+    hits.sort();
+    match hits.len() {
+        0 => anyhow::bail!("no run matches prefix '{prefix}' in {runs_dir}"),
+        1 => Ok(hits.remove(0)),
+        _ => {
+            eprintln!("ambiguous prefix '{prefix}':");
+            for h in &hits {
+                eprintln!("  {h}");
+            }
+            anyhow::bail!("{} runs match; give a longer prefix", hits.len())
+        }
+    }
+}
+
+fn load_run_manifest(runs_dir: &str, run_id: &str) -> Result<RunManifest> {
+    let text = std::fs::read_to_string(Path::new(runs_dir).join(run_id).join("manifest.json"))
+        .with_context(|| format!("read manifest for {run_id}"))?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+fn apply_trial_suffix(run_id: &str, trial: Option<u32>) -> String {
+    match trial {
+        Some(t) if !run_id.contains("_trial") => format!("{run_id}_trial{t}"),
+        _ => run_id.to_string(),
+    }
+}
+
+/// Exit code for `verdict`: 0 pass / 1 test failure / 2 infra-error.
+fn verdict_code(m: &RunManifest) -> i32 {
+    match m.status.as_str() {
+        "completed" => 0,
+        "failed_tests" | "disqualified_cheat" => 1,
+        _ => 2,
+    }
+}
+
 pub async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Run {
@@ -369,6 +417,280 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 );
             }
         },
+
+        Commands::Watch {
+            run,
+            no_follow,
+            stages_only,
+            runs_dir,
+        } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let dir = Path::new(&runs_dir).join(&id);
+            let log_path = dir.join("console.log");
+            let manifest_path = dir.join("manifest.json");
+            println!("watching {id} (Ctrl-C to stop)...");
+            let show = |line: &str| {
+                if stages_only
+                    && !(line.contains("Stage")
+                        || line.contains("PASS")
+                        || line.contains("FAIL"))
+                {
+                    return;
+                }
+                if line.contains("FAIL") || line.contains("CHEAT") {
+                    println!("{}", line.red());
+                } else if line.contains("Stage") && line.contains("PASS") {
+                    println!("{}", line.green());
+                } else {
+                    println!("{line}");
+                }
+            };
+            let mut pos: usize = 0;
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&log_path) {
+                    let from = pos.min(text.len());
+                    for line in text[from..].lines() {
+                        show(line);
+                    }
+                    pos = text.len();
+                }
+                if no_follow {
+                    break;
+                }
+                if manifest_path.exists() {
+                    if let Ok(text) = std::fs::read_to_string(&log_path) {
+                        let from = pos.min(text.len());
+                        for line in text[from..].lines() {
+                            show(line);
+                        }
+                    }
+                    println!("run archived: {id}");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+
+        Commands::Runs {
+            task,
+            limit,
+            runs_dir,
+        } => {
+            let path = Path::new(&runs_dir);
+            let mut rows: Vec<RunManifest> = std::fs::read_dir(path)
+                .with_context(|| format!("read runs dir {runs_dir}"))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| {
+                    std::fs::read_to_string(e.path().join("manifest.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                })
+                .filter(|m: &RunManifest| task.as_ref().map(|t| &m.task == t).unwrap_or(true))
+                .collect();
+            rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+            println!(
+                "{:<64} {:<8} {:<16} {:>6}  {}",
+                "run", "task", "status", "pass%", "stages"
+            );
+            for m in rows.iter().take(limit) {
+                println!(
+                    "{:<64} {:<8} {:<16} {:>5.1}%  {}/{}",
+                    m.run_id, m.task, m.status, m.pass_rate, m.passed_stages, m.total_stages
+                );
+            }
+        }
+
+        Commands::Verdict { run, json, runs_dir } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let m = load_run_manifest(&runs_dir, &id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&m)?);
+            } else {
+                println!("run:     {}", id);
+                println!("model:   {}", m.model);
+                println!("task:    {}", m.task);
+                println!("status:  {}", m.status);
+                println!(
+                    "stages:  {}/{} ({:.1}%)",
+                    m.passed_stages, m.total_stages, m.pass_rate
+                );
+                if let Some(tp) = m.throughput_req_sec {
+                    match m.reference_throughput_req_sec {
+                        Some(r) => println!("tput:    {tp:.0} req/s vs ref {r:.0}"),
+                        None => println!("tput:    {tp:.0} req/s (no reference)"),
+                    }
+                }
+                println!("turns:   {}", m.turns.map(|t| t.to_string()).unwrap_or("-".into()));
+                println!("spent:   {:.1}s", m.duration_seconds);
+            }
+            std::process::exit(verdict_code(&m));
+        }
+
+        Commands::Diff { a, b, runs_dir } => {
+            let ida = resolve_run_id(&runs_dir, &a)?;
+            let idb = resolve_run_id(&runs_dir, &b)?;
+            let ma = load_run_manifest(&runs_dir, &ida)?;
+            let mb = load_run_manifest(&runs_dir, &idb)?;
+            println!("a: {ida}  ({:.1}%)", ma.pass_rate);
+            println!("b: {idb}  ({:.1}%)", mb.pass_rate);
+            println!("{:<5} {:<46} {:<6} {:<6}", "n", "stage", "a", "b");
+            let n = ma.stages.len().max(mb.stages.len());
+            for i in 0..n {
+                let sa = ma.stages.get(i);
+                let sb = mb.stages.get(i);
+                let name = sa
+                    .map(|s| s.name.as_str())
+                    .or_else(|| sb.map(|s| s.name.as_str()))
+                    .unwrap_or("?");
+                let fa = sa.map(|s| if s.passed { "PASS" } else { "FAIL" }).unwrap_or("-");
+                let fb = sb.map(|s| if s.passed { "PASS" } else { "FAIL" }).unwrap_or("-");
+                println!("{:<5} {:<46} {:<6} {:<6}", i + 1, name, fa, fb);
+            }
+        }
+
+        Commands::Stages {
+            run,
+            trial,
+            json,
+            runs_dir,
+        } => {
+            let prefix_id = resolve_run_id(&runs_dir, &run)?;
+            let id = apply_trial_suffix(&prefix_id, trial);
+            let m = load_run_manifest(&runs_dir, &id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&m.stages)?);
+            } else {
+                println!("{id}: {} {}/{}", m.status, m.passed_stages, m.total_stages);
+                for s in &m.stages {
+                    let mark = if s.passed { "PASS" } else { "FAIL" };
+                    println!("  Stage {}: {} -> {}", s.stage, s.name, mark);
+                    if !s.passed {
+                        if let Some(e) = s.error.as_deref() {
+                            if !e.is_empty() {
+                                println!("      {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Commands::Prune { yes } => {
+            let list = |filter: &str, fmt: &str| -> Result<Vec<String>> {
+                let out = std::process::Command::new("docker")
+                    .args(["ps", "-a", "--filter", filter, "--format", fmt])
+                    .output()?;
+                Ok(String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string())
+                    .collect())
+            };
+            let containers = list("name=subdollar-", "{{.Names}}\t{{.Status}}")?;
+            let networks = {
+                let out = std::process::Command::new("docker")
+                    .args([
+                        "network",
+                        "ls",
+                        "--filter",
+                        "name=subdollar-net-",
+                        "--format",
+                        "{{.Name}}",
+                    ])
+                    .output()?;
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string())
+                    .collect::<Vec<_>>()
+            };
+            let live: Vec<&str> = containers
+                .iter()
+                .filter(|c| c.contains("omp-agent") && c.contains("\tUp"))
+                .map(|c| c.split('\t').next().unwrap_or(""))
+                .collect();
+            if !live.is_empty() {
+                anyhow::bail!(
+                    "refusing: live agent containers running ({})",
+                    live.join(", ")
+                );
+            }
+            if !yes {
+                println!("would remove {} containers, {} networks:", containers.len(), networks.len());
+                for c in &containers {
+                    println!("  container {c}");
+                }
+                for net in &networks {
+                    println!("  network   {net}");
+                }
+                println!("re-run with --yes to delete.");
+                return Ok(());
+            }
+            let mut gone_c = 0;
+            for c in &containers {
+                let name = c.split('\t').next().unwrap_or(c);
+                let st = std::process::Command::new("docker")
+                    .args(["rm", "-f", name])
+                    .status()?;
+                if st.success() {
+                    gone_c += 1;
+                }
+            }
+            let mut gone_n = 0;
+            for net in &networks {
+                let st = std::process::Command::new("docker")
+                    .args(["network", "rm", net])
+                    .status()?;
+                if st.success() {
+                    gone_n += 1;
+                }
+            }
+            println!("pruned {gone_c} containers, {gone_n} networks");
+        }
+
+        Commands::Doctor => {
+            let mut fail = 0;
+            match std::process::Command::new("docker").arg("info").output() {
+                Ok(o) if o.status.success() => println!("docker:      ok"),
+                _ => {
+                    println!("docker:      FAIL (daemon unreachable)");
+                    fail += 1;
+                }
+            }
+            if fail == 0 {
+                let out = std::process::Command::new("docker")
+                    .args(["images", "--format", "{{.Repository}}"])
+                    .output()?;
+                let repos = String::from_utf8_lossy(&out.stdout);
+                for img in ["subdollar-sandbox", "nginx", "coredns/coredns", "redis"] {
+                    if repos.lines().any(|l| l.trim() == img) {
+                        println!("image {img:<18} ok");
+                    } else {
+                        println!("image {img:<18} MISSING");
+                        fail += 1;
+                    }
+                }
+            }
+            match std::env::var("OPENROUTER_API_KEY") {
+                Ok(k) if !k.trim().is_empty() => println!("api key:     set"),
+                _ => {
+                    println!("api key:     MISSING (OPENROUTER_API_KEY)");
+                    fail += 1;
+                }
+            }
+            for port in [6379u16, 8080, 5353, 8090, 8091, 8092, 3000] {
+                match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(_) => {}
+                    Err(_) => println!("port {port}:     in use (may collide with a live run)"),
+                }
+            }
+            println!("ports:       scanned (in-use lines are warnings only)");
+            if fail > 0 {
+                anyhow::bail!("doctor: {fail} hard check(s) failed");
+            }
+            println!("doctor: all green");
+        }
 
         Commands::Ui { port, host } => {
             web::UiServer::start(&host, port).await?;
@@ -713,6 +1035,67 @@ mod tests {
             },
         };
         let _ = tokio::time::timeout(Duration::from_millis(150), run_cli(cli_ui)).await;
+    }
+
+    fn test_manifest_with_status(status: &str) -> RunManifest {
+        serde_json::from_value(serde_json::json!({
+            "run_id": "redis_m_20260917_000000_trial1",
+            "model": "m",
+            "task": "redis",
+            "status": status,
+            "language": "Go",
+            "started_at": "2026-09-17T00:00:00Z",
+            "completed_at": "2026-09-17T00:01:00Z",
+            "duration_seconds": 60.0,
+            "pass_rate": 100.0,
+            "passed_stages": 6,
+            "total_stages": 6,
+            "stages": [],
+            "throughput_req_sec": 35000.0,
+            "tokens": {"prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1, "total_tokens": 2},
+            "cost_usd": 0.01,
+            "savings_percent": 0.0,
+            "efficiency_score": 1.0,
+            "files": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_verdict_code_mapping() {
+        assert_eq!(verdict_code(&test_manifest_with_status("completed")), 0);
+        assert_eq!(verdict_code(&test_manifest_with_status("failed_tests")), 1);
+        assert_eq!(verdict_code(&test_manifest_with_status("disqualified_cheat")), 1);
+        assert_eq!(verdict_code(&test_manifest_with_status("agent_failed")), 2);
+        assert_eq!(verdict_code(&test_manifest_with_status("agent_killed")), 2);
+        assert_eq!(verdict_code(&test_manifest_with_status("mystery")), 2);
+    }
+
+    #[test]
+    fn test_apply_trial_suffix() {
+        assert_eq!(apply_trial_suffix("redis_m_20260917", Some(2)), "redis_m_20260917_trial2");
+        assert_eq!(
+            apply_trial_suffix("redis_m_20260917_trial1", Some(2)),
+            "redis_m_20260917_trial1"
+        );
+        assert_eq!(apply_trial_suffix("redis_m_20260917", None), "redis_m_20260917");
+    }
+
+    #[test]
+    fn test_resolve_run_id_exact_prefix_ambiguous() {
+        let dir = std::env::temp_dir().join(format!("test_runs_{}", std::process::id()));
+        let _ = fs::create_dir_all(dir.join("redis_m_aaa_trial1"));
+        let _ = fs::create_dir_all(dir.join("redis_m_aaa_trial2"));
+        let _ = fs::create_dir_all(dir.join("http_m_bbb"));
+        let s = dir.to_string_lossy().to_string();
+        assert_eq!(
+            resolve_run_id(&s, "redis_m_aaa_trial1").unwrap(),
+            "redis_m_aaa_trial1"
+        );
+        assert_eq!(resolve_run_id(&s, "http_m").unwrap(), "http_m_bbb");
+        assert!(resolve_run_id(&s, "redis_m_aaa").is_err());
+        assert!(resolve_run_id(&s, "wal_").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

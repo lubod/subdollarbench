@@ -51,7 +51,7 @@ pub enum Commands {
         eval_only: bool,
 
         /// Number of repeated trials for statistical variance (Pass@k)
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 3)]
         trials: u32,
 
         /// Do not save results or archive run artifacts to disk
@@ -145,12 +145,12 @@ pub enum Commands {
         keep: usize,
     },
 
-    /// Launch web-based GUI for configuring and running benchmarks
     /// Manage the Docker sandbox image and OMP agent
     Sandbox {
         #[command(subcommand)]
         command: SandboxCommands,
     },
+    /// Launch web-based GUI for configuring and running benchmarks
     Ui {
         /// Port to bind the web server
         #[arg(short, long, default_value_t = 3000)]
@@ -160,6 +160,94 @@ pub enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
+
+    /// [operate] Follow a live run's console log (stage markers highlighted)
+    Watch {
+        /// Run id or unambiguous prefix (see `runs`)
+        run: String,
+
+        /// Print current log and exit instead of following
+        #[arg(long, default_value_t = false)]
+        no_follow: bool,
+
+        /// Only show stage-result lines
+        #[arg(long, default_value_t = false)]
+        stages_only: bool,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
+    /// [operate] List recent runs (newest first)
+    Runs {
+        /// Filter by task ('http', 'redis', 'dns', ...)
+        #[arg(short, long)]
+        task: Option<String>,
+
+        /// Maximum rows to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
+    /// [analyze] One-screen verdict for a run (exit 0 pass / 1 fail / 2 infra-error)
+    Verdict {
+        /// Run id or unambiguous prefix
+        run: String,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
+    /// [analyze] Stage-by-stage diff of two runs (same task)
+    Diff {
+        /// Baseline run id or prefix
+        a: String,
+
+        /// Candidate run id or prefix
+        b: String,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
+    /// [analyze] Per-stage pass/fail detail for a run
+    Stages {
+        /// Run id or unambiguous prefix
+        run: String,
+
+        /// Trial number to inspect (appends _trial<N> when the id has no trial suffix)
+        #[arg(long)]
+        trial: Option<u32>,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
+    /// [maintain] Remove leaked subdollar Docker containers and networks
+    Prune {
+        /// Actually delete (without it, only prints the plan)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
+    /// [maintain] Pre-flight checks: docker, images, API key, ports, leaks (read-only)
+    Doctor,
 }
 
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
