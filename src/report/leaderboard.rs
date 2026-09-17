@@ -55,6 +55,9 @@ pub struct BenchmarkRunResult {
     pub pass_at_k: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_pass_rate: Option<f64>,
+    /// Trial-stability verdict written by merge_subruns: stable | watch | unstable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<String>,
 }
 
 pub fn format_duration(secs: f64) -> String {
@@ -67,6 +70,56 @@ pub fn format_duration(secs: f64) -> String {
         let rem_secs = (secs % 60.0).round() as u64;
         format!("{}m {}s", mins, rem_secs)
     }
+}
+
+/// Trial-stability verdict for one consolidated run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stability {
+    Stable,
+    Watch,
+    Unstable,
+}
+
+/// Assess whether a multi-trial result is reliable enough to publish.
+/// Rules: any pass-rate spread across trials -> Unstable; throughput
+/// CV > 25% -> Unstable (> 50% also flags a suspect measurement);
+/// CV 10-25% -> Watch; otherwise Stable. Throughput-free tasks
+/// (e.g. DNS) are judged on pass spread alone.
+pub fn assess_stability(subruns: &[BenchmarkRunResult]) -> (Stability, String) {
+    if subruns.len() < 2 {
+        return (Stability::Stable, "single trial".to_string());
+    }
+    let pr: Vec<f64> = subruns.iter().map(|r| r.pass_rate).collect();
+    let lo = pr.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi = pr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if hi - lo > 0.5 {
+        return (
+            Stability::Unstable,
+            format!("pass spread {lo:.0}-{hi:.0}% across {} trials", subruns.len()),
+        );
+    }
+    let tps: Vec<f64> = subruns.iter().filter_map(|r| r.throughput_req_sec).collect();
+    if tps.len() > 1 {
+        let mean = tps.iter().sum::<f64>() / tps.len() as f64;
+        if mean > 0.0 {
+            let var = tps.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / tps.len() as f64;
+            let cv = var.sqrt() / mean * 100.0;
+            if cv > 25.0 {
+                let mut reason = format!("throughput CV {cv:.0}% across {} trials", tps.len());
+                if cv > 50.0 {
+                    reason.push_str("; suspect measurement, verify probe");
+                }
+                return (Stability::Unstable, reason);
+            }
+            if cv > 10.0 {
+                return (
+                    Stability::Watch,
+                    format!("throughput CV {cv:.0}% across {} trials", tps.len()),
+                );
+            }
+        }
+    }
+    (Stability::Stable, format!("{} trials agree", subruns.len()))
 }
 
 impl BenchmarkRunResult {
@@ -106,6 +159,7 @@ impl BenchmarkRunResult {
             single.pass_at_1 = Some(p1);
             single.pass_at_k = Some(p1);
             single.avg_pass_rate = Some(single.pass_rate);
+            single.stability = Some("stable".to_string());
             return Some(single);
         }
 
@@ -208,6 +262,13 @@ impl BenchmarkRunResult {
         let headline_pass_rate = if c > 0 { 100.0 } else { avg_pass_rate };
         let headline_passed_stages = if c > 0 { best.total_stages } else { best.passed_stages };
 
+        let (stab, _) = assess_stability(&subruns);
+        let stab_str = match stab {
+            Stability::Stable => "stable",
+            Stability::Watch => "watch",
+            Stability::Unstable => "unstable",
+        }
+        .to_string();
         Some(BenchmarkRunResult {
             id: parent_id.to_string(),
             model: best.model.clone(),
@@ -240,6 +301,7 @@ impl BenchmarkRunResult {
             pass_at_1: Some(pass_at_1),
             pass_at_k: Some(pass_at_k),
             avg_pass_rate: Some(avg_pass_rate),
+            stability: Some(stab_str),
         })
     }
 }
@@ -868,6 +930,7 @@ mod tests {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+            stability: None,
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
         let mut pinned = base;
@@ -878,6 +941,68 @@ mod tests {
         );
         pinned.ref_drift = Some(true);
         assert!(BenchmarkRunResult::regime_of(&pinned).ends_with("+drift"));
+    }
+
+    fn stab_run(pass: f64, tp: Option<f64>) -> BenchmarkRunResult {
+        BenchmarkRunResult {
+            id: "t".to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: pass,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: tp,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: String::new(),
+            method_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            stability: None,
+        }
+    }
+
+    #[test]
+    fn test_assess_stability() {
+        // Identical trials -> stable.
+        let r = [stab_run(100.0, Some(35000.0)), stab_run(100.0, Some(35600.0))];
+        assert_eq!(assess_stability(&r).0, Stability::Stable);
+        // Deterministic partial pass (DNS-style) -> stable.
+        let r = [stab_run(83.3, None), stab_run(83.3, None), stab_run(83.3, None)];
+        assert_eq!(assess_stability(&r).0, Stability::Stable);
+        // Pass spread -> unstable.
+        let r = [stab_run(100.0, Some(82000.0)), stab_run(0.0, None), stab_run(100.0, Some(83000.0))];
+        let (s, reason) = assess_stability(&r);
+        assert_eq!(s, Stability::Unstable);
+        assert!(reason.contains("pass spread"));
+        // Throughput CV > 25% -> unstable; > 50% flags the probe.
+        let r = [stab_run(100.0, Some(852.0)), stab_run(100.0, Some(110687.0))];
+        let (s, reason) = assess_stability(&r);
+        assert_eq!(s, Stability::Unstable);
+        assert!(reason.contains("suspect measurement"));
+        // CV 10-25% -> watch.
+        let r = [stab_run(100.0, Some(44000.0)), stab_run(100.0, Some(57000.0))];
+        assert_eq!(assess_stability(&r).0, Stability::Watch);
+        // Single trial -> stable.
+        assert_eq!(assess_stability(&[stab_run(100.0, None)]).0, Stability::Stable);
     }
 
     #[test]
@@ -914,6 +1039,7 @@ mod tests {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+        stability: None,
         };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
@@ -1061,6 +1187,7 @@ mod tests {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+        stability: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -1104,6 +1231,7 @@ mod tests {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+        stability: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -1139,6 +1267,7 @@ mod tests {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+        stability: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();

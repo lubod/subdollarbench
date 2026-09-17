@@ -61,6 +61,14 @@ pub enum Commands {
         /// Model used for the end-of-run code review judge (defaults to openrouter/meta/muse-spark-1.3-contributor)
         #[arg(long)]
         review_model: Option<String>,
+
+        /// Keep adding trials in batches of 3 while the result is unstable
+        #[arg(long, default_value_t = false)]
+        extend_if_unstable: bool,
+
+        /// Trial cap for auto-extension (total, including the initial batch)
+        #[arg(long, default_value_t = 9)]
+        max_trials: u32,
     },
 
     /// Directly run verification test suite against a running server
@@ -219,6 +227,70 @@ pub enum Commands {
         /// Path to runs directory
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
+    },
+
+    /// [analyze] Trial-stability assessment for a consolidated run (exit 0 stable / 1 needs trials)
+    Stability {
+        /// Parent run id or unambiguous prefix
+        parent: String,
+
+        /// Path to results directory
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+    },
+
+    /// [operate] Run 3 more trials for an unstable parent and re-merge
+    Extend {
+        /// Parent run id or unambiguous prefix
+        parent: String,
+
+        /// Extra trials to run
+        #[arg(long, default_value_t = 3)]
+        trials: u32,
+
+        /// Override model (defaults to the parent's)
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Override task (defaults to the parent's)
+        #[arg(long)]
+        task: Option<TaskType>,
+
+        /// Override effort (defaults to the parent's)
+        #[arg(long)]
+        effort: Option<String>,
+
+        /// Maximum turns/steps allowed for OMP
+        #[arg(long, default_value_t = 100)]
+        max_turns: u32,
+
+        /// Maximum cost budget in USD
+        #[arg(long, default_value_t = 1.00)]
+        budget_usd: f64,
+
+        /// Maximum execution time in minutes before stopping agent
+        #[arg(long, default_value_t = 30)]
+        timeout_min: u64,
+
+        /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
+        #[arg(long, env = "OPENROUTER_API_KEY")]
+        api_key: Option<String>,
+
+        /// Directory for candidate workspace
+        #[arg(long, default_value = "./workspace")]
+        workdir: String,
+
+        /// Skip OMP agent run and evaluate existing server directly
+        #[arg(long, default_value_t = false)]
+        eval_only: bool,
+
+        /// Model used for the end-of-run code review judge
+        #[arg(long)]
+        review_model: Option<String>,
+
+        /// Path to results directory
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
     },
 
     /// [analyze] Per-stage pass/fail detail for a run

@@ -2,7 +2,7 @@ use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
     EnvironmentInfo, FileInfo, LeaderboardManager, RunArchiver, RunManifest,
-    is_hidden, set_hidden, PortalExporter,
+    is_hidden, set_hidden, PortalExporter, Stability, assess_stability,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -81,7 +81,11 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
 }
 
 fn default_trials() -> u32 {
-    10
+    3
+}
+
+fn default_max_trials() -> u32 {
+    9
 }
 
 fn default_max_turns() -> u32 {
@@ -112,6 +116,10 @@ pub struct RunRequest {
     pub timeout_min: Option<u64>,
     #[serde(default = "default_trials")]
     pub trials: u32,
+    #[serde(default)]
+    pub extend_if_unstable: bool,
+    #[serde(default = "default_max_trials")]
+    pub max_trials: u32,
     #[serde(default)]
     pub save_results: Option<bool>,
     #[serde(default)]
@@ -951,7 +959,7 @@ async fn start_run(
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
-        let total_trials = req.trials.max(1);
+        let mut total_trials = req.trials.max(1);
         let mut passing_trials = 0;
         let mut subrun_results = Vec::new();
         let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -996,6 +1004,69 @@ async fn start_run(
             None
         };
 
+        struct WebLogger {
+            tx: broadcast::Sender<String>,
+            log_buf: Arc<RwLock<Vec<String>>>,
+            current_run: Arc<RwLock<Option<ActiveRunInfo>>>,
+            trial_idx: u32,
+            total_trials: u32,
+        }
+        impl PipelineLogger for WebLogger {
+            fn log(&self, msg: &str) {
+                let ts = Utc::now().format("%H:%M:%S").to_string();
+                for line in msg.lines() {
+                    let clean = line.trim_end();
+                    let mut line_to_log = clean.to_string();
+
+                    if clean.starts_with("[LIVE] Turn ") && self.total_trials > 1 {
+                        line_to_log = format!("[LIVE] Subrun {}/{} | {}", self.trial_idx, self.total_trials, &clean[7..]);
+                    } else if clean.starts_with("[TELEMETRY] ") && !clean.contains("subrun=") {
+                        line_to_log = format!("{} subrun={} total_subruns={}", clean, self.trial_idx, self.total_trials);
+                    }
+
+                    let formatted = format!("[{}] {}", ts, line_to_log);
+                    self.log_buf.write().unwrap().push(formatted.clone());
+                    let _ = self.tx.send(formatted);
+                }
+
+                if msg.contains("[TELEMETRY]") {
+                    if let Some(telemetry_part) = msg.split("[TELEMETRY]").nth(1) {
+                        let mut turns = None;
+                        let mut max_turns = None;
+                        let mut spent = None;
+                        let mut tokens = None;
+                        let mut subrun = None;
+                        let mut total_subruns = None;
+
+                        for token in telemetry_part.split_whitespace() {
+                            if let Some((k, v)) = token.split_once("=") {
+                                match k {
+                                    "turn" => turns = v.parse::<u32>().ok(),
+                                    "max_turns" => max_turns = v.parse::<u32>().ok(),
+                                    "spent" => spent = v.parse::<f64>().ok(),
+                                    "tokens" => tokens = v.parse::<u64>().ok(),
+                                    "subrun" => subrun = v.parse::<u32>().ok(),
+                                    "total_subruns" => total_subruns = v.parse::<u32>().ok(),
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        if let Ok(mut run_lock) = self.current_run.write() {
+                            if let Some(ref mut info) = *run_lock {
+                                if let Some(t) = turns { info.turns = t; }
+                                if let Some(mt) = max_turns { info.max_turns = mt; }
+                                if let Some(s) = spent { info.cost_usd = s; }
+                                if let Some(tok) = tokens { info.tokens = tok; }
+                                info.subrun = subrun.or(Some(self.trial_idx));
+                                info.total_subruns = total_subruns.or(Some(self.total_trials));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for trial_idx in 1..=total_trials {
             if state_clone.cancel_requested.load(Ordering::SeqCst) {
                 let _ = tx.send("[STOP] Run cancelled by user before next trial.".to_string());
@@ -1029,68 +1100,7 @@ async fn start_run(
                 state_clone.log_buffer.write().unwrap().clear();
             }
 
-            struct WebLogger {
-                tx: broadcast::Sender<String>,
-                log_buf: Arc<RwLock<Vec<String>>>,
-                current_run: Arc<RwLock<Option<ActiveRunInfo>>>,
-                trial_idx: u32,
-                total_trials: u32,
-            }
-            impl PipelineLogger for WebLogger {
-                fn log(&self, msg: &str) {
-                    let ts = Utc::now().format("%H:%M:%S").to_string();
-                    for line in msg.lines() {
-                        let clean = line.trim_end();
-                        let mut line_to_log = clean.to_string();
 
-                        if clean.starts_with("[LIVE] Turn ") && self.total_trials > 1 {
-                            line_to_log = format!("[LIVE] Subrun {}/{} | {}", self.trial_idx, self.total_trials, &clean[7..]);
-                        } else if clean.starts_with("[TELEMETRY] ") && !clean.contains("subrun=") {
-                            line_to_log = format!("{} subrun={} total_subruns={}", clean, self.trial_idx, self.total_trials);
-                        }
-
-                        let formatted = format!("[{}] {}", ts, line_to_log);
-                        self.log_buf.write().unwrap().push(formatted.clone());
-                        let _ = self.tx.send(formatted);
-                    }
-
-                    if msg.contains("[TELEMETRY]") {
-                        if let Some(telemetry_part) = msg.split("[TELEMETRY]").nth(1) {
-                            let mut turns = None;
-                            let mut max_turns = None;
-                            let mut spent = None;
-                            let mut tokens = None;
-                            let mut subrun = None;
-                            let mut total_subruns = None;
-
-                            for token in telemetry_part.split_whitespace() {
-                                if let Some((k, v)) = token.split_once("=") {
-                                    match k {
-                                        "turn" => turns = v.parse::<u32>().ok(),
-                                        "max_turns" => max_turns = v.parse::<u32>().ok(),
-                                        "spent" => spent = v.parse::<f64>().ok(),
-                                        "tokens" => tokens = v.parse::<u64>().ok(),
-                                        "subrun" => subrun = v.parse::<u32>().ok(),
-                                        "total_subruns" => total_subruns = v.parse::<u32>().ok(),
-                                        _ => {}
-                                    }
-                                }
-                            }
-
-                            if let Ok(mut run_lock) = self.current_run.write() {
-                                if let Some(ref mut info) = *run_lock {
-                                    if let Some(t) = turns { info.turns = t; }
-                                    if let Some(mt) = max_turns { info.max_turns = mt; }
-                                    if let Some(s) = spent { info.cost_usd = s; }
-                                    if let Some(tok) = tokens { info.tokens = tok; }
-                                    info.subrun = subrun.or(Some(self.trial_idx));
-                                    info.total_subruns = total_subruns.or(Some(self.total_trials));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             let logger = Arc::new(WebLogger {
                 tx: tx.clone(),
@@ -1195,13 +1205,153 @@ async fn start_run(
 
         let batch_drift = batch_ref.map(|b| b.finish(&batch_log).drift);
 
-        if total_trials > 1 && !subrun_results.is_empty() {
-            let _ = LeaderboardManager::consolidate_multi_trial_run(
+        let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
+            LeaderboardManager::consolidate_multi_trial_run(
                 &parent_run_id,
                 &subrun_results,
                 req.save_results.unwrap_or(true),
                 batch_drift,
-            );
+            )
+        } else {
+            None
+        };
+
+        if req.extend_if_unstable && total_trials >= 2 {
+            let max_total = req.max_trials.max(total_trials);
+            let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
+            let started_at = Utc::now().to_rfc3339();
+            let task_type_ext = match req.task.as_str() {
+                "redis" => TaskType::Redis,
+                "http" => TaskType::Http,
+                "dns" => TaskType::Dns,
+                "pdf" => TaskType::Pdf,
+                "wal" => TaskType::Wal,
+                "proxy" => TaskType::Proxy,
+                "pubsub" => TaskType::Pubsub,
+                _ => TaskType::Redis,
+            };
+            while total_trials < max_total {
+                let merged = match merged_opt {
+                    Some(m) => m,
+                    None => break,
+                };
+                let (stab, reason) = assess_stability(&merged.subruns);
+                if stab == Stability::Stable {
+                    let _ = tx.send(format!("[EXTEND] stable: {}; done.", reason));
+                    break;
+                }
+                let add = (max_total - total_trials).min(3);
+                let _ = tx.send(format!(
+                    "[EXTEND] unstable ({}); running {} more trial(s)...",
+                    reason, add
+                ));
+                let ext_batch_ref = if add > 1 {
+                    match crate::bench::batch_ref::BatchRef::start(
+                        &task_type_ext,
+                        &parent_run_id,
+                        &batch_log,
+                    ) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = tx.send(format!(
+                                "[BATCH-REF] setup failed ({}); trials use live refs.",
+                                e
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let mut ext_results = Vec::new();
+                let mut ext_passing = 0usize;
+                for i in 0..add {
+                    if state_clone.cancel_requested.load(Ordering::SeqCst) {
+                        let _ = tx.send("[STOP] Extension cancelled by user.".to_string());
+                        break;
+                    }
+                    let trial_idx = total_trials + 1 + i;
+                    let run_id = format!("{}_trial{}", parent_run_id, trial_idx);
+                    *state_clone.current_run.write().unwrap() = Some(ActiveRunInfo {
+                        run_id: run_id.clone(),
+                        model: req.model.clone(),
+                        task: req.task.clone(),
+                        effort: effort_setting.clone(),
+                        started_at: started_at.clone(),
+                        turns: 0,
+                        max_turns: req.max_turns,
+                        cost_usd: 0.0,
+                        tokens: 0,
+                        duration_secs: None,
+                        subrun: Some(trial_idx),
+                        total_subruns: Some(total_trials + add),
+                    });
+                    let logger = Arc::new(WebLogger {
+                        tx: tx.clone(),
+                        log_buf: state_clone.log_buffer.clone(),
+                        current_run: state_clone.current_run.clone(),
+                        trial_idx,
+                        total_trials: total_trials + add,
+                    });
+                    logger.log(&format!(
+                        "[SUBRUN] ━━━ Starting Extension Subrun {} (Model: {}, Task: {}) ━━━",
+                        trial_idx, req.model, req.task
+                    ));
+                    let repo_root = crate::config::get_repo_root();
+                    let pipe_config = BenchmarkConfig {
+                        model: req.model.clone(),
+                        task: task_type_ext,
+                        effort: effort_setting.clone(),
+                        max_turns: req.max_turns,
+                        budget_usd: req.budget_usd,
+                        timeout_min: req.timeout_min.unwrap_or(30),
+                        api_key: req.api_key.clone(),
+                        workdir: repo_root.join("workspace"),
+                        eval_only: req.eval_only,
+                        run_id: Some(run_id.clone()),
+                        save_results: req.save_results.unwrap_or(true),
+                        review_model: req.review_model.clone(),
+                        batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
+                    };
+                    match BenchmarkPipeline::execute(
+                        pipe_config,
+                        logger.clone(),
+                        Some(state_clone.cancel_requested.clone()),
+                    )
+                    .await
+                    {
+                        Ok(output) => {
+                            if output.benchmark_result.pass_rate == 100.0 {
+                                ext_passing += 1;
+                            }
+                            ext_results.push(output.benchmark_result);
+                        }
+                        Err(e) => {
+                            if state_clone.cancel_requested.load(Ordering::SeqCst) {
+                                logger.log("[PIPELINE] Run cancelled by user.");
+                                break;
+                            }
+                            logger.log(&format!("[SUBRUN ERROR] Extension subrun {} failed: {}", trial_idx, e));
+                            break;
+                        }
+                    }
+                }
+                let n_new = ext_results.len() as u32;
+                if n_new == 0 {
+                    let _ = tx.send("[EXTEND] all extension trials failed; keeping current merge.".to_string());
+                    break;
+                }
+                total_trials += n_new;
+                passing_trials += ext_passing;
+                subrun_results.extend(ext_results);
+                let ext_drift = ext_batch_ref.map(|b| b.finish(&batch_log).drift);
+                merged_opt = LeaderboardManager::consolidate_multi_trial_run(
+                    &parent_run_id,
+                    &subrun_results,
+                    req.save_results.unwrap_or(true),
+                    ext_drift,
+                );
+            }
         }
 
 
@@ -1605,6 +1755,8 @@ mod tests {
             trials: 1,
             save_results: Some(false),
             review_model: None,
+            extend_if_unstable: false,
+            max_trials: 9,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -1644,6 +1796,8 @@ mod tests {
             trials: 2,
             save_results: Some(false),
             review_model: None,
+            extend_if_unstable: false,
+            max_trials: 9,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -1906,6 +2060,8 @@ mod tests {
             trials: 1,
             save_results: Some(false),
             review_model: None,
+            extend_if_unstable: false,
+            max_trials: 9,
         };
         let res = client
             .post(format!("{}/api/run", base))

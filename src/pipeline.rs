@@ -985,6 +985,7 @@ impl BenchmarkPipeline {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+            stability: None,
         };
 
         logger.log(&format!(

@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
-use subdollarbench::report::{LeaderboardManager, PortalExporter, RunJudge, RunManifest};
+use subdollarbench::report::{
+    BenchmarkRunResult, LeaderboardManager, PortalExporter, RunJudge, RunManifest,
+    assess_stability, Stability,
+};
 use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier, WalVerifier};
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
@@ -75,6 +78,130 @@ fn verdict_code(m: &RunManifest) -> i32 {
     }
 }
 
+fn parse_task(s: &str) -> Result<TaskType> {
+    match s.to_lowercase().as_str() {
+        "redis" => Ok(TaskType::Redis),
+        "http" => Ok(TaskType::Http),
+        "dns" => Ok(TaskType::Dns),
+        "pdf" => Ok(TaskType::Pdf),
+        "wal" => Ok(TaskType::Wal),
+        "proxy" => Ok(TaskType::Proxy),
+        "pubsub" => Ok(TaskType::Pubsub),
+        _ => anyhow::bail!("unknown task '{s}'"),
+    }
+}
+
+fn resolve_parent_id(results_dir: &str, prefix: &str) -> Result<String> {
+    let path = Path::new(results_dir);
+    if path.join(format!("{prefix}.json")).exists() {
+        return Ok(prefix.to_string());
+    }
+    let mut hits: Vec<String> = std::fs::read_dir(path)
+        .with_context(|| format!("read results dir {results_dir}"))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.strip_suffix(".json").map(|s| s.to_string())
+        })
+        .filter(|id| id.starts_with(prefix))
+        .collect();
+    hits.sort();
+    match hits.len() {
+        0 => anyhow::bail!("no consolidated run matches prefix '{prefix}' in {results_dir}"),
+        1 => Ok(hits.remove(0)),
+        _ => {
+            eprintln!("ambiguous prefix '{prefix}':");
+            for h in &hits {
+                eprintln!("  {h}");
+            }
+            anyhow::bail!("{} runs match; give a longer prefix", hits.len())
+        }
+    }
+}
+
+fn load_parent_result(results_dir: &str, parent_id: &str) -> Result<BenchmarkRunResult> {
+    let text = std::fs::read_to_string(Path::new(results_dir).join(format!("{parent_id}.json")))
+        .with_context(|| format!("read parent result {parent_id}"))?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+struct TrialBatchParams {
+    model: String,
+    task: TaskType,
+    effort: String,
+    max_turns: u32,
+    budget_usd: f64,
+    timeout_min: u64,
+    api_key: Option<String>,
+    workdir: PathBuf,
+    eval_only: bool,
+    review_model: Option<String>,
+    parent_run_id: String,
+    start_idx: u32,
+    count: u32,
+}
+
+struct TrialBatchOutput {
+    results: Vec<BenchmarkRunResult>,
+    passing: u32,
+    drift: Option<bool>,
+}
+
+/// Run one extension batch (fresh batch reference, suffix-numbered trial dirs).
+async fn run_trial_batch(p: TrialBatchParams, logger: Arc<CliPipelineLogger>) -> Result<TrialBatchOutput> {
+    let batch_ref = if p.count > 1 {
+        match subdollarbench::bench::batch_ref::BatchRef::start(
+            &p.task,
+            &p.parent_run_id,
+            &|m| println!("{}", m),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut results = Vec::new();
+    let mut passing = 0;
+    for i in 0..p.count {
+        let idx = p.start_idx + i;
+        println!("{}", format!("=== Starting Extension Subrun {} ===", idx).bold().cyan());
+        let run_id = format!("{}_trial{}", p.parent_run_id, idx);
+        let pipe_config = BenchmarkConfig {
+            model: p.model.clone(),
+            task: p.task,
+            effort: p.effort.clone(),
+            max_turns: p.max_turns,
+            budget_usd: p.budget_usd,
+            timeout_min: p.timeout_min,
+            api_key: p.api_key.clone(),
+            workdir: p.workdir.clone(),
+            eval_only: p.eval_only,
+            run_id: Some(run_id.clone()),
+            save_results: true,
+            review_model: p.review_model.clone(),
+            batch_reference: batch_ref.as_ref().map(|b| b.reference()),
+        };
+        match BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await {
+            Ok(output) => {
+                if output.benchmark_result.pass_rate == 100.0 {
+                    passing += 1;
+                }
+                results.push(output.benchmark_result);
+            }
+            Err(e) => {
+                eprintln!("  [ERROR] Extension subrun {} failed: {}", idx, e);
+            }
+        }
+    }
+    let drift = batch_ref.map(|b| b.finish(&|m| println!("{}", m)).drift);
+    Ok(TrialBatchOutput { results, passing, drift })
+}
+
 pub async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Run {
@@ -90,8 +217,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             trials,
             no_save,
             review_model,
+            extend_if_unstable,
+            max_trials,
         } => {
-            let total_trials = trials.max(1);
+            let mut total_trials = trials.max(1);
             let mut passing_trials = 0;
             let logger = Arc::new(CliPipelineLogger);
 
@@ -190,13 +319,68 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 b.finish(&|m| println!("{}", m)).drift
             });
 
-            if total_trials > 1 && !subrun_results.is_empty() {
-                let _ = LeaderboardManager::consolidate_multi_trial_run(
+            let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
+                LeaderboardManager::consolidate_multi_trial_run(
                     &parent_run_id,
                     &subrun_results,
                     !no_save,
                     batch_drift,
-                );
+                )
+            } else {
+                None
+            };
+
+            if extend_if_unstable {
+                if total_trials < 2 {
+                    println!("[EXTEND] single-trial run: nothing to assess; use --trials 2+ for auto-extend.");
+                } else {
+                    let max_total = max_trials.max(total_trials);
+                    while total_trials < max_total {
+                        let merged = match merged_opt {
+                            Some(m) => m,
+                            None => break,
+                        };
+                        let (stab, reason) = assess_stability(&merged.subruns);
+                        if stab == Stability::Stable {
+                            println!("[EXTEND] stable: {}; done.", reason);
+                            break;
+                        }
+                        let add = (max_total - total_trials).min(3);
+                        println!("[EXTEND] unstable ({}); running {} more trial(s)...", reason, add);
+                        let batch = run_trial_batch(
+                            TrialBatchParams {
+                                model: model.clone(),
+                                task,
+                                effort: effort.clone(),
+                                max_turns,
+                                budget_usd,
+                                timeout_min,
+                                api_key: api_key.clone(),
+                                workdir: work_path_buf.clone(),
+                                eval_only,
+                                review_model: review_model.clone(),
+                                parent_run_id: parent_run_id.clone(),
+                                start_idx: total_trials + 1,
+                                count: add,
+                            },
+                            logger.clone(),
+                        )
+                        .await?;
+                        if batch.results.is_empty() {
+                            eprintln!("[EXTEND] all extension trials failed; keeping current merge.");
+                            break;
+                        }
+                        total_trials += batch.results.len() as u32;
+                        passing_trials += batch.passing as usize;
+                        subrun_results.extend(batch.results);
+                        merged_opt = LeaderboardManager::consolidate_multi_trial_run(
+                            &parent_run_id,
+                            &subrun_results,
+                            !no_save,
+                            batch.drift,
+                        );
+                    }
+                }
             }
 
             if total_trials > 1 {
@@ -692,6 +876,111 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("doctor: all green");
         }
 
+        Commands::Stability { parent, results_dir } => {
+            let pid = resolve_parent_id(&results_dir, &parent)?;
+            let merged = load_parent_result(&results_dir, &pid)?;
+            println!("{pid}: {} trials", merged.subruns.len());
+            for s in &merged.subruns {
+                match s.throughput_req_sec {
+                    Some(tp) => println!("  {:<52} {:>6.1}%  {:.0} req/s", s.id, s.pass_rate, tp),
+                    None => println!("  {:<52} {:>6.1}%", s.id, s.pass_rate),
+                }
+            }
+            let (stab, reason) = assess_stability(&merged.subruns);
+            match stab {
+                Stability::Stable => println!("stability: stable ({reason})"),
+                Stability::Watch => {
+                    println!("stability: watch ({reason})");
+                    std::process::exit(1);
+                }
+                Stability::Unstable => {
+                    println!("stability: unstable ({reason})");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Extend {
+            parent,
+            trials,
+            model,
+            task,
+            effort,
+            max_turns,
+            budget_usd,
+            timeout_min,
+            api_key,
+            workdir,
+            eval_only,
+            review_model,
+            results_dir,
+        } => {
+            let pid = resolve_parent_id(&results_dir, &parent)?;
+            let merged = load_parent_result(&results_dir, &pid)?;
+            if merged.subruns.len() < 2 {
+                anyhow::bail!(
+                    "extend needs a multi-trial parent ({} has {} subrun(s)); re-run with --trials 2+",
+                    pid,
+                    merged.subruns.len()
+                );
+            }
+            let (stab, reason) = assess_stability(&merged.subruns);
+            if stab == Stability::Stable {
+                println!("{pid} already stable ({reason}); nothing to do.");
+                return Ok(());
+            }
+            println!("[EXTEND] {pid}: {reason}; running {trials} more trial(s)...");
+            let task = match task {
+                Some(t) => t,
+                None => parse_task(&merged.task)?,
+            };
+            let work_path_buf = if Path::new(&workdir).is_absolute() {
+                PathBuf::from(&workdir)
+            } else {
+                subdollarbench::config::get_repo_root().join(&workdir)
+            };
+            let logger = Arc::new(CliPipelineLogger);
+            let batch = run_trial_batch(
+                TrialBatchParams {
+                    model: model.unwrap_or_else(|| merged.model.clone()),
+                    task,
+                    effort: effort.unwrap_or_else(|| merged.effort.clone().unwrap_or_else(|| "high".to_string())),
+                    max_turns,
+                    budget_usd,
+                    timeout_min,
+                    api_key,
+                    workdir: work_path_buf,
+                    eval_only,
+                    review_model,
+                    parent_run_id: pid.clone(),
+                    start_idx: merged.subruns.len() as u32 + 1,
+                    count: trials.max(1),
+                },
+                logger,
+            )
+            .await?;
+            if batch.results.is_empty() {
+                anyhow::bail!("all extension trials failed; parent merge untouched");
+            }
+            let mut combined = merged.subruns.clone();
+            combined.extend(batch.results);
+            let total = combined.len();
+            let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
+            let final_merged = LeaderboardManager::consolidate_multi_trial_run(
+                &pid,
+                &combined,
+                true,
+                batch.drift,
+            );
+            let pass_at_1 = compute_pass_at_k(total, passing, 1) * 100.0;
+            let pass_at_k = compute_pass_at_k(total, passing, total) * 100.0;
+            println!("extended {pid}: {total} trials, {passing} passing, Pass@1 {pass_at_1:.1}% Pass@{total} {pass_at_k:.1}%");
+            if let Some(m) = final_merged {
+                let (stab2, reason2) = assess_stability(&m.subruns);
+                println!("stability now: {stab2:?} ({reason2})");
+            }
+        }
+
         Commands::Ui { port, host } => {
             web::UiServer::start(&host, port).await?;
         }
@@ -752,6 +1041,7 @@ mod tests {
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+            stability: None,
         };
         let _ = LeaderboardManager::save_result(&temp_dir.to_string_lossy(), &result);
 
@@ -900,6 +1190,8 @@ mod tests {
                 trials: 2,
                 no_save: true,
                 review_model: None,
+                extend_if_unstable: false,
+                max_trials: 9,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -952,6 +1244,8 @@ mod tests {
                 trials: 1,
                 no_save: true,
                 review_model: None,
+                extend_if_unstable: false,
+                max_trials: 9,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -1000,6 +1294,8 @@ mod tests {
                 trials: 1,
                 no_save: true,
                 review_model: None,
+                extend_if_unstable: false,
+                max_trials: 9,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
