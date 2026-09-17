@@ -564,7 +564,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 println!("{id}: {} {}/{}", m.status, m.passed_stages, m.total_stages);
                 for s in &m.stages {
                     let mark = if s.passed { "PASS" } else { "FAIL" };
-                    println!("  Stage {}: {} -> {}", s.stage, s.name, mark);
+                    println!("  {} -> {}", s.name, mark);
                     if !s.passed {
                         if let Some(e) = s.error.as_deref() {
                             if !e.is_empty() {
