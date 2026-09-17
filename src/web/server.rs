@@ -85,7 +85,7 @@ fn default_trials() -> u32 {
 }
 
 fn default_max_turns() -> u32 {
-    50
+    100
 }
 
 fn default_budget() -> f64 {

@@ -22,7 +22,7 @@ pub struct AgentExecutionLimits {
 impl Default for AgentExecutionLimits {
     fn default() -> Self {
         Self {
-            max_turns: Some(50),
+            max_turns: Some(100),
             max_budget_usd: Some(0.50),
             timeout_seconds: Some(900), // 15 minutes default
         }

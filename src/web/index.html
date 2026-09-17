@@ -3519,7 +3519,7 @@ function copyRunId() {
           if (data.last_run && liveTelemetry.turns === 0 && liveTelemetry.spent === 0) {
             const lr = data.last_run;
             liveTelemetry.turns = lr.turns || 0;
-            liveTelemetry.maxTurns = lr.max_turns || 50;
+            liveTelemetry.maxTurns = lr.max_turns || 100;
             liveTelemetry.spent = lr.cost_usd || 0.0;
             liveTelemetry.tokens = lr.tokens || 0;
             if (lr.subrun !== undefined && lr.subrun !== null) liveTelemetry.subrun = lr.subrun;
