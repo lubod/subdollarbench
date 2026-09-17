@@ -93,6 +93,10 @@ func main() {
         files: scanned,
         env: None,
         git_commit: None,
+        total_trials: None,
+        pass_at_1: None,
+        stability: None,
+        trial_pass_rates: Vec::new(),
         is_published: None,
         method_version: Some("0.1.0".to_string()),
     };
