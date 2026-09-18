@@ -21,7 +21,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -60,6 +61,8 @@ pub struct AppState {
     pub last_run: Arc<RwLock<Option<ActiveRunInfo>>>,
     pub log_buffer: Arc<RwLock<Vec<String>>>,
     pub task_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
+    pub queue_seq: Arc<AtomicU64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,7 +103,23 @@ fn default_timeout_min() -> Option<u64> {
     Some(30)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueStatus {
+    Pending,
+    Running,
+    Done,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedRun {
+    pub id: String,
+    pub enqueued_at: String,
+    pub status: QueueStatus,
+    pub request: RunRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
     pub model: String,
     pub task: String,
@@ -375,6 +394,8 @@ impl UiServer {
             .route("/api/status", get(get_status))
             .route("/api/run", post(start_run))
             .route("/api/run/stop", post(stop_run))
+            .route("/api/queue", get(get_queue).post(enqueue_run).delete(clear_queue))
+            .route("/api/queue/:id", delete(remove_queued_run))
             .route("/api/compare", get(compare_runs))
             .route("/api/stream", get(stream_logs))
             .route("/api/console", get(get_active_console))
@@ -410,6 +431,8 @@ impl UiServer {
             last_run: Arc::new(RwLock::new(None)),
             log_buffer: Arc::new(RwLock::new(Vec::new())),
             task_handle: Arc::new(std::sync::Mutex::new(None)),
+            queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            queue_seq: Arc::new(AtomicU64::new(0)),
         };
 
         let app = Self::build_app(state);
@@ -808,6 +831,12 @@ async fn stop_run(State(state): State<AppState>) -> Response {
     }
 
     *state.current_run.write().unwrap() = None;
+    {
+        let mut q = state.queue.lock().unwrap();
+        for item in q.iter_mut().filter(|i| i.status == QueueStatus::Running) {
+            item.status = QueueStatus::Cancelled;
+        }
+    }
     state.is_running.store(false, Ordering::SeqCst);
     let _ = tx.send("[DONE] Benchmark run was stopped by user.".to_string());
 
@@ -926,6 +955,589 @@ async fn compare_runs(
     }))
 }
 
+fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>) {
+    let state_clone = state.clone();
+    let handle = tokio::spawn(execute_run_body(state_clone, req, queue_id));
+    *state.task_handle.lock().unwrap() = Some(handle);
+}
+
+async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<String>) {
+    let tx = state.log_sender.clone();
+    let mut total_trials = req.trials.max(1);
+    let mut passing_trials = 0;
+    let mut subrun_results = Vec::new();
+    let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let parent_run_id = format!(
+        "{}_{}_{}",
+        req.task,
+        req.model.replace(['/', ':'], "_"),
+        run_timestamp
+    );
+
+    let batch_log = |m: &str| {
+        let _ = tx.send(m.to_string());
+    };
+    // Batch reference: one shared denominator for all trials.
+    // Fallback is live per-trial measurement inside the pipeline.
+    let batch_ref = if total_trials > 1 {
+        let task_type_pre = match req.task.as_str() {
+            "redis" => TaskType::Redis,
+            "http" => TaskType::Http,
+            "dns" => TaskType::Dns,
+            "pdf" => TaskType::Pdf,
+            "wal" => TaskType::Wal,
+            "proxy" => TaskType::Proxy,
+            "pubsub" => TaskType::Pubsub,
+            _ => TaskType::Redis,
+        };
+        match crate::bench::batch_ref::BatchRef::start(
+            &task_type_pre,
+            &parent_run_id,
+            &batch_log,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                batch_log(&format!(
+                    "[BATCH-REF] setup failed ({}); trials use live refs.",
+                    e
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    struct WebLogger {
+        tx: broadcast::Sender<String>,
+        log_buf: Arc<RwLock<Vec<String>>>,
+        current_run: Arc<RwLock<Option<ActiveRunInfo>>>,
+        trial_idx: u32,
+        total_trials: u32,
+    }
+    impl PipelineLogger for WebLogger {
+        fn log(&self, msg: &str) {
+            let ts = Utc::now().format("%H:%M:%S").to_string();
+            for line in msg.lines() {
+                let clean = line.trim_end();
+                let mut line_to_log = clean.to_string();
+
+                if clean.starts_with("[LIVE] Turn ") && self.total_trials > 1 {
+                    line_to_log = format!("[LIVE] Subrun {}/{} | {}", self.trial_idx, self.total_trials, &clean[7..]);
+                } else if clean.starts_with("[TELEMETRY] ") && !clean.contains("subrun=") {
+                    line_to_log = format!("{} subrun={} total_subruns={}", clean, self.trial_idx, self.total_trials);
+                }
+
+                let formatted = format!("[{}] {}", ts, line_to_log);
+                self.log_buf.write().unwrap().push(formatted.clone());
+                let _ = self.tx.send(formatted);
+            }
+
+            if msg.contains("[TELEMETRY]") {
+                if let Some(telemetry_part) = msg.split("[TELEMETRY]").nth(1) {
+                    let mut turns = None;
+                    let mut max_turns = None;
+                    let mut spent = None;
+                    let mut tokens = None;
+                    let mut subrun = None;
+                    let mut total_subruns = None;
+
+                    for token in telemetry_part.split_whitespace() {
+                        if let Some((k, v)) = token.split_once("=") {
+                            match k {
+                                "turn" => turns = v.parse::<u32>().ok(),
+                                "max_turns" => max_turns = v.parse::<u32>().ok(),
+                                "spent" => spent = v.parse::<f64>().ok(),
+                                "tokens" => tokens = v.parse::<u64>().ok(),
+                                "subrun" => subrun = v.parse::<u32>().ok(),
+                                "total_subruns" => total_subruns = v.parse::<u32>().ok(),
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    if let Ok(mut run_lock) = self.current_run.write() {
+                        if let Some(ref mut info) = *run_lock {
+                            if let Some(t) = turns { info.turns = t; }
+                            if let Some(mt) = max_turns { info.max_turns = mt; }
+                            if let Some(s) = spent { info.cost_usd = s; }
+                            if let Some(tok) = tokens { info.tokens = tok; }
+                            info.subrun = subrun.or(Some(self.trial_idx));
+                            info.total_subruns = total_subruns.or(Some(self.total_trials));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for trial_idx in 1..=total_trials {
+        if state.cancel_requested.load(Ordering::SeqCst) {
+            let _ = tx.send("[STOP] Run cancelled by user before next trial.".to_string());
+            break;
+        }
+
+        let started_at = Utc::now().to_rfc3339();
+        let run_id = if total_trials > 1 {
+            format!("{}_trial{}", parent_run_id, trial_idx)
+        } else {
+            parent_run_id.clone()
+        };
+
+        let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
+
+        *state.current_run.write().unwrap() = Some(ActiveRunInfo {
+            run_id: run_id.clone(),
+            model: req.model.clone(),
+            task: req.task.clone(),
+            effort: effort_setting.clone(),
+            started_at,
+            turns: 0,
+            max_turns: req.max_turns,
+            cost_usd: 0.0,
+            tokens: 0,
+            duration_secs: None,
+            subrun: Some(trial_idx),
+            total_subruns: Some(total_trials),
+        });
+        if trial_idx == 1 {
+            state.log_buffer.write().unwrap().clear();
+        }
+
+
+
+        let logger = Arc::new(WebLogger {
+            tx: tx.clone(),
+            log_buf: state.log_buffer.clone(),
+            current_run: state.current_run.clone(),
+            trial_idx,
+            total_trials,
+        });
+
+        if total_trials > 1 {
+            logger.log(&format!(
+                "[SUBRUN] ━━━ Starting Subrun {}/{} (Model: {}, Task: {}) ━━━",
+                trial_idx, total_trials, req.model, req.task
+            ));
+        } else {
+            logger.log(&format!(
+                "[SUBRUN] ━━━ Starting Benchmark Run (Model: {}, Task: {}) ━━━",
+                req.model, req.task
+            ));
+        }
+        logger.log(&format!(
+            "[LIVE] Subrun {}/{} | Turn 0/{} | Spent: $0.0000 | Tokens: 0",
+            trial_idx, total_trials, req.max_turns
+        ));
+        logger.log(&format!(
+            "[TELEMETRY] turn=0 max_turns={} spent=0.000000 tokens=0 subrun={} total_subruns={}",
+            req.max_turns, trial_idx, total_trials
+        ));
+
+        let task_type = match req.task.as_str() {
+            "redis" => TaskType::Redis,
+            "http" => TaskType::Http,
+            "dns" => TaskType::Dns,
+            "pdf" => TaskType::Pdf,
+            "wal" => TaskType::Wal,
+            "proxy" => TaskType::Proxy,
+            "pubsub" => TaskType::Pubsub,
+            _ => TaskType::Redis,
+        };
+
+        let repo_root = crate::config::get_repo_root();
+        let work_path = repo_root.join("workspace");
+
+        let pipe_config = BenchmarkConfig {
+            model: req.model.clone(),
+            task: task_type,
+            effort: effort_setting.clone(),
+            max_turns: req.max_turns,
+            budget_usd: req.budget_usd,
+            timeout_min: req.timeout_min.unwrap_or(30),
+            api_key: req.api_key.clone(),
+            workdir: work_path,
+            eval_only: req.eval_only,
+            run_id: Some(run_id.clone()),
+            save_results: req.save_results.unwrap_or(true),
+            review_model: req.review_model.clone(),
+            batch_reference: batch_ref.as_ref().map(|b| b.reference()),
+        };
+
+        let pipe_res = BenchmarkPipeline::execute(
+            pipe_config,
+            logger.clone(),
+            Some(state.cancel_requested.clone()),
+        )
+        .await;
+
+        match pipe_res {
+            Ok(output) => {
+                if output.benchmark_result.pass_rate == 100.0 {
+                    passing_trials += 1;
+                    if total_trials > 1 {
+                        logger.log(&format!(
+                            "[SUBRUN] ━━━ Subrun {}/{} PASSED (100.0%) ━━━",
+                            trial_idx, total_trials
+                        ));
+                    } else {
+                        logger.log("[PIPELINE SUCCESS] Benchmark run PASSED (100.0%)");
+                    }
+                } else if total_trials > 1 {
+                    logger.log(&format!(
+                        "[SUBRUN] ━━━ Subrun {}/{} COMPLETED (Pass Rate: {:.1}%) ━━━",
+                        trial_idx, total_trials, output.benchmark_result.pass_rate
+                    ));
+                } else {
+                    logger.log(&format!(
+                        "[PIPELINE RESULT] Benchmark run completed with pass rate: {:.1}%",
+                        output.benchmark_result.pass_rate
+                    ));
+                }
+                subrun_results.push(output.benchmark_result);
+            }
+            Err(e) => {
+                if state.cancel_requested.load(Ordering::SeqCst) {
+                    logger.log("[PIPELINE] Run cancelled by user.");
+                    break;
+                }
+                logger.log(&format!("[SUBRUN ERROR] Subrun {}/{} failed: {}", trial_idx, total_trials, e));
+                break;
+            }
+        }
+    }
+
+    let batch_drift = batch_ref.map(|b| b.finish(&batch_log).drift);
+
+    let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
+        LeaderboardManager::consolidate_multi_trial_run(
+            &parent_run_id,
+            &subrun_results,
+            req.save_results.unwrap_or(true),
+            batch_drift,
+        )
+    } else {
+        None
+    };
+
+    if req.extend_if_unstable && total_trials >= 2 {
+        let max_total = req.max_trials.max(total_trials);
+        let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
+        let started_at = Utc::now().to_rfc3339();
+        let task_type_ext = match req.task.as_str() {
+            "redis" => TaskType::Redis,
+            "http" => TaskType::Http,
+            "dns" => TaskType::Dns,
+            "pdf" => TaskType::Pdf,
+            "wal" => TaskType::Wal,
+            "proxy" => TaskType::Proxy,
+            "pubsub" => TaskType::Pubsub,
+            _ => TaskType::Redis,
+        };
+        while total_trials < max_total {
+            let merged = match merged_opt {
+                Some(m) => m,
+                None => break,
+            };
+            let (stab, reason) = assess_stability(&merged.subruns);
+            if stab == Stability::Stable {
+                let _ = tx.send(format!("[EXTEND] stable: {}; done.", reason));
+                break;
+            }
+            let add = (max_total - total_trials).min(3);
+            let _ = tx.send(format!(
+                "[EXTEND] unstable ({}); running {} more trial(s)...",
+                reason, add
+            ));
+            let ext_batch_ref = if add > 1 {
+                match crate::bench::batch_ref::BatchRef::start(
+                    &task_type_ext,
+                    &parent_run_id,
+                    &batch_log,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = tx.send(format!(
+                            "[BATCH-REF] setup failed ({}); trials use live refs.",
+                            e
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let mut ext_results = Vec::new();
+            let mut ext_passing = 0usize;
+            for i in 0..add {
+                if state.cancel_requested.load(Ordering::SeqCst) {
+                    let _ = tx.send("[STOP] Extension cancelled by user.".to_string());
+                    break;
+                }
+                let trial_idx = total_trials + 1 + i;
+                let run_id = format!("{}_trial{}", parent_run_id, trial_idx);
+                *state.current_run.write().unwrap() = Some(ActiveRunInfo {
+                    run_id: run_id.clone(),
+                    model: req.model.clone(),
+                    task: req.task.clone(),
+                    effort: effort_setting.clone(),
+                    started_at: started_at.clone(),
+                    turns: 0,
+                    max_turns: req.max_turns,
+                    cost_usd: 0.0,
+                    tokens: 0,
+                    duration_secs: None,
+                    subrun: Some(trial_idx),
+                    total_subruns: Some(total_trials + add),
+                });
+                let logger = Arc::new(WebLogger {
+                    tx: tx.clone(),
+                    log_buf: state.log_buffer.clone(),
+                    current_run: state.current_run.clone(),
+                    trial_idx,
+                    total_trials: total_trials + add,
+                });
+                logger.log(&format!(
+                    "[SUBRUN] ━━━ Starting Extension Subrun {} (Model: {}, Task: {}) ━━━",
+                    trial_idx, req.model, req.task
+                ));
+                let repo_root = crate::config::get_repo_root();
+                let pipe_config = BenchmarkConfig {
+                    model: req.model.clone(),
+                    task: task_type_ext,
+                    effort: effort_setting.clone(),
+                    max_turns: req.max_turns,
+                    budget_usd: req.budget_usd,
+                    timeout_min: req.timeout_min.unwrap_or(30),
+                    api_key: req.api_key.clone(),
+                    workdir: repo_root.join("workspace"),
+                    eval_only: req.eval_only,
+                    run_id: Some(run_id.clone()),
+                    save_results: req.save_results.unwrap_or(true),
+                    review_model: req.review_model.clone(),
+                    batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
+                };
+                match BenchmarkPipeline::execute(
+                    pipe_config,
+                    logger.clone(),
+                    Some(state.cancel_requested.clone()),
+                )
+                .await
+                {
+                    Ok(output) => {
+                        if output.benchmark_result.pass_rate == 100.0 {
+                            ext_passing += 1;
+                        }
+                        ext_results.push(output.benchmark_result);
+                    }
+                    Err(e) => {
+                        if state.cancel_requested.load(Ordering::SeqCst) {
+                            logger.log("[PIPELINE] Run cancelled by user.");
+                            break;
+                        }
+                        logger.log(&format!("[SUBRUN ERROR] Extension subrun {} failed: {}", trial_idx, e));
+                        break;
+                    }
+                }
+            }
+            let n_new = ext_results.len() as u32;
+            if n_new == 0 {
+                let _ = tx.send("[EXTEND] all extension trials failed; keeping current merge.".to_string());
+                break;
+            }
+            total_trials += n_new;
+            passing_trials += ext_passing;
+            subrun_results.extend(ext_results);
+            let ext_drift = ext_batch_ref.map(|b| b.finish(&batch_log).drift);
+            merged_opt = LeaderboardManager::consolidate_multi_trial_run(
+                &parent_run_id,
+                &subrun_results,
+                req.save_results.unwrap_or(true),
+                ext_drift,
+            );
+        }
+    }
+
+
+
+    if total_trials > 1 {
+        let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
+        let pass_at_k =
+            compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize)
+                * 100.0;
+        let _ = tx.send(format!(
+            "[MULTI-TRIAL] Trials: {}, Passing: {}, Pass@1: {:.1}%, Pass@{}: {:.1}%",
+            total_trials, passing_trials, pass_at_1, total_trials, pass_at_k
+        ));
+    }
+
+    if passing_trials == total_trials as usize && total_trials > 0 {
+        let _ = tx.send("[STATUS] All trials passed (100% pass rate).".to_string());
+    } else if passing_trials > 0 {
+        let _ = tx.send(format!(
+            "[STATUS] Partial pass: {}/{} trials passed.",
+            passing_trials, total_trials
+        ));
+    } else {
+        let _ = tx.send(
+            "[STATUS] Benchmark completed with 0 passing trials (0.0% pass rate).".to_string(),
+        );
+    }
+
+    if let Ok(mut cur_lock) = state.current_run.write() {
+        *state.last_run.write().unwrap() = cur_lock.clone();
+        *cur_lock = None;
+    }
+    *state.task_handle.lock().unwrap() = None;
+    if let Some(qid) = queue_id {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(item) = q.iter_mut().find(|i| i.id == qid) {
+            item.status = QueueStatus::Done;
+        }
+    }
+    // Runner-slot handoff: only the slot holder spawns the next run.
+    // is_running stays true across the handoff; stored false only when idle.
+    let next = {
+        let mut q = state.queue.lock().unwrap();
+        q.iter_mut().find(|i| i.status == QueueStatus::Pending).map(|item| {
+            item.status = QueueStatus::Running;
+            (item.request.clone(), item.id.clone())
+        })
+    };
+    if let Some((next_req, next_id)) = next {
+        let _ = tx.send(format!("[QUEUE] Starting queued run {next_id}..."));
+        spawn_run_body(&state, next_req, Some(next_id));
+        return;
+    }
+    state.is_running.store(false, Ordering::SeqCst);
+    let _ = tx.send("[DONE]".to_string());
+}
+
+async fn get_queue(State(state): State<AppState>) -> Json<Vec<QueuedRun>> {
+    Json(state.queue.lock().unwrap().iter().cloned().collect())
+}
+
+/// Try to start the head of the queue. Returns true when a run was spawned
+/// or the item is already picked up. Bounded retries cover the
+/// pop-None/store-false handoff gap at the end of a run body.
+async fn kick_runner(state: &AppState, want_id: &str) -> bool {
+    for _ in 0..50 {
+        let head = {
+            let mut q = state.queue.lock().unwrap();
+            match q.iter().find(|i| i.id == want_id).map(|i| i.status) {
+                None => return true,
+                Some(s) if s != QueueStatus::Pending => return true,
+                _ => {}
+            }
+            if state.is_running.load(Ordering::SeqCst) {
+                None
+            } else if state
+                .is_running
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                None
+            } else {
+                let next = q
+                    .iter_mut()
+                    .find(|i| i.status == QueueStatus::Pending)
+                    .map(|item| {
+                        item.status = QueueStatus::Running;
+                        (item.request.clone(), item.id.clone())
+                    });
+                if next.is_none() {
+                    state.is_running.store(false, Ordering::SeqCst);
+                }
+                next
+            }
+        };
+        if let Some((req, id)) = head {
+            spawn_run_body(state, req, Some(id));
+            return true;
+        }
+        if !state.is_running.load(Ordering::SeqCst) {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+async fn enqueue_run(
+    State(state): State<AppState>,
+    Json(req): Json<RunRequest>,
+) -> Result<Json<serde_json::Value>, Response> {
+    if !matches!(
+        req.task.as_str(),
+        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub"
+    ) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, or pubsub", req.task),
+        )
+            .into_response());
+    }
+    let id = format!("q{}", state.queue_seq.fetch_add(1, Ordering::SeqCst) + 1);
+    {
+        let mut q = state.queue.lock().unwrap();
+        q.push_back(QueuedRun {
+            id: id.clone(),
+            enqueued_at: Utc::now().to_rfc3339(),
+            status: QueueStatus::Pending,
+            request: req,
+        });
+        // Bound history: drop oldest finished entries past 100.
+        while q.len() > 100 {
+            if let Some(pos) = q.iter().position(|i| i.status == QueueStatus::Done || i.status == QueueStatus::Cancelled) {
+                q.remove(pos);
+            } else {
+                break;
+            }
+        }
+    }
+    let started = kick_runner(&state, &id).await;
+    let position = state
+        .queue
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|i| i.status == QueueStatus::Pending)
+        .position(|i| i.id == id)
+        .map(|p| p + 1);
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "started": started,
+        "position": position,
+    })))
+}
+
+async fn remove_queued_run(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<String, Response> {
+    let mut q = state.queue.lock().unwrap();
+    match q.iter().position(|i| i.id == id) {
+        Some(pos) if q[pos].status == QueueStatus::Pending => {
+            q.remove(pos);
+            Ok(format!("Removed {id} from queue"))
+        }
+        Some(_) => Err((
+            axum::http::StatusCode::CONFLICT,
+            format!("{id} is already running or finished"),
+        )
+            .into_response()),
+        None => Err((axum::http::StatusCode::NOT_FOUND, format!("{id} not in queue")).into_response()),
+    }
+}
+
+async fn clear_queue(State(state): State<AppState>) -> String {
+    // Drops finished history only; pending work is never discarded here.
+    let mut q = state.queue.lock().unwrap();
+    let n_before = q.len();
+    q.retain(|i| i.status == QueueStatus::Pending || i.status == QueueStatus::Running);
+    format!("Cleared {} finished run(s)", n_before - q.len())
+}
+
 async fn start_run(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
@@ -955,440 +1567,7 @@ async fn start_run(
     }
 
     state.cancel_requested.store(false, Ordering::SeqCst);
-    let tx = state.log_sender.clone();
-    let state_clone = state.clone();
-
-    let handle = tokio::spawn(async move {
-        let mut total_trials = req.trials.max(1);
-        let mut passing_trials = 0;
-        let mut subrun_results = Vec::new();
-        let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let parent_run_id = format!(
-            "{}_{}_{}",
-            req.task,
-            req.model.replace(['/', ':'], "_"),
-            run_timestamp
-        );
-
-        let batch_log = |m: &str| {
-            let _ = tx.send(m.to_string());
-        };
-        // Batch reference: one shared denominator for all trials.
-        // Fallback is live per-trial measurement inside the pipeline.
-        let batch_ref = if total_trials > 1 {
-            let task_type_pre = match req.task.as_str() {
-                "redis" => TaskType::Redis,
-                "http" => TaskType::Http,
-                "dns" => TaskType::Dns,
-                "pdf" => TaskType::Pdf,
-                "wal" => TaskType::Wal,
-                "proxy" => TaskType::Proxy,
-                "pubsub" => TaskType::Pubsub,
-                _ => TaskType::Redis,
-            };
-            match crate::bench::batch_ref::BatchRef::start(
-                &task_type_pre,
-                &parent_run_id,
-                &batch_log,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    batch_log(&format!(
-                        "[BATCH-REF] setup failed ({}); trials use live refs.",
-                        e
-                    ));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        struct WebLogger {
-            tx: broadcast::Sender<String>,
-            log_buf: Arc<RwLock<Vec<String>>>,
-            current_run: Arc<RwLock<Option<ActiveRunInfo>>>,
-            trial_idx: u32,
-            total_trials: u32,
-        }
-        impl PipelineLogger for WebLogger {
-            fn log(&self, msg: &str) {
-                let ts = Utc::now().format("%H:%M:%S").to_string();
-                for line in msg.lines() {
-                    let clean = line.trim_end();
-                    let mut line_to_log = clean.to_string();
-
-                    if clean.starts_with("[LIVE] Turn ") && self.total_trials > 1 {
-                        line_to_log = format!("[LIVE] Subrun {}/{} | {}", self.trial_idx, self.total_trials, &clean[7..]);
-                    } else if clean.starts_with("[TELEMETRY] ") && !clean.contains("subrun=") {
-                        line_to_log = format!("{} subrun={} total_subruns={}", clean, self.trial_idx, self.total_trials);
-                    }
-
-                    let formatted = format!("[{}] {}", ts, line_to_log);
-                    self.log_buf.write().unwrap().push(formatted.clone());
-                    let _ = self.tx.send(formatted);
-                }
-
-                if msg.contains("[TELEMETRY]") {
-                    if let Some(telemetry_part) = msg.split("[TELEMETRY]").nth(1) {
-                        let mut turns = None;
-                        let mut max_turns = None;
-                        let mut spent = None;
-                        let mut tokens = None;
-                        let mut subrun = None;
-                        let mut total_subruns = None;
-
-                        for token in telemetry_part.split_whitespace() {
-                            if let Some((k, v)) = token.split_once("=") {
-                                match k {
-                                    "turn" => turns = v.parse::<u32>().ok(),
-                                    "max_turns" => max_turns = v.parse::<u32>().ok(),
-                                    "spent" => spent = v.parse::<f64>().ok(),
-                                    "tokens" => tokens = v.parse::<u64>().ok(),
-                                    "subrun" => subrun = v.parse::<u32>().ok(),
-                                    "total_subruns" => total_subruns = v.parse::<u32>().ok(),
-                                    _ => {}
-                                }
-                            }
-                        }
-
-                        if let Ok(mut run_lock) = self.current_run.write() {
-                            if let Some(ref mut info) = *run_lock {
-                                if let Some(t) = turns { info.turns = t; }
-                                if let Some(mt) = max_turns { info.max_turns = mt; }
-                                if let Some(s) = spent { info.cost_usd = s; }
-                                if let Some(tok) = tokens { info.tokens = tok; }
-                                info.subrun = subrun.or(Some(self.trial_idx));
-                                info.total_subruns = total_subruns.or(Some(self.total_trials));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for trial_idx in 1..=total_trials {
-            if state_clone.cancel_requested.load(Ordering::SeqCst) {
-                let _ = tx.send("[STOP] Run cancelled by user before next trial.".to_string());
-                break;
-            }
-
-            let started_at = Utc::now().to_rfc3339();
-            let run_id = if total_trials > 1 {
-                format!("{}_trial{}", parent_run_id, trial_idx)
-            } else {
-                parent_run_id.clone()
-            };
-
-            let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
-
-            *state_clone.current_run.write().unwrap() = Some(ActiveRunInfo {
-                run_id: run_id.clone(),
-                model: req.model.clone(),
-                task: req.task.clone(),
-                effort: effort_setting.clone(),
-                started_at,
-                turns: 0,
-                max_turns: req.max_turns,
-                cost_usd: 0.0,
-                tokens: 0,
-                duration_secs: None,
-                subrun: Some(trial_idx),
-                total_subruns: Some(total_trials),
-            });
-            if trial_idx == 1 {
-                state_clone.log_buffer.write().unwrap().clear();
-            }
-
-
-
-            let logger = Arc::new(WebLogger {
-                tx: tx.clone(),
-                log_buf: state_clone.log_buffer.clone(),
-                current_run: state_clone.current_run.clone(),
-                trial_idx,
-                total_trials,
-            });
-
-            if total_trials > 1 {
-                logger.log(&format!(
-                    "[SUBRUN] ━━━ Starting Subrun {}/{} (Model: {}, Task: {}) ━━━",
-                    trial_idx, total_trials, req.model, req.task
-                ));
-            } else {
-                logger.log(&format!(
-                    "[SUBRUN] ━━━ Starting Benchmark Run (Model: {}, Task: {}) ━━━",
-                    req.model, req.task
-                ));
-            }
-            logger.log(&format!(
-                "[LIVE] Subrun {}/{} | Turn 0/{} | Spent: $0.0000 | Tokens: 0",
-                trial_idx, total_trials, req.max_turns
-            ));
-            logger.log(&format!(
-                "[TELEMETRY] turn=0 max_turns={} spent=0.000000 tokens=0 subrun={} total_subruns={}",
-                req.max_turns, trial_idx, total_trials
-            ));
-
-            let task_type = match req.task.as_str() {
-                "redis" => TaskType::Redis,
-                "http" => TaskType::Http,
-                "dns" => TaskType::Dns,
-                "pdf" => TaskType::Pdf,
-                "wal" => TaskType::Wal,
-                "proxy" => TaskType::Proxy,
-                "pubsub" => TaskType::Pubsub,
-                _ => TaskType::Redis,
-            };
-
-            let repo_root = crate::config::get_repo_root();
-            let work_path = repo_root.join("workspace");
-
-            let pipe_config = BenchmarkConfig {
-                model: req.model.clone(),
-                task: task_type,
-                effort: effort_setting.clone(),
-                max_turns: req.max_turns,
-                budget_usd: req.budget_usd,
-                timeout_min: req.timeout_min.unwrap_or(30),
-                api_key: req.api_key.clone(),
-                workdir: work_path,
-                eval_only: req.eval_only,
-                run_id: Some(run_id.clone()),
-                save_results: req.save_results.unwrap_or(true),
-                review_model: req.review_model.clone(),
-                batch_reference: batch_ref.as_ref().map(|b| b.reference()),
-            };
-
-            let pipe_res = BenchmarkPipeline::execute(
-                pipe_config,
-                logger.clone(),
-                Some(state_clone.cancel_requested.clone()),
-            )
-            .await;
-
-            match pipe_res {
-                Ok(output) => {
-                    if output.benchmark_result.pass_rate == 100.0 {
-                        passing_trials += 1;
-                        if total_trials > 1 {
-                            logger.log(&format!(
-                                "[SUBRUN] ━━━ Subrun {}/{} PASSED (100.0%) ━━━",
-                                trial_idx, total_trials
-                            ));
-                        } else {
-                            logger.log("[PIPELINE SUCCESS] Benchmark run PASSED (100.0%)");
-                        }
-                    } else if total_trials > 1 {
-                        logger.log(&format!(
-                            "[SUBRUN] ━━━ Subrun {}/{} COMPLETED (Pass Rate: {:.1}%) ━━━",
-                            trial_idx, total_trials, output.benchmark_result.pass_rate
-                        ));
-                    } else {
-                        logger.log(&format!(
-                            "[PIPELINE RESULT] Benchmark run completed with pass rate: {:.1}%",
-                            output.benchmark_result.pass_rate
-                        ));
-                    }
-                    subrun_results.push(output.benchmark_result);
-                }
-                Err(e) => {
-                    if state_clone.cancel_requested.load(Ordering::SeqCst) {
-                        logger.log("[PIPELINE] Run cancelled by user.");
-                        break;
-                    }
-                    logger.log(&format!("[SUBRUN ERROR] Subrun {}/{} failed: {}", trial_idx, total_trials, e));
-                    break;
-                }
-            }
-        }
-
-        let batch_drift = batch_ref.map(|b| b.finish(&batch_log).drift);
-
-        let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
-            LeaderboardManager::consolidate_multi_trial_run(
-                &parent_run_id,
-                &subrun_results,
-                req.save_results.unwrap_or(true),
-                batch_drift,
-            )
-        } else {
-            None
-        };
-
-        if req.extend_if_unstable && total_trials >= 2 {
-            let max_total = req.max_trials.max(total_trials);
-            let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
-            let started_at = Utc::now().to_rfc3339();
-            let task_type_ext = match req.task.as_str() {
-                "redis" => TaskType::Redis,
-                "http" => TaskType::Http,
-                "dns" => TaskType::Dns,
-                "pdf" => TaskType::Pdf,
-                "wal" => TaskType::Wal,
-                "proxy" => TaskType::Proxy,
-                "pubsub" => TaskType::Pubsub,
-                _ => TaskType::Redis,
-            };
-            while total_trials < max_total {
-                let merged = match merged_opt {
-                    Some(m) => m,
-                    None => break,
-                };
-                let (stab, reason) = assess_stability(&merged.subruns);
-                if stab == Stability::Stable {
-                    let _ = tx.send(format!("[EXTEND] stable: {}; done.", reason));
-                    break;
-                }
-                let add = (max_total - total_trials).min(3);
-                let _ = tx.send(format!(
-                    "[EXTEND] unstable ({}); running {} more trial(s)...",
-                    reason, add
-                ));
-                let ext_batch_ref = if add > 1 {
-                    match crate::bench::batch_ref::BatchRef::start(
-                        &task_type_ext,
-                        &parent_run_id,
-                        &batch_log,
-                    ) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            let _ = tx.send(format!(
-                                "[BATCH-REF] setup failed ({}); trials use live refs.",
-                                e
-                            ));
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let mut ext_results = Vec::new();
-                let mut ext_passing = 0usize;
-                for i in 0..add {
-                    if state_clone.cancel_requested.load(Ordering::SeqCst) {
-                        let _ = tx.send("[STOP] Extension cancelled by user.".to_string());
-                        break;
-                    }
-                    let trial_idx = total_trials + 1 + i;
-                    let run_id = format!("{}_trial{}", parent_run_id, trial_idx);
-                    *state_clone.current_run.write().unwrap() = Some(ActiveRunInfo {
-                        run_id: run_id.clone(),
-                        model: req.model.clone(),
-                        task: req.task.clone(),
-                        effort: effort_setting.clone(),
-                        started_at: started_at.clone(),
-                        turns: 0,
-                        max_turns: req.max_turns,
-                        cost_usd: 0.0,
-                        tokens: 0,
-                        duration_secs: None,
-                        subrun: Some(trial_idx),
-                        total_subruns: Some(total_trials + add),
-                    });
-                    let logger = Arc::new(WebLogger {
-                        tx: tx.clone(),
-                        log_buf: state_clone.log_buffer.clone(),
-                        current_run: state_clone.current_run.clone(),
-                        trial_idx,
-                        total_trials: total_trials + add,
-                    });
-                    logger.log(&format!(
-                        "[SUBRUN] ━━━ Starting Extension Subrun {} (Model: {}, Task: {}) ━━━",
-                        trial_idx, req.model, req.task
-                    ));
-                    let repo_root = crate::config::get_repo_root();
-                    let pipe_config = BenchmarkConfig {
-                        model: req.model.clone(),
-                        task: task_type_ext,
-                        effort: effort_setting.clone(),
-                        max_turns: req.max_turns,
-                        budget_usd: req.budget_usd,
-                        timeout_min: req.timeout_min.unwrap_or(30),
-                        api_key: req.api_key.clone(),
-                        workdir: repo_root.join("workspace"),
-                        eval_only: req.eval_only,
-                        run_id: Some(run_id.clone()),
-                        save_results: req.save_results.unwrap_or(true),
-                        review_model: req.review_model.clone(),
-                        batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
-                    };
-                    match BenchmarkPipeline::execute(
-                        pipe_config,
-                        logger.clone(),
-                        Some(state_clone.cancel_requested.clone()),
-                    )
-                    .await
-                    {
-                        Ok(output) => {
-                            if output.benchmark_result.pass_rate == 100.0 {
-                                ext_passing += 1;
-                            }
-                            ext_results.push(output.benchmark_result);
-                        }
-                        Err(e) => {
-                            if state_clone.cancel_requested.load(Ordering::SeqCst) {
-                                logger.log("[PIPELINE] Run cancelled by user.");
-                                break;
-                            }
-                            logger.log(&format!("[SUBRUN ERROR] Extension subrun {} failed: {}", trial_idx, e));
-                            break;
-                        }
-                    }
-                }
-                let n_new = ext_results.len() as u32;
-                if n_new == 0 {
-                    let _ = tx.send("[EXTEND] all extension trials failed; keeping current merge.".to_string());
-                    break;
-                }
-                total_trials += n_new;
-                passing_trials += ext_passing;
-                subrun_results.extend(ext_results);
-                let ext_drift = ext_batch_ref.map(|b| b.finish(&batch_log).drift);
-                merged_opt = LeaderboardManager::consolidate_multi_trial_run(
-                    &parent_run_id,
-                    &subrun_results,
-                    req.save_results.unwrap_or(true),
-                    ext_drift,
-                );
-            }
-        }
-
-
-
-        if total_trials > 1 {
-            let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
-            let pass_at_k =
-                compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize)
-                    * 100.0;
-            let _ = tx.send(format!(
-                "[MULTI-TRIAL] Trials: {}, Passing: {}, Pass@1: {:.1}%, Pass@{}: {:.1}%",
-                total_trials, passing_trials, pass_at_1, total_trials, pass_at_k
-            ));
-        }
-
-        if passing_trials == total_trials as usize && total_trials > 0 {
-            let _ = tx.send("[STATUS] All trials passed (100% pass rate).".to_string());
-        } else if passing_trials > 0 {
-            let _ = tx.send(format!(
-                "[STATUS] Partial pass: {}/{} trials passed.",
-                passing_trials, total_trials
-            ));
-        } else {
-            let _ = tx.send(
-                "[STATUS] Benchmark completed with 0 passing trials (0.0% pass rate).".to_string(),
-            );
-        }
-
-        if let Ok(mut cur_lock) = state_clone.current_run.write() {
-            *state_clone.last_run.write().unwrap() = cur_lock.clone();
-            *cur_lock = None;
-        }
-        *state_clone.task_handle.lock().unwrap() = None;
-        state_clone.is_running.store(false, Ordering::SeqCst);
-        let _ = tx.send("[DONE]".to_string());
-    });
-    *state.task_handle.lock().unwrap() = Some(handle);
+    spawn_run_body(&state, req, None);
 
     Ok("Benchmark started".to_string())
 }
@@ -1464,7 +1643,70 @@ mod tests {
             last_run: Arc::new(RwLock::new(None)),
             log_buffer: Arc::new(RwLock::new(Vec::new())),
             task_handle: Arc::new(std::sync::Mutex::new(None)),
+            queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            queue_seq: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn queue_test_req() -> RunRequest {
+        RunRequest {
+            model: "test_model".to_string(),
+            task: "dns".to_string(),
+            api_key: None,
+            budget_usd: 0.10,
+            max_turns: 5,
+            eval_only: true,
+            effort: Some("low".to_string()),
+            timeout_min: Some(1),
+            trials: 1,
+            save_results: Some(false),
+            review_model: None,
+            extend_if_unstable: false,
+            max_trials: 9,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_queue_enqueue_while_busy_stays_pending() {
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        let res = enqueue_run(State(state.clone()), Json(queue_test_req())).await;
+        assert!(res.is_ok());
+        let body = res.unwrap().0;
+        assert_eq!(body["started"], false);
+        let q = get_queue(State(state)).await.0;
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].status, QueueStatus::Pending);
+        assert!(q[0].id.starts_with('q'));
+    }
+
+    #[tokio::test]
+    async fn test_queue_remove_and_clear() {
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        let a = enqueue_run(State(state.clone()), Json(queue_test_req())).await.unwrap().0;
+        let b = enqueue_run(State(state.clone()), Json(queue_test_req())).await.unwrap().0;
+        let ida = a["id"].as_str().unwrap().to_string();
+        let idb = b["id"].as_str().unwrap().to_string();
+        assert!(remove_queued_run(State(state.clone()), AxumPath(ida.clone())).await.is_ok());
+        // Removing twice -> not found.
+        assert!(remove_queued_run(State(state.clone()), AxumPath(ida)).await.is_err());
+        // Running items cannot be removed.
+        {
+            let mut q = state.queue.lock().unwrap();
+            q.iter_mut().find(|i| i.id == idb).unwrap().status = QueueStatus::Running;
+        }
+        assert!(remove_queued_run(State(state.clone()), AxumPath(idb)).await.is_err());
+        assert_eq!(get_queue(State(state.clone())).await.0.len(), 1);
+        let msg = clear_queue(State(state.clone())).await;
+        assert!(msg.contains("Cleared 0"));
+        {
+            let mut q = state.queue.lock().unwrap();
+            q.iter_mut().for_each(|i| i.status = QueueStatus::Done);
+        }
+        let msg = clear_queue(State(state.clone())).await;
+        assert!(msg.contains("Cleared 1"));
+        assert!(get_queue(State(state)).await.0.is_empty());
     }
 
     #[test]

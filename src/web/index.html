@@ -1073,6 +1073,16 @@
           <button class="btn btn-danger" id="stopBtn" onclick="stopRun()" style="display: none; padding: 10px 16px; font-weight: 600;">
             <span>🛑</span> Stop Run
           </button>
+          <button class="btn" id="queueBtn" onclick="enqueueRun()" title="Add current settings to the run queue (starts when the engine is free)">
+            <span>＋</span> Queue
+          </button>
+        </div>
+        <div style="margin-top: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="font-weight: 600;">Run Queue <span id="queueCount" class="badge">0</span></label>
+            <a href="#" onclick="clearFinishedQueue(); return false;" style="font-size: 0.75rem;" title="Drop finished queue entries">clear finished</a>
+          </div>
+          <div id="queueList"><div class="hint">Empty — queue runs to run them hands-free.</div></div>
         </div>
       </aside>
 
@@ -3543,6 +3553,82 @@ function copyRunId() {
       }
     }
 
+    function buildRunPayload() {
+      return {
+        model: document.getElementById('model').value.trim(),
+        task: document.getElementById('task').value,
+        effort: document.getElementById('effortSelect').value,
+        api_key: document.getElementById('apiKey').value.trim() || null,
+        budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
+        max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
+        timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 30,
+        trials: parseInt(document.getElementById('trials').value, 10) || 3,
+        eval_only: document.getElementById('evalOnly').checked,
+        extend_if_unstable: document.getElementById('extendUnstable').checked,
+        max_trials: parseInt(document.getElementById('maxTrials').value, 10) || 9,
+        review_model: document.getElementById("reviewModel").value.trim() || null
+      };
+    }
+
+    async function enqueueRun() {
+      const payload = buildRunPayload();
+      if (!payload.eval_only && !payload.api_key) {
+        alert('Please provide your OpenRouter API Key before queueing.');
+        return;
+      }
+      try {
+        const res = await fetch('/api/queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          appendLog(`[QUEUE] Failed to queue run: ${await res.text()}`);
+          return;
+        }
+        const data = await res.json();
+        const where = data.started ? 'started now' : ('position ' + (data.position ?? '?'));
+        appendLog(`[QUEUE] Queued ${data.id} (${payload.model} / ${payload.task} / ${payload.trials}x) — ${where}.`);
+        refreshQueue();
+      } catch (e) {
+        alert(`Error queueing run: ${e.message}`);
+      }
+    }
+
+    async function refreshQueue() {
+      const list = document.getElementById('queueList');
+      const count = document.getElementById('queueCount');
+      if (!list) return;
+      try {
+        const res = await fetch('/api/queue');
+        if (!res.ok) return;
+        const items = await res.json();
+        const active = items.filter(q => q.status === 'Pending' || q.status === 'Running');
+        if (count) count.textContent = active.length;
+        if (!items.length) {
+          list.innerHTML = '<div class="hint">Empty — queue runs to run them hands-free.</div>';
+          return;
+        }
+        list.innerHTML = items.map(q => {
+          const r = q.request || {};
+          const pill = q.status === 'Running' ? 'badge-pass' : q.status === 'Pending' ? 'badge-info' : 'badge';
+          const rm = q.status === 'Pending' ? ` <a href="#" onclick="removeQueued('${q.id}'); return false;" title="Remove from queue">✕</a>` : '';
+          const modelShort = (r.model || '').split('/').pop();
+          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times; <span class="${pill}">${q.status}</span>${rm}</div>`;
+        }).join('');
+      } catch (e) { /* keep last state on transient errors */ }
+    }
+
+    async function removeQueued(id) {
+      await fetch(`/api/queue/${id}`, { method: 'DELETE' });
+      refreshQueue();
+    }
+
+    async function clearFinishedQueue() {
+      await fetch('/api/queue', { method: 'DELETE' });
+      refreshQueue();
+    }
+
     async function startBenchmark() {
       const apiKey = document.getElementById('apiKey').value.trim();
       const model = document.getElementById('model').value.trim();
@@ -3719,7 +3805,8 @@ function copyRunId() {
       await fetchOmpStatus();
     }
 
-    setInterval(checkActiveRun, 5000);
+    setInterval(() => { checkActiveRun(); refreshQueue(); }, 5000);
+    refreshQueue();
     fetchOmpStatus();
     setInterval(fetchOmpStatus, 30000);
   </script>
