@@ -802,6 +802,7 @@ async fn get_env() -> Json<EnvironmentInfo> {
 }
 
 async fn stop_run(State(state): State<AppState>) -> Response {
+    eprintln!("[AUDIT] POST /api/run/stop at {}", Utc::now().to_rfc3339());
     if !state.is_running.load(Ordering::SeqCst) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
