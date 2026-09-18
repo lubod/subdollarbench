@@ -2561,6 +2561,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; gap: 6px; align-items: center; justify-content: flex-end;">
                 <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
                 <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="openCompareWith(this.dataset.runId)">⚖️ Compare</button>
+                ${(r.total_trials > 1 && r.stability && r.stability !== 'stable') ? `<button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="extendRun(this.dataset.runId)" title="Run 3 more trials and re-merge">＋ Extend</button>` : ''}
                 ${pubBadge}
               </div>
             </td>
@@ -2590,6 +2591,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; gap: 6px; align-items: center;">
                 <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
                 <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="openCompareWith(this.dataset.runId)">⚖️ Compare</button>
+              ${(r.total_trials > 1 && r.stability && r.stability !== 'stable') ? `<button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="extendRun(this.dataset.runId)" title="Run 3 more trials and re-merge">＋ Extend</button>` : ''}
               </div>
             </div>
             <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; background: #090d13; padding: 8px; border-radius: 6px; text-align: center;">
@@ -2684,6 +2686,25 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (bytes < 1024) return bytes + ' B';
       if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
       return (bytes / 1048576).toFixed(2) + ' MB';
+    }
+
+    async function extendRun(runId) {
+      if (!confirm(`Run 3 more trials for ${runId} and re-merge? This spends extra budget.`)) return;
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/extend`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trials: 3 })
+        });
+        if (res.ok) {
+          appendLog(`[QUEUE] ${(await res.text())}. Watch the console for progress.`);
+          switchTab('console');
+        } else {
+          appendLog(`[QUEUE] Extension refused: ${await res.text()}`);
+        }
+      } catch (e) {
+        alert(`Error starting extension: ${e.message}`);
+      }
     }
 
     async function inspectRun(runId) {
