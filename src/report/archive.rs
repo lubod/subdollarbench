@@ -65,12 +65,21 @@ pub struct RunManifest {
     pub env: Option<EnvironmentInfo>,
     #[serde(default)]
     pub git_commit: Option<String>,
+    /// Rule-set fingerprint (see report::rules). Only comparable within one version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_version: Option<String>,
     /// Trial count for consolidated parent manifests (None on single-trial records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_trials: Option<u32>,
     /// Pass@1 across trials for consolidated parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_at_1: Option<f64>,
+    /// Wilson 95% lower bound for P@1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_1_lo: Option<f64>,
+    /// Wilson 95% upper bound for P@1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_1_hi: Option<f64>,
     /// Trial-stability verdict (stable | watch | unstable) for consolidated parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stability: Option<String>,
@@ -275,8 +284,14 @@ mod tests {
         let dst = base.join("parent").join("workspace");
         assert!(!dst.exists());
         RunArchiver::copy_dir_recursive(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("main.go")).unwrap(), "package main");
-        assert_eq!(std::fs::read_to_string(dst.join("nested").join("a.txt")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("main.go")).unwrap(),
+            "package main"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("nested").join("a.txt")).unwrap(),
+            "hi"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -343,10 +358,13 @@ mod tests {
             git_commit: None,
             total_trials: None,
             pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
         };
 
         let console_log = "[06:30:00] [INIT] Starting test run\n[06:31:00] [DONE] Finished!\n";
@@ -378,12 +396,19 @@ mod tests {
         // Verify symlink escape protection
         let outside_file = temp_dir.join("secret.txt");
         let _ = fs::write(&outside_file, "super_secret_token");
-        let symlink_path = runs_dir.join("test_run_123").join("workspace").join("evil_symlink");
+        let symlink_path = runs_dir
+            .join("test_run_123")
+            .join("workspace")
+            .join("evil_symlink");
         #[cfg(unix)]
         {
             let _ = std::os::unix::fs::symlink(&outside_file, &symlink_path);
-            let escaped = RunArchiver::get_workspace_file(&runs_dir, "test_run_123", "evil_symlink");
-            assert!(escaped.is_none(), "Symlink escape outside workspace should be denied");
+            let escaped =
+                RunArchiver::get_workspace_file(&runs_dir, "test_run_123", "evil_symlink");
+            assert!(
+                escaped.is_none(),
+                "Symlink escape outside workspace should be denied"
+            );
         }
 
         let _ = fs::remove_dir_all(&temp_dir);

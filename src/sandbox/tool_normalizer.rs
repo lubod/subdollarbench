@@ -19,7 +19,10 @@ pub fn parse_pseudo_write(text: &str) -> Option<(Option<String>, String)> {
     }
 
     // 1. Check keyword arguments: path=... and content=...
-    let content_kw_re = Regex::new(r#"(?s)\bcontent=(?:"""(.*?)"""|'''(.*?)'''|"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')"#).ok()?;
+    let content_kw_re = Regex::new(
+        r#"(?s)\bcontent=(?:"""(.*?)"""|'''(.*?)'''|"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')"#,
+    )
+    .ok()?;
     if let Some(content_cap) = content_kw_re.captures(trimmed) {
         let raw_content = content_cap
             .get(1)
@@ -112,7 +115,10 @@ pub fn extract_code_blocks_as_writes(content: &str) -> Option<Vec<ExtractedToolC
     ).ok()?;
 
     for cap in block_re.captures_iter(content) {
-        let lang = cap.get(1).map(|m| m.as_str().to_lowercase()).unwrap_or_default();
+        let lang = cap
+            .get(1)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_default();
         let code_body = cap.get(2).map(|m| m.as_str()).unwrap_or("");
         let start_idx = cap.get(0).unwrap().start();
 
@@ -531,7 +537,8 @@ func main() {
 	})
 }
 ```"#;
-        let extracted = extract_tool_calls(content).expect("Should extract main.go from run 092044 snippet");
+        let extracted =
+            extract_tool_calls(content).expect("Should extract main.go from run 092044 snippet");
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].name, "write");
         let a0: Value = serde_json::from_str(&extracted[0].arguments).unwrap();
@@ -552,12 +559,16 @@ func main() {
 ```sh
 write content='#!/bin/sh\npython3 /workspace/tcp_listener.py' i="Create executable start script" path="/workspace/start.sh"
 ```"#;
-        let extracted = extract_tool_calls(content).expect("Should extract pseudo write from code block");
+        let extracted =
+            extract_tool_calls(content).expect("Should extract pseudo write from code block");
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].name, "write");
         let a0: Value = serde_json::from_str(&extracted[0].arguments).unwrap();
         assert_eq!(a0["path"], "start.sh");
-        assert_eq!(a0["content"], "#!/bin/sh\npython3 /workspace/tcp_listener.py");
+        assert_eq!(
+            a0["content"],
+            "#!/bin/sh\npython3 /workspace/tcp_listener.py"
+        );
     }
 
     #[test]
@@ -572,6 +583,9 @@ write content='#!/bin/sh\npython3 /workspace/tcp_listener.py' i="Create executab
         let cleaned = sanitize_tool_call(tc);
         let a0: Value = serde_json::from_str(&cleaned.arguments).unwrap();
         assert_eq!(a0["path"], "start.sh");
-        assert_eq!(a0["content"], "#!/bin/sh\npython3 /workspace/tcp_listener.py");
+        assert_eq!(
+            a0["content"],
+            "#!/bin/sh\npython3 /workspace/tcp_listener.py"
+        );
     }
 }

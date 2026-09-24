@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use crate::bench::BenchmarkRunner;
 use crate::config::{get_repo_root, TaskType};
-use crate::sandbox::docker::{SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE};
+use crate::sandbox::docker::{
+    SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE,
+};
 
 /// Batch-port assignments. Deliberately offset from the per-trial ref ports
 /// (6380/8081) so the batch ref can live across the whole batch while trial
@@ -25,7 +27,7 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
     match task {
         TaskType::Redis => Some(6389),
         TaskType::Http | TaskType::Proxy => Some(8089),
-        TaskType::Dns | TaskType::Pdf | TaskType::Wal | TaskType::Pubsub => None,
+        TaskType::Dns | TaskType::Pdf | TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
     }
 }
 
@@ -140,7 +142,12 @@ impl BatchRef {
                     pre,
                     port
                 ));
-                Ok(Some(BatchRef { sandbox, task: task.clone(), port, pre }))
+                Ok(Some(BatchRef {
+                    sandbox,
+                    task: task.clone(),
+                    port,
+                    pre,
+                }))
             }
             Err(e) => {
                 log(&format!("[BATCH-REF] Warning: batch calibration failed: {}. Trials fall back to live per-trial refs.", e));
@@ -160,7 +167,10 @@ impl BatchRef {
         let post = match measure(&self.task, self.port) {
             Ok(v) => Some(v),
             Err(e) => {
-                log(&format!("[BATCH-REF] Warning: post-batch re-measure failed: {}", e));
+                log(&format!(
+                    "[BATCH-REF] Warning: post-batch re-measure failed: {}",
+                    e
+                ));
                 None
             }
         };
@@ -179,7 +189,11 @@ impl BatchRef {
         };
         append_history(&self.task, self.pre, post, drift);
         self.sandbox.cleanup();
-        BatchRefReport { pre: self.pre, post, drift }
+        BatchRefReport {
+            pre: self.pre,
+            post,
+            drift,
+        }
     }
 }
 

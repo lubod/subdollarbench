@@ -673,11 +673,14 @@ const PORTAL_JS: &str = r#"
   }
 
   let currentWeights = loadStoredWeights();
-  let currentTab = 'all';
+  let currentTab = 'models';
   let searchQuery = '';
   let passOnly = false;
   let sortCol = 'score';
   let sortDir = -1;
+  // Models-tab ordering. Default: pooled P@1 lower bound, descending.
+  let modelsSortCol = 'p1lo';
+  let modelsSortDir = -1;
   let formulaPanelOpen = false;
   try {
     formulaPanelOpen = localStorage.getItem('subdollarbench_formula_open') === '1';
@@ -735,7 +738,7 @@ const PORTAL_JS: &str = r#"
   function computeScore(r, weights) {
     const w = weights || DEFAULT_WEIGHTS;
     let confFactor = 1.0;
-    const passRate = (r.pass_rate !== undefined && r.pass_rate !== null) ? r.pass_rate : 0;
+    const passRate = (r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? r.avg_pass_rate : ((r.pass_rate !== undefined && r.pass_rate !== null) ? r.pass_rate : 0);
     if (w.strictPass) {
       if (passRate < 100) return 0.0;
     } else {
@@ -749,7 +752,11 @@ const PORTAL_JS: &str = r#"
     const costFactor = Math.pow(baseCost, w.wCost);
 
     const candTp = Math.max(r.throughput_req_sec || 0, 0);
-    const refTp = (r.reference_throughput_req_sec && r.reference_throughput_req_sec > 0) ? r.reference_throughput_req_sec : getBaseline(r.task);
+    const hasLiveRef = (r.reference_throughput_req_sec && r.reference_throughput_req_sec > 0);
+    // No live reference, no score: fallback baselines are unlabeled
+    // constants unmeasured on this testbed (mirrors the Rust scorer).
+    if (w.wTp > 0 && !hasLiveRef) return null;
+    const refTp = hasLiveRef ? r.reference_throughput_req_sec : 0;
     const speedRatio = refTp > 0 ? (candTp / refTp) : 0;
     let tpFactor = 1.0;
     if (w.wTp > 0) {
@@ -791,10 +798,12 @@ const PORTAL_JS: &str = r#"
 
   function computeDefaultRanks(runs, tab) {
     let list = runs.slice();
-    if (tab && tab !== 'all' && tab !== 'grouped') {
+    if (tab && tab !== 'all') {
       list = list.filter(r => (r.task || '').toLowerCase() === tab.toLowerCase());
     }
-    list.sort((a, b) => computeScore(b, DEFAULT_WEIGHTS) - computeScore(a, DEFAULT_WEIGHTS));
+    const rankLo = r => (r.pass_at_1_lo !== undefined && r.pass_at_1_lo !== null) ? r.pass_at_1_lo : ((r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? r.pass_at_1 : (r.pass_rate || 0));
+    const scoreOrNeg = (r, w) => { const v = computeScore(r, w); return (v === null || v === undefined) ? -1 : v; };
+    list.sort((a, b) => (scoreOrNeg(b, DEFAULT_WEIGHTS) - scoreOrNeg(a, DEFAULT_WEIGHTS)) || (rankLo(b) - rankLo(a)));
     const map = {};
     list.forEach((r, idx) => {
       map[r.id] = idx + 1;
@@ -804,7 +813,7 @@ const PORTAL_JS: &str = r#"
 
   function getSortedFilteredRuns(runs, tab, query, onlyPassed) {
     let filtered = runs.slice();
-    if (tab && tab !== 'all' && tab !== 'grouped') {
+    if (tab && tab !== 'all') {
       filtered = filtered.filter(r => (r.task || '').toLowerCase() === tab.toLowerCase());
     }
     if (query) {
@@ -816,21 +825,28 @@ const PORTAL_JS: &str = r#"
       );
     }
     if (onlyPassed) {
-      filtered = filtered.filter(r => (r.pass_rate || 0) >= 100);
+      filtered = filtered.filter(r => ((r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? r.avg_pass_rate : (r.pass_rate || 0)) >= 100);
     }
 
     filtered.sort((a, b) => {
       let vA, vB;
       if (sortCol === 'score') {
-        vA = computeScore(a, currentWeights);
-        vB = computeScore(b, currentWeights);
+        const sA = computeScore(a, currentWeights);
+        const sB = computeScore(b, currentWeights);
+        vA = (sA === null || sA === undefined) ? -1 : sA;
+        vB = (sB === null || sB === undefined) ? -1 : sB;
+        if (vA === vB) {
+          const loA = (a.pass_at_1_lo !== undefined && a.pass_at_1_lo !== null) ? a.pass_at_1_lo : 0;
+          const loB = (b.pass_at_1_lo !== undefined && b.pass_at_1_lo !== null) ? b.pass_at_1_lo : 0;
+          return sortDir === 1 ? (loA - loB) : (loB - loA);
+        }
       } else if (sortCol === 'model') {
         vA = (a.model || '').toLowerCase();
         vB = (b.model || '').toLowerCase();
         return sortDir === 1 ? vA.localeCompare(vB) : vB.localeCompare(vA);
       } else if (sortCol === 'pass') {
-        vA = a.pass_rate || 0;
-        vB = b.pass_rate || 0;
+        vA = (a.avg_pass_rate !== undefined && a.avg_pass_rate !== null) ? a.avg_pass_rate : (a.pass_rate || 0);
+        vB = (b.avg_pass_rate !== undefined && b.avg_pass_rate !== null) ? b.avg_pass_rate : (b.pass_rate || 0);
       } else if (sortCol === 'dur') {
         vA = a.duration_seconds || 0;
         vB = b.duration_seconds || 0;
@@ -932,10 +948,13 @@ const PORTAL_JS: &str = r#"
 
       const curScore = computeScore(r, currentWeights);
       const defScore = computeScore(r, DEFAULT_WEIGHTS);
+      const scoreMain = (curScore === null || curScore === undefined)
+        ? `-- <small style="font-size: 0.72rem; color: var(--mut);">(eff ${(r.efficiency_score || 0).toFixed(1)})</small>`
+        : `${curScore.toFixed(1)} <small style="font-size: 0.72rem; color: var(--mut);">pts/¢</small>`;
       
       let scoreSub = '';
       if (isCustom) {
-        scoreSub = `<div style="font-size: 0.7rem; color: var(--mut);">default: ${defScore.toFixed(1)}</div>`;
+        scoreSub = `<div style="font-size: 0.7rem; color: var(--mut);">default: ${(defScore === null || defScore === undefined) ? '--' : defScore.toFixed(1)}</div>`;
       } else {
         const bonusBase = (r.throughput_score !== undefined && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100)
           ? `<div style="font-size: 0.72rem; color: var(--mut);">base: ${r.efficiency_score.toFixed(1)}</div>`
@@ -984,7 +1003,7 @@ const PORTAL_JS: &str = r#"
           </div>
         </td>
         <td class="score">
-          <div style="font-size: 0.95rem; font-weight: 700;">${curScore.toFixed(1)} <small style="font-size: 0.72rem; color: var(--mut);">pts/¢</small></div>
+          <div style="font-size: 0.95rem; font-weight: 700;">${scoreMain}</div>
           ${scoreSub}
         </td>
         <td><a href="runs/${escapeHtml(r.id)}/" class="badge badge-info" style="text-decoration: none; padding: 4px 8px;">Inspect &rarr;</a></td>
@@ -997,7 +1016,8 @@ const PORTAL_JS: &str = r#"
     if (!spec) return '';
     const taskRuns = runs.filter(r => (r.task || '').toLowerCase() === taskKey.toLowerCase());
     const passRuns = taskRuns.filter(r => currentWeights.strictPass ? (r.pass_rate >= 100) : ((r.pass_rate || 0) > 0));
-    const topRun = passRuns.slice().sort((a, b) => computeScore(b, currentWeights) - computeScore(a, currentWeights))[0];
+    const scoreNum = (r) => { const v = computeScore(r, currentWeights); return (v === null || v === undefined) ? -1 : v; };
+    const topRun = passRuns.slice().sort((a, b) => scoreNum(b) - scoreNum(a))[0];
 
     const peakTpRun = passRuns.slice().sort((a, b) => (b.throughput_req_sec || 0) - (a.throughput_req_sec || 0))[0];
     const lowestCostRun = passRuns.slice().sort((a, b) => {
@@ -1007,7 +1027,8 @@ const PORTAL_JS: &str = r#"
     })[0];
 
     const topModel = topRun ? shortModelName(topRun.model) : 'None yet';
-    const topScore = topRun ? (computeScore(topRun, currentWeights).toFixed(1) + ' pts/¢') : '-';
+    const topScoreVal = topRun ? computeScore(topRun, currentWeights) : null;
+    const topScore = topRun ? (((topScoreVal === null || topScoreVal === undefined) ? '-- (eff ' + (topRun.efficiency_score || 0).toFixed(1) + ')' : topScoreVal.toFixed(1)) + ' pts/¢') : '-';
     const peakTpStr = peakTpRun ? formatThroughput(peakTpRun.throughput_req_sec, taskKey) : 'N/A';
     const peakRatioStr = (peakTpRun && peakTpRun.reference_throughput_req_sec && peakTpRun.throughput_req_sec)
       ? `${Math.round((peakTpRun.throughput_req_sec / peakTpRun.reference_throughput_req_sec) * 100)}% of reference · regime ${regimeOf(peakTpRun)}`
@@ -1096,7 +1117,7 @@ const PORTAL_JS: &str = r#"
     return `
       <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span>📐</span>
-        <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>
+        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>HTTP/Proxy</strong> (Nginx, live), <strong>Redis</strong> (live). <strong>DNS</strong> (live CoreDNS where measured), <strong>PDF/WAL/PubSub</strong> timings are reported but unscored (--). DNS is quarantined from the global board pending verifier investigation.</span>
         ${customBadge}
       </div>
     `;
@@ -1177,13 +1198,130 @@ const PORTAL_JS: &str = r#"
     });
   }
 
+  // Wilson 95% interval on raw counts (percent). Mirrors the Rust scorer.
+  function wilson95(c, n) {
+    if (!n) return [0, 0];
+    const z = 1.96, z2 = z * z;
+    const p = c / n;
+    const denom = 1 + z2 / n;
+    const center = (p + z2 / (2 * n)) / denom;
+    const half = z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denom;
+    return [Math.max(0, center - half) * 100, Math.min(1, center + half) * 100];
+  }
+
+  // Cross-task rollup: one row per model+effort over non-quarantined tasks.
+  // Pooled P@1 = passing trials / all trials; cost/turns summed; avg% averaged.
+  function aggregateModels() {
+    const groups = {};
+    for (const r of RUNS_DATA) {
+      const task = (r.task || '').toLowerCase();
+      if (task === 'dns') continue;
+      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto');
+      const g = groups[key] || (groups[key] = {
+        model: r.model || '?', effort: r.effort || 'auto',
+        tasks: {}, nTrials: 0, nPass: 0, sumAvg: 0, nParents: 0,
+        sumCost: 0, sumTurns: 0,
+      });
+      g.tasks[r.task] = true;
+      const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
+      const c = (r.subruns && r.subruns.length)
+        ? r.subruns.filter(sr => (sr.pass_rate || 0) >= 100).length
+        : (((r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? r.avg_pass_rate : r.pass_rate) >= 100 ? n : 0);
+      g.nTrials += n;
+      g.nPass += c;
+      g.sumAvg += ((r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? r.avg_pass_rate : (r.pass_rate || 0));
+      g.nParents += 1;
+      g.sumCost += (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
+      g.sumTurns += (r.turns || 0);
+    }
+    const rows = Object.values(groups).map(g => {
+      const [lo, hi] = wilson95(g.nPass, g.nTrials);
+      return {
+        model: g.model, effort: g.effort,
+        nTasks: Object.keys(g.tasks).length,
+        tasks: Object.keys(g.tasks).sort().join(', '),
+        avgPct: g.sumAvg / Math.max(1, g.nParents),
+        p1: g.nTrials ? (100 * g.nPass / g.nTrials) : 0,
+        lo, hi, nTrials: g.nTrials, nPass: g.nPass,
+        cost: g.sumCost, turns: g.sumTurns,
+      };
+    });
+    rows.sort((a, b) => (b.lo - a.lo) || (b.p1 - a.p1) || (a.cost - b.cost));
+    return rows;
+  }
+
+  function modelsSortVal(r, col) {
+    if (col === 'model') return (r.model + ' ' + r.effort).toLowerCase();
+    if (col === 'tasks') return r.nTasks;
+    if (col === 'avg') return r.avgPct;
+    if (col === 'cost') return r.cost;
+    if (col === 'turns') return r.turns;
+    if (col === 'p1') return r.p1;
+    return r.lo;
+  }
+
+  function renderModelsView() {
+    const q = (typeof searchQuery !== 'undefined' ? (searchQuery || '') : '').toLowerCase();
+    const rows = aggregateModels().filter(r => !q || ((r.model + ' ' + r.effort).toLowerCase().includes(q)));
+    rows.sort((a, b) => {
+      const va = modelsSortVal(a, modelsSortCol);
+      const vb = modelsSortVal(b, modelsSortCol);
+      if (typeof va === 'string') return modelsSortDir === 1 ? va.localeCompare(vb) : vb.localeCompare(va);
+      if (va === vb) return (b.lo - a.lo) || (b.p1 - a.p1) || (a.cost - b.cost);
+      return modelsSortDir === 1 ? (va - vb) : (vb - va);
+    });
+    const body = rows.map((r, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i + 1}`;
+      const meta = getModelMeta(r.model);
+      return `<tr>
+        <td style="text-align: center;">${medal}</td>
+        <td><div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+          <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
+            <span class="model-icon" title="${meta.family}">${meta.icon}</span>
+            <span style="font-weight: 600; color: ${meta.color};">${escapeHtml(shortModelName(r.model))}</span>
+          </div>
+          <span class="badge badge-effort">effort: ${escapeHtml(r.effort)}</span>
+        </div></td>
+        <td style="text-align: center;">${r.nTasks} <span style="font-size: 0.7rem; color: var(--mut);">${escapeHtml(r.tasks)}</span></td>
+        <td style="text-align: center; font-weight: 700;">${r.avgPct.toFixed(0)}%</td>
+        <td style="text-align: center; font-weight: 700;">${r.p1.toFixed(0)}% <span style="font-size: 0.7rem; color: var(--mut);">(${r.lo.toFixed(0)}–${r.hi.toFixed(0)})</span>
+          <div style="font-size: 0.7rem; color: var(--mut);">${r.nPass}/${r.nTrials} trials</div></td>
+        <td style="text-align: center;">$${r.cost.toFixed(4)}</td>
+        <td style="text-align: center;">${r.turns}</td>
+      </tr>`;
+    }).join('\n');
+    const arrow = (c) => modelsSortCol === c ? (modelsSortDir === 1 ? ' ▲' : ' ▼') : '';
+    return `
+      <div style="margin-bottom: 10px; padding: 8px 12px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.76rem; color: var(--mut);">
+        🏅 <strong>Cross-task rollup</strong> (DNS quarantined): one row per model+effort across all tasks. Ranked by pooled P@1 lower bound — the honest answer to "which cheap model codes best".
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th style="width: 40px;">#</th>
+          <th onclick="window.__subdollar_models_sort('model')" style="cursor: pointer;">Model & Effort${arrow('model')}</th>
+          <th onclick="window.__subdollar_models_sort('tasks')" style="cursor: pointer;">Tasks${arrow('tasks')}</th>
+          <th onclick="window.__subdollar_models_sort('avg')" style="cursor: pointer;">Mean avg%${arrow('avg')}</th>
+          <th onclick="window.__subdollar_models_sort('p1lo')" style="cursor: pointer;">Pooled P@1 (95% CI)${arrow('p1lo')}</th>
+          <th onclick="window.__subdollar_models_sort('cost')" style="cursor: pointer;">Total cost${arrow('cost')}</th>
+          <th onclick="window.__subdollar_models_sort('turns')" style="cursor: pointer;">Total turns${arrow('turns')}</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table></div>`;
+  }
+
   function updateLeaderboardView() {
     syncFormulaControls();
+    // The formula customizer never scored the Models rollup: hide its
+    // toggle there, restore it on task tabs.
+    const ft0 = document.getElementById('formulaToggleBtn');
+    if (ft0) ft0.style.display = (typeof currentTab !== 'undefined' && currentTab === 'models') ? 'none' : '';
+    const fp0 = document.getElementById('formulaPanel');
+    if (fp0 && typeof currentTab !== 'undefined' && currentTab === 'models') fp0.style.display = 'none';
 
     const container = document.getElementById('portalDynamicContainer');
     if (!container) return;
 
-    ['all', 'http', 'redis', 'dns', 'pdf', 'wal', 'proxy', 'pubsub', 'grouped'].forEach(t => {
+    ['models', 'http', 'redis', 'dns', 'pdf', 'wal', 'proxy', 'pubsub'].forEach(t => {
       const btn = document.getElementById('tabBtn_' + t);
       if (btn) {
         if (t === currentTab) btn.classList.add('active');
@@ -1191,68 +1329,15 @@ const PORTAL_JS: &str = r#"
       }
     });
 
-    if (currentTab === 'grouped') {
-      const httpRuns = getSortedFilteredRuns(RUNS_DATA, 'http', searchQuery, passOnly);
-      const redisRuns = getSortedFilteredRuns(RUNS_DATA, 'redis', searchQuery, passOnly);
-      const dnsRuns = getSortedFilteredRuns(RUNS_DATA, 'dns', searchQuery, passOnly);
-      const pdfRuns = getSortedFilteredRuns(RUNS_DATA, 'pdf', searchQuery, passOnly);
-      const walRuns = getSortedFilteredRuns(RUNS_DATA, 'wal', searchQuery, passOnly);
-      const proxyRuns = getSortedFilteredRuns(RUNS_DATA, 'proxy', searchQuery, passOnly);
-      const pubsubRuns = getSortedFilteredRuns(RUNS_DATA, 'pubsub', searchQuery, passOnly);
-      const allRuns = getSortedFilteredRuns(RUNS_DATA, 'all', searchQuery, passOnly);
-
-      const defHttp = computeDefaultRanks(RUNS_DATA, 'http');
-      const defRedis = computeDefaultRanks(RUNS_DATA, 'redis');
-      const defDns = computeDefaultRanks(RUNS_DATA, 'dns');
-      const defPdf = computeDefaultRanks(RUNS_DATA, 'pdf');
-      const defWal = computeDefaultRanks(RUNS_DATA, 'wal');
-      const defProxy = computeDefaultRanks(RUNS_DATA, 'proxy');
-      const defPubsub = computeDefaultRanks(RUNS_DATA, 'pubsub');
-      const defAll = computeDefaultRanks(RUNS_DATA, 'all');
-
+    if (currentTab === 'models') {
       container.innerHTML = `
         ${renderCalibrationNote()}
-        <div style="display: flex; flex-direction: column; gap: 16px;">
-          <div>
-            ${renderTaskBanner('http', RUNS_DATA)}
-            ${renderTableContainer(httpRuns, false, '🌐 Task 2: HTTP/1.1 Web Server Rankings', 'RFC 7230/7231 Conformance', defHttp)}
-          </div>
-          <div>
-            ${renderTaskBanner('redis', RUNS_DATA)}
-            ${renderTableContainer(redisRuns, false, '⚡ Task 1: Redis Server Rankings', 'RESP2 Protocol Conformance', defRedis)}
-          </div>
-          <div>
-            ${renderTaskBanner('dns', RUNS_DATA)}
-            ${renderTableContainer(dnsRuns, false, '📡 Task 3: DNS Server Rankings', 'RFC 1035 UDP 5353 Conformance', defDns)}
-          </div>
-          <div>
-            ${renderTaskBanner('pdf', RUNS_DATA)}
-            ${renderTableContainer(pdfRuns, false, '📄 Task 4: PDF Microservice Rankings', 'Port 8090 Raw Parser Conformance', defPdf)}
-          </div>
-          <div>
-            ${renderTaskBanner('wal', RUNS_DATA)}
-            ${renderTableContainer(walRuns, false, '📓 Task 5: WAL Broker Rankings', 'TCP Fsync Durability Conformance', defWal)}
-          </div>
-          <div>
-            ${renderTaskBanner('proxy', RUNS_DATA)}
-            ${renderTableContainer(proxyRuns, false, '🔀 Task 6: Reverse Proxy Rankings', 'Port 8091 Round-Robin + Failover Conformance', defProxy)}
-          </div>
-          <div>
-            ${renderTaskBanner('pubsub', RUNS_DATA)}
-            ${renderTableContainer(pubsubRuns, false, '📢 Task 7: Pub/Sub Broker Rankings', 'Port 8092 WebSocket Fan-Out Conformance', defPubsub)}
-          </div>
-          <div>
-            ${renderTableContainer(allRuns, true, '🏆 Consolidated Global Leaderboard (All Runs)', 'Global multi-task ranking', defAll)}
-          </div>
-        </div>
+        ${renderModelsView()}
       `;
-    } else if (currentTab === 'all') {
-      const runs = getSortedFilteredRuns(RUNS_DATA, 'all', searchQuery, passOnly);
-      const defAll = computeDefaultRanks(RUNS_DATA, 'all');
-      container.innerHTML = `
-        ${renderCalibrationNote()}
-        ${renderTableContainer(runs, true, '', '', defAll)}
-      `;
+      const ft = document.getElementById('formulaToggleBtn');
+      if (ft) ft.style.display = 'none';
+      const fp = document.getElementById('formulaPanel');
+      if (fp) fp.style.display = 'none';
     } else {
       const runs = getSortedFilteredRuns(RUNS_DATA, currentTab, searchQuery, passOnly);
       const defTask = computeDefaultRanks(RUNS_DATA, currentTab);
@@ -1271,6 +1356,12 @@ const PORTAL_JS: &str = r#"
       });
     });
   }
+
+  window.__subdollar_models_sort = function(col) {
+    if (modelsSortCol === col) modelsSortDir = -modelsSortDir;
+    else { modelsSortCol = col; modelsSortDir = (col === 'model') ? 1 : -1; }
+    updateLeaderboardView();
+  };
 
   window.__subdollar_set_tab = function(tab) {
     currentTab = tab;
@@ -1339,7 +1430,6 @@ const PORTAL_JS: &str = r#"
 })();
 "#;
 
-
 pub struct PortalExporter;
 
 impl PortalExporter {
@@ -1355,7 +1445,10 @@ impl PortalExporter {
         let runs_path = Path::new(runs_dir);
         let mut results = LeaderboardManager::load_all(results_dir);
         results.truncate(keep);
-        let visible: Vec<_> = results.into_iter().filter(|r| !is_hidden(runs_path, &r.id)).collect();
+        let visible: Vec<_> = results
+            .into_iter()
+            .filter(|r| !is_hidden(runs_path, &r.id))
+            .collect();
         let out_dir = Path::new(out);
         let runs_out = out_dir.join("runs");
         fs::create_dir_all(&runs_out)
@@ -1438,54 +1531,211 @@ impl PortalExporter {
             .replace('"', "&quot;")
     }
 
-    pub fn get_model_meta(model: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str) {
+    pub fn get_model_meta(
+        model: &str,
+    ) -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
         let m = model.to_lowercase();
         if m.contains("claude") || m.contains("anthropic") {
-            ("Anthropic", "✦", "#f27244", "rgba(242, 114, 68, 0.14)", "rgba(242, 114, 68, 0.35)")
-        } else if m.contains("gpt") || m.contains("openai") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
-            ("OpenAI", "✳️", "#10a37f", "rgba(16, 163, 127, 0.14)", "rgba(16, 163, 127, 0.35)")
+            (
+                "Anthropic",
+                "✦",
+                "#f27244",
+                "rgba(242, 114, 68, 0.14)",
+                "rgba(242, 114, 68, 0.35)",
+            )
+        } else if m.contains("gpt")
+            || m.contains("openai")
+            || m.contains("o1")
+            || m.contains("o3")
+            || m.contains("o4")
+        {
+            (
+                "OpenAI",
+                "✳️",
+                "#10a37f",
+                "rgba(16, 163, 127, 0.14)",
+                "rgba(16, 163, 127, 0.35)",
+            )
         } else if m.contains("gemini") || m.contains("google") {
-            ("Google", "✨", "#4285f4", "rgba(66, 133, 244, 0.14)", "rgba(66, 133, 244, 0.35)")
+            (
+                "Google",
+                "✨",
+                "#4285f4",
+                "rgba(66, 133, 244, 0.14)",
+                "rgba(66, 133, 244, 0.35)",
+            )
         } else if m.contains("deepseek") {
-            ("DeepSeek", "🐋", "#0084ff", "rgba(0, 132, 255, 0.14)", "rgba(0, 132, 255, 0.35)")
+            (
+                "DeepSeek",
+                "🐋",
+                "#0084ff",
+                "rgba(0, 132, 255, 0.14)",
+                "rgba(0, 132, 255, 0.35)",
+            )
         } else if m.contains("llama") || m.contains("meta") {
-            ("Meta", "🦙", "#8b5cf6", "rgba(139, 92, 246, 0.14)", "rgba(139, 92, 246, 0.35)")
+            (
+                "Meta",
+                "🦙",
+                "#8b5cf6",
+                "rgba(139, 92, 246, 0.14)",
+                "rgba(139, 92, 246, 0.35)",
+            )
         } else if m.contains("qwen") {
-            ("Qwen", "🔮", "#a855f7", "rgba(168, 85, 247, 0.14)", "rgba(168, 85, 247, 0.35)")
+            (
+                "Qwen",
+                "🔮",
+                "#a855f7",
+                "rgba(168, 85, 247, 0.14)",
+                "rgba(168, 85, 247, 0.35)",
+            )
         } else if m.contains("mistral") || m.contains("codestral") || m.contains("pixtral") {
-            ("Mistral", "🌪️", "#ff7000", "rgba(255, 112, 0, 0.14)", "rgba(255, 112, 0, 0.35)")
+            (
+                "Mistral",
+                "🌪️",
+                "#ff7000",
+                "rgba(255, 112, 0, 0.14)",
+                "rgba(255, 112, 0, 0.35)",
+            )
         } else if m.contains("minimax") {
-            ("MiniMax", "⚡", "#e11d48", "rgba(225, 29, 72, 0.14)", "rgba(225, 29, 72, 0.35)")
+            (
+                "MiniMax",
+                "⚡",
+                "#e11d48",
+                "rgba(225, 29, 72, 0.14)",
+                "rgba(225, 29, 72, 0.35)",
+            )
         } else if m.contains("nova") || m.contains("amazon") {
-            ("Amazon", "☀️", "#f59e0b", "rgba(245, 158, 11, 0.14)", "rgba(245, 158, 11, 0.35)")
+            (
+                "Amazon",
+                "☀️",
+                "#f59e0b",
+                "rgba(245, 158, 11, 0.14)",
+                "rgba(245, 158, 11, 0.35)",
+            )
         } else if m.contains("cohere") || m.contains("command") {
-            ("Cohere", "🌿", "#14b8a6", "rgba(20, 184, 166, 0.14)", "rgba(20, 184, 166, 0.35)")
-        } else if m.contains("local") || m.contains("ollama") || m.contains("llama.cpp") || m.contains("vllm") {
-            ("Local", "💻", "#94a3b8", "rgba(148, 163, 184, 0.14)", "rgba(148, 163, 184, 0.35)")
+            (
+                "Cohere",
+                "🌿",
+                "#14b8a6",
+                "rgba(20, 184, 166, 0.14)",
+                "rgba(20, 184, 166, 0.35)",
+            )
+        } else if m.contains("local")
+            || m.contains("ollama")
+            || m.contains("llama.cpp")
+            || m.contains("vllm")
+        {
+            (
+                "Local",
+                "💻",
+                "#94a3b8",
+                "rgba(148, 163, 184, 0.14)",
+                "rgba(148, 163, 184, 0.35)",
+            )
         } else {
             let colors = [
-                ("Other", "🤖", "#06b6d4", "rgba(6, 182, 212, 0.14)", "rgba(6, 182, 212, 0.35)"),
-                ("Other", "🤖", "#ec4899", "rgba(236, 72, 153, 0.14)", "rgba(236, 72, 153, 0.35)"),
-                ("Other", "🤖", "#84cc16", "rgba(132, 204, 22, 0.14)", "rgba(132, 204, 22, 0.35)"),
-                ("Other", "🤖", "#3b82f6", "rgba(59, 130, 246, 0.14)", "rgba(59, 130, 246, 0.35)"),
-                ("Other", "🤖", "#f43f5e", "rgba(244, 63, 94, 0.14)", "rgba(244, 63, 94, 0.35)"),
-                ("Other", "🤖", "#6366f1", "rgba(99, 102, 241, 0.14)", "rgba(99, 102, 241, 0.35)"),
-                ("Other", "🤖", "#10b981", "rgba(16, 185, 129, 0.14)", "rgba(16, 185, 129, 0.35)"),
-                ("Other", "🤖", "#f59e0b", "rgba(245, 158, 11, 0.14)", "rgba(245, 158, 11, 0.35)"),
+                (
+                    "Other",
+                    "🤖",
+                    "#06b6d4",
+                    "rgba(6, 182, 212, 0.14)",
+                    "rgba(6, 182, 212, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#ec4899",
+                    "rgba(236, 72, 153, 0.14)",
+                    "rgba(236, 72, 153, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#84cc16",
+                    "rgba(132, 204, 22, 0.14)",
+                    "rgba(132, 204, 22, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#3b82f6",
+                    "rgba(59, 130, 246, 0.14)",
+                    "rgba(59, 130, 246, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#f43f5e",
+                    "rgba(244, 63, 94, 0.14)",
+                    "rgba(244, 63, 94, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#6366f1",
+                    "rgba(99, 102, 241, 0.14)",
+                    "rgba(99, 102, 241, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#10b981",
+                    "rgba(16, 185, 129, 0.14)",
+                    "rgba(16, 185, 129, 0.35)",
+                ),
+                (
+                    "Other",
+                    "🤖",
+                    "#f59e0b",
+                    "rgba(245, 158, 11, 0.14)",
+                    "rgba(245, 158, 11, 0.35)",
+                ),
             ];
-            let hash: usize = m.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+            let hash: usize = m.bytes().fold(0usize, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as usize)
+            });
             colors[hash % colors.len()]
         }
     }
 
-    fn render_index(results: &[crate::report::leaderboard::BenchmarkRunResult], base_url: &str) -> String {
-        let http_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("http")).count();
-        let redis_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("redis")).count();
-        let dns_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("dns")).count();
-        let pdf_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("pdf")).count();
-        let wal_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("wal")).count();
-        let proxy_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("proxy")).count();
-        let pubsub_n = results.iter().filter(|r| r.task.eq_ignore_ascii_case("pubsub")).count();
+    fn render_index(
+        results: &[crate::report::leaderboard::BenchmarkRunResult],
+        base_url: &str,
+    ) -> String {
+        let http_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("http"))
+            .count();
+        let redis_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("redis"))
+            .count();
+        let dns_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("dns"))
+            .count();
+        let pdf_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("pdf"))
+            .count();
+        let wal_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("wal"))
+            .count();
+        let proxy_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("proxy"))
+            .count();
+        let pubsub_n = results
+            .iter()
+            .filter(|r| r.task.eq_ignore_ascii_case("pubsub"))
+            .count();
         let passed_n = results.iter().filter(|r| r.pass_rate >= 100.0).count();
         let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
 
@@ -1515,14 +1765,27 @@ impl PortalExporter {
             let eff_c = r.effective_cost_usd.unwrap_or(r.total_cost_usd);
             let dur_s = r.duration_seconds.unwrap_or(0.0);
             let dur_txt = format_duration(dur_s);
-            let tok_n = if r.total_tokens > 0 { r.total_tokens } else { r.prompt_tokens + r.cached_tokens + r.completion_tokens };
+            let tok_n = if r.total_tokens > 0 {
+                r.total_tokens
+            } else {
+                r.prompt_tokens + r.cached_tokens + r.completion_tokens
+            };
             let tok_txt = format!("{:.1}k tokens", tok_n as f64 / 1000.0);
             let pass_badge = if r.pass_rate >= 100.0 {
-                format!("<span class=\"badge badge-pass\">✔ 100% ({}/{})</span>", r.passed_stages, r.total_stages)
+                format!(
+                    "<span class=\"badge badge-pass\">✔ 100% ({}/{})</span>",
+                    r.passed_stages, r.total_stages
+                )
             } else {
-                format!("<span class=\"badge badge-fail\">✕ {:.0}% ({}/{})</span>", r.pass_rate, r.passed_stages, r.total_stages)
+                format!(
+                    "<span class=\"badge badge-fail\">✕ {:.0}% ({}/{})</span>",
+                    r.pass_rate, r.passed_stages, r.total_stages
+                )
             };
-            let turns_str = r.turns.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
+            let turns_str = r
+                .turns
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string());
 
             let subruns_badge = if !r.subruns.is_empty() {
                 format!(" <span class=\"badge\" style=\"background:rgba(163,113,247,0.15);color:#d2a8ff;font-weight:600;\" title=\"Fair Expected Score: Median TP & Passing Mean Cost scaled by Pass@1\">{} trials (Fair)</span>", r.subruns.len())
@@ -1545,10 +1808,16 @@ impl PortalExporter {
                     r.subruns.len()
                 ));
                 for (s_idx, sr) in r.subruns.iter().enumerate() {
-                    let s_tp = sr.throughput_req_sec.map(|v| format!("{:.0} {}", v, unit)).unwrap_or_else(|| "N/A".to_string());
+                    let s_tp = sr
+                        .throughput_req_sec
+                        .map(|v| format!("{:.0} {}", v, unit))
+                        .unwrap_or_else(|| "N/A".to_string());
                     let s_cost = sr.effective_cost_usd.unwrap_or(sr.total_cost_usd);
                     let s_dur = format_duration(sr.duration_seconds.unwrap_or(0.0));
-                    let s_turns = sr.turns.map(|t| format!("{}t", t)).unwrap_or_else(|| "-".to_string());
+                    let s_turns = sr
+                        .turns
+                        .map(|t| format!("{}t", t))
+                        .unwrap_or_else(|| "-".to_string());
                     subruns_html.push_str(&format!(
                         "<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px dashed rgba(255,255,255,0.05);padding-bottom:2px;\"><span><strong>Trial {}:</strong> {} · ${:.4} · {} · {}</span><a href=\"runs/{}/\" style=\"color:var(--primary);text-decoration:underline;\">Inspect</a></div>",
                         s_idx + 1, s_tp, s_cost, s_dur, s_turns, Self::esc(&sr.id)
@@ -1597,7 +1866,7 @@ impl PortalExporter {
         };
 
         format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📡 DNS Server</div><div class=\"v\">{dns}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div><div class=\"card\"><div class=\"k\">📓 WAL Broker</div><div class=\"v\">{wal}</div></div><div class=\"card\"><div class=\"k\">🔀 Reverse Proxy</div><div class=\"v\">{proxy}</div></div><div class=\"card\"><div class=\"k\">📢 Pub/Sub Broker</div><div class=\"v\">{pubsub}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                 <button id=\"tabBtn_all\" class=\"btn-toggle active\" onclick=\"window.__subdollar_set_tab('all')\">🌐 Consolidated (All Tasks)</button>                 <button id=\"tabBtn_http\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('http')\">🌐 HTTP/1.1 Server <span class=\"badge-count\">{http}</span></button>                 <button id=\"tabBtn_redis\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('redis')\">⚡ Redis Clone <span class=\"badge-count\">{redis}</span></button>                 <button id=\"tabBtn_dns\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('dns')\">📡 DNS Server <span class=\"badge-count\">{dns}</span></button>                 <button id=\"tabBtn_wal\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('wal')\">📓 WAL <span class=\"badge-count\">{wal}</span></button>                 <button id=\"tabBtn_proxy\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('proxy')\">🔀 Proxy <span class=\"badge-count\">{proxy}</span></button>                 <button id=\"tabBtn_pubsub\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pubsub')\">📢 PubSub <span class=\"badge-count\">{pubsub}</span></button>                 <button id=\"tabBtn_pdf\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pdf')\">📄 PDF Microservice <span class=\"badge-count\">{pdf}</span></button>                 <button id=\"tabBtn_grouped\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('grouped')\">📑 Grouped View</button>               </div>               <div style=\"display:flex;gap:10px;align-items:center;flex-wrap:wrap;\">                 <button id=\"formulaToggleBtn\" class=\"btn-formula\" onclick=\"window.__subdollar_toggle_formula()\">                   <span>🎛️ Customize Formula</span>                   <span id=\"formulaStatusBadge\" class=\"badge\" style=\"background:rgba(88,166,255,0.2);color:var(--acc);font-size:0.68rem;padding:1px 5px;display:none;\">Custom</span>                 </button>                 <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>             <div id=\"formulaPanel\" class=\"formula-panel\" style=\"display:none;\">               <div class=\"formula-header\">                 <div>                   <div style=\"display:flex;align-items:center;gap:8px;\">                     <span style=\"font-size:1.1rem;\">🎛️</span>                     <span style=\"font-size:0.95rem;font-weight:700;color:#fff;\">Interactive Scoring Formula Customizer</span>                     <span class=\"badge badge-info\">Live Dynamic Re-scoring</span>                   </div>                   <div style=\"font-size:0.74rem;color:var(--mut);margin-top:3px;\">                     Adjust the relative importance of cost, throughput, duration, tokens, turns, and test conformance. Scores, medals, and KPI leaderboards update in real time.                   </div>                 </div>                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <button class=\"btn-toggle\" onclick=\"window.__subdollar_reset_formula()\" style=\"border:1px solid var(--line);border-radius:4px;font-size:0.72rem;padding:4px 10px;\">🔄 Reset Defaults</button>                 </div>               </div>               <div style=\"font-size:0.72rem;font-weight:600;color:var(--mut);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;\">Quick Presets:</div>               <div class=\"formula-presets\">                 <button class=\"preset-pill active\" id=\"preset_default\" onclick=\"window.__subdollar_apply_preset('default')\">🎯 SubDollar Balanced (Default)</button>                 <button class=\"preset-pill\" id=\"preset_speed\" onclick=\"window.__subdollar_apply_preset('speed')\">⚡ Speed Demon (Throughput King)</button>                 <button class=\"preset-pill\" id=\"preset_frugal\" onclick=\"window.__subdollar_apply_preset('frugal')\">💰 Extreme Frugal (Cost &amp; Tokens)</button>                 <button class=\"preset-pill\" id=\"preset_agentic\" onclick=\"window.__subdollar_apply_preset('agentic')\">🤖 Agentic One-Shot (Turns &amp; Latency)</button>                 <button class=\"preset-pill\" id=\"preset_lenient\" onclick=\"window.__subdollar_apply_preset('lenient')\">🎓 Lenient Conformance (Partial Credit)</button>               </div>               <div class=\"formula-grid\">                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">💰 Cost Importance (W<sub>cost</sub>)</span>                     <span class=\"param-val\" id=\"val_wCost\">1.0×</span>                   </div>                   <div class=\"param-desc\">Cost sensitivity: <code>(100 / cost_¢)<sup>W</sup></code>. Higher values punish high-cost runs.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wCost\" min=\"0\" max=\"3\" step=\"0.1\" value=\"1.0\" oninput=\"window.__subdollar_weight_change('wCost', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">3.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">⚡ Throughput Importance (W<sub>tp</sub>)</span>                     <span class=\"param-val\" id=\"val_wTp\">1.0×</span>                   </div>                   <div class=\"param-desc\">Speed factor vs reference: <code>(speed_ratio·(1+2·speed)/3)<sup>W</sup></code>. 0 ignores speed.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTp\" min=\"0\" max=\"3\" step=\"0.1\" value=\"1.0\" oninput=\"window.__subdollar_weight_change('wTp', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">3.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">⏱️ Duration / Latency (W<sub>dur</sub>)</span>                     <span class=\"param-val\" id=\"val_wDur\">0.0×</span>                   </div>                   <div class=\"param-desc\">Wall-clock reward vs 60s median: <code>(60s / duration)<sup>W</sup></code>. Rewards fast synthesis.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wDur\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wDur', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🪙 Token Economy (W<sub>tok</sub>)</span>                     <span class=\"param-val\" id=\"val_wTok\">0.0×</span>                   </div>                   <div class=\"param-desc\">Token frugality reward vs 50k median: <code>(50k / total_tokens)<sup>W</sup></code>. Rewards brevity.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTok\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wTok', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🔄 Agent Turns (W<sub>turns</sub>)</span>                     <span class=\"param-val\" id=\"val_wTurns\">0.0×</span>                   </div>                   <div class=\"param-desc\">Turn efficiency reward vs 8 turns median: <code>(8 / turns)<sup>W</sup></code>. Rewards one-shot code.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTurns\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wTurns', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🎯 Conformance Strictness</span>                     <span class=\"param-val\" id=\"val_strictPass\">Strict</span>                   </div>                   <div class=\"param-desc\">Choose whether 100% passing tests is required or partial pass rates earn partial score credit.</div>                   <div style=\"display:flex;gap:12px;margin-top:6px;font-size:0.74rem;\">                     <label style=\"display:flex;align-items:center;gap:5px;cursor:pointer;\">                       <input type=\"radio\" name=\"strictPassRadio\" id=\"radio_strict\" value=\"strict\" checked onchange=\"window.__subdollar_strict_change(true)\">                       <span><strong>Strict</strong> (100% or 0 pts)</span>                     </label>                     <label style=\"display:flex;align-items:center;gap:5px;cursor:pointer;\">                       <input type=\"radio\" name=\"strictPassRadio\" id=\"radio_lenient\" value=\"lenient\" onchange=\"window.__subdollar_strict_change(false)\">                       <span><strong>Lenient</strong> (Pass% &times; pts)</span>                     </label>                   </div>                 </div>               </div>               <div class=\"formula-math\">                 <span style=\"color:var(--gold);font-weight:700;\">Active Formula:</span>                 <span id=\"formulaMathDisplay\">Score = Conformance &times; (100 / Cost<sub>&cent;</sub>)<sup>1.0</sup> &times; (NormSpeed)<sup>1.0</sup> &times; 3.0</span>               </div>             </div>             <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             <script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📡 DNS Server</div><div class=\"v\">{dns}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div><div class=\"card\"><div class=\"k\">📓 WAL Broker</div><div class=\"v\">{wal}</div></div><div class=\"card\"><div class=\"k\">🔀 Reverse Proxy</div><div class=\"v\">{proxy}</div></div><div class=\"card\"><div class=\"k\">📢 Pub/Sub Broker</div><div class=\"v\">{pubsub}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                 <button id=\"tabBtn_models\" class=\"btn-toggle active\" onclick=\"window.__subdollar_set_tab('models')\">🏅 Models</button>                 <button id=\"tabBtn_http\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('http')\">🌐 HTTP/1.1 Server <span class=\"badge-count\">{http}</span></button>                 <button id=\"tabBtn_redis\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('redis')\">⚡ Redis Clone <span class=\"badge-count\">{redis}</span></button>                 <button id=\"tabBtn_dns\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('dns')\">📡 DNS Server <span class=\"badge-count\">{dns}</span></button>                 <button id=\"tabBtn_wal\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('wal')\">📓 WAL <span class=\"badge-count\">{wal}</span></button>                 <button id=\"tabBtn_proxy\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('proxy')\">🔀 Proxy <span class=\"badge-count\">{proxy}</span></button>                 <button id=\"tabBtn_pubsub\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pubsub')\">📢 PubSub <span class=\"badge-count\">{pubsub}</span></button>                 <button id=\"tabBtn_pdf\" class=\"btn-toggle\" onclick=\"window.__subdollar_set_tab('pdf')\">📄 PDF Microservice <span class=\"badge-count\">{pdf}</span></button>               </div>               <div style=\"display:flex;gap:10px;align-items:center;flex-wrap:wrap;\">                 <button id=\"formulaToggleBtn\" class=\"btn-formula\" onclick=\"window.__subdollar_toggle_formula()\">                   <span>🎛️ Customize Formula</span>                   <span id=\"formulaStatusBadge\" class=\"badge\" style=\"background:rgba(88,166,255,0.2);color:var(--acc);font-size:0.68rem;padding:1px 5px;display:none;\">Custom</span>                 </button>                 <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>             <div id=\"formulaPanel\" class=\"formula-panel\" style=\"display:none;\">               <div class=\"formula-header\">                 <div>                   <div style=\"display:flex;align-items:center;gap:8px;\">                     <span style=\"font-size:1.1rem;\">🎛️</span>                     <span style=\"font-size:0.95rem;font-weight:700;color:#fff;\">Interactive Scoring Formula Customizer</span>                     <span class=\"badge badge-info\">Live Dynamic Re-scoring</span>                   </div>                   <div style=\"font-size:0.74rem;color:var(--mut);margin-top:3px;\">                     Adjust the relative importance of cost, throughput, duration, tokens, turns, and test conformance. Scores, medals, and KPI leaderboards update in real time.                   </div>                 </div>                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <button class=\"btn-toggle\" onclick=\"window.__subdollar_reset_formula()\" style=\"border:1px solid var(--line);border-radius:4px;font-size:0.72rem;padding:4px 10px;\">🔄 Reset Defaults</button>                 </div>               </div>               <div style=\"font-size:0.72rem;font-weight:600;color:var(--mut);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;\">Quick Presets:</div>               <div class=\"formula-presets\">                 <button class=\"preset-pill active\" id=\"preset_default\" onclick=\"window.__subdollar_apply_preset('default')\">🎯 SubDollar Balanced (Default)</button>                 <button class=\"preset-pill\" id=\"preset_speed\" onclick=\"window.__subdollar_apply_preset('speed')\">⚡ Speed Demon (Throughput King)</button>                 <button class=\"preset-pill\" id=\"preset_frugal\" onclick=\"window.__subdollar_apply_preset('frugal')\">💰 Extreme Frugal (Cost &amp; Tokens)</button>                 <button class=\"preset-pill\" id=\"preset_agentic\" onclick=\"window.__subdollar_apply_preset('agentic')\">🤖 Agentic One-Shot (Turns &amp; Latency)</button>                 <button class=\"preset-pill\" id=\"preset_lenient\" onclick=\"window.__subdollar_apply_preset('lenient')\">🎓 Lenient Conformance (Partial Credit)</button>               </div>               <div class=\"formula-grid\">                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">💰 Cost Importance (W<sub>cost</sub>)</span>                     <span class=\"param-val\" id=\"val_wCost\">1.0×</span>                   </div>                   <div class=\"param-desc\">Cost sensitivity: <code>(100 / cost_¢)<sup>W</sup></code>. Higher values punish high-cost runs.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wCost\" min=\"0\" max=\"3\" step=\"0.1\" value=\"1.0\" oninput=\"window.__subdollar_weight_change('wCost', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">3.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">⚡ Throughput Importance (W<sub>tp</sub>)</span>                     <span class=\"param-val\" id=\"val_wTp\">1.0×</span>                   </div>                   <div class=\"param-desc\">Speed factor vs reference: <code>(speed_ratio·(1+2·speed)/3)<sup>W</sup></code>. 0 ignores speed.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTp\" min=\"0\" max=\"3\" step=\"0.1\" value=\"1.0\" oninput=\"window.__subdollar_weight_change('wTp', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">3.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">⏱️ Duration / Latency (W<sub>dur</sub>)</span>                     <span class=\"param-val\" id=\"val_wDur\">0.0×</span>                   </div>                   <div class=\"param-desc\">Wall-clock reward vs 60s median: <code>(60s / duration)<sup>W</sup></code>. Rewards fast synthesis.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wDur\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wDur', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🪙 Token Economy (W<sub>tok</sub>)</span>                     <span class=\"param-val\" id=\"val_wTok\">0.0×</span>                   </div>                   <div class=\"param-desc\">Token frugality reward vs 50k median: <code>(50k / total_tokens)<sup>W</sup></code>. Rewards brevity.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTok\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wTok', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🔄 Agent Turns (W<sub>turns</sub>)</span>                     <span class=\"param-val\" id=\"val_wTurns\">0.0×</span>                   </div>                   <div class=\"param-desc\">Turn efficiency reward vs 8 turns median: <code>(8 / turns)<sup>W</sup></code>. Rewards one-shot code.</div>                   <div class=\"slider-row\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">0.0</span>                     <input type=\"range\" class=\"formula-slider\" id=\"slider_wTurns\" min=\"0\" max=\"2\" step=\"0.1\" value=\"0.0\" oninput=\"window.__subdollar_weight_change('wTurns', this.value)\">                     <span style=\"font-size:0.68rem;color:var(--mut);\">2.0</span>                   </div>                 </div>                 <div class=\"param-card\">                   <div class=\"param-header\">                     <span class=\"param-title\">🎯 Conformance Strictness</span>                     <span class=\"param-val\" id=\"val_strictPass\">Strict</span>                   </div>                   <div class=\"param-desc\">Choose whether 100% passing tests is required or partial pass rates earn partial score credit.</div>                   <div style=\"display:flex;gap:12px;margin-top:6px;font-size:0.74rem;\">                     <label style=\"display:flex;align-items:center;gap:5px;cursor:pointer;\">                       <input type=\"radio\" name=\"strictPassRadio\" id=\"radio_strict\" value=\"strict\" checked onchange=\"window.__subdollar_strict_change(true)\">                       <span><strong>Strict</strong> (100% or 0 pts)</span>                     </label>                     <label style=\"display:flex;align-items:center;gap:5px;cursor:pointer;\">                       <input type=\"radio\" name=\"strictPassRadio\" id=\"radio_lenient\" value=\"lenient\" onchange=\"window.__subdollar_strict_change(false)\">                       <span><strong>Lenient</strong> (Pass% &times; pts)</span>                     </label>                   </div>                 </div>               </div>               <div class=\"formula-math\">                 <span style=\"color:var(--gold);font-weight:700;\">Active Formula:</span>                 <span id=\"formulaMathDisplay\">Score = Conformance &times; (100 / Cost<sub>&cent;</sub>)<sup>1.0</sup> &times; (NormSpeed)<sup>1.0</sup> &times; 3.0</span>               </div>             </div>             <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             <script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
             css = PORTAL_CSS,
             js = PORTAL_JS,
             n = results.len(),
@@ -1616,12 +1885,7 @@ impl PortalExporter {
         )
     }
 
-    fn export_run(
-        runs_dir: &Path,
-        runs_out: &Path,
-        run_id: &str,
-        secrets: &[Regex],
-    ) -> Result<()> {
+    fn export_run(runs_dir: &Path, runs_out: &Path, run_id: &str, secrets: &[Regex]) -> Result<()> {
         let clean = Path::new(run_id)
             .file_name()
             .and_then(|s| s.to_str())
@@ -1635,7 +1899,13 @@ impl PortalExporter {
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok());
 
-        for name in ["manifest.json", "env.json", "console.log", "README.md", "review.json"] {
+        for name in [
+            "manifest.json",
+            "env.json",
+            "console.log",
+            "README.md",
+            "review.json",
+        ] {
             if let Ok(content) = fs::read_to_string(src.join(name)) {
                 fs::write(dst.join(name), Self::redact(&content, secrets))?;
             }
@@ -1645,10 +1915,7 @@ impl PortalExporter {
 
         let body = match &manifest {
             Some(m) => Self::render_run(m, &dst, secrets)?,
-            None => format!(
-                "<h1>{}</h1><p>Manifest missing.</p>",
-                Self::esc(clean)
-            )
+            None => format!("<h1>{}</h1><p>Manifest missing.</p>", Self::esc(clean)),
         };
         fs::write(dst.join("index.html"), body)?;
         Ok(())
@@ -1709,17 +1976,31 @@ impl PortalExporter {
                             serde_json::Value::String(x) => x.clone(),
                             _ => v.to_string(),
                         };
-                        format!("<tr><td>{}</td><td>{}</td></tr>\n", Self::esc(k), Self::esc(&val))
+                        format!(
+                            "<tr><td>{}</td><td>{}</td></tr>\n",
+                            Self::esc(k),
+                            Self::esc(&val)
+                        )
                     })
                     .collect::<String>()
             }
             _ => "<tr><td colspan=\"2\">N/A</td></tr>\n".to_string(),
         };
         let log_html = fs::read_to_string(dst.join("console.log"))
-            .map(|c| format!("<details><summary>console.log (full trace)</summary><pre>{}</pre></details>", Self::esc(&Self::redact(&c, secrets))))
+            .map(|c| {
+                format!(
+                    "<details><summary>console.log (full trace)</summary><pre>{}</pre></details>",
+                    Self::esc(&Self::redact(&c, secrets))
+                )
+            })
             .unwrap_or_default();
         let readme_html = fs::read_to_string(dst.join("README.md"))
-            .map(|c| format!("<details><summary>README.md</summary><pre>{}</pre></details>", Self::esc(&c)))
+            .map(|c| {
+                format!(
+                    "<details><summary>README.md</summary><pre>{}</pre></details>",
+                    Self::esc(&c)
+                )
+            })
             .unwrap_or_default();
         let review_html = fs::read_to_string(dst.join("review.json"))
             .ok()
@@ -1745,8 +2026,16 @@ impl PortalExporter {
             (Some(tp), Some(ref_tp)) if ref_tp > 0.0 => {
                 let pct = (tp / ref_tp * 100.0).clamp(0.0, 100.0) as u32;
                 (
-                    format!("{:.0} {} ({:.0}% of reference)", tp, unit, tp / ref_tp * 100.0),
-                    format!("<div class=\"bar\"><div class=\"fill\" style=\"width:{}%\"></div></div>", pct),
+                    format!(
+                        "{:.0} {} ({:.0}% of reference)",
+                        tp,
+                        unit,
+                        tp / ref_tp * 100.0
+                    ),
+                    format!(
+                        "<div class=\"bar\"><div class=\"fill\" style=\"width:{}%\"></div></div>",
+                        pct
+                    ),
                 )
             }
             (Some(tp), _) => (format!("{:.0} {}", tp, unit), String::new()),
@@ -1830,7 +2119,12 @@ impl PortalExporter {
         ))
     }
 
-    fn render_workspace(dir: &Path, prefix: &str, list: &mut String, inline: &mut String) -> Result<()> {
+    fn render_workspace(
+        dir: &Path,
+        prefix: &str,
+        list: &mut String,
+        inline: &mut String,
+    ) -> Result<()> {
         let mut entries: Vec<_> = fs::read_dir(dir)
             .map(|rd| rd.flatten().collect())
             .unwrap_or_default();
@@ -1838,7 +2132,11 @@ impl PortalExporter {
         for entry in entries {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "__pycache__"
+            {
                 continue;
             }
             let rel = if prefix.is_empty() {
@@ -1850,7 +2148,11 @@ impl PortalExporter {
                 let mut sub_list = String::new();
                 let mut sub_inline = String::new();
                 Self::render_workspace(&path, &rel, &mut sub_list, &mut sub_inline)?;
-                list.push_str(&format!("<li>{}/<ul>{}</ul></li>\n", Self::esc(&name), sub_list));
+                list.push_str(&format!(
+                    "<li>{}/<ul>{}</ul></li>\n",
+                    Self::esc(&name),
+                    sub_list
+                ));
                 inline.push_str(&sub_inline);
             } else if path.is_file() {
                 let size = path.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1884,7 +2186,11 @@ impl PortalExporter {
         for entry in entries.unwrap().flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "__pycache__"
+            {
                 continue;
             }
             if path.is_dir() {
@@ -1902,7 +2208,6 @@ impl PortalExporter {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -2012,7 +2317,11 @@ mod tests {
         )
         .unwrap();
 
-        fs::write(run_dir.join("review.json"), "{\"good\": [\"g1\"], \"bad\": [\"b1\"], \"conclusion\": \"done well\"}").unwrap();
+        fs::write(
+            run_dir.join("review.json"),
+            "{\"good\": [\"g1\"], \"bad\": [\"b1\"], \"conclusion\": \"done well\"}",
+        )
+        .unwrap();
         let summary = PortalExporter::export(
             runs_dir.to_str().unwrap(),
             results_dir.to_str().unwrap(),

@@ -50,13 +50,24 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         eval_only: bool,
 
-        /// Number of repeated trials for statistical variance (Pass@k)
-        #[arg(long, default_value_t = 3)]
+        /// Number of repeated trials for statistical variance (Pass@k).
+        /// Nine by default: n=3 point estimates span +/-40pt; Wilson
+        /// intervals only become interpretable at n>=9.
+        #[arg(long, default_value_t = 9)]
         trials: u32,
 
         /// Do not save results or archive run artifacts to disk
         #[arg(long, default_value_t = false)]
         no_save: bool,
+
+        /// Enqueue on the running `ui` engine instead of running foreground.
+        /// Foreground runs fight a live engine over docker and task ports.
+        #[arg(long, default_value_t = false)]
+        queue: bool,
+
+        /// `ui` engine base URL (or SDB_SERVER); only used with --queue
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
 
         /// Model used for the end-of-run code review judge (defaults to openrouter/meta/muse-spark-1.3-contributor)
         #[arg(long)]
@@ -91,6 +102,13 @@ pub enum Commands {
         /// Filter by task ('http', 'redis', 'dns', or 'all' for per-task + consolidated)
         #[arg(short, long, default_value = "all")]
         task: String,
+    },
+
+    /// Print the effort x model P@1-lower-bound matrix per task
+    MatrixReport {
+        /// Directory containing result JSON files
+        #[arg(short, long, default_value = "./results")]
+        results_dir: String,
     },
 
     /// Export a static read-only portal (leaderboard + run pages) for VPS hosting
@@ -193,6 +211,18 @@ pub enum Commands {
         #[arg(short, long)]
         task: Option<String>,
 
+        /// Filter by model substring (e.g. 'muse-spark', 'glm')
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Filter by effort ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+        #[arg(long)]
+        effort: Option<String>,
+
+        /// Filter by status ('completed', 'failed_tests', 'disqualified_cheat', ...)
+        #[arg(long)]
+        status: Option<String>,
+
         /// Maximum rows to show
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -241,6 +271,32 @@ pub enum Commands {
         /// Path to results directory
         #[arg(long, default_value = "./results")]
         results_dir: String,
+    },
+
+    /// [operate] Plan an effort x model x task comparison wave (prints shell commands)
+    Matrix {
+        /// Comma-separated models (default: all four cheap models)
+        #[arg(
+            long,
+            default_value = "openrouter/meta/muse-spark-1.3-contributor,openrouter/z-ai/glm-5.3-flash,openrouter/deepseek/deepseek-v4.1-flash,openrouter/qwen/qwen3.8-flash"
+        )]
+        models: String,
+
+        /// Comma-separated efforts (default: minimal,max — the uncrossed extremes)
+        #[arg(long, default_value = "minimal,max")]
+        efforts: String,
+
+        /// Comma-separated tasks (default: redis,proxy,pdf — easy, discriminating, GLM-weak)
+        #[arg(long, default_value = "redis,proxy,pdf")]
+        tasks: String,
+
+        /// Trials per cell
+        #[arg(long, default_value_t = 3)]
+        trials: u32,
+
+        /// Extra flags appended to every generated `run` command
+        #[arg(long, default_value = "")]
+        extra: String,
     },
 
     /// [operate] Run 3 more trials for an unstable parent and re-merge
@@ -322,6 +378,417 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [maintain] Re-merge all saved parents with current scoring (honest avg
+    /// headlines, Wilson intervals, rules_version stamps, unscored refless tp).
+    /// Dry run by default; --yes writes.
+    Backfill {
+        /// Path to results directory
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+
+        /// Actually rewrite files (without it, only prints the plan)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
+    /// [operate] Live engine status: idle/running, current + last run (GET /api/status)
+    Status {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// [operate] Live queue contents (GET /api/queue)
+    Queue {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// [operate] Merged engine view: live queue head + archived manifests with filters
+    Ps {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+
+        /// Filter by model substring
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Filter by task
+        #[arg(short, long)]
+        task: Option<String>,
+
+        /// Filter by effort
+        #[arg(long)]
+        effort: Option<String>,
+
+        /// Filter by status (exact, case-insensitive)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum archived rows to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
+    /// [operate] Enqueue one run behind the live job (POST /api/queue)
+    Enqueue {
+        /// Model identifier on OpenRouter
+        #[arg(short, long)]
+        model: String,
+
+        /// Task to run
+        #[arg(short, long, value_enum, default_value_t = TaskType::Redis)]
+        task: TaskType,
+
+        /// Reasoning effort / thinking level
+        #[arg(short = 'e', long, default_value = "high")]
+        effort: String,
+
+        /// Maximum turns/steps allowed for OMP
+        #[arg(long, default_value_t = 100)]
+        max_turns: u32,
+
+        /// Maximum cost budget in USD
+        #[arg(short = 'b', long, default_value_t = 1.00)]
+        budget_usd: f64,
+
+        /// Maximum execution time in minutes
+        #[arg(long, default_value_t = 30)]
+        timeout_min: u64,
+
+        /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
+        #[arg(long, env = "OPENROUTER_API_KEY")]
+        api_key: Option<String>,
+
+        /// Skip OMP agent run and evaluate existing server directly
+        #[arg(long, default_value_t = false)]
+        eval_only: bool,
+
+        /// Number of repeated trials
+        #[arg(long, default_value_t = 9)]
+        trials: u32,
+
+        /// Keep adding trials in batches of 3 while the result is unstable
+        #[arg(long, default_value_t = false)]
+        extend_if_unstable: bool,
+
+        /// Trial cap for auto-extension
+        #[arg(long, default_value_t = 9)]
+        max_trials: u32,
+
+        /// Do not save results or archive run artifacts to disk
+        #[arg(long, default_value_t = false)]
+        no_save: bool,
+
+        /// Model used for the end-of-run code review judge
+        #[arg(long)]
+        review_model: Option<String>,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [operate] Queue an extension behind the live job (POST /api/runs/:id/extend)
+    QueueExtend {
+        /// Parent run id or unambiguous prefix
+        parent: String,
+
+        /// Extra trials to run
+        #[arg(long, default_value_t = 3)]
+        trials: u32,
+
+        /// Override max turns (defaults to the server default)
+        #[arg(long)]
+        max_turns: Option<u32>,
+
+        /// Override budget in USD (defaults to the server default)
+        #[arg(long)]
+        budget_usd: Option<f64>,
+
+        /// Override timeout in minutes (defaults to the server default)
+        #[arg(long)]
+        timeout_min: Option<u64>,
+
+        /// Skip OMP agent run and evaluate existing server directly
+        #[arg(long, default_value_t = false)]
+        eval_only: bool,
+
+        /// Path to results directory (for prefix resolution)
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [operate] Remove one pending queue item (DELETE /api/queue/:id)
+    Dequeue {
+        /// Queue id (e.g. q4)
+        id: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [operate] Drop finished queue history (DELETE /api/queue; pending work untouched)
+    QueueClear {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [operate] Stop the live run: cancel flag + abort + sandbox cleanup (POST /api/run/stop)
+    Stop {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [operate] Live console tail from the engine buffer (GET /api/console)
+    Log {
+        /// Run id or prefix is NOT needed: the engine streams the active run.
+        /// Kept for symmetry with `watch`; positional is ignored.
+        #[arg(default_value = "")]
+        run: String,
+
+        /// Lines to show
+        #[arg(long, default_value_t = 100)]
+        tail: usize,
+
+        /// Only show stage-result lines
+        #[arg(long, default_value_t = false)]
+        stages_only: bool,
+
+        /// Follow: poll with the server cursor until idle
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] Archived manifest for a run (GET /api/runs/:id)
+    Detail {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] Stage-by-stage server diff of two runs (GET /api/compare)
+    Sdiff {
+        /// Baseline run id or prefix
+        a: String,
+
+        /// Candidate run id or prefix
+        b: String,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] Workspace file list for a run (GET /api/runs/:id/files)
+    Ls {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] One workspace file for a run (GET /api/runs/:id/file)
+    Cat {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Workspace-relative file path
+        file: String,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] Code review judge output for a run (GET /api/runs/:id/review)
+    Review {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] Leaderboard rows from the engine (GET /api/leaderboard)
+    Lboard {
+        /// Filter by task ('http', 'redis', 'dns', or 'all')
+        #[arg(short, long, default_value = "all")]
+        task: String,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [analyze] Task prompt from the engine (GET /api/prompt/:task)
+    Prompt {
+        /// Task name
+        task: String,
+
+        /// Save edited prompt back (POST /api/prompt/:task); reads stdin
+        #[arg(long, default_value_t = false)]
+        save: bool,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [maintain] Host environment from the engine (GET /api/env)
+    Env {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [operate] Model catalog under $1/M with prices and effort levels (GET /api/models)
+    Models {
+        /// Filter by family or substring ('glm', 'claude', 'qwen', 'flash', ...)
+        #[arg(long)]
+        family: Option<String>,
+
+        /// Free-text search over id and name
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Sort order: cheapest (default), newest, expensive, name
+        #[arg(long, default_value = "cheapest")]
+        sort: String,
+
+        /// Maximum rows to show
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [maintain] OMP sandbox status via the engine (GET /api/sandbox/omp)
+    Omp {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [maintain] Update the sandbox image via the engine (POST /api/sandbox/omp/update)
+    OmpUpdate {
+        /// Target OMP version (optional, defaults to latest on npm)
+        #[arg(short, long)]
+        version: Option<String>,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [maintain] Rebuild the static portal via the engine (POST /api/portal/rebuild)
+    PortalRebuild {
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [maintain] Show or hide a run in the portal (POST /api/runs/:id/portal)
+    Hide {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Unhide instead of hide
+        #[arg(long, default_value_t = false)]
+        show: bool,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
+    /// [maintain] Delete a run and its result (DELETE /api/runs/:id)
+    Rm {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Confirm deletion (no prompt otherwise)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL (or SDB_SERVER)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        server: String,
+    },
+
     /// [maintain] Pre-flight checks: docker, images, API key, ports, leaks (read-only)
     Doctor,
 }
@@ -348,6 +815,7 @@ pub enum TaskType {
     Wal,
     Proxy,
     Pubsub,
+    Binproto,
 }
 
 impl TaskType {
@@ -360,6 +828,7 @@ impl TaskType {
             TaskType::Wal => 5,
             TaskType::Proxy => 5,
             TaskType::Pubsub => 4,
+            TaskType::Binproto => 5,
         }
     }
 
@@ -372,6 +841,7 @@ impl TaskType {
             TaskType::Wal => 6390,
             TaskType::Proxy => 8091,
             TaskType::Pubsub => 8092,
+            TaskType::Binproto => 6395,
         }
     }
 
@@ -390,6 +860,7 @@ impl std::fmt::Display for TaskType {
             TaskType::Wal => write!(f, "wal"),
             TaskType::Proxy => write!(f, "proxy"),
             TaskType::Pubsub => write!(f, "pubsub"),
+            TaskType::Binproto => write!(f, "binproto"),
         }
     }
 }
@@ -452,10 +923,12 @@ mod tests {
         assert_eq!(TaskType::Wal.total_stages(), 5);
         assert_eq!(TaskType::Proxy.total_stages(), 5);
         assert_eq!(TaskType::Pubsub.total_stages(), 4);
+        assert_eq!(TaskType::Binproto.total_stages(), 5);
 
         assert_eq!(TaskType::Redis.default_port(), 6379);
         assert_eq!(TaskType::Http.default_port(), 8080);
         assert_eq!(TaskType::Dns.default_port(), 5353);
+        assert_eq!(TaskType::Binproto.default_port(), 6395);
 
         assert!(!TaskType::Redis.is_udp());
         assert!(!TaskType::Http.is_udp());
@@ -725,6 +1198,170 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_parsing_matrix() {
+        let cli = Cli::try_parse_from(["subdollarbench", "matrix"]).unwrap();
+        match cli.command {
+            Commands::Matrix {
+                models,
+                efforts,
+                tasks,
+                trials,
+                extra,
+            } => {
+                assert!(models.contains("muse-spark"));
+                assert_eq!(efforts, "minimal,max");
+                assert_eq!(tasks, "redis,proxy,pdf");
+                assert_eq!(trials, 3);
+                assert_eq!(extra, "");
+            }
+            _ => panic!("Expected Matrix command"),
+        }
+        let cli2 = Cli::try_parse_from([
+            "subdollarbench",
+            "matrix",
+            "--models",
+            "a,b",
+            "--efforts",
+            "minimal",
+            "--tasks",
+            "redis",
+            "--trials",
+            "9",
+        ])
+        .unwrap();
+        match cli2.command {
+            Commands::Matrix {
+                models,
+                efforts,
+                tasks,
+                trials,
+                ..
+            } => {
+                assert_eq!(models, "a,b");
+                assert_eq!(efforts, "minimal");
+                assert_eq!(tasks, "redis");
+                assert_eq!(trials, 9);
+            }
+            _ => panic!("Expected Matrix command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_engine_commands() {
+        let cli = Cli::try_parse_from(["subdollarbench", "status"]).unwrap();
+        match cli.command {
+            Commands::Status { server, json } => {
+                assert_eq!(server, "http://127.0.0.1:3000");
+                assert!(!json);
+            }
+            _ => panic!("Expected Status command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "queue", "--json"]).unwrap();
+        match cli.command {
+            Commands::Queue { json, .. } => assert!(json),
+            _ => panic!("Expected Queue command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "ps", "--model", "muse", "--limit", "5"]).unwrap();
+        match cli.command {
+            Commands::Ps { model, limit, .. } => {
+                assert_eq!(model, Some("muse".to_string()));
+                assert_eq!(limit, 5);
+            }
+            _ => panic!("Expected Ps command"),
+        }
+        let cli = Cli::try_parse_from([
+            "subdollarbench", "enqueue", "--model", "m", "--task", "redis", "--effort", "max",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Enqueue { model, trials, .. } => {
+                assert_eq!(model, "m");
+                assert_eq!(trials, 9);
+            }
+            _ => panic!("Expected Enqueue command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "queue-extend", "wal_m_1", "--trials", "6"]).unwrap();
+        match cli.command {
+            Commands::QueueExtend { parent, trials, .. } => {
+                assert_eq!(parent, "wal_m_1");
+                assert_eq!(trials, 6);
+            }
+            _ => panic!("Expected QueueExtend command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "dequeue", "q4"]).unwrap();
+        match cli.command {
+            Commands::Dequeue { id, .. } => assert_eq!(id, "q4"),
+            _ => panic!("Expected Dequeue command"),
+        }
+        for name in ["stop", "queue-clear", "env", "omp", "portal-rebuild", "models"] {
+            let cli = Cli::try_parse_from(["subdollarbench", name]).unwrap();
+            match cli.command {
+                Commands::Stop { .. } | Commands::QueueClear { .. } | Commands::Env { .. }
+                | Commands::Omp { .. } | Commands::PortalRebuild { .. } | Commands::Models { .. } => {}
+                _ => panic!("Expected {name} command"),
+            }
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "run", "--model", "m", "--queue"]).unwrap();
+        match cli.command {
+            Commands::Run { queue, .. } => assert!(queue),
+            _ => panic!("Expected Run command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "runs", "--model", "glm", "--status", "completed"]).unwrap();
+        match cli.command {
+            Commands::Runs { model, status, .. } => {
+                assert_eq!(model, Some("glm".to_string()));
+                assert_eq!(status, Some("completed".to_string()));
+            }
+            _ => panic!("Expected Runs command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "models", "--family", "glm", "--sort", "newest"]).unwrap();
+        match cli.command {
+            Commands::Models { family, sort, .. } => {
+                assert_eq!(family, Some("glm".to_string()));
+                assert_eq!(sort, "newest");
+            }
+            _ => panic!("Expected Models command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "hide", "abc123"]).unwrap();
+        match cli.command {
+            Commands::Hide { run, show, .. } => {
+                assert_eq!(run, "abc123");
+                assert!(!show);
+            }
+            _ => panic!("Expected Hide command"),
+        }
+        let cli = Cli::try_parse_from(["subdollarbench", "rm", "abc123", "--yes"]).unwrap();
+        match cli.command {
+            Commands::Rm { yes, .. } => assert!(yes),
+            _ => panic!("Expected Rm command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_matrix_report() {
+        let cli = Cli::try_parse_from(["subdollarbench", "matrix-report"]).unwrap();
+        match cli.command {
+            Commands::MatrixReport { results_dir } => assert_eq!(results_dir, "./results"),
+            _ => panic!("Expected MatrixReport command"),
+        }
+    }
+
+    #[test]
+    fn test_trials_default_nine() {
+        let cli = Cli::try_parse_from(["subdollarbench", "run", "--model", "m", "--task", "redis"])
+            .unwrap();
+        match cli.command {
+            Commands::Run {
+                trials, max_trials, ..
+            } => {
+                assert_eq!(trials, 9);
+                assert_eq!(max_trials, 9);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
     fn test_cli_parsing_sandbox() {
         let args_check = ["subdollarbench", "sandbox", "check"];
         let cli_check = Cli::try_parse_from(args_check).unwrap();
@@ -735,7 +1372,13 @@ mod tests {
             _ => panic!("Expected Sandbox check command"),
         }
 
-        let args_update = ["subdollarbench", "sandbox", "update", "--version", "18.1.21"];
+        let args_update = [
+            "subdollarbench",
+            "sandbox",
+            "update",
+            "--version",
+            "18.1.21",
+        ];
         let cli_update = Cli::try_parse_from(args_update).unwrap();
         match cli_update.command {
             Commands::Sandbox { command } => {

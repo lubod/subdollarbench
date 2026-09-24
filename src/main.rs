@@ -8,10 +8,14 @@ use std::sync::Arc;
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use subdollarbench::report::{
-    BenchmarkRunResult, LeaderboardManager, PortalExporter, RunJudge, RunManifest,
-    assess_stability, Stability,
+    assess_stability, BenchmarkRunResult, LeaderboardManager, PortalExporter, RunJudge,
+    RunManifest, Stability,
 };
-use subdollarbench::verifier::{DnsVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier, WalVerifier};
+use subdollarbench::verifier::{
+    BinprotoVerifier, DnsVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier,
+    RedisVerifier, WalVerifier,
+};
+use subdollarbench::remote;
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
 
@@ -87,6 +91,7 @@ fn parse_task(s: &str) -> Result<TaskType> {
         "wal" => Ok(TaskType::Wal),
         "proxy" => Ok(TaskType::Proxy),
         "pubsub" => Ok(TaskType::Pubsub),
+        "binproto" => Ok(TaskType::Binproto),
         _ => anyhow::bail!("unknown task '{s}'"),
     }
 }
@@ -149,13 +154,14 @@ struct TrialBatchOutput {
 }
 
 /// Run one extension batch (fresh batch reference, suffix-numbered trial dirs).
-async fn run_trial_batch(p: TrialBatchParams, logger: Arc<CliPipelineLogger>) -> Result<TrialBatchOutput> {
+async fn run_trial_batch(
+    p: TrialBatchParams,
+    logger: Arc<CliPipelineLogger>,
+) -> Result<TrialBatchOutput> {
     let batch_ref = if p.count > 1 {
-        match subdollarbench::bench::batch_ref::BatchRef::start(
-            &p.task,
-            &p.parent_run_id,
-            &|m| println!("{}", m),
-        ) {
+        match subdollarbench::bench::batch_ref::BatchRef::start(&p.task, &p.parent_run_id, &|m| {
+            println!("{}", m)
+        }) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
@@ -169,7 +175,12 @@ async fn run_trial_batch(p: TrialBatchParams, logger: Arc<CliPipelineLogger>) ->
     let mut passing = 0;
     for i in 0..p.count {
         let idx = p.start_idx + i;
-        println!("{}", format!("=== Starting Extension Subrun {} ===", idx).bold().cyan());
+        println!(
+            "{}",
+            format!("=== Starting Extension Subrun {} ===", idx)
+                .bold()
+                .cyan()
+        );
         let run_id = format!("{}_trial{}", p.parent_run_id, idx);
         let pipe_config = BenchmarkConfig {
             model: p.model.clone(),
@@ -199,7 +210,11 @@ async fn run_trial_batch(p: TrialBatchParams, logger: Arc<CliPipelineLogger>) ->
         }
     }
     let drift = batch_ref.map(|b| b.finish(&|m| println!("{}", m)).drift);
-    Ok(TrialBatchOutput { results, passing, drift })
+    Ok(TrialBatchOutput {
+        results,
+        passing,
+        drift,
+    })
 }
 
 pub async fn run_cli(cli: Cli) -> Result<()> {
@@ -216,10 +231,40 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             eval_only,
             trials,
             no_save,
+            queue,
+            server,
             review_model,
             extend_if_unstable,
             max_trials,
         } => {
+            if queue {
+                // Engine path: identical payload to `enqueue`, so matrix
+                // output stays uniform. Foreground stays the default.
+                let body = remote::run_request(
+                    &model,
+                    &task.to_string(),
+                    &effort,
+                    max_turns,
+                    budget_usd,
+                    timeout_min,
+                    api_key.as_deref(),
+                    eval_only,
+                    trials,
+                    extend_if_unstable,
+                    max_trials,
+                    no_save,
+                    review_model.as_deref(),
+                );
+                let resp = remote::post_json(&server, "/api/queue", &body).await?;
+                let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                if resp.get("started").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    println!("enqueued {id}: engine idle, started immediately");
+                } else {
+                    let pos = resp.get("position").and_then(|v| v.as_u64()).map(|p| p.to_string()).unwrap_or("-".into());
+                    println!("enqueued {id} at position {pos}");
+                }
+                return Ok(());
+            }
             let mut total_trials = trials.max(1);
             let mut passing_trials = 0;
             let logger = Arc::new(CliPipelineLogger);
@@ -310,14 +355,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         subrun_results.push(output.benchmark_result);
                     }
                     Err(e) => {
-                        eprintln!("  [ERROR] Subrun {}/{} execution failed: {}", trial_idx, total_trials, e);
+                        eprintln!(
+                            "  [ERROR] Subrun {}/{} execution failed: {}",
+                            trial_idx, total_trials, e
+                        );
                     }
                 }
             }
 
-            let batch_drift = batch_ref.map(|b| {
-                b.finish(&|m| println!("{}", m)).drift
-            });
+            let batch_drift = batch_ref.map(|b| b.finish(&|m| println!("{}", m)).drift);
 
             let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
                 LeaderboardManager::consolidate_multi_trial_run(
@@ -346,7 +392,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             break;
                         }
                         let add = (max_total - total_trials).min(3);
-                        println!("[EXTEND] unstable ({}); running {} more trial(s)...", reason, add);
+                        println!(
+                            "[EXTEND] unstable ({}); running {} more trial(s)...",
+                            reason, add
+                        );
                         let batch = run_trial_batch(
                             TrialBatchParams {
                                 model: model.clone(),
@@ -367,7 +416,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         )
                         .await?;
                         if batch.results.is_empty() {
-                            eprintln!("[EXTEND] all extension trials failed; keeping current merge.");
+                            eprintln!(
+                                "[EXTEND] all extension trials failed; keeping current merge."
+                            );
                             break;
                         }
                         total_trials += batch.results.len() as u32;
@@ -414,6 +465,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Wal => 6390,
                 TaskType::Proxy => 8091,
                 TaskType::Pubsub => 8092,
+                TaskType::Binproto => 6395,
             });
             println!("Evaluating {} on port {}...", task, p);
             match task {
@@ -462,7 +514,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         .map(|i| {
                             (
                                 format!("subdollar-upstream{}-manual", i),
-                                subdollarbench::sandbox::docker::PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                                subdollarbench::sandbox::docker::PROXY_UPSTREAM_PORTS
+                                    [(i - 1) as usize],
                             )
                         })
                         .collect();
@@ -481,6 +534,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         res.pass_rate, res.passed_count, res.total_stages
                     );
                 }
+                TaskType::Binproto => {
+                    let v = BinprotoVerifier::new(p, None);
+                    let res = v.run_all().await;
+                    println!(
+                        "Pass rate: {:.1}% ({}/{})",
+                        res.pass_rate, res.passed_count, res.total_stages
+                    );
+                }
             }
         }
 
@@ -490,6 +551,237 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 println!("No benchmark results found in {}", results_dir);
             } else {
                 LeaderboardManager::print_leaderboard_views(&all, &task);
+            }
+        }
+
+        Commands::Backfill { results_dir, yes } => {
+            use std::path::Path;
+            let path = Path::new(&results_dir);
+            let mut entries: Vec<String> = std::fs::read_dir(path)
+                .with_context(|| format!("read results dir {results_dir}"))?
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".json"))
+                .collect();
+            entries.sort();
+            let (mut rewritten, mut stamped, mut skipped) = (0, 0, 0);
+            for name in &entries {
+                let fp = path.join(name);
+                let Ok(text) = std::fs::read_to_string(&fp) else {
+                    skipped += 1;
+                    continue;
+                };
+                let Ok(mut run) =
+                    serde_json::from_str::<subdollarbench::report::BenchmarkRunResult>(&text)
+                else {
+                    skipped += 1;
+                    continue;
+                };
+                if run.subruns.is_empty() {
+                    continue;
+                }
+                // Legacy stamp when the run predates fingerprinting.
+                let want_stamp = run.rules_version.is_none();
+                let stamp = want_stamp.then(|| {
+                    subdollarbench::report::legacy_rules_version(&run.timestamp).to_string()
+                });
+                // Re-merge with current scoring from stored subruns.
+                // Stored subruns also predate fingerprinting: stamp them first
+                // so the merge inherits a unanimous (non-mixed) version.
+                let mut subs = run.subruns.clone();
+                for sub in &mut subs {
+                    if sub.rules_version.is_none() {
+                        sub.rules_version = stamp.clone();
+                    }
+                    // Proportional rescore (2026-09-24.1): stored subruns
+                    // predate the cliff removal; recompute their scores from
+                    // pass_rate + effective cost so trial rows match parents.
+                    let eff_cost = sub
+                        .effective_cost_usd
+                        .unwrap_or(sub.total_cost_usd);
+                    sub.efficiency_score =
+                        subdollarbench::cost::calculator::ModelPricing::calculate_efficiency_score(
+                            sub.pass_rate,
+                            eff_cost,
+                        );
+                    sub.throughput_score = subdollarbench::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
+                        sub.pass_rate,
+                        eff_cost,
+                        sub.throughput_req_sec,
+                        sub.reference_throughput_req_sec,
+                        Some(&sub.task),
+                    );
+                }
+                let Some(merged) = subdollarbench::report::BenchmarkRunResult::merge_subruns(
+                    &run.id,
+                    subs.clone(),
+                    run.ref_drift,
+                ) else {
+                    skipped += 1;
+                    continue;
+                };
+                // Preserve the recorded batch bracket; only scoring fields move.
+                // Carry the rescored subruns (proportional eff/tp) so the
+                // stored trial rows match the new rule-set.
+                let mut out = merged;
+                out.ref_drift = run.ref_drift;
+                out.subruns = out.subruns.into_iter().map(|m| {
+                    match subs.iter().find(|r| r.id == m.id) {
+                        Some(r) => r.clone(),
+                        None => m,
+                    }
+                }).collect();
+                if out.rules_version.is_none() {
+                    out.rules_version = stamp.clone();
+                }
+                fn opt_eq(a: Option<f64>, b: Option<f64>) -> bool {
+                    match (a, b) {
+                        (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+                        (None, None) => true,
+                        _ => false,
+                    }
+                }
+                let subs_same = run.subruns.len() == out.subruns.len()
+                    && run.subruns.iter().zip(out.subruns.iter()).all(|(a, b)| {
+                        (a.efficiency_score - b.efficiency_score).abs() < 1e-9
+                            && opt_eq(a.throughput_score, b.throughput_score)
+                    });
+                let same = (run.pass_rate - out.pass_rate).abs() < 1e-9
+                    && opt_eq(run.pass_at_1_lo, out.pass_at_1_lo)
+                    && opt_eq(run.pass_at_1_hi, out.pass_at_1_hi)
+                    && opt_eq(run.throughput_score, out.throughput_score)
+                    && (run.efficiency_score - out.efficiency_score).abs() < 1e-9
+                    && subs_same
+                    && run.rules_version == out.rules_version;
+                if same {
+                    if want_stamp && out.rules_version.is_some() && run.rules_version.is_none() {
+                        // Stamp-only change.
+                        if yes {
+                            let data = serde_json::to_string_pretty(&out)?;
+                            std::fs::write(&fp, data)?;
+                            // Mirror the stamp into the parent manifest.
+                            let mpath = subdollarbench::report::RunArchiver::resolve_runs_dir()
+                                .join(&run.id)
+                                .join("manifest.json");
+                            if let Ok(mtext) = std::fs::read_to_string(&mpath) {
+                                if let Ok(mut mval) =
+                                    serde_json::from_str::<serde_json::Value>(&mtext)
+                                {
+                                    mval["rules_version"] = serde_json::Value::String(
+                                        out.rules_version.clone().unwrap_or_default(),
+                                    );
+                                    let _ = std::fs::write(
+                                        &mpath,
+                                        serde_json::to_string_pretty(&mval)?,
+                                    );
+                                }
+                            }
+                        }
+                        stamped += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                    continue;
+                }
+                println!(
+                    "  {}: pass {:.0} -> {:.0} | P@1 [{:.0}-{:.0}] | tp {} -> {} | rules {} -> {}",
+                    run.id,
+                    run.pass_rate,
+                    out.pass_rate,
+                    out.pass_at_1_lo.unwrap_or(-1.0),
+                    out.pass_at_1_hi.unwrap_or(-1.0),
+                    match run.throughput_score {
+                        Some(v) => format!("{v:.1}"),
+                        None => "-".to_string(),
+                    },
+                    match out.throughput_score {
+                        Some(v) => format!("{v:.1}"),
+                        None => "-".to_string(),
+                    },
+                    run.rules_version.as_deref().unwrap_or("-"),
+                    out.rules_version.as_deref().unwrap_or("-"),
+                );
+                if yes {
+                    let data = serde_json::to_string_pretty(&out)?;
+                    std::fs::write(&fp, data)?;
+                    // Mirror headline + Wilson + rules into the parent manifest.
+                    let mpath = subdollarbench::report::RunArchiver::resolve_runs_dir()
+                        .join(&run.id)
+                        .join("manifest.json");
+                    if let Ok(mtext) = std::fs::read_to_string(&mpath) {
+                        if let Ok(mut mval) = serde_json::from_str::<serde_json::Value>(&mtext) {
+                            mval["pass_rate"] = serde_json::Value::from(out.pass_rate);
+                            mval["passed_stages"] = serde_json::Value::from(out.passed_stages);
+                            mval["total_trials"] =
+                                serde_json::Value::from(out.total_trials.unwrap_or(0));
+                            mval["pass_at_1"] = out
+                                .pass_at_1
+                                .map(serde_json::Value::from)
+                                .unwrap_or(serde_json::Value::Null);
+                            mval["pass_at_1_lo"] = out
+                                .pass_at_1_lo
+                                .map(serde_json::Value::from)
+                                .unwrap_or(serde_json::Value::Null);
+                            mval["pass_at_1_hi"] = out
+                                .pass_at_1_hi
+                                .map(serde_json::Value::from)
+                                .unwrap_or(serde_json::Value::Null);
+                            mval["stability"] = out
+                                .stability
+                                .clone()
+                                .map(serde_json::Value::String)
+                                .unwrap_or(serde_json::Value::Null);
+                            mval["trial_pass_rates"] = serde_json::Value::Array(
+                                out.subruns
+                                    .iter()
+                                    .map(|r| serde_json::Value::from(r.pass_rate))
+                                    .collect(),
+                            );
+                            mval["throughput_req_sec"] = out
+                                .throughput_req_sec
+                                .map(serde_json::Value::from)
+                                .unwrap_or(serde_json::Value::Null);
+                            mval["throughput_score"] = out
+                                .throughput_score
+                                .map(serde_json::Value::from)
+                                .unwrap_or(serde_json::Value::Null);
+                            mval["rules_version"] = out
+                                .rules_version
+                                .clone()
+                                .map(serde_json::Value::String)
+                                .unwrap_or(serde_json::Value::Null);
+                            if out.avg_pass_rate.unwrap_or(out.pass_rate) >= 100.0 {
+                                mval["status"] = serde_json::Value::String("completed".to_string());
+                            } else if mval.get("status").and_then(|v| v.as_str())
+                                == Some("completed")
+                            {
+                                mval["status"] =
+                                    serde_json::Value::String("failed_tests".to_string());
+                            }
+                            let _ = std::fs::write(&mpath, serde_json::to_string_pretty(&mval)?);
+                        }
+                    }
+                    if yes {
+                        rewritten += 1;
+                    }
+                }
+                rewritten += usize::from(!yes);
+            }
+            if yes {
+                println!("backfill: rewrote {rewritten}, stamped {stamped}, skipped {skipped}");
+            } else {
+                println!(
+                    "backfill plan: {rewritten} to rewrite, {stamped} stamp-only, {skipped} unchanged (re-run with --yes)"
+                );
+            }
+        }
+
+        Commands::MatrixReport { results_dir } => {
+            let all = LeaderboardManager::load_all(&results_dir);
+            if all.is_empty() {
+                println!("No benchmark results found in {}", results_dir);
+            } else {
+                LeaderboardManager::print_effort_matrix(&all);
             }
         }
 
@@ -532,7 +824,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     }
                 };
                 let task_prompt = std::fs::read_to_string(
-                    std::path::Path::new("tasks").join(&manifest.task).join("prompt.md"),
+                    std::path::Path::new("tasks")
+                        .join(&manifest.task)
+                        .join("prompt.md"),
                 )
                 .unwrap_or_default();
                 match RunJudge::judge_run(
@@ -548,7 +842,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     Ok(review) => {
                         let text = serde_json::to_string_pretty(&review)?;
                         std::fs::write(dir.join("review.json"), text)?;
-                        println!("[OK] {id}: {}+{} bullets", review.good.len(), review.bad.len());
+                        println!(
+                            "[OK] {id}: {}+{} bullets",
+                            review.good.len(),
+                            review.bad.len()
+                        );
                         done += 1;
                     }
                     Err(e) => {
@@ -558,7 +856,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
             }
             let summary = PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?;
-            println!("reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} runs", summary.run_count);
+            println!(
+                "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} runs",
+                summary.run_count
+            );
         }
         Commands::Portal {
             runs_dir,
@@ -579,25 +880,51 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             subdollarbench::config::SandboxCommands::Check => {
                 println!("{}", "Checking OMP Sandbox Status...".bold().cyan());
                 let status = subdollarbench::sandbox::omp_updater::check_status(true).await;
-                let installed = status.installed_version.as_deref().unwrap_or("Not installed");
+                let installed = status
+                    .installed_version
+                    .as_deref()
+                    .unwrap_or("Not installed");
                 let latest = status.latest_version.as_deref().unwrap_or("Unknown");
                 println!("--------------------------------------------------");
-                println!("  Docker Image:    {}", if status.image_exists { "Found (subdollar-sandbox)".green() } else { "Missing".red() });
+                println!(
+                    "  Docker Image:    {}",
+                    if status.image_exists {
+                        "Found (subdollar-sandbox)".green()
+                    } else {
+                        "Missing".red()
+                    }
+                );
                 println!("  Installed OMP:   {}", installed.cyan());
                 println!("  Latest on npm:   {}", latest.yellow());
-                println!("  Status:          {}", if status.up_to_date { "Up to date ✓".green() } else { "Update available ⚠️".yellow() });
+                println!(
+                    "  Status:          {}",
+                    if status.up_to_date {
+                        "Up to date ✓".green()
+                    } else {
+                        "Update available ⚠️".yellow()
+                    }
+                );
                 if let Some(err) = status.last_error {
                     println!("  Registry Notice: {}", err.dimmed());
                 }
                 println!("--------------------------------------------------");
             }
             subdollarbench::config::SandboxCommands::Update { version } => {
-                println!("{}", "Updating subdollar-sandbox image with OMP...".bold().cyan());
-                let new_status = subdollarbench::sandbox::omp_updater::update_sandbox_image(version.as_deref()).await?;
+                println!(
+                    "{}",
+                    "Updating subdollar-sandbox image with OMP...".bold().cyan()
+                );
+                let new_status =
+                    subdollarbench::sandbox::omp_updater::update_sandbox_image(version.as_deref())
+                        .await?;
                 println!(
                     "{} Installed OMP: {}",
                     "✅ Sandbox successfully updated!".bold().green(),
-                    new_status.installed_version.as_deref().unwrap_or("Unknown").green()
+                    new_status
+                        .installed_version
+                        .as_deref()
+                        .unwrap_or("Unknown")
+                        .green()
                 );
             }
         },
@@ -615,9 +942,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("watching {id} (Ctrl-C to stop)...");
             let show = |line: &str| {
                 if stages_only
-                    && !(line.contains("Stage")
-                        || line.contains("PASS")
-                        || line.contains("FAIL"))
+                    && !(line.contains("Stage") || line.contains("PASS") || line.contains("FAIL"))
                 {
                     return;
                 }
@@ -657,6 +982,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
         Commands::Runs {
             task,
+            model,
+            effort,
+            status,
             limit,
             runs_dir,
             all,
@@ -672,22 +1000,53 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         .ok()
                         .and_then(|t| serde_json::from_str(&t).ok())
                 })
-                .filter(|m: &RunManifest| task.as_ref().map(|t| &m.task == t).unwrap_or(true))
+                .filter(|m: &RunManifest| {
+                    if let Some(t) = task.as_ref() {
+                        if &m.task != t {
+                            return false;
+                        }
+                    }
+                    if let Some(pat) = model.as_ref() {
+                        if !m.model.to_lowercase().contains(&pat.to_lowercase()) {
+                            return false;
+                        }
+                    }
+                    if let Some(pat) = effort.as_ref() {
+                        if m.effort.as_deref().unwrap_or("").to_lowercase() != pat.to_lowercase() {
+                            return false;
+                        }
+                    }
+                    if let Some(pat) = status.as_ref() {
+                        if !m.status.eq_ignore_ascii_case(pat) {
+                            return false;
+                        }
+                    }
+                    true
+                })
                 .collect();
             rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
             println!(
-                "{:<64} {:<8} {:<16} {:>6}  {}",
-                "run", "task", "status", "pass%", "stages"
+                "{:<64} {:<22} {:<7} {:<8} {:<16} {:>6}",
+                "run", "model", "effort", "task", "status", "pass%"
             );
             for m in rows.iter().take(limit) {
                 println!(
-                    "{:<64} {:<8} {:<16} {:>5.1}%  {}/{}",
-                    m.run_id, m.task, m.status, m.pass_rate, m.passed_stages, m.total_stages
+                    "{:<64} {:<22} {:<7} {:<8} {:<16} {:>5.1}%",
+                    m.run_id,
+                    m.model.rsplit('/').next().unwrap_or(&m.model),
+                    m.effort.as_deref().unwrap_or("-"),
+                    m.task,
+                    m.status,
+                    m.pass_rate,
                 );
             }
         }
 
-        Commands::Verdict { run, json, runs_dir } => {
+        Commands::Verdict {
+            run,
+            json,
+            runs_dir,
+        } => {
             let id = resolve_run_id(&runs_dir, &run)?;
             let m = load_run_manifest(&runs_dir, &id)?;
             if json {
@@ -719,7 +1078,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         None => println!("tput:    {tp:.0} req/s (no reference)"),
                     }
                 }
-                println!("turns:   {}", m.turns.map(|t| t.to_string()).unwrap_or("-".into()));
+                println!(
+                    "turns:   {}",
+                    m.turns.map(|t| t.to_string()).unwrap_or("-".into())
+                );
                 println!("spent:   {:.1}s", m.duration_seconds);
             }
             std::process::exit(verdict_code(&m));
@@ -741,8 +1103,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     .map(|s| s.name.as_str())
                     .or_else(|| sb.map(|s| s.name.as_str()))
                     .unwrap_or("?");
-                let fa = sa.map(|s| if s.passed { "PASS" } else { "FAIL" }).unwrap_or("-");
-                let fb = sb.map(|s| if s.passed { "PASS" } else { "FAIL" }).unwrap_or("-");
+                let fa = sa
+                    .map(|s| if s.passed { "PASS" } else { "FAIL" })
+                    .unwrap_or("-");
+                let fb = sb
+                    .map(|s| if s.passed { "PASS" } else { "FAIL" })
+                    .unwrap_or("-");
                 println!("{:<5} {:<46} {:<6} {:<6}", i + 1, name, fa, fb);
             }
         }
@@ -815,7 +1181,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 );
             }
             if !yes {
-                println!("would remove {} containers, {} networks:", containers.len(), networks.len());
+                println!(
+                    "would remove {} containers, {} networks:",
+                    containers.len(),
+                    networks.len()
+                );
                 for c in &containers {
                     println!("  container {c}");
                 }
@@ -845,6 +1215,59 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
             }
             println!("pruned {gone_c} containers, {gone_n} networks");
+        }
+
+        Commands::Matrix {
+            models,
+            efforts,
+            tasks,
+            trials,
+            extra,
+        } => {
+            let models: Vec<String> = models
+                .split(',')
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect();
+            let efforts: Vec<String> = efforts
+                .split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect();
+            let tasks: Vec<String> = tasks
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
+            for t in &tasks {
+                parse_task(t)?;
+            }
+            println!(
+                "# effort x model matrix: {} models x {} efforts x {} tasks x {} trials ({} runs)",
+                models.len(),
+                efforts.len(),
+                tasks.len(),
+                trials,
+                models.len() * efforts.len() * tasks.len()
+            );
+            println!(
+                "# analysis after the wave: subdollarbench matrix-report --results-dir ./results"
+            );
+            for m in &models {
+                for e in &efforts {
+                    for t in &tasks {
+                        let ex = if extra.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", extra.trim())
+                        };
+                        println!(
+                            "subdollarbench run --model {} --task {} --effort {} --trials {}{}",
+                            m, t, e, trials, ex
+                        );
+                    }
+                }
+            }
         }
 
         Commands::Doctor => {
@@ -890,7 +1313,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("doctor: all green");
         }
 
-        Commands::Stability { parent, results_dir } => {
+        Commands::Stability {
+            parent,
+            results_dir,
+        } => {
             let pid = resolve_parent_id(&results_dir, &parent)?;
             let merged = load_parent_result(&results_dir, &pid)?;
             println!("{pid}: {} trials", merged.subruns.len());
@@ -958,7 +1384,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TrialBatchParams {
                     model: model.unwrap_or_else(|| merged.model.clone()),
                     task,
-                    effort: effort.unwrap_or_else(|| merged.effort.clone().unwrap_or_else(|| "high".to_string())),
+                    effort: effort.unwrap_or_else(|| {
+                        merged.effort.clone().unwrap_or_else(|| "high".to_string())
+                    }),
                     max_turns,
                     budget_usd,
                     timeout_min,
@@ -980,12 +1408,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             combined.extend(batch.results);
             let total = combined.len();
             let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
-            let final_merged = LeaderboardManager::consolidate_multi_trial_run(
-                &pid,
-                &combined,
-                true,
-                batch.drift,
-            );
+            let final_merged =
+                LeaderboardManager::consolidate_multi_trial_run(&pid, &combined, true, batch.drift);
             let pass_at_1 = compute_pass_at_k(total, passing, 1) * 100.0;
             let pass_at_k = compute_pass_at_k(total, passing, total) * 100.0;
             println!("extended {pid}: {total} trials, {passing} passing, Pass@1 {pass_at_1:.1}% Pass@{total} {pass_at_k:.1}%");
@@ -995,9 +1419,334 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
+        Commands::Status { server, json } => {
+            let v = remote::get_json(&server, "/api/status").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                print!("{}", remote::format_status(&v));
+            }
+        }
+
+        Commands::Queue { server, json } => {
+            let v = remote::get_json(&server, "/api/queue").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                print!("{}", remote::format_queue(&v));
+            }
+        }
+
+        Commands::Ps {
+            server,
+            model,
+            task,
+            effort,
+            status,
+            limit,
+            runs_dir,
+        } => {
+            // Both calls are read-only; the engine keeps running untouched.
+            let queue = remote::get_json(&server, "/api/queue").await?;
+            let runs = remote::get_json(&server, "/api/runs").await?;
+            let _ = runs_dir;
+            print!(
+                "{}",
+                remote::format_ps(
+                    &queue,
+                    &runs,
+                    model.as_deref(),
+                    task.as_deref(),
+                    effort.as_deref(),
+                    status.as_deref(),
+                    limit,
+                )
+            );
+        }
+
+        Commands::Enqueue {
+            model,
+            task,
+            effort,
+            max_turns,
+            budget_usd,
+            timeout_min,
+            api_key,
+            eval_only,
+            trials,
+            extend_if_unstable,
+            max_trials,
+            no_save,
+            review_model,
+            server,
+        } => {
+            let body = remote::run_request(
+                &model,
+                &task.to_string(),
+                &effort,
+                max_turns,
+                budget_usd,
+                timeout_min,
+                api_key.as_deref(),
+                eval_only,
+                trials,
+                extend_if_unstable,
+                max_trials,
+                no_save,
+                review_model.as_deref(),
+            );
+            let resp = remote::post_json(&server, "/api/queue", &body).await?;
+            let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            if resp.get("started").and_then(|v| v.as_bool()).unwrap_or(false) {
+                println!("enqueued {id}: engine idle, started immediately");
+            } else {
+                let pos = resp
+                    .get("position")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p.to_string())
+                    .unwrap_or("-".into());
+                println!("enqueued {id} at position {pos}");
+            }
+        }
+
+        Commands::QueueExtend {
+            parent,
+            trials,
+            max_turns,
+            budget_usd,
+            timeout_min,
+            eval_only,
+            results_dir,
+            server,
+        } => {
+            let pid = resolve_parent_id(&results_dir, &parent)?;
+            let body = remote::extend_body(
+                trials,
+                max_turns,
+                budget_usd,
+                timeout_min,
+                eval_only.then_some(true),
+            );
+            // Server path-encodes cleanly (clean_run_id rejects slashes).
+            let resp = remote::post_json(&server, &format!("/api/runs/{pid}/extend"), &body).await?;
+            if let Some(qid) = resp.get("queued").and_then(|v| v.as_str()) {
+                let pos = resp
+                    .get("position")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p.to_string())
+                    .unwrap_or("-".into());
+                println!("queued {qid} (extend {pid} +{trials}) at position {pos}");
+            } else if let Some(started) = resp.get("started").and_then(|v| v.as_str()) {
+                println!("extend {started} started immediately");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            }
+        }
+
+        Commands::Dequeue { id, server } => {
+            println!("{}", remote::delete_text(&server, &format!("/api/queue/{id}")).await?);
+        }
+
+        Commands::QueueClear { server } => {
+            // Server only drops finished history; pending work is untouched.
+            println!("{}", remote::delete_text(&server, "/api/queue").await?);
+        }
+
+        Commands::Stop { server } => {
+            println!("{}", remote::post_empty(&server, "/api/run/stop").await?);
+        }
+
+        Commands::Log {
+            run: _,
+            tail,
+            stages_only,
+            follow,
+            server,
+        } => {
+            // Poll the in-memory buffer (pre-flush live tail); --follow ends
+            // when the engine goes idle. Read-only against the engine.
+            let show = |line: &str| {
+                if stages_only
+                    && !(line.contains("Stage") || line.contains("PASS") || line.contains("FAIL"))
+                {
+                    return;
+                }
+                if line.contains("FAIL") || line.contains("CHEAT") {
+                    println!("{}", line.red());
+                } else if line.contains("Stage") && line.contains("PASS") {
+                    println!("{}", line.green());
+                } else {
+                    println!("{line}");
+                }
+            };
+            let mut since: Option<usize> = None;
+            loop {
+                let (total, body) = remote::get_console(&server, tail, since).await?;
+                for line in body.lines() {
+                    show(line);
+                }
+                let status = remote::get_json(&server, "/api/status").await?;
+                let idle = !status.get("is_running").and_then(|b| b.as_bool()).unwrap_or(false);
+                since = Some(total);
+                if !follow || idle {
+                    if follow && idle {
+                        println!("engine idle.");
+                    }
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            }
+        }
+
+        Commands::Detail {
+            run,
+            json,
+            runs_dir,
+            server,
+        } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let v = remote::get_json(&server, &format!("/api/runs/{id}")).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                print!("{}", remote::format_detail(&v));
+            }
+        }
+
+        Commands::Sdiff { a, b, runs_dir, server } => {
+            let ida = resolve_run_id(&runs_dir, &a)?;
+            let idb = resolve_run_id(&runs_dir, &b)?;
+            let v = remote::get_json(&server, &format!("/api/compare?run_a={ida}&run_b={idb}")).await?;
+            print!("{}", remote::format_compare(&v));
+        }
+
+        Commands::Ls { run, runs_dir, server } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let v = remote::get_json(&server, &format!("/api/runs/{id}/files")).await?;
+            let files = v.as_array().cloned().unwrap_or_default();
+            for f in &files {
+                let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let size = f.get("size_bytes").and_then(|n| n.as_u64()).unwrap_or(0);
+                println!("{size:>10}  {name}");
+            }
+        }
+
+        Commands::Cat {
+            run,
+            file,
+            runs_dir,
+            server,
+        } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            print!("{}", remote::get_file_text(&server, &id, &file).await?);
+        }
+
+        Commands::Review { run, runs_dir, server } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let v = remote::get_json(&server, &format!("/api/runs/{id}/review")).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
+        Commands::Lboard { task, json, server } => {
+            let v = remote::get_json(&server, &format!("/api/leaderboard?task={task}")).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                let rows = v.as_array().cloned().unwrap_or_default();
+                println!("{:<64} {:<8} {:>6}", "run", "task", "pass%");
+                for r in &rows {
+                    let id = r.get("id").and_then(|s| s.as_str()).unwrap_or("?");
+                    let t = r.get("task").and_then(|s| s.as_str()).unwrap_or("?");
+                    let p = r.get("pass_rate").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                    println!("{id:<64} {t:<8} {p:>5.1}%");
+                }
+            }
+        }
+
+        Commands::Prompt { task, save, server } => {
+            if save {
+                let mut body = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)?;
+                println!("{}", remote::post_text(&server, &format!("/api/prompt/{task}"), body).await?);
+            } else {
+                print!("{}", remote::get_text(&server, &format!("/api/prompt/{task}")).await?);
+            }
+        }
+
+        Commands::Env { server } => {
+            let v = remote::get_json(&server, "/api/env").await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
+        Commands::Models {
+            family,
+            search,
+            sort,
+            limit,
+            json,
+            server,
+        } => {
+            let v = remote::get_json(&server, "/api/models").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                print!(
+                    "{}",
+                    remote::format_models_filtered(
+                        &v,
+                        family.as_deref(),
+                        search.as_deref(),
+                        &sort,
+                        limit,
+                    )
+                );
+            }
+        }
+
+        Commands::Omp { server } => {
+            let v = remote::get_json(&server, "/api/sandbox/omp").await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
+        Commands::OmpUpdate { version, server } => {
+            let body = serde_json::json!({ "version": version });
+            let v = remote::post_json(&server, "/api/sandbox/omp/update", &body).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
+        Commands::PortalRebuild { server } => {
+            println!("{}", remote::post_empty(&server, "/api/portal/rebuild").await?);
+        }
+
+        Commands::Hide {
+            run,
+            show,
+            runs_dir,
+            server,
+        } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let body = serde_json::json!({ "hidden": !show });
+            let v = remote::post_json(&server, &format!("/api/runs/{id}/portal"), &body).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
+        Commands::Rm {
+            run,
+            yes,
+            runs_dir,
+            server,
+        } => {
+            let id = resolve_run_id(&runs_dir, &run)?;
+            if !yes {
+                anyhow::bail!("refusing to delete {id} without --yes");
+            }
+            println!("{}", remote::delete_text(&server, &format!("/api/runs/{id}")).await?);
+        }
+
         Commands::Ui { port, host } => {
             web::UiServer::start(&host, port).await?;
         }
+
     }
 
     Ok(())
@@ -1050,9 +1799,12 @@ mod tests {
             throughput_score: Some(102.8),
             timestamp: "2026-09-04T12:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             pass_at_k: None,
             avg_pass_rate: None,
             stability: None,
@@ -1099,8 +1851,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_main_cli_portal_export() {
-
-        let temp_dir = std::env::temp_dir().join(format!("test_main_portal_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_main_portal_{}", std::process::id()));
         let runs_dir = temp_dir.join("runs");
         let results_dir = temp_dir.join("results");
         let out_dir = temp_dir.join("portal");
@@ -1144,10 +1896,13 @@ mod tests {
             git_commit: None,
             total_trials: None,
             pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
         };
         fs::write(
             run_dir.join("manifest.json"),
@@ -1167,7 +1922,11 @@ mod tests {
             "efficiency_score": 66.6, "throughput_score": 66.6,
             "timestamp": "2026-09-04T12:01:00Z", "method_version": "0.1.0"
         });
-        fs::write(results_dir.join(format!("{}.json", run_id)), serde_json::to_string(&result).unwrap()).unwrap();
+        fs::write(
+            results_dir.join(format!("{}.json", run_id)),
+            serde_json::to_string(&result).unwrap(),
+        )
+        .unwrap();
 
         let cli = Cli {
             command: Commands::Portal {
@@ -1182,7 +1941,8 @@ mod tests {
 
         let index = fs::read_to_string(out_dir.join("index.html")).unwrap();
         assert!(index.contains(run_id));
-        let log = fs::read_to_string(out_dir.join("runs").join(run_id).join("console.log")).unwrap();
+        let log =
+            fs::read_to_string(out_dir.join("runs").join(run_id).join("console.log")).unwrap();
         assert!(!log.contains("SECRET123"));
 
         let _ = fs::remove_dir_all(&temp_dir);
@@ -1207,6 +1967,8 @@ mod tests {
                 eval_only: true,
                 trials: 2,
                 no_save: true,
+                queue: false,
+                server: "http://127.0.0.1:3000".to_string(),
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
@@ -1261,6 +2023,8 @@ mod tests {
                 eval_only: true,
                 trials: 1,
                 no_save: true,
+                queue: false,
+                server: "http://127.0.0.1:3000".to_string(),
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
@@ -1311,6 +2075,8 @@ mod tests {
                 eval_only: true,
                 trials: 1,
                 no_save: true,
+                queue: false,
+                server: "http://127.0.0.1:3000".to_string(),
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
@@ -1379,7 +2145,10 @@ mod tests {
     fn test_verdict_code_mapping() {
         assert_eq!(verdict_code(&test_manifest_with_status("completed")), 0);
         assert_eq!(verdict_code(&test_manifest_with_status("failed_tests")), 1);
-        assert_eq!(verdict_code(&test_manifest_with_status("disqualified_cheat")), 1);
+        assert_eq!(
+            verdict_code(&test_manifest_with_status("disqualified_cheat")),
+            1
+        );
         assert_eq!(verdict_code(&test_manifest_with_status("agent_failed")), 2);
         assert_eq!(verdict_code(&test_manifest_with_status("agent_killed")), 2);
         assert_eq!(verdict_code(&test_manifest_with_status("mystery")), 2);
@@ -1387,12 +2156,18 @@ mod tests {
 
     #[test]
     fn test_apply_trial_suffix() {
-        assert_eq!(apply_trial_suffix("redis_m_20260917", Some(2)), "redis_m_20260917_trial2");
+        assert_eq!(
+            apply_trial_suffix("redis_m_20260917", Some(2)),
+            "redis_m_20260917_trial2"
+        );
         assert_eq!(
             apply_trial_suffix("redis_m_20260917_trial1", Some(2)),
             "redis_m_20260917_trial1"
         );
-        assert_eq!(apply_trial_suffix("redis_m_20260917", None), "redis_m_20260917");
+        assert_eq!(
+            apply_trial_suffix("redis_m_20260917", None),
+            "redis_m_20260917"
+        );
     }
 
     #[test]

@@ -107,7 +107,12 @@ impl DnsVerifier {
             }
             let rtype = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
             let rclass = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
-            let ttl = u32::from_be_bytes([buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7]]);
+            let ttl = u32::from_be_bytes([
+                buf[offset + 4],
+                buf[offset + 5],
+                buf[offset + 6],
+                buf[offset + 7],
+            ]);
             let rdlen = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
             offset += 10;
             if offset + rdlen > buf.len() {
@@ -171,6 +176,8 @@ impl DnsVerifier {
         stages.push(self.test_stage2_example_com().await);
         stages.push(self.test_stage3_localhost().await);
         stages.push(self.test_stage4_txt_record().await);
+        // Stage 5 before the burst: an 800-query flood must not be able to
+        // drain candidate sockets ahead of the NXDOMAIN probe.
         stages.push(self.test_stage5_nxdomain().await);
         stages.push(self.test_stage6_concurrency().await);
 
@@ -205,7 +212,10 @@ impl DnsVerifier {
                     if parsed.id != id || !parsed.qr {
                         return None;
                     }
-                    let has_ip = parsed.answers.iter().any(|a| a.rtype == 1 && a.rdata == [93, 184, 216, 34])
+                    let has_ip = parsed
+                        .answers
+                        .iter()
+                        .any(|a| a.rtype == 1 && a.rdata == [93, 184, 216, 34])
                         || buf[..len].windows(4).any(|w| w == [93, 184, 216, 34]);
                     if !has_ip {
                         return None;
@@ -286,7 +296,9 @@ impl DnsVerifier {
                             stage: 1,
                             name,
                             passed: false,
-                            error: Some("Response QR bit not set (flags indicate query)".to_string()),
+                            error: Some(
+                                "Response QR bit not set (flags indicate query)".to_string(),
+                            ),
                         };
                     }
                     StageResult {
@@ -323,11 +335,18 @@ impl DnsVerifier {
                             stage: 2,
                             name,
                             passed: false,
-                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                            error: Some(format!(
+                                "Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}",
+                                tx_id, parsed.id
+                            )),
                         };
                     }
-                    let has_a_record = parsed.answers.iter().any(|a| a.rtype == 1 && a.rdata == [93, 184, 216, 34])
-                        || (parsed.ancount >= 1 && resp.windows(4).any(|w| w == [93, 184, 216, 34]));
+                    let has_a_record = parsed
+                        .answers
+                        .iter()
+                        .any(|a| a.rtype == 1 && a.rdata == [93, 184, 216, 34])
+                        || (parsed.ancount >= 1
+                            && resp.windows(4).any(|w| w == [93, 184, 216, 34]));
                     if has_a_record {
                         StageResult {
                             stage: 2,
@@ -374,10 +393,16 @@ impl DnsVerifier {
                             stage: 3,
                             name,
                             passed: false,
-                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                            error: Some(format!(
+                                "Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}",
+                                tx_id, parsed.id
+                            )),
                         };
                     }
-                    let has_local = parsed.answers.iter().any(|a| a.rtype == 1 && a.rdata == [127, 0, 0, 1])
+                    let has_local = parsed
+                        .answers
+                        .iter()
+                        .any(|a| a.rtype == 1 && a.rdata == [127, 0, 0, 1])
                         || (parsed.ancount >= 1 && resp.windows(4).any(|w| w == [127, 0, 0, 1]));
                     if has_local {
                         StageResult {
@@ -391,7 +416,10 @@ impl DnsVerifier {
                             stage: 3,
                             name,
                             passed: false,
-                            error: Some(format!("Expected A record 127.0.0.1, got ancount={}", parsed.ancount)),
+                            error: Some(format!(
+                                "Expected A record 127.0.0.1, got ancount={}",
+                                parsed.ancount
+                            )),
                         }
                     }
                 }
@@ -422,12 +450,17 @@ impl DnsVerifier {
                             stage: 4,
                             name,
                             passed: false,
-                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
+                            error: Some(format!(
+                                "Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}",
+                                tx_id, parsed.id
+                            )),
                         };
                     }
                     let s = String::from_utf8_lossy(&resp);
-                    let has_txt = parsed.answers.iter().any(|a| a.rtype == 16 && String::from_utf8_lossy(&a.rdata).contains("subdollar-benchmark"))
-                        || s.contains("subdollar-benchmark");
+                    let has_txt = parsed.answers.iter().any(|a| {
+                        a.rtype == 16
+                            && String::from_utf8_lossy(&a.rdata).contains("subdollar-benchmark")
+                    }) || s.contains("subdollar-benchmark");
                     if has_txt {
                         StageResult {
                             stage: 4,
@@ -440,7 +473,9 @@ impl DnsVerifier {
                             stage: 4,
                             name,
                             passed: false,
-                            error: Some("TXT record payload 'subdollar-benchmark' not found".to_string()),
+                            error: Some(
+                                "TXT record payload 'subdollar-benchmark' not found".to_string(),
+                            ),
                         }
                     }
                 }
@@ -460,52 +495,74 @@ impl DnsVerifier {
         }
     }
 
-    pub async fn test_stage5_nxdomain(&self) -> StageResult {
-        let name = "Stage 5: Unknown Domain NXDOMAIN / Error Response".to_string();
-        let tx_id = rand::random::<u16>();
-        match self.send_query(tx_id, "nonexistent.subdollar.invalid", 1).await {
-            Ok(resp) => match Self::parse_response(&resp) {
-                Ok(parsed) => {
-                    if parsed.id != tx_id {
-                        return StageResult {
-                            stage: 5,
-                            name,
-                            passed: false,
-                            error: Some(format!("Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}", tx_id, parsed.id)),
-                        };
+    fn check_nxdomain(name: String, tx_id: u16, resp: &[u8]) -> StageResult {
+        match Self::parse_response(resp) {
+            Ok(parsed) => {
+                if parsed.id != tx_id {
+                    return StageResult {
+                        stage: 5,
+                        name,
+                        passed: false,
+                        error: Some(format!(
+                            "Transaction ID mismatch: sent 0x{:04x}, got 0x{:04x}",
+                            tx_id, parsed.id
+                        )),
+                    };
+                }
+                if parsed.rcode == 3 || parsed.ancount == 0 {
+                    StageResult {
+                        stage: 5,
+                        name,
+                        passed: true,
+                        error: None,
                     }
-                    if parsed.rcode == 3 || parsed.ancount == 0 {
-                        StageResult {
-                            stage: 5,
-                            name,
-                            passed: true,
-                            error: None,
-                        }
-                    } else {
-                        StageResult {
-                            stage: 5,
-                            name,
-                            passed: false,
-                            error: Some(format!(
-                                "Expected RCODE 3 or ANCOUNT 0, got rcode={}, ancount={}",
-                                parsed.rcode, parsed.ancount
-                            )),
-                        }
+                } else {
+                    StageResult {
+                        stage: 5,
+                        name,
+                        passed: false,
+                        error: Some(format!(
+                            "Expected RCODE 3 or ANCOUNT 0, got rcode={}, ancount={}",
+                            parsed.rcode, parsed.ancount
+                        )),
                     }
                 }
-                Err(e) => StageResult {
-                    stage: 5,
-                    name,
-                    passed: false,
-                    error: Some(e),
-                },
-            },
+            }
             Err(e) => StageResult {
                 stage: 5,
                 name,
                 passed: false,
                 error: Some(e),
             },
+        }
+    }
+
+    pub async fn test_stage5_nxdomain(&self) -> StageResult {
+        let name = "Stage 5: Unknown Domain NXDOMAIN / Error Response".to_string();
+        // UDP loss under shared testbed load must not masquerade as a model
+        // failure: retry transport errors, keep TX-ID mismatch a hard fail.
+        // Per-attempt latency is logged so a 1.6s marginal miss is
+        // distinguishable from a ~10s resolver hang (unreachable ref-dns).
+        let mut last_err = "no attempts".to_string();
+        for _ in 0..3 {
+            let tx_id = rand::random::<u16>();
+            let t0 = std::time::Instant::now();
+            match self
+                .send_query(tx_id, "nonexistent.subdollar.invalid", 1)
+                .await
+            {
+                Err(e) => {
+                    last_err = format!("{} (attempt {:.1}s)", e, t0.elapsed().as_secs_f64());
+                    continue;
+                }
+                Ok(resp) => return Self::check_nxdomain(name.clone(), tx_id, &resp),
+            }
+        }
+        StageResult {
+            stage: 5,
+            name,
+            passed: false,
+            error: Some(format!("transport failed after 3 attempts: {last_err}")),
         }
     }
 
@@ -639,6 +696,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stage5_survives_packet_loss() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let drops = Arc::new(AtomicUsize::new(2));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let drops_srv = drops.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let Ok((len, src)) = socket.recv_from(&mut buf).await else {
+                    continue;
+                };
+                if len < 12 {
+                    continue;
+                }
+                // Drop the first two queries: transport errors the retry
+                // loop must absorb.
+                if drops_srv.fetch_add(1, Ordering::SeqCst) < 2 {
+                    continue;
+                }
+                let mut resp = Vec::new();
+                resp.extend_from_slice(&buf[0..2]);
+                resp.extend_from_slice(&[
+                    0x81, 0x83, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ]);
+                resp.extend_from_slice(&buf[12..len]);
+                let _ = socket.send_to(&resp, src).await;
+            }
+        });
+        let v = DnsVerifier::new(port, None);
+        let r = v.test_stage5_nxdomain().await;
+        assert!(
+            r.passed,
+            "stage 5 must survive 2 dropped packets: {:?}",
+            r.error
+        );
+    }
+
+    #[tokio::test]
     async fn test_dns_verifier_all_stages_pass() {
         let port = start_mock_dns_server().await;
         let verifier = DnsVerifier::new(port, None);
@@ -666,7 +763,9 @@ mod tests {
         assert!(DnsVerifier::parse_response(&[0x12, 0x34]).is_err());
 
         // Valid 12-byte header with no questions and no answers
-        let hdr = [0x12, 0x34, 0x81, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let hdr = [
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
         let parsed = DnsVerifier::parse_response(&hdr).unwrap();
         assert_eq!(parsed.id, 0x1234);
         assert!(parsed.qr);

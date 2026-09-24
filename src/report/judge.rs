@@ -22,8 +22,18 @@ impl RunJudge {
         if r.conclusion.trim().is_empty() {
             anyhow::bail!("review conclusion is empty");
         }
-        let good: Vec<&str> = r.good.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        let bad: Vec<&str> = r.bad.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let good: Vec<&str> = r
+            .good
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let bad: Vec<&str> = r
+            .bad
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         if good.is_empty() || bad.is_empty() {
             anyhow::bail!("review needs at least one strength and one weakness");
         }
@@ -68,14 +78,20 @@ impl RunJudge {
         if *budget == 0 {
             return;
         }
-        let mut entries: Vec<_> = std::fs::read_dir(dir).map(|rd| rd.flatten().collect()).unwrap_or_default();
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .map(|rd| rd.flatten().collect())
+            .unwrap_or_default();
         entries.sort_by_key(|a| a.file_name());
         for entry in entries {
             if *budget == 0 {
                 return;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "__pycache__"
+            {
                 continue;
             }
             let path = entry.path();
@@ -101,17 +117,29 @@ impl RunJudge {
         }
     }
 
-    pub fn build_prompt(task: &str, task_prompt: &str, files: &[(String, String)], metrics: &str) -> String {
+    pub fn build_prompt(
+        task: &str,
+        task_prompt: &str,
+        files: &[(String, String)],
+        metrics: &str,
+    ) -> String {
         let mut p = String::new();
         p.push_str("You are an expert systems-engineering code reviewer. Review the candidate ");
         p.push_str(task);
         p.push_str(" server below against its task requirements and its measured results.\n");
         p.push_str("Judge ONLY this run on its own prompt and its own numbers. Weigh run economy (turns, tokens, cost, duration) alongside correctness and throughput. Never compare against other runs, models, or leaderboard positions.\n");
         p.push_str("Respond with a single JSON object and nothing else, exactly this shape:\n");
-        p.push_str("{\"good\": [\"...\", ...], \"bad\": [\"...\", ...], \"conclusion\": \"...\"}\n");
+        p.push_str(
+            "{\"good\": [\"...\", ...], \"bad\": [\"...\", ...], \"conclusion\": \"...\"}\n",
+        );
         p.push_str("Rules: good plus bad must total exactly 9 bullets (any split, at least one of each), each bullet one or two sentences grounded in the code or the numbers, conclusion exactly three sentences. No markdown fences.\n\n");
         p.push_str("## Task requirements (excerpt)\n");
-        p.push_str(&task_prompt.chars().take(MAX_PROMPT_CHARS).collect::<String>());
+        p.push_str(
+            &task_prompt
+                .chars()
+                .take(MAX_PROMPT_CHARS)
+                .collect::<String>(),
+        );
         p.push_str("\n\n## Measured results\n");
         p.push_str(metrics);
         p.push_str("\n\n## Candidate files\n");
@@ -143,7 +171,14 @@ impl RunJudge {
         }
     }
 
-    async fn call_once(client: &reqwest::Client, url: &str, key: Option<&str>, model: &str, messages: &[serde_json::Value], max_tokens: u32) -> Result<String> {
+    async fn call_once(
+        client: &reqwest::Client,
+        url: &str,
+        key: Option<&str>,
+        model: &str,
+        messages: &[serde_json::Value],
+        max_tokens: u32,
+    ) -> Result<String> {
         let mut req = client
             .post(url)
             .header("Content-Type", "application/json")
@@ -253,7 +288,11 @@ impl RunJudge {
         model: &str,
         prompt: String,
     ) -> Result<ReviewJson> {
-        let max_tokens = if url.contains("127.0.0.1") { 4000 } else { 2000 };
+        let max_tokens = if url.contains("127.0.0.1") {
+            4000
+        } else {
+            2000
+        };
         let system = serde_json::json!({"role": "system", "content": "You review one benchmark run against its own task prompt and measured results. Reply with exactly one JSON object, no prose, no fences."});
         let user = serde_json::json!({"role": "user", "content": prompt});
         let mut messages = vec![system, user];
@@ -285,8 +324,19 @@ mod tests {
 
     fn sample() -> ReviewJson {
         ReviewJson {
-            good: vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
-            bad: vec!["h".to_string(), "d".to_string(), "g".to_string(), "e".to_string(), "f".to_string()],
+            good: vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ],
+            bad: vec![
+                "h".to_string(),
+                "d".to_string(),
+                "g".to_string(),
+                "e".to_string(),
+                "f".to_string(),
+            ],
             conclusion: "ok".to_string(),
         }
     }

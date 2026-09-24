@@ -310,7 +310,10 @@ impl ComplianceChecker {
         // Check forbidden generic socket tunneling / proxy utilities
         let forbidden_proxies = ["socat", "nc", "ncat", "netcat"];
         if forbidden_proxies.contains(&cmd_base) {
-            return Some(format!("uses forbidden generic socket tunnel/proxy '{}'", cmd_base));
+            return Some(format!(
+                "uses forbidden generic socket tunnel/proxy '{}'",
+                cmd_base
+            ));
         }
 
         // Check if the command itself is a forbidden daemon.
@@ -318,9 +321,7 @@ impl ComplianceChecker {
         // /workspace/..., /app/...) are the candidate's own build output and
         // are allowed; bare names and system paths (/usr/bin/...) stay forbidden.
         for daemon in FORBIDDEN_DAEMONS {
-            if cmd_base == *daemon
-                && !Self::is_allowed_local_build_output(&cmd_token, daemon)
-            {
+            if cmd_base == *daemon && !Self::is_allowed_local_build_output(&cmd_token, daemon) {
                 return Some(format!("executes forbidden server daemon '{}'", daemon));
             }
         }
@@ -362,7 +363,12 @@ impl ComplianceChecker {
                     let arg_lower = arg.to_lowercase();
                     let arg_base = arg_lower.split('/').next_back().unwrap_or(&arg_lower);
                     for daemon in FORBIDDEN_DAEMONS {
-                        if arg_base == *daemon || arg_base == "redis" || arg_base == "valkey" || arg_base == "keydb" || arg_base.starts_with(&format!("{}-", daemon)) {
+                        if arg_base == *daemon
+                            || arg_base == "redis"
+                            || arg_base == "valkey"
+                            || arg_base == "keydb"
+                            || arg_base.starts_with(&format!("{}-", daemon))
+                        {
                             return Some(format!(
                                 "installs forbidden server daemon '{}' via {}",
                                 daemon, cmd_base
@@ -408,8 +414,7 @@ impl ComplianceChecker {
                             Some((_, after)) => after.split(':').next().unwrap_or(after),
                             None => arg_lower.split(':').next().unwrap_or(arg_lower.as_str()),
                         };
-                        if img_ref == *img || img_ref.starts_with(&format!("{}-", img))
-                        {
+                        if img_ref == *img || img_ref.starts_with(&format!("{}-", img)) {
                             return Some(format!(
                                 "runs forbidden container image '{}' via {}",
                                 img, cmd_base
@@ -503,7 +508,16 @@ impl ComplianceChecker {
         let first = toks[0].to_lowercase();
         let base = first.split('/').next_back().unwrap_or(&first);
         if !FORBIDDEN_DAEMONS.contains(&base) {
-            if base == "apt" || base == "apt-get" || base == "apk" || base == "yum" || base == "dnf" || base == "pacman" || base == "sh" || base == "bash" || base == "docker" {
+            if base == "apt"
+                || base == "apt-get"
+                || base == "apk"
+                || base == "yum"
+                || base == "dnf"
+                || base == "pacman"
+                || base == "sh"
+                || base == "bash"
+                || base == "docker"
+            {
                 return Self::check_daemon_command(lit);
             }
             return None;
@@ -513,7 +527,6 @@ impl ComplianceChecker {
         }
         Self::check_daemon_command(lit)
     }
-
 
     fn scan_elf_for_vendor_signatures(path: &Path) -> Option<Option<String>> {
         use std::io::Read;
@@ -603,7 +616,9 @@ impl ComplianceChecker {
                 if lower.starts_with("from ") {
                     let img_name = Self::docker_image_name(&line).to_lowercase();
                     for forbidden in FORBIDDEN_BASE_IMAGES {
-                        if img_name == *forbidden || img_name.starts_with(&format!("{}-", forbidden)) {
+                        if img_name == *forbidden
+                            || img_name.starts_with(&format!("{}-", forbidden))
+                        {
                             violations
                                 .push(format!("Dockerfile uses forbidden base image '{}'", line));
                             break;
@@ -655,7 +670,10 @@ impl ComplianceChecker {
             for line in logical_lines {
                 let lower = line.to_lowercase();
                 if lower.contains("base64 -d |") || lower.contains("base64 --decode |") {
-                    violations.push(format!("{}: uses obfuscated base64 pipeline execution", filename));
+                    violations.push(format!(
+                        "{}: uses obfuscated base64 pipeline execution",
+                        filename
+                    ));
                 }
                 if let Some(v) = Self::check_daemon_command(&line) {
                     violations.push(format!("{}: {}", filename, v));
@@ -689,9 +707,22 @@ impl ComplianceChecker {
         // 4. Python requirements.txt or pyproject.toml
         if filename == "requirements.txt" || filename == "pyproject.toml" {
             let forbidden = [
-                "flask", "fastapi", "django", "tornado", "aiohttp", "sanic", "redis", "valkey",
-                "pypdf", "pymupdf", "pdfminer", "pdfplumber", "pdf2image", "fitz",
-                "redis-py", "twisted",
+                "flask",
+                "fastapi",
+                "django",
+                "tornado",
+                "aiohttp",
+                "sanic",
+                "redis",
+                "valkey",
+                "pypdf",
+                "pymupdf",
+                "pdfminer",
+                "pdfplumber",
+                "pdf2image",
+                "fitz",
+                "redis-py",
+                "twisted",
             ];
             for line in content.lines() {
                 let trimmed = line.trim().to_lowercase();
@@ -722,8 +753,16 @@ impl ComplianceChecker {
                 "pdfium-render",
             ];
             for line in content.lines() {
-                let code = line.split('#').next().unwrap_or("").trim().trim_start_matches('[');
-                let name: String = code.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+                let code = line
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches('[');
+                let name: String = code
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
                 if forbidden.contains(&name.to_lowercase().as_str()) {
                     violations.push(format!("Cargo.toml: uses forbidden dependency '{}'", name));
                     break;
@@ -760,7 +799,10 @@ impl ComplianceChecker {
                     violations.push(format!("{}: imports built-in http.server", filename));
                 }
                 if content.contains("wsgiref.simple_server") {
-                    violations.push(format!("{}: imports built-in wsgiref.simple_server", filename));
+                    violations.push(format!(
+                        "{}: imports built-in wsgiref.simple_server",
+                        filename
+                    ));
                 }
                 if Self::imports_py_module(&content, "flask") {
                     violations.push(format!("{}: imports flask", filename));
@@ -769,7 +811,8 @@ impl ComplianceChecker {
                     || Self::imports_py_module(&content, "pymupdf")
                     || Self::imports_py_module(&content, "pdfminer")
                     || Self::imports_py_module(&content, "pypdf")
-                    || Self::imports_py_module(&content, "pdfplumber") {
+                    || Self::imports_py_module(&content, "pdfplumber")
+                {
                     violations.push(format!("{}: imports pdf library", filename));
                 }
                 if Self::imports_py_module(&content, "fastapi") {
@@ -781,7 +824,6 @@ impl ComplianceChecker {
                 {
                     violations.push(format!("{}: uses obfuscated dynamic execution", filename));
                 }
-
             }
             "go" => {
                 if content.contains("http.ListenAndServe") || content.contains("http.Server{") {
@@ -826,7 +868,10 @@ impl ComplianceChecker {
 
         // 8. Embedded daemon invocations inside string literals of source files
         // (e.g. subprocess.Popen(["redis-server"]) in an entrypoint script).
-        if matches!(ext, "py" | "go" | "js" | "ts" | "rs" | "c" | "cpp" | "cc" | "h" | "hpp") {
+        if matches!(
+            ext,
+            "py" | "go" | "js" | "ts" | "rs" | "c" | "cpp" | "cc" | "h" | "hpp"
+        ) {
             for lit in Self::string_literals(&content) {
                 if let Some(v) = Self::check_literal_invocation(&lit) {
                     violations.push(format!("{}: {}", filename, v));
@@ -864,11 +909,16 @@ mod tests {
 
     #[test]
     fn test_compliance_checker_allows_own_binary_in_dockerfile_cmd() {
-        let temp_dir = std::env::temp_dir().join(format!("test_compliance_dockercmd_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_dockercmd_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
         fs::write(temp_dir.join("Dockerfile"), "FROM golang:1.22-alpine\nRUN go build -o redis-server main.go\nCMD [\"./redis-server\"]\n").unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
-        fs::write(temp_dir.join("Dockerfile"), "FROM alpine\nCMD [\"redis-server\"]\n").unwrap();
+        fs::write(
+            temp_dir.join("Dockerfile"),
+            "FROM alpine\nCMD [\"redis-server\"]\n",
+        )
+        .unwrap();
         let res = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("redis-server"));
@@ -1113,34 +1163,59 @@ mod tests {
 
     #[test]
     fn test_compliance_checker_tight_matches_and_literal_scan() {
-        let temp_dir = std::env::temp_dir().join(format!("test_compliance_tight_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_tight_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
-        fs::write(temp_dir.join("app.py"), "import flask_cors
+        fs::write(
+            temp_dir.join("app.py"),
+            "import flask_cors
 from fastapi_utils import x
-").unwrap();
-        fs::write(temp_dir.join("Cargo.toml"), "[dependencies]
+",
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.join("Cargo.toml"),
+            "[dependencies]
 hyper-util = \"0.1\"
 redis-protocol = \"1\"
-").unwrap();
-        fs::write(temp_dir.join("Dockerfile"), "FROM predis/base:1
+",
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.join("Dockerfile"),
+            "FROM predis/base:1
 CMD [\"./svc\"]
-").unwrap();
+",
+        )
+        .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
-        fs::write(temp_dir.join("entry.py"), "import subprocess
+        fs::write(
+            temp_dir.join("entry.py"),
+            "import subprocess
 subprocess.Popen([\"redis-server\", \"--port\"])
-").unwrap();
+",
+        )
+        .unwrap();
         let r1 = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(r1.is_err());
         assert!(r1.unwrap_err().contains("redis-server"));
         let _ = fs::remove_file(temp_dir.join("entry.py"));
-        fs::write(temp_dir.join("start.sh"), "#!/bin/bash
+        fs::write(
+            temp_dir.join("start.sh"),
+            "#!/bin/bash
 python3 -m http.server 8080
-").unwrap();
+",
+        )
+        .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_err());
         let _ = fs::remove_file(temp_dir.join("start.sh"));
-        fs::write(temp_dir.join("Dockerfile"), "FROM alpine
+        fs::write(
+            temp_dir.join("Dockerfile"),
+            "FROM alpine
 RUN apk add redis
-").unwrap();
+",
+        )
+        .unwrap();
         let r3 = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(r3.is_err());
         assert!(r3.unwrap_err().contains("redis"));
@@ -1223,7 +1298,10 @@ RUN apk add redis
         )
         .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_err());
-        fs::write(temp_dir.join("start.sh"), "#!/bin/bash\nsudo /usr/sbin/nginx\n")
+        fs::write(
+            temp_dir.join("start.sh"),
+            "#!/bin/bash\nsudo /usr/sbin/nginx\n",
+        )
         .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_err());
 

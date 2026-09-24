@@ -50,5 +50,6 @@ Your server must listen on UDP port 5353 and respond to standard queries (QR=1, 
 
 ### Recursion & Scale (SHOULD-have, judge-reviewed)
 - **Upstream Forwarding**: Forward queries for names outside your 3 static records to the upstream resolver at hostname `ref-dns`, port `53`. Cache answers honoring TTL; serve repeats from memory.
+- **Fail-Fast Resolution (REQUIRED for full marks)**: The verifier times out unknown-domain queries after ~1.5s. A blocking hostname lookup per query (e.g. libc `gethostbyname`/`getaddrinfo` on `ref-dns` inside the request path) can stall for ~10s on an unreachable resolver and fail the query on transport, not logic. Resolve `ref-dns` ONCE at startup (or on first use with a short timeout), cache the resulting IP, and reuse it for all forwards. If resolution fails or the upstream does not answer within your own short timeout, answer unknown queries immediately with `RCODE=3` (NXDOMAIN) — never block the request thread on DNS resolution.
 
 Test your DNS server thoroughly with `dig @127.0.0.1 -p 5353 example.com` before finishing!

@@ -337,7 +337,10 @@ impl ProxyVerifier {
                 }
             }
         }
-        let _ = std::process::Command::new("docker").arg("start").arg(&mid_name).output();
+        let _ = std::process::Command::new("docker")
+            .arg("start")
+            .arg(&mid_name)
+            .output();
         if let Some(e) = burst_err {
             return stage_fail(4, name, format!("Proxy must fail over, {}", e));
         }
@@ -398,7 +401,10 @@ mod tests {
     fn status_line_ok_and_rejected() {
         let ok = |s: &str| parse_status_line(s);
         assert_eq!(ok("HTTP/1.1 200 OK"), Some(("HTTP/1.1".into(), 200)));
-        assert_eq!(ok("HTTP/1.1 502 Bad Gateway\r"), Some(("HTTP/1.1".into(), 502)));
+        assert_eq!(
+            ok("HTTP/1.1 502 Bad Gateway\r"),
+            Some(("HTTP/1.1".into(), 502))
+        );
         assert_eq!(ok("HTTP/1.0 200 OK"), Some(("HTTP/1.0".into(), 200)));
         assert_eq!(ok("NOTHTTP 200 OK"), None);
         assert_eq!(ok("HTTP/1.1 OK"), None);

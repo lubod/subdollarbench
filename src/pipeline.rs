@@ -11,9 +11,9 @@ use crate::bench::BenchmarkRunner;
 use crate::config::{get_repo_root, TaskType};
 use crate::cost::ModelPricing;
 use crate::report::archive::{RunArchiver, RunManifest, RunTokenUsage};
+use crate::report::judge::RunJudge;
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
 use crate::report::portal::PortalExporter;
-use crate::report::judge::RunJudge;
 use crate::sandbox::docker::{SandboxManager, PROXY_UPSTREAM_PORTS};
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::verifier::compliance::ComplianceChecker;
@@ -21,6 +21,7 @@ use crate::verifier::dns::DnsVerifier;
 use crate::verifier::http::HttpVerifier;
 use crate::verifier::pdf::PdfVerifier;
 use crate::verifier::proxy::ProxyVerifier;
+use crate::verifier::binproto::BinprotoVerifier;
 use crate::verifier::pubsub::PubsubVerifier;
 use crate::verifier::redis::RedisVerifier;
 use crate::verifier::wal::WalVerifier;
@@ -121,11 +122,7 @@ async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
         wh.write_all(format!("PUB recovery_probe msg-{}\n", i).as_bytes())
             .await?;
         let mut line = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rd.read_line(&mut line),
-        )
-        .await??;
+        tokio::time::timeout(std::time::Duration::from_secs(5), rd.read_line(&mut line)).await??;
         if line.starts_with("+OK") {
             acks += 1;
         }
@@ -244,18 +241,18 @@ impl BenchmarkPipeline {
                 }
             }
             TaskType::Pdf => {
-                logger.log("[SETUP] PDF task uses verifier-generated fixtures; no reference container.");
+                logger.log(
+                    "[SETUP] PDF task uses verifier-generated fixtures; no reference container.",
+                );
             }
-            TaskType::Proxy => {
-                match sandbox.start_upstream_pool(&PROXY_UPSTREAM_PORTS) {
-                    Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
-                    Err(e) => logger.log(&format!(
-                        "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
-                        e
-                    )),
-                }
-            }
-            TaskType::Wal | TaskType::Pubsub => {
+            TaskType::Proxy => match sandbox.start_upstream_pool(&PROXY_UPSTREAM_PORTS) {
+                Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
+                Err(e) => logger.log(&format!(
+                    "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
+                    e
+                )),
+            },
+            TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
                 logger.log("[SETUP] No reference container for this task (verifier-timed).");
             }
         }
@@ -437,7 +434,12 @@ impl BenchmarkPipeline {
         } else {
             let _ = sandbox.start_candidate_in_docker(&config.workdir, port);
 
-            if config.task == TaskType::Proxy {
+            // Proxy needs its upstream pool; DNS needs ref-dns. Both live
+            // on the private run network, which the candidate only joins here
+            // (default bridge has neither alias). Without this, DNS
+            // candidates hang in libc resolution of `ref-dns` past the 1.5s
+            // verifier timeout and fail stage 5 on transport, not logic.
+            if config.task == TaskType::Proxy || config.task == TaskType::Dns {
                 if let Err(e) = sandbox.connect_candidate_to_network() {
                     logger.log(&format!(
                         "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
@@ -513,7 +515,10 @@ impl BenchmarkPipeline {
                                 let status_str = if st.passed { "PASS" } else { "FAIL" };
                                 logger.log(&format!(
                                     "  Stage {}: {} -> {} {}",
-                                    st.stage, st.name, status_str, st.error.as_deref().unwrap_or("")
+                                    st.stage,
+                                    st.name,
+                                    status_str,
+                                    st.error.as_deref().unwrap_or("")
                                 ));
                                 stages.push(st);
                             }
@@ -574,14 +579,15 @@ impl BenchmarkPipeline {
                     )
                 }
                 TaskType::Wal => {
-                    let log_stage = |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
-                        logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
-                        ));
-                    };
+                    let log_stage =
+                        |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                            let status_str = if s.passed { "PASS" } else { "FAIL" };
+                            let err_str = s.error.as_deref().unwrap_or("");
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                s.stage, s.name, status_str, err_str
+                            ));
+                        };
                     let fail = |n: u32, name: &str, err: String| crate::verifier::StageResult {
                         stage: n,
                         name: name.to_string(),
@@ -616,19 +622,38 @@ impl BenchmarkPipeline {
                                 match sandbox.restart_candidate() {
                                     Ok(()) => {
                                         if sandbox.wait_for_port(port, 25).await {
-                                            logger.log("[BENCH] Candidate back; checking recovery...");
+                                            logger.log(
+                                                "[BENCH] Candidate back; checking recovery...",
+                                            );
                                             verifier.check_recovery(probe_acks).await
                                         } else {
-                                            fail(4, "Stage 4: Crash recovery", "candidate did not reopen port after restart".to_string())
+                                            fail(
+                                                4,
+                                                "Stage 4: Crash recovery",
+                                                "candidate did not reopen port after restart"
+                                                    .to_string(),
+                                            )
                                         }
                                     }
-                                    Err(e) => fail(4, "Stage 4: Crash recovery", format!("restart failed: {}", e)),
+                                    Err(e) => fail(
+                                        4,
+                                        "Stage 4: Crash recovery",
+                                        format!("restart failed: {}", e),
+                                    ),
                                 }
                             }
-                            Err(e) => fail(4, "Stage 4: Crash recovery", format!("SIGKILL failed: {}", e)),
+                            Err(e) => fail(
+                                4,
+                                "Stage 4: Crash recovery",
+                                format!("SIGKILL failed: {}", e),
+                            ),
                         }
                     } else {
-                        fail(4, "Stage 4: Crash recovery", "probe had no full acks; skipping kill".to_string())
+                        fail(
+                            4,
+                            "Stage 4: Crash recovery",
+                            "probe had no full acks; skipping kill".to_string(),
+                        )
                     };
                     log_stage(&logger, &rec);
                     stages.push(rec);
@@ -681,14 +706,15 @@ impl BenchmarkPipeline {
                         // Alias propagation after connect.
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
-                    let log_stage = |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
-                        logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
-                        ));
-                    };
+                    let log_stage =
+                        |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                            let status_str = if s.passed { "PASS" } else { "FAIL" };
+                            let err_str = s.error.as_deref().unwrap_or("");
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                s.stage, s.name, status_str, err_str
+                            ));
+                        };
                     let ups: Vec<(String, u16)> = (1u8..=3u8)
                         .map(|i| {
                             (
@@ -749,6 +775,24 @@ impl BenchmarkPipeline {
                         summary.stages,
                     )
                 }
+                TaskType::Binproto => {
+                    let verifier = BinprotoVerifier::new(port, Some(&verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage, s.name, status_str, err_str
+                        ));
+                    }
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
             };
 
             // Container diagnostics if any failures
@@ -760,38 +804,51 @@ impl BenchmarkPipeline {
                 }
             }
 
-
             // 8. Load testing if 100% pass
             if pr == 100.0 {
-                logger.log("[BENCH] 100% tests passed! Running live throughput load test on candidate...");
+                logger.log(
+                    "[BENCH] 100% tests passed! Running live throughput load test on candidate...",
+                );
                 match config.task {
                     TaskType::Redis => {
                         if let Ok(tp) = BenchmarkRunner::run_redis_benchmark(port) {
-                            logger.log(&format!("  Candidate Throughput (median of 3): {:.0} req/sec", tp));
+                            logger.log(&format!(
+                                "  Candidate Throughput (median of 3): {:.0} req/sec",
+                                tp
+                            ));
                             throughput = Some(tp);
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
                             if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(6380) {
-                                logger.log(&format!("  Official Reference Redis: {:.0} req/sec", ref_tp));
+                                logger.log(&format!(
+                                    "  Official Reference Redis: {:.0} req/sec",
+                                    ref_tp
+                                ));
                                 reference_throughput = Some(ref_tp);
                             }
                         }
                     }
                     TaskType::Http => {
                         if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(port) {
-                            logger.log(&format!("  Candidate Throughput (median of 3): {:.0} req/sec", tp));
+                            logger.log(&format!(
+                                "  Candidate Throughput (median of 3): {:.0} req/sec",
+                                tp
+                            ));
                             throughput = Some(tp);
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
                             if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(8081) {
-                                logger.log(&format!("  Official Reference Nginx: {:.0} req/sec", ref_tp));
+                                logger.log(&format!(
+                                    "  Official Reference Nginx: {:.0} req/sec",
+                                    ref_tp
+                                ));
                                 reference_throughput = Some(ref_tp);
                             }
                         }
                     }
-                    TaskType::Wal | TaskType::Pubsub => {
+                    TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
                         if let Some(tp) = extra_throughput {
                             logger.log(&format!(
                                 "  Candidate Throughput (verifier soak, median-grade): {:.0} msgs/sec",
@@ -799,15 +856,31 @@ impl BenchmarkPipeline {
                             ));
                             throughput = Some(tp);
                         }
-                        logger.log("[BENCH] No external reference for this task; score uses fallback baseline.");
+                        // Verifier-timed, no external reference: reported but
+                        // unscored until a reference harness exists.
+                        logger.log(
+                            "[BENCH] No reference implementation for this task; timing reported, score unscored.",
+                        );
                     }
                     TaskType::Proxy => {
                         if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(port) {
-                            logger.log(&format!("  Candidate Throughput (median of 3): {:.0} req/sec", tp));
+                            logger.log(&format!(
+                                "  Candidate Throughput (median of 3): {:.0} req/sec",
+                                tp
+                            ));
                             throughput = Some(tp);
                         }
                         if config.batch_reference.is_none() {
-                            logger.log("[BENCH] No batch reference; score uses pinned nginx fallback baseline.");
+                            // Same nginx denominator as http: a proxy cannot
+                            // beat direct. Live per-trial when no batch ref.
+                            logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
+                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(8081) {
+                                logger.log(&format!(
+                                    "  Official Reference Nginx: {:.0} req/sec",
+                                    ref_tp
+                                ));
+                                reference_throughput = Some(ref_tp);
+                            }
                         }
                     }
                     TaskType::Dns => {
@@ -816,7 +889,22 @@ impl BenchmarkPipeline {
                             logger.log(&format!("  Candidate Throughput: {:.0} queries/sec", tp));
                             throughput = Some(tp);
                         }
-                        logger.log("[BENCH] No external reference for DNS; score uses verifier timing.");
+                        if config.batch_reference.is_none() {
+                            // Live CoreDNS baseline on an ephemeral port: same
+                            // probe, same host load window as the candidate.
+                            logger.log(
+                                "[BENCH] Calibrating live CoreDNS baseline (pinned image, ephemeral port)...",
+                            );
+                            if let Some(ref_tp) =
+                                crate::bench::measure_dns_reference(&verifier_seed).await
+                            {
+                                logger.log(&format!(
+                                    "  Official Reference CoreDNS: {:.0} queries/sec",
+                                    ref_tp
+                                ));
+                                reference_throughput = Some(ref_tp);
+                            }
+                        }
                     }
                     TaskType::Pdf => {
                         let verifier = PdfVerifier::new(port, Some(&verifier_seed));
@@ -824,7 +912,11 @@ impl BenchmarkPipeline {
                             logger.log(&format!("  Candidate Throughput: {:.0} pages/sec", tp));
                             throughput = Some(tp);
                         }
-                        logger.log("[BENCH] No external reference for PDF extraction; score uses verifier timing.");
+                        // No external PDF reference exists; candidate timing is
+                        // reported but unscored (throughput_score stays None).
+                        logger.log(
+                            "[BENCH] No reference implementation for PDF; timing reported, score unscored.",
+                        );
                     }
                 }
 
@@ -832,7 +924,10 @@ impl BenchmarkPipeline {
                 // scores against the same pre-batch median; the per-trial live
                 // measurement above is skipped in that case.
                 if let Some(batch) = config.batch_reference {
-                    logger.log(&format!("  Batch reference (shared pre-batch median): {:.0} req/sec", batch));
+                    logger.log(&format!(
+                        "  Batch reference (shared pre-batch median): {:.0} req/sec",
+                        batch
+                    ));
                     reference_throughput = Some(batch);
                 }
                 baseline_source = if config.batch_reference.is_some() {
@@ -846,7 +941,10 @@ impl BenchmarkPipeline {
                 if let (Some(cand_tp), Some(ref_tp)) = (throughput, reference_throughput) {
                     if ref_tp > 0.0 {
                         let ratio = (cand_tp / ref_tp) * 100.0;
-                        logger.log(&format!("  ⚡ Relative Performance: {:.1}% of official reference", ratio));
+                        logger.log(&format!(
+                            "  ⚡ Relative Performance: {:.1}% of official reference",
+                            ratio
+                        ));
                     }
                 }
             }
@@ -897,6 +995,11 @@ impl BenchmarkPipeline {
             reference_throughput,
             Some(&config.task.to_string()),
         );
+        if throughput.is_some() && reference_throughput.is_none() {
+            logger.log(
+                "[BENCH] Timing recorded without a live reference: throughput_score unscored (--).",
+            );
+        }
 
         let lang = LeaderboardManager::detect_language(&config.workdir);
         let scanned_files = RunArchiver::scan_workspace_files(&config.workdir);
@@ -944,12 +1047,15 @@ impl BenchmarkPipeline {
             effective_cost_usd: Some(effective_cost_usd),
             savings_percent: breakdown.savings_percent,
             efficiency_score,
-            throughput_score: Some(throughput_score),
+            throughput_score,
             files: scanned_files,
             env: None,
             git_commit: None,
+            rules_version: Some(crate::report::rules_fingerprint()),
             total_trials: None,
             pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
             trial_pass_rates: Vec::new(),
             is_published: None,
@@ -981,23 +1087,23 @@ impl BenchmarkPipeline {
             turns: Some(omp_stats.steps_taken),
             savings_percent: breakdown.savings_percent,
             efficiency_score,
-            throughput_score: Some(throughput_score),
+            throughput_score,
             timestamp: completed_at,
             method_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             subruns: Vec::new(),
             total_trials: None,
+            rules_version: Some(crate::report::rules_fingerprint()),
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
         };
 
         logger.log(&format!(
             "[TELEMETRY] turn={} max_turns={} spent={:.6} tokens={}",
-            omp_stats.steps_taken,
-            config.max_turns,
-            cost_usd,
-            total_run_tokens
+            omp_stats.steps_taken, config.max_turns, cost_usd, total_run_tokens
         ));
 
         // 11. Optional Archiving and Leaderboard update
@@ -1019,7 +1125,10 @@ impl BenchmarkPipeline {
                     .unwrap_or_else(|| "openrouter/meta/muse-spark-1.3-contributor".to_string());
                 let task_name = config.task.to_string();
                 let task_prompt = std::fs::read_to_string(
-                    get_repo_root().join("tasks").join(&task_name).join("prompt.md"),
+                    get_repo_root()
+                        .join("tasks")
+                        .join(&task_name)
+                        .join("prompt.md"),
                 )
                 .unwrap_or_default();
                 match RunJudge::judge_run(
@@ -1045,7 +1154,8 @@ impl BenchmarkPipeline {
                         );
                         buffering_logger.log(&rev_msg);
                         let log_path = runs_dir.join(&manifest.run_id).join("console.log");
-                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path)
+                        {
                             use std::io::Write;
                             let _ = writeln!(f, "[{}] {}", Utc::now().format("%H:%M:%S"), rev_msg);
                         }
@@ -1054,7 +1164,8 @@ impl BenchmarkPipeline {
                         let skip_msg = format!("[REVIEW] Skipped: {}", e);
                         buffering_logger.log(&skip_msg);
                         let log_path = runs_dir.join(&manifest.run_id).join("console.log");
-                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path)
+                        {
                             use std::io::Write;
                             let _ = writeln!(f, "[{}] {}", Utc::now().format("%H:%M:%S"), skip_msg);
                         }
@@ -1084,6 +1195,18 @@ impl BenchmarkPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dns_candidate_joins_run_network() {
+        // Regression: the pre-verify attach must cover DNS (ref-dns lives on
+        // the private run network). If narrowed back to Proxy-only, stage 5
+        // fails on libc resolution timeout instead of candidate logic.
+        let src = include_str!("pipeline.rs");
+        assert!(
+            src.contains("TaskType::Proxy || config.task == TaskType::Dns"),
+            "DNS candidate must join the run network alongside Proxy"
+        );
+    }
 
     struct DummyLogger;
     impl PipelineLogger for DummyLogger {

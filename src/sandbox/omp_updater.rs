@@ -231,7 +231,9 @@ pub async fn auto_update_if_needed() -> Result<()> {
                 Ok(new_status) => {
                     println!(
                         "[OMP Automation] Successfully updated subdollar-sandbox to OMP v{}.",
-                        new_status.installed_version.unwrap_or_else(|| latest.clone())
+                        new_status
+                            .installed_version
+                            .unwrap_or_else(|| latest.clone())
                     );
                 }
                 Err(e) => {

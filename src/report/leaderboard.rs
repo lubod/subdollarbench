@@ -1,10 +1,10 @@
-use chrono::Utc;
-use std::collections::{HashMap, HashSet};
 use anyhow::Result;
+use chrono::Utc;
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -45,6 +45,11 @@ pub struct BenchmarkRunResult {
     pub throughput_score: Option<f64>,
     pub timestamp: String,
     pub method_version: Option<String>,
+    /// Rule-set fingerprint: hash over task prompts + verifier sources +
+    /// cheat-stage flag. Runs are only comparable within one rules_version;
+    /// the leaderboard groups by it. Backfilled legacy values below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subruns: Vec<BenchmarkRunResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +60,12 @@ pub struct BenchmarkRunResult {
     pub pass_at_k: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_pass_rate: Option<f64>,
+    /// Wilson 95% score interval for the pass fraction (P@1 point estimate).
+    /// Lower bound is the ranking key: stops n=3 1.00s outranking n=9 0.89s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_1_lo: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_1_hi: Option<f64>,
     /// Trial-stability verdict written by merge_subruns: stable | watch | unstable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stability: Option<String>,
@@ -70,6 +81,34 @@ pub fn format_duration(secs: f64) -> String {
         let rem_secs = (secs % 60.0).round() as u64;
         format!("{}m {}s", mins, rem_secs)
     }
+}
+
+/// Legacy rule-set stamps for runs recorded before fingerprinting.
+/// `legacy-pre-cheat` (<=2026-09-17): no anti-cheat stage; looser grading on
+/// pdf/pubsub/proxy. `legacy-cheat` (2026-09-18+): anti-cheat active.
+pub const RULES_LEGACY_PRE_CHEAT: &str = "legacy-pre-cheat";
+pub const RULES_LEGACY_CHEAT: &str = "legacy-cheat";
+
+/// Stamp a pre-fingerprint timestamp with its legacy rule-set.
+pub fn legacy_rules_version(timestamp: &str) -> &'static str {
+    if timestamp < "2026-09-18T00:00:00Z" {
+        RULES_LEGACY_PRE_CHEAT
+    } else {
+        RULES_LEGACY_CHEAT
+    }
+}
+
+/// Tasks quarantined from cross-model ranking while their verifier is
+/// under investigation (see DNS stage-5 89% failure analysis). Ranked
+/// within-task only; excluded from the consolidated global board until
+/// cleared here.
+pub const QUARANTINED_TASKS: &[&str] = &[];
+
+/// True when a task is quarantined from cross-model ranking.
+pub fn is_quarantined(task: &str) -> bool {
+    QUARANTINED_TASKS
+        .iter()
+        .any(|q| q.eq_ignore_ascii_case(task))
 }
 
 /// Trial-stability verdict for one consolidated run.
@@ -95,10 +134,16 @@ pub fn assess_stability(subruns: &[BenchmarkRunResult]) -> (Stability, String) {
     if hi - lo > 0.5 {
         return (
             Stability::Unstable,
-            format!("pass spread {lo:.0}-{hi:.0}% across {} trials", subruns.len()),
+            format!(
+                "pass spread {lo:.0}-{hi:.0}% across {} trials",
+                subruns.len()
+            ),
         );
     }
-    let tps: Vec<f64> = subruns.iter().filter_map(|r| r.throughput_req_sec).collect();
+    let tps: Vec<f64> = subruns
+        .iter()
+        .filter_map(|r| r.throughput_req_sec)
+        .collect();
     if tps.len() > 1 {
         let mean = tps.iter().sum::<f64>() / tps.len() as f64;
         if mean > 0.0 {
@@ -147,14 +192,22 @@ impl BenchmarkRunResult {
 
     /// Merges multiple subruns into a single consolidated BenchmarkRunResult
     /// with averaged metrics, while preserving the individual subrun records.
-    pub fn merge_subruns(parent_id: &str, subruns: Vec<BenchmarkRunResult>, batch_drift: Option<bool>) -> Option<BenchmarkRunResult> {
+    pub fn merge_subruns(
+        parent_id: &str,
+        subruns: Vec<BenchmarkRunResult>,
+        batch_drift: Option<bool>,
+    ) -> Option<BenchmarkRunResult> {
         if subruns.is_empty() {
             return None;
         }
         if subruns.len() == 1 {
             let mut single = subruns.into_iter().next().unwrap();
             single.id = parent_id.to_string();
-            let p1 = if single.pass_rate >= 100.0 { 100.0 } else { 0.0 };
+            let p1 = if single.pass_rate >= 100.0 {
+                100.0
+            } else {
+                0.0
+            };
             single.total_trials = Some(1);
             single.pass_at_1 = Some(p1);
             single.pass_at_k = Some(p1);
@@ -166,7 +219,8 @@ impl BenchmarkRunResult {
         let n = subruns.len();
 
         // 1. Conformance & Reliability Metrics
-        let passing: Vec<&BenchmarkRunResult> = subruns.iter().filter(|r| r.pass_rate >= 100.0).collect();
+        let passing: Vec<&BenchmarkRunResult> =
+            subruns.iter().filter(|r| r.pass_rate >= 100.0).collect();
         let c = passing.len();
         let pass_at_1 = (c as f64 / n as f64) * 100.0;
         let pass_at_k = compute_pass_at_k(n, c, n) * 100.0;
@@ -188,8 +242,11 @@ impl BenchmarkRunResult {
             })
             .unwrap_or(&subruns[0]);
 
-        // 3. Fair Throughput: Median throughput among passing trials
-        let fair_tp = if c > 0 {
+        // 3. Fair Throughput: median among passing trials, but only when a
+        // live/batch reference exists. Unanchored medians (dns/wal/pdf/pubsub
+        // without refs) are reported per-trial, never scored.
+        let has_ref = best.reference_throughput_req_sec.unwrap_or(0.0) > 0.0;
+        let fair_tp = if c > 0 && has_ref {
             let mut tps: Vec<f64> = passing
                 .iter()
                 .filter_map(|r| r.throughput_req_sec)
@@ -210,58 +267,102 @@ impl BenchmarkRunResult {
         // 4. Fair Cost: Mean cost among passing trials (or all trials if none passed)
         let (fair_cost_usd, fair_eff_cost_usd) = if c > 0 {
             let sum_cost: f64 = passing.iter().map(|r| r.total_cost_usd).sum();
-            let sum_eff: f64 = passing.iter().map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd)).sum();
+            let sum_eff: f64 = passing
+                .iter()
+                .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
+                .sum();
             (sum_cost / c as f64, sum_eff / c as f64)
         } else {
             let sum_cost: f64 = subruns.iter().map(|r| r.total_cost_usd).sum();
-            let sum_eff: f64 = subruns.iter().map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd)).sum();
+            let sum_eff: f64 = subruns
+                .iter()
+                .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
+                .sum();
             (sum_cost / n as f64, sum_eff / n as f64)
         };
 
         // 5. Fair Duration, Turns, Tokens & Savings
-        let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) = if c > 0 {
-            let dur: f64 = passing.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / c as f64;
-            let turns: u32 = (passing.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / c as f64).round() as u32;
-            let p: u64 = passing.iter().map(|r| r.prompt_tokens).sum::<u64>() / c as u64;
-            let ca: u64 = passing.iter().map(|r| r.cached_tokens).sum::<u64>() / c as u64;
-            let co: u64 = passing.iter().map(|r| r.completion_tokens).sum::<u64>() / c as u64;
-            let tot: u64 = passing.iter().map(|r| r.total_tokens).sum::<u64>() / c as u64;
-            let sav: f64 = passing.iter().map(|r| r.savings_percent).sum::<f64>() / c as f64;
-            (Some(dur), Some(turns), p, ca, co, tot, sav)
-        } else {
-            let dur: f64 = subruns.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / n as f64;
-            let turns: u32 = (subruns.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / n as f64).round() as u32;
-            let p: u64 = subruns.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
-            let ca: u64 = subruns.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
-            let co: u64 = subruns.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
-            let tot: u64 = subruns.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
-            let sav: f64 = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
-            (Some(dur), Some(turns), p, ca, co, tot, sav)
-        };
+        let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) =
+            if c > 0 {
+                let dur: f64 = passing
+                    .iter()
+                    .filter_map(|r| r.duration_seconds)
+                    .sum::<f64>()
+                    / c as f64;
+                let turns: u32 = (passing.iter().filter_map(|r| r.turns).sum::<u32>() as f64
+                    / c as f64)
+                    .round() as u32;
+                let p: u64 = passing.iter().map(|r| r.prompt_tokens).sum::<u64>() / c as u64;
+                let ca: u64 = passing.iter().map(|r| r.cached_tokens).sum::<u64>() / c as u64;
+                let co: u64 = passing.iter().map(|r| r.completion_tokens).sum::<u64>() / c as u64;
+                let tot: u64 = passing.iter().map(|r| r.total_tokens).sum::<u64>() / c as u64;
+                let sav: f64 = passing.iter().map(|r| r.savings_percent).sum::<f64>() / c as f64;
+                (Some(dur), Some(turns), p, ca, co, tot, sav)
+            } else {
+                let dur: f64 = subruns
+                    .iter()
+                    .filter_map(|r| r.duration_seconds)
+                    .sum::<f64>()
+                    / n as f64;
+                let turns: u32 = (subruns.iter().filter_map(|r| r.turns).sum::<u32>() as f64
+                    / n as f64)
+                    .round() as u32;
+                let p: u64 = subruns.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
+                let ca: u64 = subruns.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
+                let co: u64 = subruns.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
+                let tot: u64 = subruns.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
+                let sav: f64 = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
+                (Some(dur), Some(turns), p, ca, co, tot, sav)
+            };
 
-        // 6. Fair Expected Score: Scaled by Pass@1 (Expected Utility)
-        let (fair_eff_score, fair_tp_score) = if c > 0 {
+        // 6. Fair Expected Score: Scaled by Pass@1 (Expected Utility).
+        // Unanchored tasks (no live/batch ref) keep fair_tp_score None:
+        // reported, never ranked.
+        let (fair_eff_score, fair_tp_score): (f64, Option<f64>) = if c > 0 {
             let base_eff = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
                 100.0,
                 fair_eff_cost_usd,
             );
-            let base_tp = crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
-                100.0,
-                fair_eff_cost_usd,
-                fair_tp,
-                best.reference_throughput_req_sec,
-                Some(&best.task),
-            );
+            let base_tp =
+                crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
+                    100.0,
+                    fair_eff_cost_usd,
+                    fair_tp,
+                    best.reference_throughput_req_sec,
+                    Some(&best.task),
+                );
             let rel = pass_at_1 / 100.0;
-            (base_eff * rel, base_tp * rel)
+            (base_eff * rel, base_tp.map(|b| b * rel))
         } else {
-            (0.0, 0.0)
+            (0.0, None)
         };
 
-        let latest_timestamp = subruns.iter().map(|r| &r.timestamp).max().cloned().unwrap_or_else(|| Utc::now().to_rfc3339());
-        let headline_pass_rate = if c > 0 { 100.0 } else { avg_pass_rate };
-        let headline_passed_stages = if c > 0 { best.total_stages } else { best.passed_stages };
+        let latest_timestamp = subruns
+            .iter()
+            .map(|r| &r.timestamp)
+            .max()
+            .cloned()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        // Honest headline: mean pass rate across trials. Best-of lives in
+        // pass_at_k; the canonical workspace still comes from `best`.
+        let headline_pass_rate = avg_pass_rate;
+        let mean_passed = subruns.iter().map(|r| r.passed_stages).sum::<u32>() as f64 / n as f64;
+        let headline_passed_stages = mean_passed.round() as u32;
+        let (w_lo, w_hi) = wilson_interval_95(n, c);
 
+        let merged_rules_version: Option<String> = {
+            let mut vs: Vec<String> = subruns
+                .iter()
+                .filter_map(|r| r.rules_version.clone())
+                .collect();
+            vs.sort();
+            vs.dedup();
+            match vs.len() {
+                1 => Some(vs.into_iter().next().unwrap()),
+                0 => None,
+                _ => Some("mixed".to_string()),
+            }
+        };
         let (stab, _) = assess_stability(&subruns);
         let stab_str = match stab {
             Stability::Stable => "stable",
@@ -293,17 +394,40 @@ impl BenchmarkRunResult {
             turns: fair_turns,
             savings_percent: fair_savings,
             efficiency_score: fair_eff_score,
-            throughput_score: Some(fair_tp_score),
+            throughput_score: fair_tp_score,
             timestamp: latest_timestamp,
             method_version: best.method_version.clone(),
+            rules_version: merged_rules_version,
             subruns,
             total_trials: Some(n as u32),
             pass_at_1: Some(pass_at_1),
             pass_at_k: Some(pass_at_k),
             avg_pass_rate: Some(avg_pass_rate),
+            pass_at_1_lo: Some(w_lo),
+            pass_at_1_hi: Some(w_hi),
             stability: Some(stab_str),
         })
     }
+}
+
+/// Wilson 95% score interval for c passes out of n trials, in percent.
+/// Point estimate for P@1 is c/n; the interval makes thin cells (n=3)
+/// honestly wide. z=1.96 hardcoded: this is a display statistic, not crypto.
+pub fn wilson_interval_95(n: usize, c: usize) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let z = 1.96_f64;
+    let z2 = z * z;
+    let n_f = n as f64;
+    let p = c as f64 / n_f;
+    let denom = 1.0 + z2 / n_f;
+    let center = (p + z2 / (2.0 * n_f)) / denom;
+    let half = z * ((p * (1.0 - p) / n_f + z2 / (4.0 * n_f * n_f)).sqrt()) / denom;
+    (
+        (center - half).max(0.0) * 100.0,
+        (center + half).min(1.0) * 100.0,
+    )
 }
 
 pub fn compute_pass_at_k(n: usize, c: usize, k: usize) -> f64 {
@@ -415,7 +539,8 @@ impl LeaderboardManager {
             return None;
         }
 
-        let merged = BenchmarkRunResult::merge_subruns(parent_run_id, subrun_results.to_vec(), batch_drift)?;
+        let merged =
+            BenchmarkRunResult::merge_subruns(parent_run_id, subrun_results.to_vec(), batch_drift)?;
 
         if save_results {
             let repo_root = crate::config::get_repo_root();
@@ -458,7 +583,8 @@ impl LeaderboardManager {
                 let sub_manifest_path = runs_dir.join(&sub.id).join("manifest.json");
                 if let Ok(m_str) = fs::read_to_string(sub_manifest_path) {
                     if let Ok(m_val) = serde_json::from_str::<serde_json::Value>(&m_str) {
-                        return m_val.get("status").and_then(|s| s.as_str()) == Some("disqualified_cheat");
+                        return m_val.get("status").and_then(|s| s.as_str())
+                            == Some("disqualified_cheat");
                     }
                 }
                 false
@@ -466,18 +592,22 @@ impl LeaderboardManager {
 
             // 1. Build genuine merged parent manifest (not a trial-1 clone)
             if let Ok(content) = fs::read_to_string(best_sub_dir.join("manifest.json")) {
-                if let Ok(mut manifest) = serde_json::from_str::<crate::report::RunManifest>(&content) {
+                if let Ok(mut manifest) =
+                    serde_json::from_str::<crate::report::RunManifest>(&content)
+                {
                     manifest.run_id = parent_run_id.to_string();
                     manifest.status = if any_cheat {
                         "disqualified_cheat".to_string()
-                    } else if merged.pass_rate >= 100.0 {
+                    } else if merged.avg_pass_rate.unwrap_or(merged.pass_rate) >= 100.0 {
                         "completed".to_string()
                     } else {
                         "failed_tests".to_string()
                     };
-                    manifest.pass_rate = merged.pass_rate;
+                    manifest.pass_rate = merged.avg_pass_rate.unwrap_or(merged.pass_rate);
                     manifest.total_trials = merged.total_trials;
                     manifest.pass_at_1 = merged.pass_at_1;
+                    manifest.pass_at_1_lo = merged.pass_at_1_lo;
+                    manifest.pass_at_1_hi = merged.pass_at_1_hi;
                     manifest.stability = merged.stability.clone();
                     manifest.trial_pass_rates =
                         merged.subruns.iter().map(|s| s.pass_rate).collect();
@@ -519,12 +649,18 @@ impl LeaderboardManager {
                     let p1 = merged.pass_at_1.unwrap_or(100.0);
                     let pk = merged.pass_at_k.unwrap_or(100.0);
                     let n = subrun_results.len();
-                    let passing = subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count();
+                    let passing = subrun_results
+                        .iter()
+                        .filter(|r| r.pass_rate >= 100.0)
+                        .count();
                     rev_val["multi_trial_disclosure"] = serde_json::Value::String(format!(
                         "Evaluated best workspace of {} subruns ({}/{} passed, Pass@1: {:.0}%, Pass@{}: {:.0}%). Best subrun: {}",
                         n, passing, n, p1, n, pk, best_sub.id
                     ));
-                    let _ = fs::write(parent_dir.join("review.json"), serde_json::to_string_pretty(&rev_val).unwrap_or(content));
+                    let _ = fs::write(
+                        parent_dir.join("review.json"),
+                        serde_json::to_string_pretty(&rev_val).unwrap_or(content),
+                    );
                 } else {
                     let _ = fs::write(parent_dir.join("review.json"), content);
                 }
@@ -577,7 +713,12 @@ impl LeaderboardManager {
                     if let Ok(content) = fs::read_to_string(&file_path) {
                         if let Ok(run) = serde_json::from_str::<BenchmarkRunResult>(&content) {
                             if !run.subruns.is_empty() {
-                                if let Some(_merged) = Self::consolidate_multi_trial_run(&run.id, &run.subruns, true, None) {
+                                if let Some(_merged) = Self::consolidate_multi_trial_run(
+                                    &run.id,
+                                    &run.subruns,
+                                    true,
+                                    None,
+                                ) {
                                     count += 1;
                                 }
                             }
@@ -612,7 +753,8 @@ impl LeaderboardManager {
                     if let Ok(data) = fs::read_to_string(p) {
                         if let Ok(mut res) = serde_json::from_str::<BenchmarkRunResult>(&data) {
                             if res.total_tokens == 0 {
-                                res.total_tokens = res.prompt_tokens + res.cached_tokens + res.completion_tokens;
+                                res.total_tokens =
+                                    res.prompt_tokens + res.cached_tokens + res.completion_tokens;
                             }
                             list.push(res);
                         }
@@ -656,14 +798,22 @@ impl LeaderboardManager {
         }
 
         list = consolidated;
+        // Rank by P@1 lower bound (honest under thin trials), then P@1
+        // point, then score. Legacy rows without Wilson fields rank by
+        // headline pass rate so old results still order sensibly.
+        fn rank_lo(r: &BenchmarkRunResult) -> f64 {
+            r.pass_at_1_lo.unwrap_or(r.pass_at_1.unwrap_or(r.pass_rate))
+        }
+        fn rank_p1(r: &BenchmarkRunResult) -> f64 {
+            r.pass_at_1.unwrap_or(r.pass_rate)
+        }
         list.sort_by(|a, b| {
-            let a_pass_100 = a.pass_rate >= 100.0;
-            let b_pass_100 = b.pass_rate >= 100.0;
-            b_pass_100
-                .cmp(&a_pass_100)
+            rank_lo(b)
+                .partial_cmp(&rank_lo(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    b.pass_rate
-                        .partial_cmp(&a.pass_rate)
+                    rank_p1(b)
+                        .partial_cmp(&rank_p1(a))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .then_with(|| {
@@ -697,7 +847,12 @@ impl LeaderboardManager {
         let m = model.to_lowercase();
         if m.contains("claude") || m.contains("anthropic") {
             ("✦", Color::Red)
-        } else if m.contains("gpt") || m.contains("openai") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        } else if m.contains("gpt")
+            || m.contains("openai")
+            || m.contains("o1")
+            || m.contains("o3")
+            || m.contains("o4")
+        {
             ("✳️", Color::Green)
         } else if m.contains("gemini") || m.contains("google") {
             ("✨", Color::Blue)
@@ -715,7 +870,11 @@ impl LeaderboardManager {
             ("☀️", Color::Yellow)
         } else if m.contains("cohere") || m.contains("command") {
             ("🌿", Color::DarkCyan)
-        } else if m.contains("local") || m.contains("ollama") || m.contains("llama.cpp") || m.contains("vllm") {
+        } else if m.contains("local")
+            || m.contains("ollama")
+            || m.contains("llama.cpp")
+            || m.contains("vllm")
+        {
             ("💻", Color::White)
         } else {
             ("🤖", Color::Cyan)
@@ -761,20 +920,45 @@ impl LeaderboardManager {
                 _ => format!("{}", idx + 1),
             };
 
+            // Throughput is language-relative: the reference is one
+            // implementation, so same-language ratios compare and
+            // cross-language ones mislead. The Lang column disambiguates.
             let tp = match (r.throughput_req_sec, r.reference_throughput_req_sec) {
                 (Some(cand_tp), Some(ref_tp)) if ref_tp > 0.0 => {
                     let ratio = (cand_tp / ref_tp) * 100.0;
-                    format!("{:.0} req/s ({:.0}% ref)", cand_tp, ratio)
+                    format!("{:.0} req/s ({:.0}% ref, {})", cand_tp, ratio, r.language)
                 }
-                (Some(cand_tp), _) => format!("{:.0} req/s", cand_tp),
+                // Unanchored timing: reported, never ranked.
+                (Some(cand_tp), _) => format!("{:.0} req/s (unscored, {})", cand_tp, r.language),
                 _ => "N/A".to_string(),
             };
 
+            // Rank key first: the table sorts by P@1-lo, so the cell
+            // leads with the interval, avg second. Matches matrix-report.
             let pass_str = if !r.subruns.is_empty() {
-                if let (Some(p1), Some(pk)) = (r.pass_at_1, r.pass_at_k) {
-                    format!("{:.0}% (P@1: {:.0}%, P@{}: {:.0}%)", r.pass_rate, p1, r.subruns.len(), pk)
-                } else {
-                    format!("{:.0}% ({} trials)", r.pass_rate, r.subruns.len())
+                let avg = r.avg_pass_rate.unwrap_or(r.pass_rate);
+                match (r.pass_at_1, r.pass_at_1_lo, r.pass_at_1_hi, r.pass_at_k) {
+                    (Some(p1), Some(lo), Some(hi), Some(pk)) => {
+                        format!(
+                            "P@1 {:.0}% ({:.0}-{:.0}) · avg {:.0}% · P@{} {:.0}%",
+                            p1,
+                            lo,
+                            hi,
+                            avg,
+                            r.subruns.len(),
+                            pk
+                        )
+                    }
+                    (Some(p1), _, _, Some(pk)) => {
+                        format!(
+                            "P@1 {:.0}% · avg {:.0}% · P@{} {:.0}%",
+                            p1,
+                            avg,
+                            r.subruns.len(),
+                            pk
+                        )
+                    }
+                    _ => format!("avg {:.0}% ({} trials)", avg, r.subruns.len()),
                 }
             } else {
                 format!(
@@ -786,7 +970,12 @@ impl LeaderboardManager {
             let (icon, model_color) = Self::get_model_cli_meta(&r.model);
             let short_model = Self::short_model_name(&r.model);
             let model_display = if !r.subruns.is_empty() {
-                format!("{} {} [{} trials · Fair E[Score]]", icon, short_model, r.subruns.len())
+                format!(
+                    "{} {} [{} trials · Fair E[Score]]",
+                    icon,
+                    short_model,
+                    r.subruns.len()
+                )
             } else {
                 format!("{} {}", icon, short_model)
             };
@@ -807,7 +996,7 @@ impl LeaderboardManager {
                 Cell::new(eff_str).fg(Color::Yellow),
                 Cell::new(&r.task),
                 Cell::new(&r.language).fg(Color::Green),
-                Cell::new(pass_str).fg(if r.pass_rate == 100.0 {
+                Cell::new(pass_str).fg(if r.avg_pass_rate.unwrap_or(r.pass_rate) >= 100.0 {
                     Color::Green
                 } else {
                     Color::Yellow
@@ -818,11 +1007,64 @@ impl LeaderboardManager {
                 Cell::new(BenchmarkRunResult::regime_of(r)),
                 Cell::new(format!("${:.4}", r.total_cost_usd)).fg(Color::Magenta),
                 Cell::new(savings_str).fg(Color::Green),
-                Cell::new(format!("{:.1}", r.throughput_score.unwrap_or(r.efficiency_score))).fg(Color::Cyan),
+                Cell::new(match r.throughput_score {
+                    Some(tp) => format!("{tp:.1}"),
+                    // Unanchored (no live ref): efficiency only, never a tp rank.
+                    None => format!("-- ({:.1} eff)", r.efficiency_score),
+                })
+                .fg(Color::Cyan),
             ]));
         }
 
         println!("\n{}", table);
+    }
+
+    /// Two-way P@1-lower-bound table: model rows x effort columns, per task.
+    /// Answers whether the model ranking survives within-effort.
+    pub fn print_effort_matrix(results: &[BenchmarkRunResult]) {
+        use std::collections::BTreeSet;
+        let mut tasks: BTreeSet<String> = BTreeSet::new();
+        for r in results {
+            tasks.insert(r.task.clone());
+        }
+        for task in tasks {
+            let rows: Vec<&BenchmarkRunResult> =
+                results.iter().filter(|r| r.task == task).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let mut models: BTreeSet<String> = BTreeSet::new();
+            let mut efforts: BTreeSet<String> = BTreeSet::new();
+            for r in &rows {
+                models.insert(Self::short_model_name(&r.model).to_string());
+                efforts.insert(r.effort.clone().unwrap_or_else(|| "auto".to_string()));
+            }
+            println!("\n=== Effort x Model: {task} (P@1 lower bound / trials) ===");
+            let mut header = format!("{:>22}", "model");
+            for e in &efforts {
+                header.push_str(&format!(" | {:>16}", e));
+            }
+            println!("{header}");
+            for m in &models {
+                let mut line = format!("{:>22}", m);
+                for e in &efforts {
+                    let cell = rows
+                        .iter()
+                        .find(|r| {
+                            Self::short_model_name(&r.model) == m
+                                && r.effort.as_deref().unwrap_or("auto") == e
+                        })
+                        .map(|r| {
+                            let lo = r.pass_at_1_lo.unwrap_or(r.pass_at_1.unwrap_or(r.pass_rate));
+                            let n = r.total_trials.unwrap_or(r.subruns.len() as u32);
+                            format!("{lo:.0} (n={n})")
+                        })
+                        .unwrap_or_else(|| "-".to_string());
+                    line.push_str(&format!(" | {:>16}", cell));
+                }
+                println!("{line}");
+            }
+        }
     }
 
     pub fn print_leaderboard_views(results: &[BenchmarkRunResult], task_filter: &str) {
@@ -853,11 +1095,29 @@ impl LeaderboardManager {
                 Self::print_table_with_title(title, &task_results);
             }
 
-            // Print consolidated global leaderboard
-            Self::print_table_with_title(
-                "🏆 Consolidated Global Leaderboard (All Tasks)",
-                results,
-            );
+            // Quarantined tasks rank within-task only, never on the global board.
+            let global: Vec<BenchmarkRunResult> = results
+                .iter()
+                .filter(|r| !is_quarantined(&r.task))
+                .cloned()
+                .collect();
+            let skipped: Vec<String> = {
+                let mut t: Vec<String> = results
+                    .iter()
+                    .filter(|r| is_quarantined(&r.task))
+                    .map(|r| r.task.clone())
+                    .collect();
+                t.sort();
+                t.dedup();
+                t
+            };
+            if !skipped.is_empty() {
+                println!(
+                    "\n(Quarantined from global ranking pending verifier investigation: {} — see per-task board above.)\n",
+                    skipped.join(", ")
+                );
+            }
+            Self::print_table_with_title("🏆 Consolidated Global Leaderboard (All Tasks)", &global);
         } else {
             let task_results: Vec<BenchmarkRunResult> = results
                 .iter()
@@ -884,8 +1144,7 @@ impl LeaderboardManager {
 mod tests {
     use super::*;
     use crate::sandbox::docker::{
-        BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE,
-        REF_REDIS_IMAGE,
+        BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE,
     };
 
     #[test]
@@ -930,11 +1189,14 @@ mod tests {
             throughput_score: None,
             timestamp: String::new(),
             method_version: None,
+            rules_version: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
@@ -976,11 +1238,14 @@ mod tests {
             throughput_score: None,
             timestamp: String::new(),
             method_version: None,
+            rules_version: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
         }
     }
@@ -988,70 +1253,95 @@ mod tests {
     #[test]
     fn test_assess_stability() {
         // Identical trials -> stable.
-        let r = [stab_run(100.0, Some(35000.0)), stab_run(100.0, Some(35600.0))];
+        let r = [
+            stab_run(100.0, Some(35000.0)),
+            stab_run(100.0, Some(35600.0)),
+        ];
         assert_eq!(assess_stability(&r).0, Stability::Stable);
         // Deterministic partial pass (DNS-style) -> stable.
-        let r = [stab_run(83.3, None), stab_run(83.3, None), stab_run(83.3, None)];
+        let r = [
+            stab_run(83.3, None),
+            stab_run(83.3, None),
+            stab_run(83.3, None),
+        ];
         assert_eq!(assess_stability(&r).0, Stability::Stable);
         // Pass spread -> unstable.
-        let r = [stab_run(100.0, Some(82000.0)), stab_run(0.0, None), stab_run(100.0, Some(83000.0))];
+        let r = [
+            stab_run(100.0, Some(82000.0)),
+            stab_run(0.0, None),
+            stab_run(100.0, Some(83000.0)),
+        ];
         let (s, reason) = assess_stability(&r);
         assert_eq!(s, Stability::Unstable);
         assert!(reason.contains("pass spread"));
         // Throughput CV > 25% -> unstable; > 50% flags the probe.
-        let r = [stab_run(100.0, Some(852.0)), stab_run(100.0, Some(110687.0))];
+        let r = [
+            stab_run(100.0, Some(852.0)),
+            stab_run(100.0, Some(110687.0)),
+        ];
         let (s, reason) = assess_stability(&r);
         assert_eq!(s, Stability::Unstable);
         assert!(reason.contains("suspect measurement"));
         // CV 10-25% -> watch.
-        let r = [stab_run(100.0, Some(44000.0)), stab_run(100.0, Some(57000.0))];
+        let r = [
+            stab_run(100.0, Some(44000.0)),
+            stab_run(100.0, Some(57000.0)),
+        ];
         assert_eq!(assess_stability(&r).0, Stability::Watch);
         // Single trial -> stable.
-        assert_eq!(assess_stability(&[stab_run(100.0, None)]).0, Stability::Stable);
+        assert_eq!(
+            assess_stability(&[stab_run(100.0, None)]).0,
+            Stability::Stable
+        );
     }
 
     #[test]
     fn test_merge_subruns_best_of_and_pass_at_k() {
-        let make_run = |id: &str, tp: f64, dur: f64, turns: u32, cost: f64, pass: f64| BenchmarkRunResult {
-            id: id.to_string(),
-            model: "test-model".to_string(),
-            task: "dns".to_string(),
-            language: "Python".to_string(),
-            effort: Some("auto".to_string()),
-            pass_rate: pass,
-            passed_stages: if pass >= 100.0 { 6 } else { 3 },
-            total_stages: 6,
-            throughput_req_sec: Some(tp),
-            reference_throughput_req_sec: Some(19000.0),
-            baseline_source: None,
-            ref_drift: None,
-            ref_image: None,
-            prompt_tokens: 1000,
-            cached_tokens: 2000,
-            completion_tokens: 500,
-            total_tokens: 3500,
-            total_cost_usd: cost,
-            effective_cost_usd: Some(cost * 2.0),
-            duration_seconds: Some(dur),
-            turns: Some(turns),
-            savings_percent: 50.0,
-            efficiency_score: 100.0,
-            throughput_score: Some(tp / 10.0),
-            timestamp: "2026-09-12T08:00:00Z".to_string(),
-            method_version: Some("0.2.0".to_string()),
-            subruns: Vec::new(),
-            total_trials: None,
-            pass_at_1: None,
-            pass_at_k: None,
-            avg_pass_rate: None,
-        stability: None,
-        };
+        let make_run =
+            |id: &str, tp: f64, dur: f64, turns: u32, cost: f64, pass: f64| BenchmarkRunResult {
+                id: id.to_string(),
+                model: "test-model".to_string(),
+                task: "dns".to_string(),
+                language: "Python".to_string(),
+                effort: Some("auto".to_string()),
+                pass_rate: pass,
+                passed_stages: if pass >= 100.0 { 6 } else { 3 },
+                total_stages: 6,
+                throughput_req_sec: Some(tp),
+                reference_throughput_req_sec: Some(19000.0),
+                baseline_source: None,
+                ref_drift: None,
+                ref_image: None,
+                prompt_tokens: 1000,
+                cached_tokens: 2000,
+                completion_tokens: 500,
+                total_tokens: 3500,
+                total_cost_usd: cost,
+                effective_cost_usd: Some(cost * 2.0),
+                duration_seconds: Some(dur),
+                turns: Some(turns),
+                savings_percent: 50.0,
+                efficiency_score: 100.0,
+                throughput_score: Some(tp / 10.0),
+                timestamp: "2026-09-12T08:00:00Z".to_string(),
+                method_version: Some("0.2.0".to_string()),
+                rules_version: None,
+                subruns: Vec::new(),
+                total_trials: None,
+                pass_at_1: None,
+                pass_at_k: None,
+                avg_pass_rate: None,
+                pass_at_1_lo: None,
+                pass_at_1_hi: None,
+                stability: None,
+            };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
         let t2 = make_run("run_trial2", 6000.0, 30.0, 7, 0.002, 100.0);
         let t3 = make_run("run_trial3", 7000.0, 50.0, 9, 0.003, 100.0);
 
-        let merged = BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3], None).unwrap();
+        let merged =
+            BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3], None).unwrap();
         assert_eq!(merged.id, "run_parent");
         assert_eq!(merged.total_trials, Some(3));
         assert_eq!(merged.pass_rate, 100.0);
@@ -1071,7 +1361,7 @@ mod tests {
         let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
         let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
         let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3], None).unwrap();
-        assert_eq!(mixed.pass_rate, 100.0);
+        assert!((mixed.pass_rate - 66.66666666666667).abs() < 1e-9);
         assert_eq!(mixed.throughput_req_sec.unwrap(), 5500.0);
         assert_eq!(mixed.total_cost_usd, 0.0015);
         assert!((mixed.avg_pass_rate.unwrap() - 66.66666666666667).abs() < 1e-9);
@@ -1080,6 +1370,68 @@ mod tests {
         assert!(mixed.throughput_score.unwrap() > 0.0);
     }
 
+    #[test]
+    fn test_wilson_interval_95() {
+        // Thin cells are honestly wide; full cells narrow.
+        let (lo3, hi3) = wilson_interval_95(3, 3);
+        assert!(lo3 < 50.0, "n=3 3/3 lower bound {lo3}");
+        assert!((hi3 - 100.0).abs() < 1e-9);
+        let (lo0, hi0) = wilson_interval_95(3, 0);
+        assert!((lo0 - 0.0).abs() < 1e-9);
+        assert!(hi0 > 50.0, "n=3 0/3 upper bound {hi0}");
+        let (lo9, hi9) = wilson_interval_95(9, 8);
+        assert!(lo9 > 55.0 && lo9 < 90.0, "n=9 8/9 lower {lo9}");
+        assert!(hi9 > 95.0, "n=9 8/9 upper {hi9}");
+        assert_eq!(wilson_interval_95(0, 0), (0.0, 0.0));
+        // Merge stores the interval: 2/3 -> P@1 66.7 with wide bounds.
+        let mk = |id: &str, pass: f64| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "dns".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: pass,
+            passed_stages: 6,
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            effective_cost_usd: Some(0.01),
+            duration_seconds: Some(10.0),
+            turns: Some(5),
+            savings_percent: 0.0,
+            efficiency_score: 1.0,
+            throughput_score: None,
+            timestamp: "2026-09-12T08:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+        };
+        let m = BenchmarkRunResult::merge_subruns(
+            "w",
+            vec![mk("a", 100.0), mk("b", 100.0), mk("c", 0.0)],
+            None,
+        )
+        .unwrap();
+        let (lo, hi) = (m.pass_at_1_lo.unwrap(), m.pass_at_1_hi.unwrap());
+        assert!((m.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
+        assert!(lo > 15.0 && lo < 40.0, "2/3 lower {lo}");
+        assert!(hi > 85.0, "2/3 upper {hi}");
+    }
 
     #[test]
     fn test_compute_pass_at_k() {
@@ -1187,12 +1539,15 @@ mod tests {
             throughput_score: Some(538.0),
             timestamp: "2026-09-04T12:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
-        stability: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -1231,12 +1586,15 @@ mod tests {
             throughput_score: Some(0.0),
             timestamp: "2026-09-04T06:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
-        stability: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -1267,12 +1625,15 @@ mod tests {
             throughput_score: Some(481.0),
             timestamp: "2026-09-04T06:05:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
-        stability: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();
@@ -1323,7 +1684,8 @@ mod tests {
     fn test_reconsolidate_saved_results_empty() {
         let temp = std::env::temp_dir().join(format!("test_reconsolidate_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp);
-        let count = LeaderboardManager::reconsolidate_saved_results(temp.to_str().unwrap()).unwrap();
+        let count =
+            LeaderboardManager::reconsolidate_saved_results(temp.to_str().unwrap()).unwrap();
         assert_eq!(count, 0);
         let _ = fs::remove_dir_all(&temp);
     }
@@ -1332,14 +1694,29 @@ mod tests {
     #[ignore]
     fn run_reconsolidate_historical_results() {
         let count = LeaderboardManager::reconsolidate_saved_results("results").unwrap();
-        println!("Reconsolidated {} historical multi-trial runs in results/", count);
+        println!(
+            "Reconsolidated {} historical multi-trial runs in results/",
+            count
+        );
     }
 
     #[test]
     fn test_short_model_name() {
-        assert_eq!(LeaderboardManager::short_model_name("openrouter/deepseek/deepseek-v4.1-flash"), "deepseek-v4.1-flash");
-        assert_eq!(LeaderboardManager::short_model_name("openrouter/meta/muse-spark-1.3-contributor"), "muse-spark-1.3-contributor");
-        assert_eq!(LeaderboardManager::short_model_name("openai/gpt-5.6-luna"), "gpt-5.6-luna");
-        assert_eq!(LeaderboardManager::short_model_name("gemini-3.8-flash"), "gemini-3.8-flash");
+        assert_eq!(
+            LeaderboardManager::short_model_name("openrouter/deepseek/deepseek-v4.1-flash"),
+            "deepseek-v4.1-flash"
+        );
+        assert_eq!(
+            LeaderboardManager::short_model_name("openrouter/meta/muse-spark-1.3-contributor"),
+            "muse-spark-1.3-contributor"
+        );
+        assert_eq!(
+            LeaderboardManager::short_model_name("openai/gpt-5.6-luna"),
+            "gpt-5.6-luna"
+        );
+        assert_eq!(
+            LeaderboardManager::short_model_name("gemini-3.8-flash"),
+            "gemini-3.8-flash"
+        );
     }
 }

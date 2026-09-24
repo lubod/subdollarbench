@@ -1,7 +1,7 @@
-use std::io::Write;
-use std::time::{Duration, Instant};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use std::io::Write;
+use std::time::{Duration, Instant};
 
 use super::StageResult;
 
@@ -116,7 +116,10 @@ impl PdfVerifier {
     pub fn pdf_stage3(&self) -> (Vec<u8>, String) {
         let pfx = self.get_seed_prefix("live");
         let want = format!("Compressed stream {} works!", pfx);
-        let raw_stream = format!("BT /F1 12 Tf 72 720 Td (Compressed stream {} works!) Tj ET", pfx);
+        let raw_stream = format!(
+            "BT /F1 12 Tf 72 720 Td (Compressed stream {} works!) Tj ET",
+            pfx
+        );
         let compressed = Self::zlib_compress(raw_stream.as_bytes());
         let pdf = Self::single_page_pdf(&compressed, "/Filter /FlateDecode");
         (pdf, want)
@@ -144,7 +147,11 @@ impl PdfVerifier {
             Self::stream_obj("", s2.as_bytes()),
             Self::stream_obj("", s3.as_bytes()),
             // Decoy: valid object, never referenced from the page tree.
-            format!("<< /Note (internal) >>\n(DECOY-{} must not appear) Tj", decoy_id).into_bytes(),
+            format!(
+                "<< /Note (internal) >>\n(DECOY-{} must not appear) Tj",
+                decoy_id
+            )
+            .into_bytes(),
         ];
         (Self::build_pdf(&objs, 1), want)
     }
@@ -170,7 +177,13 @@ impl PdfVerifier {
         }
     }
 
-    async fn check_extract(&self, stage: u32, name: &str, pdf: Vec<u8>, expected: &str) -> StageResult {
+    async fn check_extract(
+        &self,
+        stage: u32,
+        name: &str,
+        pdf: Vec<u8>,
+        expected: &str,
+    ) -> StageResult {
         let done = |passed: bool, error: Option<String>| StageResult {
             stage,
             name: name.to_string(),
@@ -213,13 +226,19 @@ impl PdfVerifier {
 
     async fn test_stage2_positioning(&self) -> StageResult {
         let (pdf, want) = self.pdf_stage2();
-        self.check_extract(2, "Stage 2: TJ arrays, positioning, hex, escapes", pdf, &want)
-            .await
+        self.check_extract(
+            2,
+            "Stage 2: TJ arrays, positioning, hex, escapes",
+            pdf,
+            &want,
+        )
+        .await
     }
 
     async fn test_stage3_flate(&self) -> StageResult {
         let (pdf, want) = self.pdf_stage3();
-        self.check_extract(3, "Stage 3: FlateDecode stream", pdf, &want).await
+        self.check_extract(3, "Stage 3: FlateDecode stream", pdf, &want)
+            .await
     }
 
     async fn test_stage4_multipage(&self) -> StageResult {
@@ -247,7 +266,10 @@ impl PdfVerifier {
             Err(e) => return done(false, Some(format!("garbage POST failed: {}", e))),
             Ok(resp) => {
                 if resp.status().as_u16() != 400 {
-                    return done(false, Some(format!("garbage POST status {}", resp.status())));
+                    return done(
+                        false,
+                        Some(format!("garbage POST status {}", resp.status())),
+                    );
                 }
             }
         }
@@ -304,13 +326,22 @@ impl PdfVerifier {
             }
         }
         if fails.is_empty() {
-            StageResult { stage: 6, name, passed: true, error: None }
+            StageResult {
+                stage: 6,
+                name,
+                passed: true,
+                error: None,
+            }
         } else {
             StageResult {
                 stage: 6,
                 name,
                 passed: false,
-                error: Some(format!("{} of 16 burst extractions failed: {}", fails.len(), fails[0])),
+                error: Some(format!(
+                    "{} of 16 burst extractions failed: {}",
+                    fails.len(),
+                    fails[0]
+                )),
             }
         }
     }
@@ -399,7 +430,9 @@ mod tests {
     fn test_pdf_stage3_fixture_is_valid_zlib() {
         let v = PdfVerifier::new(8090, Some("testseed"));
         let (pdf, _want) = v.pdf_stage3();
-        assert!(pdf.windows(b"/FlateDecode".len()).any(|w| w == b"/FlateDecode"));
+        assert!(pdf
+            .windows(b"/FlateDecode".len())
+            .any(|w| w == b"/FlateDecode"));
     }
 
     #[test]

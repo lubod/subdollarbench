@@ -24,22 +24,29 @@ pub const COMPUTE_COST_PER_TOKEN: f64 = 0.00000005;
 impl ModelPricing {
     /// Calculates the equivalent compute cost from execution duration and total token volume.
     pub fn compute_cost(duration_seconds: f64, total_tokens: u64) -> f64 {
-        (duration_seconds * COMPUTE_COST_PER_SECOND) + (total_tokens as f64 * COMPUTE_COST_PER_TOKEN)
+        (duration_seconds * COMPUTE_COST_PER_SECOND)
+            + (total_tokens as f64 * COMPUTE_COST_PER_TOKEN)
     }
 
     /// Calculates effective total cost: API spend + compute runtime floor.
-    pub fn calculate_effective_cost(api_cost_usd: f64, duration_seconds: f64, total_tokens: u64) -> f64 {
+    pub fn calculate_effective_cost(
+        api_cost_usd: f64,
+        duration_seconds: f64,
+        total_tokens: u64,
+    ) -> f64 {
         api_cost_usd + Self::compute_cost(duration_seconds, total_tokens)
     }
 
     /// Calculates Engineering Efficiency Score (pts/¢): Pass Rate (%) / (Effective Cost in Cents)
-    /// Only fully functional implementations (strictly 100% pass rate) earn efficiency points.
+    /// Proportional credit: a 98% run earns 98% of a 100% run's score at
+    /// the same cost. (Pre-2026-09-24 scoring gated on strictly 100% and
+    /// zeroed everything below; see RULES_VERSION history.)
     pub fn calculate_efficiency_score(pass_rate: f64, effective_cost_usd: f64) -> f64 {
-        if pass_rate < 100.0 || effective_cost_usd <= 0.0 {
+        if pass_rate <= 0.0 || effective_cost_usd <= 0.0 {
             0.0
         } else {
             let cost_cents = (effective_cost_usd * 100.0).max(0.0001);
-            100.0 / cost_cents
+            pass_rate.max(0.0).min(100.0) / cost_cents
         }
     }
 
@@ -56,7 +63,7 @@ impl ModelPricing {
         effective_cost_usd: f64,
         throughput_req_sec: Option<f64>,
         reference_throughput_req_sec: Option<f64>,
-    ) -> f64 {
+    ) -> Option<f64> {
         Self::calculate_throughput_score_for_task(
             pass_rate,
             effective_cost_usd,
@@ -71,39 +78,23 @@ impl ModelPricing {
         effective_cost_usd: f64,
         throughput_req_sec: Option<f64>,
         reference_throughput_req_sec: Option<f64>,
-        task: Option<&str>,
-    ) -> f64 {
+        _task: Option<&str>,
+    ) -> Option<f64> {
         let base_eff = Self::calculate_efficiency_score(pass_rate, effective_cost_usd);
         if base_eff <= 0.0 {
-            return 0.0;
+            return Some(0.0);
         }
+        // No live reference, no score. Fallback baselines were unlabeled
+        // constants unmeasured on this testbed; scoring against them made
+        // refless tasks look comparable to anchored ones. Callers display
+        // "--" and rank by P@1/cost instead.
+        let ref_tp = match reference_throughput_req_sec {
+            Some(v) if v > 0.0 => v,
+            _ => return None,
+        };
         let cand_tp = throughput_req_sec.unwrap_or(0.0).max(0.0);
-        let ref_tp = reference_throughput_req_sec.unwrap_or(0.0).max(0.0);
-        // Calibrated against ground-truth reference implementations on the benchmark testbed:
-        // - HTTP: 33,000 req/s (Nginx live container reference via wrk)
-        // - Redis: 71,000 req/s (Redis:alpine live container reference via redis-benchmark)
-        // - DNS: 19,000 queries/s (Reference Python RFC 1035 UDP resolver on testbed)
-        // - PDF: 4,600 pages/s (Reference Python PDF extractor microservice on testbed)
-        // - WAL: 1,000 msgs/s (fsync-bound append on disk; calibrated from empirical batches)
-        // - Proxy: 33,000 req/s (same nginx denominator as http: a proxy cannot beat direct)
-        // - PubSub: 80,000 deliveries/s (fan-out soak; calibrated from empirical batches)
-        let fallback_baseline = match task.unwrap_or("http").to_lowercase().as_str() {
-            "redis" => 71_000.0,
-            "dns" => 19_000.0,
-            "pdf" => 4_600.0,
-            "wal" => 1_000.0,
-            "proxy" => 33_000.0,
-            "pubsub" => 80_000.0,
-            _ => 33_000.0,
-        };
-        let speed_ratio = if ref_tp > 0.0 {
-            cand_tp / ref_tp
-        } else if cand_tp > 0.0 {
-            cand_tp / fallback_baseline
-        } else {
-            0.0
-        };
-        base_eff * speed_ratio * (1.0 + 2.0 * speed_ratio)
+        let speed_ratio = cand_tp / ref_tp;
+        Some(base_eff * speed_ratio * (1.0 + 2.0 * speed_ratio))
     }
 
     pub fn new(
@@ -482,43 +473,46 @@ mod tests {
         assert!((score - (100.0 / 1.3)).abs() < 1e-3);
 
         assert_eq!(ModelPricing::calculate_efficiency_score(0.0, eff), 0.0);
-        assert_eq!(ModelPricing::calculate_efficiency_score(50.0, eff), 0.0);
+        // Proportional credit (no 100%-or-zero cliff).
+        let half = ModelPricing::calculate_efficiency_score(50.0, eff);
+        assert!((half - (50.0 / 1.3)).abs() < 1e-3);
+        let near = ModelPricing::calculate_efficiency_score(98.0, eff);
+        assert!((near - (98.0 / 1.3)).abs() < 1e-3);
 
-        let tp_score = ModelPricing::calculate_throughput_score(100.0, eff, Some(30_000.0), Some(30_000.0));
-        assert!((tp_score - (score * 3.0)).abs() < 1e-3);
+        let tp_score =
+            ModelPricing::calculate_throughput_score(100.0, eff, Some(30_000.0), Some(30_000.0));
+        assert!((tp_score.unwrap() - (score * 3.0)).abs() < 1e-3);
 
-        // Task-aware fallback tests
-        let tp_redis = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(71_000.0), None, Some("redis"));
-        assert!((tp_redis - (score * 3.0)).abs() < 1e-3);
-
-        let tp_dns = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(19_000.0), None, Some("dns"));
-        assert!((tp_dns - (score * 3.0)).abs() < 1e-3);
-
-        let tp_pdf = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(4_600.0), None, Some("pdf"));
-        assert!((tp_pdf - (score * 3.0)).abs() < 1e-3);
-
-        let tp_wal = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(1_000.0), None, Some("wal"));
-        assert!((tp_wal - (score * 3.0)).abs() < 1e-3);
-
-        let tp_proxy = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(33_000.0), None, Some("proxy"));
-        assert!((tp_proxy - (score * 3.0)).abs() < 1e-3);
-
-        let tp_pubsub = ModelPricing::calculate_throughput_score_for_task(100.0, eff, Some(80_000.0), None, Some("pubsub"));
-        assert!((tp_pubsub - (score * 3.0)).abs() < 1e-3);
+        // No live reference -> no score (refless tasks rank by P@1/cost).
+        for task in ["redis", "dns", "pdf", "wal", "proxy", "pubsub", "http"] {
+            assert_eq!(
+                ModelPricing::calculate_throughput_score_for_task(
+                    100.0,
+                    eff,
+                    Some(50_000.0),
+                    None,
+                    Some(task)
+                ),
+                None,
+                "task {task} without a live ref must not score"
+            );
+        }
 
         // Zero throughput or missing throughput yields 0.0
-        let tp_zero = ModelPricing::calculate_throughput_score(100.0, eff, Some(0.0), Some(30_000.0));
-        assert_eq!(tp_zero, 0.0);
+        let tp_zero =
+            ModelPricing::calculate_throughput_score(100.0, eff, Some(0.0), Some(30_000.0));
+        assert_eq!(tp_zero, Some(0.0));
         let tp_none = ModelPricing::calculate_throughput_score(100.0, eff, None, Some(30_000.0));
-        assert_eq!(tp_none, 0.0);
+        assert_eq!(tp_none, Some(0.0));
 
         // Sub-reference performance (half-speed: ratio 0.5 => multiplier 0.5 * (1 + 1) = 1.0)
-        let tp_half = ModelPricing::calculate_throughput_score(100.0, eff, Some(15_000.0), Some(30_000.0));
-        assert!((tp_half - (score * 1.0)).abs() < 1e-3);
+        let tp_half =
+            ModelPricing::calculate_throughput_score(100.0, eff, Some(15_000.0), Some(30_000.0));
+        assert!((tp_half.unwrap() - (score * 1.0)).abs() < 1e-3);
 
         // Superlinear high performance (2x speed: ratio 2.0 => multiplier 2.0 * (1 + 4) = 10.0)
-        let tp_double = ModelPricing::calculate_throughput_score(100.0, eff, Some(60_000.0), Some(30_000.0));
-        assert!((tp_double - (score * 10.0)).abs() < 1e-3);
+        let tp_double =
+            ModelPricing::calculate_throughput_score(100.0, eff, Some(60_000.0), Some(30_000.0));
+        assert!((tp_double.unwrap() - (score * 10.0)).abs() < 1e-3);
     }
-
 }

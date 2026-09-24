@@ -9,6 +9,31 @@ use std::process::Command;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+/// Live CoreDNS baseline on an ephemeral host port, probed with the same
+/// `measure_throughput` path as candidates. Starts the pinned CoreDNS image
+/// (forwarding Corefile like the trial oracle), warms up, measures, cleans up.
+/// Returns None instead of a constant so refless runs stay unscored.
+pub async fn measure_dns_reference(seed: &str) -> Option<f64> {
+    use crate::sandbox::docker::SandboxManager;
+    use crate::verifier::DnsVerifier;
+    let sandbox = SandboxManager::with_id(&format!("dnsref-{}", seed));
+    // Ephemeral port avoids colliding with trial refs or candidates.
+    let port: u16 = 15353 + (rand::random::<u16>() % 4000);
+    if sandbox.start_reference_dns(port).is_err() {
+        return None;
+    }
+    let v = DnsVerifier::new(port, Some(seed));
+    if !v.wait_for_ready(20).await {
+        sandbox.cleanup();
+        return None;
+    }
+    // Warmup window (discarded), then the scored measurement.
+    let _ = v.measure_throughput().await;
+    let tp = v.measure_throughput().await;
+    sandbox.cleanup();
+    tp
+}
+
 pub struct BenchmarkRunner;
 
 static REDIS_BENCH_RE: LazyLock<Regex> = LazyLock::new(|| {

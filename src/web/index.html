@@ -1059,7 +1059,7 @@
               <span>Subruns</span>
               <span class="badge" style="background: rgba(163, 113, 247, 0.2); color: #d2a8ff; font-size: 0.65rem;">Default: 3</span>
             </label>
-            <input type="number" id="trials" value="3" min="1" max="30" title="Number of subruns/trials to run and average (Pass@k)" />
+            <input type="number" id="trials" value="9" min="1" max="30" title="Number of subruns/trials to run and average (Pass@k)" />
           </div>
         </div>
         <span class="hint" style="margin-top: -4px; margin-bottom: 8px; display: block;">Runs 3 subruns (3× cost &amp; runtime) by default to compute Pass@k and average throughput. Set to 1 for quick single-shot runs.</span>
@@ -1107,6 +1107,13 @@
 
         <!-- Tab 1: Terminal Console -->
         <div id="tab-console" class="console-container">
+          <div id="currentRunCard" style="display: none; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+              <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">● Current run</div>
+              <button class="btn btn-danger" id="stopBtnConsole" onclick="stopRun()" style="padding: 4px 12px; font-size: 0.75rem; font-weight: 600;">🛑 Stop run</button>
+            </div>
+            <div id="runningSetupBar" class="hint" style="margin-top: 6px; font-size: 0.78rem;"></div>
+          </div>
           <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
             <div style="display: flex; align-items: center; gap: 10px;">
               <span class="hint">Real-time execution log from OMP, Docker, and Test Harness</span>
@@ -1691,7 +1698,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       } else if (name === 'traceability') {
         document.getElementById('tab-traceability').style.display = 'flex';
         if (tabs[1]) tabs[1].classList.add('active');
-        loadRuns();
+        if (!allRunsCache || !allRunsCache.length) loadRuns();
       } else if (name === 'compare') {
         if (compTab) compTab.style.display = 'flex';
         if (tabs[2]) tabs[2].classList.add('active');
@@ -1929,6 +1936,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     function clearConsole() {
       document.getElementById('terminalOutput').textContent = '';
+      consoleKnownLines = 0;
+      consoleSynced = false;
     }
 
     function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
@@ -2182,6 +2191,17 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+    }
+
+    function renderRunningSetup(m) {
+      const card = document.getElementById('currentRunCard');
+      const bar = document.getElementById('runningSetupBar');
+      if (!card || !bar) return;
+      if (!m) { card.style.display = 'none'; bar.innerHTML = ''; return; }
+      const modelShort = String(m.model || '').split('/').pop();
+      const review = (m.review_model && String(m.review_model).split('/').pop()) || 'default';
+      bar.innerHTML = `RUNNING: <b>${escapeHtml(modelShort)}</b> \u00b7 ${escapeHtml(m.task || '')} \u00b7 ${escapeHtml(m.effort || '')} \u00b7 ${(m.subrun ?? '?')}/${(m.total_subruns ?? '?')} \u00b7 $${Number(m.budget_usd ?? 0).toFixed(2)} \u00b7 ${m.max_turns ?? '?'} turns \u00b7 ${m.timeout_min ?? '?'} min \u00b7 ${m.trials ?? '?'} trials${m.eval_only ? ' \u00b7 eval-only' : ''}${m.extend_if_unstable ? ` \u00b7 extend\u2192${m.max_trials ?? '?'}` : ''} \u00b7 judge ${escapeHtml(review)}`;
+      card.style.display = 'block';
     }
 
     let currentLoadedPromptText = '';
@@ -2546,7 +2566,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; flex-direction: column; gap: 4px;">
                 <div>${passBadge}</div>
                 <div>${effBadge}</div>
-                ${(() => { const kids = (allRunsCache || []).filter(x => x.run_id.startsWith(r.run_id + '_trial')); return kids.length ? `<span class="badge" style="background: rgba(210,168,255,0.15); color: #d2a8ff; font-size: 0.7rem;" title="Trial outcomes: ${kids.map(k => Math.round(k.pass_rate) + '%').join(' / ')}">📦 ${kids.length} subruns</span>` : ''; })()}
+                ${(() => { const subs = r.subruns || []; return subs.length ? `<span class="badge" style="background: rgba(210,168,255,0.15); color: #d2a8ff; font-size: 0.7rem;" title="Trial outcomes: ${subs.map(k => Math.round(k.pass_rate) + '%').join(' / ')}">📦 ${subs.length} subruns</span>` : ''; })()}
               </div>
             </td>
             <td>
@@ -2562,7 +2582,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <div style="display: flex; flex-direction: column; gap: 2px;">
                 <span style="font-weight: 700; color: var(--primary); font-size: 0.95rem;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)} <span style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">pts/¢</span></span>
                 ${(r.throughput_score !== undefined && r.throughput_score !== null && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100) ? `<span style="font-size: 0.7rem; color: var(--text-muted);">(base: ${r.efficiency_score.toFixed(1)})</span>` : ''}
-                ${(r.total_trials && r.total_trials > 1) ? `<span style="font-size: 0.7rem; color: #d2a8ff;" title="Trial outcomes: ${((r.subruns || []).map(t => Math.round(t.pass_rate) + '%').join(' / ') || 'n/a')}">📦 ${r.total_trials} trials (Fair)${(r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? ` • avg ${Math.round(r.avg_pass_rate)}%` : ''}${(r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? ` • Pass@1 ${Math.round(r.pass_at_1)}%` : ''}${(r.stability !== undefined && r.stability !== null) ? ` • ${r.stability === 'stable' ? '🟢' : r.stability === 'watch' ? '🟡' : '🔴'} ${r.stability}` : ''}</span>` : ''}
+                ${(r.total_trials && r.total_trials > 1) ? `<span style="font-size: 0.7rem; color: #d2a8ff;" title="Trial outcomes: ${((r.subruns || []).map(t => Math.round(t.pass_rate) + '%').join(' / ') || 'n/a')}">📦 ${r.total_trials} trials (Fair)${(r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? ` • P@1 ${Math.round(r.pass_at_1)}%${(r.pass_at_1_lo !== undefined && r.pass_at_1_lo !== null && r.pass_at_1_hi !== undefined && r.pass_at_1_hi !== null) ? ` (${Math.round(r.pass_at_1_lo)}–${Math.round(r.pass_at_1_hi)})` : ''}` : ''}${(r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? ` • avg ${Math.round(r.avg_pass_rate)}%` : ''}${(r.stability !== undefined && r.stability !== null) ? ` • ${r.stability === 'stable' ? '🟢' : r.stability === 'watch' ? '🟡' : '🔴'} ${r.stability}` : ''}</span>` : ''}
                 <span style="font-size: 0.72rem; color: var(--text-muted);">${tp}</span>
               </div>
             </td>
@@ -2703,13 +2723,23 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/extend`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ trials: 3 })
+          body: JSON.stringify({ trials: 3, queue: true })
         });
+        const text = await res.text();
+        let detail = text;
+        try {
+          const j = JSON.parse(text);
+          if (j.queued) detail = `queued as ${j.queued}` + (j.position ? ` (position ${j.position})` : '');
+          else if (j.started) detail = `started now`;
+        } catch (e) { /* plain-text fallback (immediate path legacy) */ }
         if (res.ok) {
-          appendLog(`[QUEUE] ${(await res.text())}. Watch the console for progress.`);
+          appendLog(`[QUEUE] Extend ${runId}: ${detail}.`);
+          refreshQueue();
           switchTab('console');
+        } else if (res.status === 409) {
+          appendLog(`[QUEUE] Extension refused (busy, not queued): ${text}`);
         } else {
-          appendLog(`[QUEUE] Extension refused: ${await res.text()}`);
+          appendLog(`[QUEUE] Extension refused: ${text}`);
         }
       } catch (e) {
         alert(`Error starting extension: ${e.message}`);
@@ -3159,40 +3189,82 @@ function copyRunId() {
 
     let autoRefreshTimer = null;
     let isFetchingConsole = false;
+    // Lines of the server buffer already rendered. Delta fetches append
+    // only new rows instead of re-rendering the whole console each tick.
+    let consoleKnownLines = 0;
+    let consoleSynced = false;
+
+    function appendConsoleLines(lines) {
+      const term = document.getElementById('terminalOutput');
+      const wrap = document.createElement('div');
+      wrap.innerHTML = renderLines(lines);
+      while (wrap.firstChild) term.appendChild(wrap.firstChild);
+      const autoScroll = document.getElementById('autoScrollCheck');
+      if (!autoScroll || autoScroll.checked) {
+        term.scrollTop = term.scrollHeight;
+      }
+    }
+
+    function renderConsoleBody(term, body) {
+      const lines = body.split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].includes('[TELEMETRY]') || lines[i].includes('[LIVE]')) {
+          parseTelemetryLine(lines[i]);
+          break;
+        }
+      }
+      let filtered = lines.filter(l => !l.includes('[TELEMETRY]'));
+      if (!showCodeDetails) {
+        filtered = filtered.filter(l => !l.includes('  | ') && !l.includes('  | ...'));
+      }
+      return filtered;
+    }
 
     async function fetchConsoleLogs(force = false) {
       if (isFetchingConsole) return;
       isFetchingConsole = true;
       try {
-        const res = await fetch('/api/console');
-        if (res.ok) {
-          const text = await res.text();
-          const term = document.getElementById('terminalOutput');
-          if (text.trim() && (force || text.length > term.textContent.length || !term.textContent.includes(text.slice(-50)))) {
-            const lines = text.split('\n');
-            for (let i = lines.length - 1; i >= 0; i--) {
-              if (lines[i].includes('[TELEMETRY]') || lines[i].includes('[LIVE]')) {
-                parseTelemetryLine(lines[i]);
-                break;
-              }
+        const term = document.getElementById('terminalOutput');
+        // Fresh snapshot (manual refresh or first paint): render capped tail.
+        if (force || !consoleSynced) {
+          const res = await fetch('/api/console?tail=3000');
+          if (res.ok) {
+            const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
+            const body = await res.text();
+            if (body.trim()) {
+              term.innerHTML = renderLines(renderConsoleBody(term, body));
+            } else {
+              term.innerHTML = '';
             }
-            let filtered = lines.filter(l => !l.includes('[TELEMETRY]'));
-            if (!showCodeDetails) {
-              filtered = filtered.filter(l => !l.includes('  | ') && !l.includes('  | ...'));
-            }
-            term.innerHTML = renderLines(filtered);
+            consoleKnownLines = total;
+            consoleSynced = true;
             const autoScroll = document.getElementById('autoScrollCheck');
-            if (!autoScroll || autoScroll.checked) {
+            if (autoScroll && autoScroll.checked) {
               term.scrollTop = term.scrollHeight;
             }
           }
+        } else {
+          // Steady state: append only lines newer than the cursor.
+          const res = await fetch(`/api/console?since=${consoleKnownLines}`);
+          if (res.ok) {
+            const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
+            const text = await res.text();
+            // Server resends the capped tail when the cursor is stale
+            // (trim/restart/desync): re-render, then resume deltas.
+            if (text && total > 0 && total - consoleKnownLines > 3000) {
+              term.innerHTML = renderLines(renderConsoleBody(term, text));
+            } else if (text.trim()) {
+              appendConsoleLines(renderConsoleBody(term, text));
+            }
+            consoleKnownLines = total;
+          }
+        }
           const badge = document.getElementById('consolePulseBadge');
           const pText = document.getElementById('consolePulseText');
           if (badge && pText) {
             badge.style.display = 'inline-flex';
             pText.textContent = activeEventSource ? 'Live Stream Connected' : 'Auto-Sync Active';
           }
-        }
       } catch (e) {
         console.warn('Console fetch error:', e);
       } finally {
@@ -3238,6 +3310,8 @@ function copyRunId() {
           activeEventSource = null;
           if (pText) pText.textContent = 'Completed';
           resetStatus();
+          renderRunningSetup(null);
+          checkActiveRun();
           loadRuns();
         } else {
           appendLog(event.data);
@@ -3259,9 +3333,14 @@ function copyRunId() {
     async function stopRun() {
       if (!confirm('Are you sure you want to stop the currently running benchmark?')) return;
       const stopBtn = document.getElementById('stopBtn');
+      const stopBtnConsole = document.getElementById('stopBtnConsole');
       if (stopBtn) {
         stopBtn.disabled = true;
         stopBtn.textContent = 'Stopping...';
+      }
+      if (stopBtnConsole) {
+        stopBtnConsole.disabled = true;
+        stopBtnConsole.textContent = 'Stopping...';
       }
       try {
         const res = await fetch('/api/run/stop', { method: 'POST' });
@@ -3280,6 +3359,10 @@ function copyRunId() {
         if (stopBtn) {
           stopBtn.disabled = false;
           stopBtn.textContent = '🛑 Stop Run';
+        }
+        if (stopBtnConsole) {
+          stopBtnConsole.disabled = false;
+          stopBtnConsole.textContent = '🛑 Stop run';
         }
       }
     }
@@ -3525,22 +3608,13 @@ function copyRunId() {
         if (!res.ok) return;
         const data = await res.json();
         if (data.is_running) {
-          document.getElementById('startBtn').disabled = true;
           const stopBtn = document.getElementById('stopBtn');
           if (stopBtn) stopBtn.style.display = 'block';
           document.getElementById('statusDot').className = 'status-dot running';
           document.getElementById('statusText').textContent = 'Running';
           if (data.current_run) {
             const m = data.current_run;
-            if (m.model) {
-              const modelInput = document.getElementById('model');
-              if (modelInput && !modelInput.value) modelInput.value = m.model;
-            }
-            if (m.task) {
-              const taskSelect = document.getElementById('task');
-              if (taskSelect) taskSelect.value = m.task;
-            }
-            if (m.effort) setEffort(m.effort);
+            renderRunningSetup(m);
             if (m.turns !== undefined) liveTelemetry.turns = m.turns;
             if (m.max_turns !== undefined && m.max_turns > 0) liveTelemetry.maxTurns = m.max_turns;
             if (m.cost_usd !== undefined) liveTelemetry.spent = m.cost_usd;
@@ -3562,6 +3636,7 @@ function copyRunId() {
           if (liveTelemetry.isRunning) {
             stopElapsedTimer();
           }
+          renderRunningSetup(null);
           if (data.last_run && liveTelemetry.turns === 0 && liveTelemetry.spent === 0) {
             const lr = data.last_run;
             liveTelemetry.turns = lr.turns || 0;
@@ -3592,7 +3667,7 @@ function copyRunId() {
         budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
         max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
         timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 30,
-        trials: parseInt(document.getElementById('trials').value, 10) || 3,
+        trials: parseInt(document.getElementById('trials').value, 10) || 9,
         eval_only: document.getElementById('evalOnly').checked,
         extend_if_unstable: document.getElementById('extendUnstable').checked,
         max_trials: parseInt(document.getElementById('maxTrials').value, 10) || 9,
@@ -3640,9 +3715,14 @@ function copyRunId() {
           return;
         }
         list.innerHTML = items.map(q => {
-          const r = q.request || {};
           const pill = q.status === 'Running' ? 'badge-pass' : q.status === 'Pending' ? 'badge-info' : 'badge';
           const rm = q.status === 'Pending' ? ` <a href="#" onclick="removeQueued('${q.id}'); return false;" title="Remove from queue">✕</a>` : '';
+          if (q.kind && q.kind.Extend) {
+            const e = q.kind.Extend;
+            const short = (e.parent_run_id || '').slice(-14);
+            return `<div class="queue-row"><span class="badge">${q.id}</span> extend ${escapeHtml(short)} · +${e.trials ?? '?'} trial(s) <span class="${pill}">${q.status}</span>${rm}</div>`;
+          }
+          const r = (q.kind && q.kind.Run) || q.request || {};
           const modelShort = (r.model || '').split('/').pop();
           return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times; <span class="${pill}">${q.status}</span>${rm}</div>`;
         }).join('');
@@ -3667,7 +3747,7 @@ function copyRunId() {
       const budget = parseFloat(document.getElementById('budget').value) || 1.00;
       const turns = parseInt(document.getElementById('turns').value, 10) || 100;
       const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 30;
-      const trials = parseInt(document.getElementById('trials').value, 10) || 3;
+      const trials = parseInt(document.getElementById('trials').value, 10) || 9;
       const evalOnly = document.getElementById('evalOnly').checked;
 
       if (!evalOnly && !apiKey) {
@@ -3675,30 +3755,8 @@ function copyRunId() {
         return;
       }
 
-      switchTab('console');
-      clearConsole();
-      appendLog(`[INIT] Starting benchmark for ${model} (Effort: ${effort}, Subruns: ${trials}) on task '${task}'...`);
-
-      // Initialize Live Telemetry
-      liveTelemetry.turns = 0;
-      liveTelemetry.maxTurns = turns;
-      liveTelemetry.spent = 0.0;
-      liveTelemetry.tokens = 0;
-      liveTelemetry.subrun = 1;
-      liveTelemetry.totalSubruns = trials;
-      liveTelemetry.durationSecs = null;
-      startElapsedTimer(Date.now());
-
       const startBtn = document.getElementById('startBtn');
-      startBtn.disabled = true;
-      const stopBtn = document.getElementById('stopBtn');
-      if (stopBtn) stopBtn.style.display = 'block';
-      document.getElementById('statusDot').className = 'status-dot running';
-      document.getElementById('statusText').textContent = 'Running';
-
-      // Connect log stream immediately so all replayed and live events are captured
-      attachLogStream();
-
+      if (startBtn) startBtn.disabled = true;
       try {
         const res = await fetch('/api/run', {
           method: 'POST',
@@ -3720,7 +3778,15 @@ function copyRunId() {
         });
 
         if (!res.ok) {
-          appendLog(`[ERROR] Failed to start run: ${await res.text()}`);
+          const errText = await res.text();
+          if (res.status === 409) {
+            appendLog(`[BUSY] Engine is running \u2014 queueing instead: ${errText}`);
+            await enqueueRun();
+            if (startBtn) startBtn.disabled = false;
+            checkActiveRun();
+            return;
+          }
+          appendLog(`[ERROR] Failed to start run: ${errText}`);
           if (activeEventSource) {
             try { activeEventSource.close(); } catch(e) {}
             activeEventSource = null;
@@ -3728,6 +3794,21 @@ function copyRunId() {
           resetStatus();
           return;
         }
+
+        switchTab('console');
+        clearConsole();
+        appendLog(`[INIT] Starting benchmark for ${model} (Effort: ${effort}, Subruns: ${trials}) on task '${task}'...`);
+        liveTelemetry.turns = 0;
+        liveTelemetry.maxTurns = turns;
+        liveTelemetry.spent = 0.0;
+        liveTelemetry.tokens = 0;
+        liveTelemetry.subrun = 1;
+        liveTelemetry.totalSubruns = trials;
+        liveTelemetry.durationSecs = null;
+        startElapsedTimer(Date.now());
+        attachLogStream();
+        if (startBtn) startBtn.disabled = false;
+        checkActiveRun();
 
       } catch (e) {
         appendLog(`[ERROR] Connection failure: ${e.message}`);
@@ -3744,6 +3825,7 @@ function copyRunId() {
       document.getElementById('startBtn').disabled = false;
       const stopBtn = document.getElementById('stopBtn');
       if (stopBtn) stopBtn.style.display = 'none';
+      renderRunningSetup(null);
       document.getElementById('statusDot').className = 'status-dot';
       document.getElementById('statusText').textContent = 'Ready';
     }

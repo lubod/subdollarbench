@@ -218,7 +218,10 @@ impl SandboxManager {
     }
 
     fn upstream_marker_path(&self, idx: u8) -> PathBuf {
-        std::env::temp_dir().join(format!("subdollar-upstream-{}-{}.html", self.instance_id, idx))
+        std::env::temp_dir().join(format!(
+            "subdollar-upstream-{}-{}.html",
+            self.instance_id, idx
+        ))
     }
 
     /// Start nginx upstreams with distinct marker bodies for the proxy task.
@@ -260,7 +263,10 @@ impl SandboxManager {
                 "-p",
                 &format!("{}:80", port),
                 "-v",
-                &format!("{}:/usr/share/nginx/html/index.html:ro", self.upstream_marker_path(idx).display()),
+                &format!(
+                    "{}:/usr/share/nginx/html/index.html:ro",
+                    self.upstream_marker_path(idx).display()
+                ),
                 REF_NGINX_IMAGE,
             ])
             .output()?;
@@ -369,7 +375,11 @@ impl SandboxManager {
                     }
                 } else if p.is_dir() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.starts_with('.') && name != "target" && name != "node_modules" && name != "vendor" {
+                    if !name.starts_with('.')
+                        && name != "target"
+                        && name != "node_modules"
+                        && name != "vendor"
+                    {
                         if let Some(found) = Self::find_go_main_recursive(&p) {
                             return Some(found);
                         }
@@ -463,7 +473,10 @@ impl SandboxManager {
                     format!("cd /workspace/{}\n", parent.display())
                 };
                 let bridge = format!("#!/bin/bash\n{}exec go run .\n", cd_part);
-                info!("Found Go main at {:?}. Synthesizing root start.sh...", main_go);
+                info!(
+                    "Found Go main at {:?}. Synthesizing root start.sh...",
+                    main_go
+                );
                 let _ = fs::write(&root_start_sh, bridge);
                 #[cfg(unix)]
                 {
@@ -525,7 +538,8 @@ impl SandboxManager {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&root_start_sh, fs::Permissions::from_mode(0o755));
+                        let _ =
+                            fs::set_permissions(&root_start_sh, fs::Permissions::from_mode(0o755));
                     }
                     return Ok(true);
                 }
@@ -686,9 +700,10 @@ impl SandboxManager {
     }
 
     pub fn agent_container_name(&self) -> String {
-        let clean = self
-            .instance_id
-            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "");
+        let clean = self.instance_id.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+            "",
+        );
         format!("subdollar-omp-agent-{}", clean)
     }
 
@@ -698,9 +713,7 @@ impl SandboxManager {
 
     pub fn remove_network_retrying(net: &str) {
         for _ in 0..5 {
-            let res = Command::new("docker")
-                .args(["network", "rm", net])
-                .output();
+            let res = Command::new("docker").args(["network", "rm", net]).output();
             if let Ok(out) = res {
                 if out.status.success() {
                     return;
@@ -762,13 +775,12 @@ impl SandboxManager {
                 "subdollar-omp-agent",
             ]);
         }
-        let _ = Command::new("docker")
-            .args(&rm_args)
-            .output();
+        let _ = Command::new("docker").args(&rm_args).output();
 
-        let clean = self
-            .instance_id
-            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "");
+        let clean = self.instance_id.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+            "",
+        );
         if !clean.is_empty() && clean != "default" {
             let _ = Command::new("sh")
                 .args([

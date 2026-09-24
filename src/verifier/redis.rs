@@ -401,8 +401,12 @@ impl RedisVerifier {
             let mut temp = [0u8; 1024];
             let start = std::time::Instant::now();
             while read_buf.len() < 24 && start.elapsed() < Duration::from_millis(600) {
-                if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(200), stream.read(&mut temp)).await {
-                    if n == 0 { break; }
+                if let Ok(Ok(n)) =
+                    tokio::time::timeout(Duration::from_millis(200), stream.read(&mut temp)).await
+                {
+                    if n == 0 {
+                        break;
+                    }
                     read_buf.extend_from_slice(&temp[..n]);
                 } else {
                     break;
@@ -414,7 +418,10 @@ impl RedisVerifier {
                     stage: 2,
                     name,
                     passed: false,
-                    error: Some(format!("TCP pipelining failed, got response: {:?}", pipe_resp)),
+                    error: Some(format!(
+                        "TCP pipelining failed, got response: {:?}",
+                        pipe_resp
+                    )),
                 };
             }
         }
@@ -668,16 +675,27 @@ impl RedisVerifier {
             Ok(r) => r,
             Err(e) => return fail(format!("broadcast read: {}", e)),
         };
-        if !(pushed.contains("message") && pushed.contains(&chan) && pushed.contains("hello-fanout")) {
+        if !(pushed.contains("message")
+            && pushed.contains(&chan)
+            && pushed.contains("hello-fanout"))
+        {
             return fail(format!("bad broadcast frame: {:?}", pushed));
         }
-        StageResult { stage: 5, name, passed: true, error: None }
+        StageResult {
+            stage: 5,
+            name,
+            passed: true,
+            error: None,
+        }
     }
 
     /// AOF probe keypair (seeded so parallel runs never collide).
     pub fn probe_pair(&self) -> (String, String) {
         let seed = self.get_seed_prefix("aof").to_string();
-        (format!("persist_probe_{}", seed), format!("smoked-{}", seed))
+        (
+            format!("persist_probe_{}", seed),
+            format!("smoked-{}", seed),
+        )
     }
 
     pub async fn write_probe_key(&self) -> Result<()> {
@@ -711,7 +729,12 @@ impl RedisVerifier {
         if !got.contains(&v) {
             return fail(format!("probe key lost or wrong: {:?}", got));
         }
-        StageResult { stage: 6, name, passed: true, error: None }
+        StageResult {
+            stage: 6,
+            name,
+            passed: true,
+            error: None,
+        }
     }
 }
 
@@ -835,11 +858,19 @@ mod tests {
                         let upper = req.to_uppercase();
 
                         if upper.contains("SET") && upper.contains("_P1") {
-                            let _ = socket.write_all(b"+OK\r\n+OK\r\n$2\r\nv1\r\n$2\r\nv2\r\n").await;
+                            let _ = socket
+                                .write_all(b"+OK\r\n+OK\r\n$2\r\nv1\r\n$2\r\nv2\r\n")
+                                .await;
                             continue;
                         }
-                        if upper.contains("INCR") && (upper.contains("STR_NUM") || upper.contains("BAD_INT") || upper.contains("STR_MYRUN")) {
-                            let _ = socket.write_all(b"-ERR value is not an integer or out of range\r\n").await;
+                        if upper.contains("INCR")
+                            && (upper.contains("STR_NUM")
+                                || upper.contains("BAD_INT")
+                                || upper.contains("STR_MYRUN"))
+                        {
+                            let _ = socket
+                                .write_all(b"-ERR value is not an integer or out of range\r\n")
+                                .await;
                             continue;
                         }
                         if upper.contains("PING") {
@@ -890,7 +921,9 @@ mod tests {
                             // Echo channel, confirm, then push a canned broadcast.
                             let parts: Vec<&str> = req.split("\r\n").collect();
                             let mut chan = "chan".to_string();
-                            if let Some(i) = parts.iter().position(|x| x.to_uppercase() == "SUBSCRIBE") {
+                            if let Some(i) =
+                                parts.iter().position(|x| x.to_uppercase() == "SUBSCRIBE")
+                            {
                                 if let Some(c) = parts.get(i + 2) {
                                     chan = c.to_string();
                                 }
@@ -948,11 +981,19 @@ mod tests {
                         let upper = req.to_uppercase();
 
                         if upper.contains("SET") && upper.contains("_P1") {
-                            let _ = socket.write_all(b"+OK\r\n+OK\r\n$2\r\nv1\r\n$2\r\nv2\r\n").await;
+                            let _ = socket
+                                .write_all(b"+OK\r\n+OK\r\n$2\r\nv1\r\n$2\r\nv2\r\n")
+                                .await;
                             continue;
                         }
-                        if upper.contains("INCR") && (upper.contains("STR_NUM") || upper.contains("BAD_INT") || upper.contains("STR_MYRUN")) {
-                            let _ = socket.write_all(b"-ERR value is not an integer or out of range\r\n").await;
+                        if upper.contains("INCR")
+                            && (upper.contains("STR_NUM")
+                                || upper.contains("BAD_INT")
+                                || upper.contains("STR_MYRUN"))
+                        {
+                            let _ = socket
+                                .write_all(b"-ERR value is not an integer or out of range\r\n")
+                                .await;
                             continue;
                         }
                         if upper.contains("PING") {
@@ -1009,7 +1050,9 @@ mod tests {
                             // Echo channel, confirm, then push a canned broadcast.
                             let parts: Vec<&str> = req.split("\r\n").collect();
                             let mut chan = "chan".to_string();
-                            if let Some(i) = parts.iter().position(|x| x.to_uppercase() == "SUBSCRIBE") {
+                            if let Some(i) =
+                                parts.iter().position(|x| x.to_uppercase() == "SUBSCRIBE")
+                            {
                                 if let Some(c) = parts.get(i + 2) {
                                     chan = c.to_string();
                                 }

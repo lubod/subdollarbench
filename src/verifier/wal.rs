@@ -57,9 +57,14 @@ impl WalConn {
     }
 
     async fn send_line(&mut self, line: &str) -> Result<()> {
-        self.writer.write_all(line.as_bytes()).await
+        self.writer
+            .write_all(line.as_bytes())
+            .await
             .map_err(|e| anyhow!("Failed to send {line:?}: {e}"))?;
-        self.writer.flush().await.map_err(|e| anyhow!("Flush failed: {e}"))?;
+        self.writer
+            .flush()
+            .await
+            .map_err(|e| anyhow!("Flush failed: {e}"))?;
         Ok(())
     }
 
@@ -241,7 +246,9 @@ impl WalVerifier {
             return Err(anyhow!("SUB from 0 returned no messages"));
         }
         if !msgs.iter().any(|(o, p)| *o == base && p == &payload) {
-            return Err(anyhow!("Message at offset {base} missing from SUB output ({msgs:?})"));
+            return Err(anyhow!(
+                "Message at offset {base} missing from SUB output ({msgs:?})"
+            ));
         }
         if !offsets_contiguous(&msgs) {
             return Err(anyhow!("SUB offsets not contiguous: {msgs:?}"));
@@ -267,7 +274,10 @@ impl WalVerifier {
             match base {
                 None => base = Some(off),
                 Some(b) if off != b + i => {
-                    return Err(anyhow!("PUB {i}: expected contiguous offset {}, got {off}", b + i))
+                    return Err(anyhow!(
+                        "PUB {i}: expected contiguous offset {}, got {off}",
+                        b + i
+                    ))
                 }
                 _ => {}
             }
@@ -278,13 +288,18 @@ impl WalVerifier {
         let from = base + 5;
         let msgs = conn.sub_collect(&topic, from).await?;
         if msgs.len() != 5 {
-            return Err(anyhow!("Expected 5 messages from offset {from}, got {}", msgs.len()));
+            return Err(anyhow!(
+                "Expected 5 messages from offset {from}, got {}",
+                msgs.len()
+            ));
         }
         for (k, (off, payload)) in msgs.iter().enumerate() {
             let want_off = from + k as u64;
             let want_payload = format!("msg{}_{seed_tag}", 5 + k);
             if *off != want_off || payload != &want_payload {
-                return Err(anyhow!("Message {k}: expected `:{want_off} {want_payload}`, got `:{off} {payload}`"));
+                return Err(anyhow!(
+                    "Message {k}: expected `:{want_off} {want_payload}`, got `:{off} {payload}`"
+                ));
             }
         }
         Ok(())
@@ -312,10 +327,14 @@ impl WalVerifier {
             return Err(anyhow!("Isolation topics returned no messages"));
         }
         if !got_a.iter().all(|(_, p)| p == &payload_a) {
-            return Err(anyhow!("Topic {topic_a} leaked foreign payloads: {got_a:?}"));
+            return Err(anyhow!(
+                "Topic {topic_a} leaked foreign payloads: {got_a:?}"
+            ));
         }
         if !got_b.iter().all(|(_, p)| p == &payload_b) {
-            return Err(anyhow!("Topic {topic_b} leaked foreign payloads: {got_b:?}"));
+            return Err(anyhow!(
+                "Topic {topic_b} leaked foreign payloads: {got_b:?}"
+            ));
         }
         Ok(())
     }
@@ -389,18 +408,28 @@ mod tests {
         assert_eq!(parse_pub_ack("+OK  7  \r\n"), Some(7));
         assert_eq!(parse_pub_ack("+OK 18446744073709551615"), Some(u64::MAX));
         assert_eq!(parse_sub_data(":0 hello"), Some((0, "hello".to_string())));
-        assert_eq!(parse_sub_data(":5 hi there"), Some((5, "hi there".to_string())));
-        assert_eq!(parse_sub_data(":12 a.b_c-d\r\n"), Some((12, "a.b_c-d".to_string())));
+        assert_eq!(
+            parse_sub_data(":5 hi there"),
+            Some((5, "hi there".to_string()))
+        );
+        assert_eq!(
+            parse_sub_data(":12 a.b_c-d\r\n"),
+            Some((12, "a.b_c-d".to_string()))
+        );
         assert!(is_end_line("+END\r\n"));
         assert!(is_err_line("-ERR bad command"));
     }
 
     #[test]
     fn parsers_reject_malformed_lines() {
-        for bad in ["+OK", "+OK abc", "+OK -1", "+OK 1 2", "+END", "-ERR x", ":5 hi", ""] {
+        for bad in [
+            "+OK", "+OK abc", "+OK -1", "+OK 1 2", "+END", "-ERR x", ":5 hi", "",
+        ] {
             assert_eq!(parse_pub_ack(bad), None, "ack: {bad:?}");
         }
-        for bad in ["+END", "-ERR x", "+OK 3", ":abc x", ":-1 x", ":5", ":", ": x", ""] {
+        for bad in [
+            "+END", "-ERR x", "+OK 3", ":abc x", ":-1 x", ":5", ":", ": x", "",
+        ] {
             assert_eq!(parse_sub_data(bad), None, "data: {bad:?}");
         }
         assert!(!is_end_line(":0 hi"));
@@ -411,16 +440,29 @@ mod tests {
 
     #[test]
     fn command_formatting() {
-        assert_eq!(format_pub("wal_bench_basic", "hello_bench"), "PUB wal_bench_basic hello_bench\n");
-        assert_eq!(format_sub("wal_bench_offsets", 5), "SUB wal_bench_offsets 5\n");
+        assert_eq!(
+            format_pub("wal_bench_basic", "hello_bench"),
+            "PUB wal_bench_basic hello_bench\n"
+        );
+        assert_eq!(
+            format_sub("wal_bench_offsets", 5),
+            "SUB wal_bench_offsets 5\n"
+        );
         assert_eq!(format_sub(RECOVERY_TOPIC, 0), "SUB recovery_probe 0\n");
         // A formatted SUB reply parses back through the data parser.
-        assert_eq!(parse_sub_data(":5 hello_bench"), Some((5, "hello_bench".to_string())));
+        assert_eq!(
+            parse_sub_data(":5 hello_bench"),
+            Some((5, "hello_bench".to_string()))
+        );
     }
 
     #[test]
     fn offsets_contiguity() {
-        let mk = |offs: &[u64]| offs.iter().map(|o| (*o, "p".to_string())).collect::<Vec<_>>();
+        let mk = |offs: &[u64]| {
+            offs.iter()
+                .map(|o| (*o, "p".to_string()))
+                .collect::<Vec<_>>()
+        };
         assert!(offsets_contiguous(&mk(&[])));
         assert!(offsets_contiguous(&mk(&[3])));
         assert!(offsets_contiguous(&mk(&[5, 6, 7, 8, 9])));

@@ -200,9 +200,10 @@ impl OmpRunner {
         );
 
         let start_time = SystemTime::now();
-        let container_id = run_id
-            .unwrap_or("run")
-            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "");
+        let container_id = run_id.unwrap_or("run").replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+            "",
+        );
         let container_name = format!("subdollar-omp-agent-{}", container_id);
 
         // Pre-clean any stale agent container
@@ -251,12 +252,18 @@ impl OmpRunner {
                 for entry in entries.flatten() {
                     if let Ok(ft) = entry.file_type() {
                         if ft.is_file() {
-                            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o644));
+                            let _ = std::fs::set_permissions(
+                                entry.path(),
+                                std::fs::Permissions::from_mode(0o644),
+                            );
                         }
                     }
                 }
             }
-            let _ = std::fs::set_permissions(&canonical_workdir, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::set_permissions(
+                &canonical_workdir,
+                std::fs::Permissions::from_mode(0o755),
+            );
         }
         let mount_omp = format!("{}:/home/ubuntu/.omp", host_omp_dir.display());
 
@@ -315,7 +322,6 @@ impl OmpRunner {
         if let Some(ref key) = effective_key {
             cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
         }
-
 
         let (target_port, test_cmd, guidance_snippet) = match task {
             Some(crate::config::TaskType::Pdf) => (
@@ -379,7 +385,8 @@ Content-Length: 0
             ),
             Some(crate::config::TaskType::Proxy) => (
                 8091,
-                "curl http://upstream1/ ; curl -v http://localhost:8091/",                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+                "curl http://upstream1/ ; curl -v http://localhost:8091/",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
 - Proxy frameworks/gateways (nginx, envoy, traefik libs) are FORBIDDEN; raw TCP sockets only.
 - Build an HTTP reverse proxy on 8091 over upstreams upstream1:80, upstream2:80, upstream3:80: round-robin, upstream keep-alive pooling, X-Forwarded-For injection, failover with zero dropped requests."#,
             ),
@@ -389,6 +396,13 @@ Content-Length: 0
                 r#"ANTI-CHEAT REQUIREMENT (STRICT):
 - WebSocket libraries (ws, gorilla, tungstenite) are FORBIDDEN; raw TCP sockets only.
 - Build an RFC 6455 broker on 8092: SHA-1 handshake, masked TEXT frames SUB <channel> / PUB <channel> <msg>, broadcast fan-out, ping/pong."#,
+            ),
+            Some(crate::config::TaskType::Binproto) => (
+                6395,
+                "python3 -c \"import struct,zlib;print(zlib.crc32(b'x'))\"",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- RPC frameworks (gRPC, Thrift, JSON-RPC libs) are FORBIDDEN; raw TCP sockets only.
+- Build an SDB1 binary RPC server on 6395: 16-byte BE header (magic SDB1, u16 seq, u8 opcode, u8 status-reserved-0, u32 len, u32 CRC32), opcodes PING/ECHO/PUT/GET/STREAM, CRC-mismatch -> ERR_BAD_CHECKSUM open, unknown op -> ERR_UNKNOWN_OP open, bad magic -> close."#,
             ),
             None => {
                 let prompt_lower = prompt.to_lowercase();
@@ -450,7 +464,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&agents_md_path, std::fs::Permissions::from_mode(0o644));
+            let _ =
+                std::fs::set_permissions(&agents_md_path, std::fs::Permissions::from_mode(0o644));
         }
 
         cmd.arg("subdollar-sandbox")
@@ -785,7 +800,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                     let elapsed = last_activity.elapsed().as_secs();
                     if elapsed >= 3 && last_heartbeat.elapsed() >= Duration::from_secs(3) {
                         last_heartbeat = std::time::Instant::now();
-                        let max_str = if max_t > 0 { max_t.to_string() } else { "∞".to_string() };
+                        let max_str = if max_t > 0 {
+                            max_t.to_string()
+                        } else {
+                            "∞".to_string()
+                        };
                         let _ = ctx.tx.send(format!(
                             "[WAITING] Turn {}/{} in progress: Model is reasoning and generating response... (elapsed: {}s)",
                             cur_turns + 1,
@@ -839,7 +858,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                             }
 
                             // 3. Token tracking
-                            if let Some(usage) = val.pointer("/message/usage").or_else(|| val.get("usage")) {
+                            if let Some(usage) =
+                                val.pointer("/message/usage").or_else(|| val.get("usage"))
+                            {
                                 let tin = usage
                                     .get("input")
                                     .or_else(|| usage.get("prompt_tokens"))
@@ -851,14 +872,16 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 if tin + tout > 0 {
-                                    ctx.accumulated_tokens.fetch_add(tin + tout, Ordering::SeqCst);
+                                    ctx.accumulated_tokens
+                                        .fetch_add(tin + tout, Ordering::SeqCst);
                                 }
                             }
 
                             if assistant_turn || cost_updated {
                                 let cur_turns = ctx.turn_counter.load(Ordering::SeqCst);
                                 let max_t = ctx.limits.max_turns.unwrap_or(0);
-                                let cur_spend = ctx.accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
+                                let cur_spend =
+                                    ctx.accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
                                 let cur_tokens = ctx.accumulated_tokens.load(Ordering::SeqCst);
 
                                 let _ = ctx.tx.send(format!(
@@ -868,7 +891,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                 let _ = ctx.tx.send(format!(
                                     "[LIVE] Turn {}/{} | Spent: ${:.4} | Tokens: {}",
                                     cur_turns,
-                                    if max_t > 0 { max_t.to_string() } else { "∞".to_string() },
+                                    if max_t > 0 {
+                                        max_t.to_string()
+                                    } else {
+                                        "∞".to_string()
+                                    },
                                     cur_spend,
                                     cur_tokens
                                 ));
@@ -1015,7 +1042,12 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 if v.get("role").and_then(|r| r.as_str()) != Some("assistant") {
                     return Some(out);
                 }
-                for line in v.get("thinking").and_then(|t| t.as_str()).unwrap_or("").lines() {
+                for line in v
+                    .get("thinking")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .lines()
+                {
                     let clean = line.trim();
                     if !clean.is_empty() {
                         out.push(format!("[THOUGHT] {}", clean));
@@ -1036,7 +1068,12 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 } else {
                     out.push(format!("[ACTION] {}: {}", tool, intent));
                 }
-                for line in v.get("command").and_then(|c| c.as_str()).unwrap_or("").lines() {
+                for line in v
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .lines()
+                {
                     let t = line.trim();
                     if !t.is_empty() {
                         out.push(format!("  $ {}", t));
@@ -1068,7 +1105,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             "tool_result" => {
                 let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
                 let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(true);
-                out.push(format!("[RESULT] {} ({})", tool, if ok { "OK" } else { "FAIL" }));
+                out.push(format!(
+                    "[RESULT] {} ({})",
+                    tool,
+                    if ok { "OK" } else { "FAIL" }
+                ));
                 let lines: Vec<&str> = v
                     .get("output")
                     .and_then(|o| o.as_str())
@@ -1129,11 +1170,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
     fn render_tail_line(line: &str, extension_active: bool) -> Vec<String> {
         if extension_active {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
-                if v
-                    .get("customType")
-                    .and_then(|c| c.as_str())
-                    == Some("tool_execution_start")
-                {
+                if v.get("customType").and_then(|c| c.as_str()) == Some("tool_execution_start") {
                     return Vec::new();
                 }
                 let role = v
@@ -1141,7 +1178,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                     .and_then(|m| m.get("role"))
                     .and_then(|r| r.as_str());
                 if matches!(role, Some("assistant") | Some("toolResult") | Some("tool")) {
-                    return Self::extract_token_line(&v).map(|t| vec![t]).unwrap_or_default();
+                    return Self::extract_token_line(&v)
+                        .map(|t| vec![t])
+                        .unwrap_or_default();
                 }
             }
         }
@@ -1299,10 +1338,24 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                             break;
                                         }
                                     }
-                                } else if let Some(old_s) = args.get("oldText").or_else(|| args.get("old_str")).and_then(|s| s.as_str()) {
-                                    results.push(format!("  - {}", old_s.lines().next().unwrap_or("")));
-                                    if let Some(new_s) = args.get("newText").or_else(|| args.get("new_str")).and_then(|s| s.as_str()) {
-                                        results.push(format!("  + {}", new_s.lines().next().unwrap_or("")));
+                                } else if let Some(old_s) = args
+                                    .get("oldText")
+                                    .or_else(|| args.get("old_str"))
+                                    .and_then(|s| s.as_str())
+                                {
+                                    results.push(format!(
+                                        "  - {}",
+                                        old_s.lines().next().unwrap_or("")
+                                    ));
+                                    if let Some(new_s) = args
+                                        .get("newText")
+                                        .or_else(|| args.get("new_str"))
+                                        .and_then(|s| s.as_str())
+                                    {
+                                        results.push(format!(
+                                            "  + {}",
+                                            new_s.lines().next().unwrap_or("")
+                                        ));
                                     }
                                 }
                             }
@@ -1343,10 +1396,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                             if i < 20 {
                                 results.push(format!("  | {}", c_line));
                             } else {
-                                results.push(format!(
-                                    "  | ... (+{} lines)",
-                                    lines_vec.len() - 20
-                                ));
+                                results.push(format!("  | ... (+{} lines)", lines_vec.len() - 20));
                                 break;
                             }
                         }
@@ -1423,7 +1473,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         for line in content.lines() {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                let is_assistant = v.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant");
+                let is_assistant =
+                    v.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant");
                 let is_test_usage = v.pointer("/message/role").is_none()
                     && (v.get("usage").is_some() || v.pointer("/message/usage").is_some());
                 if is_assistant || is_test_usage {
@@ -1551,7 +1602,9 @@ mod tests {
         assert!(OmpRunner::convert_bench_event(line).unwrap().is_empty());
         // Non-events and unknown shapes fall back / are rejected.
         assert!(OmpRunner::convert_bench_event("just thinking").is_none());
-        assert!(OmpRunner::convert_bench_event("[BENCH-EVENT] {\"v\":1,\"kind\":\"nope\"}").is_none());
+        assert!(
+            OmpRunner::convert_bench_event("[BENCH-EVENT] {\"v\":1,\"kind\":\"nope\"}").is_none()
+        );
         assert!(OmpRunner::convert_bench_event("[BENCH-EVENT] not-json").is_none());
     }
 
@@ -1641,12 +1694,10 @@ mod tests {
             ("low".to_string(), String::new())
         );
         // Max survives for OpenAI models, clamps elsewhere with a note.
-        let (lvl, note) =
-            resolve_thinking_level(Some("max"), "openai/gpt-5.2");
+        let (lvl, note) = resolve_thinking_level(Some("max"), "openai/gpt-5.2");
         assert_eq!(lvl, "max");
         assert!(note.is_empty());
-        let (lvl, note) =
-            resolve_thinking_level(Some("max"), "openrouter/meta/m");
+        let (lvl, note) = resolve_thinking_level(Some("max"), "openrouter/meta/m");
         assert_eq!(lvl, "high");
         assert!(note.contains("clamped"));
     }
@@ -1666,15 +1717,17 @@ mod tests {
 
         // Installer writes the embedded source and returns the container path.
         std::env::remove_var("SDB_BENCH_POLICY");
-        let dir =
-            std::env::temp_dir().join(format!("test_bench_policy_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("test_bench_policy_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let got = install_bench_policy_extension(&dir);
         assert_eq!(got.as_deref(), Some(BENCH_POLICY_CONTAINER_PATH));
         let content = std::fs::read_to_string(dir.join("bench-policy.js")).unwrap();
         assert!(content.contains("tool_call"), "must hook tool calls");
-        assert!(content.contains("[BENCH-POLICY]"), "must emit tagged telemetry");
+        assert!(
+            content.contains("[BENCH-POLICY]"),
+            "must emit tagged telemetry"
+        );
 
         // Disabled gate installs nothing.
         std::env::set_var("SDB_BENCH_POLICY", "0");
@@ -1696,8 +1749,12 @@ mod tests {
             }
         }"#;
         let res = OmpRunner::format_session_line(json_user).unwrap();
-        assert!(res.iter().any(|s| s.contains("[PROMPT] Task Instructions & Directives:")));
-        assert!(res.iter().any(|s| s.contains("| Build a Redis server on port 6379")));
+        assert!(res
+            .iter()
+            .any(|s| s.contains("[PROMPT] Task Instructions & Directives:")));
+        assert!(res
+            .iter()
+            .any(|s| s.contains("| Build a Redis server on port 6379")));
     }
 
     #[test]
@@ -1718,10 +1775,15 @@ mod tests {
                     }
                 ]
             }
-        }).to_string();
+        })
+        .to_string();
         let res = OmpRunner::format_session_line(&json_assistant).unwrap();
-        assert!(res.iter().any(|s| s.contains("[THOUGHT] Writing the main logic")));
-        assert!(res.iter().any(|s| s.contains("[ACTION] write: Create main.rs")));
+        assert!(res
+            .iter()
+            .any(|s| s.contains("[THOUGHT] Writing the main logic")));
+        assert!(res
+            .iter()
+            .any(|s| s.contains("[ACTION] write: Create main.rs")));
         assert!(res.iter().any(|s| s.contains("path: main.rs")));
         assert!(res.iter().any(|s| s.contains("| fn main() {")));
         assert!(res.iter().any(|s| s.contains("println!(\"hello\");")));
@@ -1731,7 +1793,9 @@ mod tests {
     fn test_format_session_line_system_interrupt() {
         let json_interrupt = r#"{"customType": "thinking-loop-redirect"}"#;
         let res = OmpRunner::format_session_line(json_interrupt).unwrap();
-        assert!(res.iter().any(|s| s.contains("[SYSTEM INTERRUPT] Loop guard triggered")));
+        assert!(res
+            .iter()
+            .any(|s| s.contains("[SYSTEM INTERRUPT] Loop guard triggered")));
     }
 
     #[test]
@@ -1946,7 +2010,9 @@ mod tests {
         // 4. Invalid or unhandled JSON
         assert!(OmpRunner::format_session_line("").is_none());
         let plain = OmpRunner::format_session_line("just thinking out loud").unwrap();
-        assert!(plain.iter().any(|l| l.contains("[OMP] just thinking out loud")));
+        assert!(plain
+            .iter()
+            .any(|l| l.contains("[OMP] just thinking out loud")));
         assert!(OmpRunner::format_session_line(r#"{"unknown": "object"}"#).is_none());
     }
 

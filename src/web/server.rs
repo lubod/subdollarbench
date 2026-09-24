@@ -1,8 +1,8 @@
 use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
-    BenchmarkRunResult, EnvironmentInfo, FileInfo, LeaderboardManager, RunArchiver, RunManifest,
-    is_hidden, set_hidden, PortalExporter, Stability, assess_stability,
+    assess_stability, is_hidden, set_hidden, BenchmarkRunResult, EnvironmentInfo, FileInfo,
+    LeaderboardManager, PortalExporter, RunArchiver, RunManifest, Stability,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -17,12 +17,12 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -50,6 +50,20 @@ pub struct ActiveRunInfo {
     pub subrun: Option<u32>,
     #[serde(default)]
     pub total_subruns: Option<u32>,
+    #[serde(default)]
+    pub budget_usd: f64,
+    #[serde(default)]
+    pub timeout_min: u64,
+    #[serde(default)]
+    pub trials: u32,
+    #[serde(default)]
+    pub eval_only: bool,
+    #[serde(default)]
+    pub extend_if_unstable: bool,
+    #[serde(default)]
+    pub max_trials: u32,
+    #[serde(default)]
+    pub review_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -84,7 +98,7 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
 }
 
 fn default_trials() -> u32 {
-    3
+    9
 }
 
 fn default_max_trials() -> u32 {
@@ -111,12 +125,47 @@ pub enum QueueStatus {
     Cancelled,
 }
 
+/// What a queue entry carries. Runs own their full request; extends
+/// reference a stored parent and resolve trial numbering at dispatch
+/// (fresh subrun count), so chained extends never collide on trial dirs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QueueKind {
+    Run(RunRequest),
+    Extend(ExtendRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendRequest {
+    pub parent_run_id: String,
+    pub trials: u32,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub budget_usd: Option<f64>,
+    #[serde(default)]
+    pub timeout_min: Option<u64>,
+    #[serde(default)]
+    pub eval_only: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedRun {
     pub id: String,
     pub enqueued_at: String,
     pub status: QueueStatus,
-    pub request: RunRequest,
+    pub kind: QueueKind,
+}
+
+impl QueuedRun {
+    /// Back-compat accessor: pre-extend queue payloads deserialized with a
+    /// bare `request` field are not expected (queue is in-memory only), but
+    /// tests and the GUI only need the run request when present.
+    pub fn run_request(&self) -> Option<&RunRequest> {
+        match &self.kind {
+            QueueKind::Run(r) => Some(r),
+            QueueKind::Extend(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,7 +443,10 @@ impl UiServer {
             .route("/api/status", get(get_status))
             .route("/api/run", post(start_run))
             .route("/api/run/stop", post(stop_run))
-            .route("/api/queue", get(get_queue).post(enqueue_run).delete(clear_queue))
+            .route(
+                "/api/queue",
+                get(get_queue).post(enqueue_run).delete(clear_queue),
+            )
             .route("/api/queue/:id", delete(remove_queued_run))
             .route("/api/compare", get(compare_runs))
             .route("/api/stream", get(stream_logs))
@@ -535,7 +587,11 @@ async fn get_models(
 
                 let supported_params = item.supported_parameters.as_ref();
                 let has_reasoning_param = supported_params
-                    .map(|params| params.iter().any(|p| p == "reasoning" || p == "reasoning_effort"))
+                    .map(|params| {
+                        params
+                            .iter()
+                            .any(|p| p == "reasoning" || p == "reasoning_effort")
+                    })
                     .unwrap_or(false);
 
                 let reasoning_obj = item.reasoning.as_ref();
@@ -554,15 +610,15 @@ async fn get_models(
                     .and_then(|r| r.supports_max_tokens)
                     .unwrap_or(false);
 
-                let reasoning_mandatory = reasoning_obj
-                    .and_then(|r| r.mandatory)
-                    .unwrap_or(false);
+                let reasoning_mandatory = reasoning_obj.and_then(|r| r.mandatory).unwrap_or(false);
 
                 let is_reasoning = has_reasoning_param
                     || !supported_efforts.is_empty()
                     || supports_max_tokens
                     || reasoning_mandatory
-                    || reasoning_obj.and_then(|r| r.default_enabled).unwrap_or(false);
+                    || reasoning_obj
+                        .and_then(|r| r.default_enabled)
+                        .unwrap_or(false);
 
                 if prompt_p <= 1.0 && comp_p <= 5.0 && (prompt_p > 0.0 || comp_p > 0.0) {
                     models.push(SubDollarModel {
@@ -628,11 +684,15 @@ async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<serd
         }
     }
     let runs_dir = RunArchiver::resolve_runs_dir();
-    Json(list.into_iter().map(|r| {
-        let mut v = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
-        v["portal_hidden"] = serde_json::Value::Bool(is_hidden(&runs_dir, &r.id));
-        v
-    }).collect())
+    Json(
+        list.into_iter()
+            .map(|r| {
+                let mut v = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
+                v["portal_hidden"] = serde_json::Value::Bool(is_hidden(&runs_dir, &r.id));
+                v
+            })
+            .collect(),
+    )
 }
 
 fn refresh_portal() {
@@ -656,7 +716,8 @@ fn clean_run_id(run_id: &str) -> Option<String> {
 
 fn manifest_with_portal_flag(m: &RunManifest) -> serde_json::Value {
     let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
-    v["portal_hidden"] = serde_json::Value::Bool(is_hidden(&RunArchiver::resolve_runs_dir(), &m.run_id));
+    v["portal_hidden"] =
+        serde_json::Value::Bool(is_hidden(&RunArchiver::resolve_runs_dir(), &m.run_id));
     v
 }
 
@@ -749,10 +810,17 @@ async fn rebuild_portal() -> Response {
 
 async fn get_runs() -> Json<Vec<serde_json::Value>> {
     let r_dir = RunArchiver::resolve_runs_dir();
-    Json(RunArchiver::list_runs(&r_dir).iter().map(manifest_with_portal_flag).collect())
+    Json(
+        RunArchiver::list_runs(&r_dir)
+            .iter()
+            .map(manifest_with_portal_flag)
+            .collect(),
+    )
 }
 
-async fn get_run_detail(AxumPath(run_id): AxumPath<String>) -> Result<Json<serde_json::Value>, Response> {
+async fn get_run_detail(
+    AxumPath(run_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, Response> {
     let r_dir = RunArchiver::resolve_runs_dir();
     match RunArchiver::get_run(&r_dir, &run_id) {
         Some(m) => Ok(Json(manifest_with_portal_flag(&m))),
@@ -791,12 +859,33 @@ async fn get_run_file(
     }
 }
 
-async fn get_active_console(State(state): State<AppState>) -> Response {
-    let buf = state.log_buffer.read().unwrap();
-    buf.join("\n").into_response()
+#[derive(Debug, Deserialize)]
+struct ConsoleQuery {
+    /// Max lines to return (newest). Defaults to the buffer cap.
+    tail: Option<usize>,
+    /// Lines the client already holds; returns only newer lines plus a
+    /// `X-Console-Total` header so the client can detect truncation gaps.
+    since: Option<usize>,
 }
 
-
+async fn get_active_console(
+    State(state): State<AppState>,
+    Query(q): Query<ConsoleQuery>,
+) -> Response {
+    let buf = state.log_buffer.read().unwrap();
+    let total = buf.len();
+    let cap = q.tail.unwrap_or(MAX_CONSOLE_LINES).min(total.max(1));
+    let tail_start = total.saturating_sub(cap);
+    let start = match q.since {
+        // Unknown cursor (client counts rendered lines, server counts pushed
+        // lines): resend the capped tail so the client re-renders in sync.
+        Some(known) if known >= total || known < tail_start => tail_start,
+        Some(known) => known,
+        None => tail_start,
+    };
+    let body = buf[start..].join("\n");
+    ([("X-Console-Total", total.to_string())], body).into_response()
+}
 
 async fn get_env() -> Json<EnvironmentInfo> {
     Json(EnvironmentInfo::detect())
@@ -957,6 +1046,20 @@ async fn compare_runs(
     }))
 }
 
+/// Max lines retained in the in-memory live console. Bounds per-fetch
+/// payloads, SSE replay on connect, and steady-state memory while a run
+/// streams. Full history stays in runs/<id>/console.log on disk.
+const MAX_CONSOLE_LINES: usize = 3000;
+
+fn push_console_line(log_buf: &Arc<RwLock<Vec<String>>>, line: String) {
+    let mut buf = log_buf.write().unwrap();
+    buf.push(line);
+    let overflow = buf.len().saturating_sub(MAX_CONSOLE_LINES);
+    if overflow > 0 {
+        buf.drain(..overflow);
+    }
+}
+
 struct WebLogger {
     tx: broadcast::Sender<String>,
     log_buf: Arc<RwLock<Vec<String>>>,
@@ -972,13 +1075,21 @@ impl PipelineLogger for WebLogger {
             let mut line_to_log = clean.to_string();
 
             if clean.starts_with("[LIVE] Turn ") && self.total_trials > 1 {
-                line_to_log = format!("[LIVE] Subrun {}/{} | {}", self.trial_idx, self.total_trials, &clean[7..]);
+                line_to_log = format!(
+                    "[LIVE] Subrun {}/{} | {}",
+                    self.trial_idx,
+                    self.total_trials,
+                    &clean[7..]
+                );
             } else if clean.starts_with("[TELEMETRY] ") && !clean.contains("subrun=") {
-                line_to_log = format!("{} subrun={} total_subruns={}", clean, self.trial_idx, self.total_trials);
+                line_to_log = format!(
+                    "{} subrun={} total_subruns={}",
+                    clean, self.trial_idx, self.total_trials
+                );
             }
 
             let formatted = format!("[{}] {}", ts, line_to_log);
-            self.log_buf.write().unwrap().push(formatted.clone());
+            push_console_line(&self.log_buf, formatted.clone());
             let _ = self.tx.send(formatted);
         }
 
@@ -1007,10 +1118,18 @@ impl PipelineLogger for WebLogger {
 
                 if let Ok(mut run_lock) = self.current_run.write() {
                     if let Some(ref mut info) = *run_lock {
-                        if let Some(t) = turns { info.turns = t; }
-                        if let Some(mt) = max_turns { info.max_turns = mt; }
-                        if let Some(s) = spent { info.cost_usd = s; }
-                        if let Some(tok) = tokens { info.tokens = tok; }
+                        if let Some(t) = turns {
+                            info.turns = t;
+                        }
+                        if let Some(mt) = max_turns {
+                            info.max_turns = mt;
+                        }
+                        if let Some(s) = spent {
+                            info.cost_usd = s;
+                        }
+                        if let Some(tok) = tokens {
+                            info.tokens = tok;
+                        }
                         info.subrun = subrun.or(Some(self.trial_idx));
                         info.total_subruns = total_subruns.or(Some(self.total_trials));
                     }
@@ -1019,7 +1138,6 @@ impl PipelineLogger for WebLogger {
         }
     }
 }
-
 
 struct ExtBatchSpec {
     model: String,
@@ -1058,7 +1176,10 @@ async fn run_extension_batch(
         match crate::bench::batch_ref::BatchRef::start(&spec.task, &spec.parent_run_id, batch_log) {
             Ok(b) => b,
             Err(e) => {
-                let _ = tx.send(format!("[BATCH-REF] setup failed ({}); trials use live refs.", e));
+                let _ = tx.send(format!(
+                    "[BATCH-REF] setup failed ({}); trials use live refs.",
+                    e
+                ));
                 None
             }
         }
@@ -1087,6 +1208,13 @@ async fn run_extension_batch(
             duration_secs: None,
             subrun: Some(trial_idx),
             total_subruns: Some(spec.display_total),
+            budget_usd: spec.budget_usd,
+            timeout_min: spec.timeout_min,
+            trials: spec.display_total,
+            eval_only: spec.eval_only,
+            extend_if_unstable: false,
+            max_trials: spec.display_total,
+            review_model: spec.review_model.clone(),
         });
         let logger = Arc::new(WebLogger {
             tx: tx.clone(),
@@ -1114,7 +1242,8 @@ async fn run_extension_batch(
             review_model: spec.review_model.clone(),
             batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
         };
-        match BenchmarkPipeline::execute(pipe_config, logger.clone(), Some(Arc::clone(cancel))).await
+        match BenchmarkPipeline::execute(pipe_config, logger.clone(), Some(Arc::clone(cancel)))
+            .await
         {
             Ok(output) => {
                 if output.benchmark_result.pass_rate == 100.0 {
@@ -1127,31 +1256,210 @@ async fn run_extension_batch(
                     logger.log("[PIPELINE] Run cancelled by user.");
                     break;
                 }
-                logger.log(&format!("[SUBRUN ERROR] Extension subrun {} failed: {}", trial_idx, e));
+                logger.log(&format!(
+                    "[SUBRUN ERROR] Extension subrun {} failed: {}",
+                    trial_idx, e
+                ));
                 break;
             }
         }
     }
     let drift = ext_batch_ref.map(|b| b.finish(batch_log).drift);
-    ExtBatchOut { results, passing, drift }
+    ExtBatchOut {
+        results,
+        passing,
+        drift,
+    }
 }
 
-/// Pop the next pending queue item and spawn it. Returns true when a run was
-/// spawned. Callers must own the runner slot (chain holder or kick CAS winner).
+/// Pop the next pending queue item and spawn it. Returns true when an item
+/// was spawned. Callers must own the runner slot (chain holder or kick CAS
+/// winner). Extends re-validate at dispatch: a parent stabilized by an
+/// earlier item in the same chain is marked Done with a log line, never run.
 fn pump_queue(state: &AppState) -> bool {
     let next = {
         let mut q = state.queue.lock().unwrap();
-        q.iter_mut().find(|i| i.status == QueueStatus::Pending).map(|item| {
-            item.status = QueueStatus::Running;
-            (item.request.clone(), item.id.clone())
-        })
+        q.iter_mut()
+            .find(|i| i.status == QueueStatus::Pending)
+            .map(|item| {
+                item.status = QueueStatus::Running;
+                (item.kind.clone(), item.id.clone())
+            })
     };
-    if let Some((req, id)) = next {
-        let _ = state.log_sender.send(format!("[QUEUE] Starting queued run {id}..."));
-        spawn_run_body(state, req, Some(id));
-        true
+    match next {
+        Some((QueueKind::Run(req), id)) => {
+            let _ = state
+                .log_sender
+                .send(format!("[QUEUE] Starting queued run {id}..."));
+            spawn_run_body(state, req, Some(id));
+            true
+        }
+        Some((QueueKind::Extend(ext), id)) => {
+            spawn_extend_body(state, ext, id);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Spawn an extend with fresh dispatch-time validation. The runner slot is
+/// already held by the caller; this fn never releases it — the spawned task
+/// hands off via pump_queue or stores false when idle, like run bodies.
+fn spawn_extend_body(state: &AppState, ext: ExtendRequest, queue_id: String) {
+    let state_clone = state.clone();
+    let handle = tokio::spawn(execute_extend_body(state_clone, ext, queue_id));
+    *state.task_handle.lock().unwrap() = Some(handle);
+}
+
+/// Queued-extend worker: re-read the parent under the held slot, skip when
+/// it no longer needs trials, else run the extension batch and re-merge.
+/// Trial numbering derives from the fresh subrun count, so chained extends
+/// on one parent never collide on trial dirs.
+async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: String) {
+    let tx = state.log_sender.clone();
+    let finish_item = |state: &AppState, note: &str| {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
+            item.status = QueueStatus::Done;
+        }
+        let _ = tx.send(note.to_string());
+    };
+    let parent_path = crate::config::get_repo_root()
+        .join("results")
+        .join(format!("{}.json", ext.parent_run_id));
+    let data: BenchmarkRunResult = match std::fs::read_to_string(&parent_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+    {
+        Some(d) => d,
+        None => {
+            finish_item(
+                &state,
+                &format!("[EXTEND-QUEUE] {queue_id}: parent '{}' gone; skipping.", ext.parent_run_id),
+            );
+            *state.task_handle.lock().unwrap() = None;
+            if !pump_queue(&state) {
+                state.is_running.store(false, Ordering::SeqCst);
+                let _ = tx.send("[DONE]".to_string());
+            }
+            return;
+        }
+    };
+    if data.subruns.len() < 2 {
+        finish_item(
+            &state,
+            &format!("[EXTEND-QUEUE] {queue_id}: '{}' is not multi-trial; skipping.", ext.parent_run_id),
+        );
+        *state.task_handle.lock().unwrap() = None;
+        if !pump_queue(&state) {
+            state.is_running.store(false, Ordering::SeqCst);
+            let _ = tx.send("[DONE]".to_string());
+        }
+        return;
+    }
+    let (stab, reason) = assess_stability(&data.subruns);
+    if stab == Stability::Stable {
+        finish_item(
+            &state,
+            &format!("[EXTEND-QUEUE] {queue_id}: '{}' already stable ({reason}); skipping.", ext.parent_run_id),
+        );
+        *state.task_handle.lock().unwrap() = None;
+        if !pump_queue(&state) {
+            state.is_running.store(false, Ordering::SeqCst);
+            let _ = tx.send("[DONE]".to_string());
+        }
+        return;
+    }
+    let task_type = match data.task.as_str() {
+        "redis" => TaskType::Redis,
+        "http" => TaskType::Http,
+        "dns" => TaskType::Dns,
+        "pdf" => TaskType::Pdf,
+        "wal" => TaskType::Wal,
+        "proxy" => TaskType::Proxy,
+        "pubsub" => TaskType::Pubsub,
+        "binproto" => TaskType::Binproto,
+        _ => {
+            finish_item(
+                &state,
+                &format!("[EXTEND-QUEUE] {queue_id}: unknown task '{}'; skipping.", data.task),
+            );
+            *state.task_handle.lock().unwrap() = None;
+            if !pump_queue(&state) {
+                state.is_running.store(false, Ordering::SeqCst);
+                let _ = tx.send("[DONE]".to_string());
+            }
+            return;
+        }
+    };
+    let count = ext.trials.max(1);
+    let start_idx = data.subruns.len() as u32 + 1;
+    let total = data.subruns.len() as u32 + count;
+    let spec = ExtBatchSpec {
+        model: data.model.clone(),
+        task: task_type,
+        effort: data.effort.clone().unwrap_or_else(|| "high".to_string()),
+        max_turns: ext.max_turns.unwrap_or(100),
+        budget_usd: ext.budget_usd.unwrap_or(1.0),
+        timeout_min: ext.timeout_min.unwrap_or(30),
+        api_key: None,
+        eval_only: ext.eval_only.unwrap_or(false),
+        save_results: true,
+        review_model: None,
+        parent_run_id: ext.parent_run_id.clone(),
+        start_idx,
+        count,
+        display_total: total,
+    };
+    state.cancel_requested.store(false, Ordering::SeqCst);
+    let _ = tx.send(format!(
+        "[EXTEND-QUEUE] {queue_id}: {reason}; running {count} more trial(s) for {} (trials {start_idx}-{total})...",
+        ext.parent_run_id
+    ));
+    let out = run_extension_batch(
+        &tx,
+        &state.log_buffer,
+        &state.current_run,
+        &state.cancel_requested,
+        &|m: &str| {
+            let _ = tx.send(m.to_string());
+        },
+        spec,
+    )
+    .await;
+    if !out.results.is_empty() {
+        let mut combined = data.subruns.clone();
+        combined.extend(out.results);
+        let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
+        let merged = LeaderboardManager::consolidate_multi_trial_run(
+            &ext.parent_run_id,
+            &combined,
+            true,
+            out.drift,
+        );
+        let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
+        let (stab2, reason2) = assess_stability(&parked);
+        let _ = tx.send(format!(
+            "[EXTEND-QUEUE] {queue_id}: {}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
+            ext.parent_run_id,
+            combined.len(),
+            compute_pass_at_k(combined.len(), passing, 1) * 100.0
+        ));
     } else {
-        false
+        let _ = tx.send(format!(
+            "[EXTEND-QUEUE] {queue_id}: all extension trials failed; parent untouched."
+        ));
+    }
+    {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
+            item.status = QueueStatus::Done;
+        }
+    }
+    *state.task_handle.lock().unwrap() = None;
+    if !pump_queue(&state) {
+        state.is_running.store(false, Ordering::SeqCst);
+        let _ = tx.send("[DONE]".to_string());
     }
 }
 
@@ -1188,13 +1496,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
             "pubsub" => TaskType::Pubsub,
+        "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
-        match crate::bench::batch_ref::BatchRef::start(
-            &task_type_pre,
-            &parent_run_id,
-            &batch_log,
-        ) {
+        match crate::bench::batch_ref::BatchRef::start(&task_type_pre, &parent_run_id, &batch_log) {
             Ok(b) => b,
             Err(e) => {
                 batch_log(&format!(
@@ -1207,7 +1512,6 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     } else {
         None
     };
-
 
     for trial_idx in 1..=total_trials {
         if state.cancel_requested.load(Ordering::SeqCst) {
@@ -1237,12 +1541,17 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             duration_secs: None,
             subrun: Some(trial_idx),
             total_subruns: Some(total_trials),
+            budget_usd: req.budget_usd,
+            timeout_min: req.timeout_min.unwrap_or(30),
+            trials: total_trials,
+            eval_only: req.eval_only,
+            extend_if_unstable: req.extend_if_unstable,
+            max_trials: req.max_trials,
+            review_model: req.review_model.clone(),
         });
         if trial_idx == 1 {
             state.log_buffer.write().unwrap().clear();
         }
-
-
 
         let logger = Arc::new(WebLogger {
             tx: tx.clone(),
@@ -1280,6 +1589,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
             "pubsub" => TaskType::Pubsub,
+        "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
 
@@ -1339,7 +1649,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
                     logger.log("[PIPELINE] Run cancelled by user.");
                     break;
                 }
-                logger.log(&format!("[SUBRUN ERROR] Subrun {}/{} failed: {}", trial_idx, total_trials, e));
+                logger.log(&format!(
+                    "[SUBRUN ERROR] Subrun {}/{} failed: {}",
+                    trial_idx, total_trials, e
+                ));
                 break;
             }
         }
@@ -1369,6 +1682,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
             "pubsub" => TaskType::Pubsub,
+        "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
         while total_trials < max_total {
@@ -1411,7 +1725,9 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             )
             .await;
             if out.results.is_empty() {
-                let _ = tx.send("[EXTEND] all extension trials failed; keeping current merge.".to_string());
+                let _ = tx.send(
+                    "[EXTEND] all extension trials failed; keeping current merge.".to_string(),
+                );
                 break;
             }
             total_trials += out.results.len() as u32;
@@ -1426,13 +1742,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         }
     }
 
-
-
     if total_trials > 1 {
         let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
         let pass_at_k =
-            compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize)
-                * 100.0;
+            compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize) * 100.0;
         let _ = tx.send(format!(
             "[MULTI-TRIAL] Trials: {}, Passing: {}, Pass@1: {:.1}%, Pass@{}: {:.1}%",
             total_trials, passing_trials, pass_at_1, total_trials, pass_at_k
@@ -1479,23 +1792,83 @@ struct ExtendBody {
     budget_usd: Option<f64>,
     timeout_min: Option<u64>,
     eval_only: Option<bool>,
+    /// When true and the runner is busy, enqueue behind the running job
+    /// instead of failing with 409. Stability re-validates at dispatch:
+    /// a parent stabilized meanwhile skips with a log line, never runs.
+    #[serde(default)]
+    queue: bool,
 }
 
 /// Run N more trials for a consolidated parent and re-merge.
-/// Refuses stable parents and unknown ids; 409 while the engine is busy.
+/// Refuses stable parents and unknown ids; 409 while the engine is busy
+/// unless `queue: true` asks to wait behind the running job.
 async fn extend_parent_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<ExtendBody>,
-) -> Result<String, Response> {
+) -> Result<Json<serde_json::Value>, Response> {
     let fail = |code: StatusCode, msg: String| (code, msg).into_response();
-    let clean = clean_run_id(&id).ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("invalid run id '{id}'")))?;
+    let clean = clean_run_id(&id)
+        .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("invalid run id '{id}'")))?;
+    // Cheap checks for the queue path: id shape, parent parses, multi-trial.
+    // Stability re-runs at dispatch under the held slot.
+    let cheap_check = || -> Result<BenchmarkRunResult, Response> {
+        let parent_path = crate::config::get_repo_root()
+            .join("results")
+            .join(format!("{clean}.json"));
+        let data: BenchmarkRunResult = std::fs::read_to_string(&parent_path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or_else(|| {
+                fail(
+                    StatusCode::NOT_FOUND,
+                    format!("no consolidated result for '{clean}'"),
+                )
+            })?;
+        if data.subruns.len() < 2 {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                format!("{clean} is not a multi-trial run"),
+            ));
+        }
+        Ok(data)
+    };
     if state
         .is_running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return Err(fail(StatusCode::CONFLICT, "Benchmark is already running".to_string()));
+        if !body.queue {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Benchmark is already running".to_string(),
+            ));
+        }
+        cheap_check()?;
+        let ext = ExtendRequest {
+            parent_run_id: clean.clone(),
+            trials: body.trials.unwrap_or(3).max(1),
+            max_turns: body.max_turns,
+            budget_usd: body.budget_usd,
+            timeout_min: body.timeout_min,
+            eval_only: body.eval_only,
+        };
+        let qid = push_queue_item(&state, QueueKind::Extend(ext));
+        let position = state
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.status == QueueStatus::Pending)
+            .position(|i| i.id == qid)
+            .map(|p| p + 1);
+        // NOTE: no kick here — the runner is busy by definition; the
+        // current body hands off via pump_queue on completion.
+        return Ok(Json(serde_json::json!({
+            "queued": qid,
+            "parent": clean,
+            "position": position,
+        })));
     }
     // NOTE: every early return below must release the slot.
     let release = |state: &AppState| state.is_running.store(false, Ordering::SeqCst);
@@ -1509,7 +1882,10 @@ async fn extend_parent_run(
         Some(d) => d,
         None => {
             release(&state);
-            return Err(fail(StatusCode::NOT_FOUND, format!("no consolidated result for '{clean}'")));
+            return Err(fail(
+                StatusCode::NOT_FOUND,
+                format!("no consolidated result for '{clean}'"),
+            ));
         }
     };
     if data.subruns.len() < 2 {
@@ -1522,7 +1898,10 @@ async fn extend_parent_run(
     let (stab, reason) = assess_stability(&data.subruns);
     if stab == Stability::Stable {
         release(&state);
-        return Err(fail(StatusCode::CONFLICT, format!("{clean} already stable")));
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("{clean} already stable"),
+        ));
     }
     let task_type = match data.task.as_str() {
         "redis" => TaskType::Redis,
@@ -1532,9 +1911,13 @@ async fn extend_parent_run(
         "wal" => TaskType::Wal,
         "proxy" => TaskType::Proxy,
         "pubsub" => TaskType::Pubsub,
+        "binproto" => TaskType::Binproto,
         _ => {
             release(&state);
-            return Err(fail(StatusCode::BAD_REQUEST, format!("unknown task '{}'", data.task)));
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                format!("unknown task '{}'", data.task),
+            ));
         }
     };
     let count = body.trials.unwrap_or(3).max(1);
@@ -1560,7 +1943,9 @@ async fn extend_parent_run(
     let handle = tokio::spawn(async move {
         state_clone.cancel_requested.store(false, Ordering::SeqCst);
         let tx = state_clone.log_sender.clone();
-        let _ = tx.send(format!("[EXTEND] {reason}; running {count} more trial(s) for {clean_for_task}..."));
+        let _ = tx.send(format!(
+            "[EXTEND] {reason}; running {count} more trial(s) for {clean_for_task}..."
+        ));
         let out = run_extension_batch(
             &tx,
             &state_clone.log_buffer,
@@ -1576,7 +1961,12 @@ async fn extend_parent_run(
             let mut combined = data.subruns.clone();
             combined.extend(out.results);
             let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
-            let merged = LeaderboardManager::consolidate_multi_trial_run(&clean_for_task, &combined, true, out.drift);
+            let merged = LeaderboardManager::consolidate_multi_trial_run(
+                &clean_for_task,
+                &combined,
+                true,
+                out.drift,
+            );
             let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
             let (stab2, reason2) = assess_stability(&parked);
             let _ = tx.send(format!(
@@ -1592,7 +1982,9 @@ async fn extend_parent_run(
         }
     });
     *state.task_handle.lock().unwrap() = Some(handle);
-    Ok(format!("Extension started for {clean}"))
+    Ok(Json(serde_json::json!({
+        "started": clean,
+    })))
 }
 
 async fn get_queue(State(state): State<AppState>) -> Json<Vec<QueuedRun>> {
@@ -1625,7 +2017,7 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
                     .find(|i| i.status == QueueStatus::Pending)
                     .map(|item| {
                         item.status = QueueStatus::Running;
-                        (item.request.clone(), item.id.clone())
+                        (item.kind.clone(), item.id.clone())
                     });
                 if next.is_none() {
                     state.is_running.store(false, Ordering::SeqCst);
@@ -1633,9 +2025,16 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
                 next
             }
         };
-        if let Some((req, id)) = head {
-            spawn_run_body(state, req, Some(id));
-            return true;
+        match head {
+            Some((QueueKind::Run(req), id)) => {
+                spawn_run_body(state, req, Some(id));
+                return true;
+            }
+            Some((QueueKind::Extend(ext), id)) => {
+                spawn_extend_body(state, ext, id);
+                return true;
+            }
+            None => {}
         }
         if !state.is_running.load(Ordering::SeqCst) {
             return false;
@@ -1645,20 +2044,8 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
     false
 }
 
-async fn enqueue_run(
-    State(state): State<AppState>,
-    Json(req): Json<RunRequest>,
-) -> Result<Json<serde_json::Value>, Response> {
-    if !matches!(
-        req.task.as_str(),
-        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub"
-    ) {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            format!("Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, or pubsub", req.task),
-        )
-            .into_response());
-    }
+/// Push a queue item, returning its id. Callers own kick/start decisions.
+fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
     let id = format!("q{}", state.queue_seq.fetch_add(1, Ordering::SeqCst) + 1);
     {
         let mut q = state.queue.lock().unwrap();
@@ -1666,17 +2053,41 @@ async fn enqueue_run(
             id: id.clone(),
             enqueued_at: Utc::now().to_rfc3339(),
             status: QueueStatus::Pending,
-            request: req,
+            kind,
         });
         // Bound history: drop oldest finished entries past 100.
         while q.len() > 100 {
-            if let Some(pos) = q.iter().position(|i| i.status == QueueStatus::Done || i.status == QueueStatus::Cancelled) {
+            if let Some(pos) = q
+                .iter()
+                .position(|i| i.status == QueueStatus::Done || i.status == QueueStatus::Cancelled)
+            {
                 q.remove(pos);
             } else {
                 break;
             }
         }
     }
+    id
+}
+
+async fn enqueue_run(
+    State(state): State<AppState>,
+    Json(req): Json<RunRequest>,
+) -> Result<Json<serde_json::Value>, Response> {
+    if !matches!(
+        req.task.as_str(),
+        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
+    ) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!(
+                "Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, pubsub, or binproto",
+                req.task
+            ),
+        )
+            .into_response());
+    }
+    let id = push_queue_item(&state, QueueKind::Run(req));
     let started = kick_runner(&state, &id).await;
     let position = state
         .queue
@@ -1708,7 +2119,11 @@ async fn remove_queued_run(
             format!("{id} is already running or finished"),
         )
             .into_response()),
-        None => Err((axum::http::StatusCode::NOT_FOUND, format!("{id} not in queue")).into_response()),
+        None => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("{id} not in queue"),
+        )
+            .into_response()),
     }
 }
 
@@ -1738,12 +2153,15 @@ async fn start_run(
 
     if !matches!(
         req.task.as_str(),
-        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub"
+        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
     ) {
         state.is_running.store(false, Ordering::SeqCst);
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            format!("Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, or pubsub", req.task),
+            format!(
+                "Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, pubsub, or binproto",
+                req.task
+            ),
         )
             .into_response());
     }
@@ -1779,15 +2197,14 @@ async fn stream_logs(
             let clean = line.replace("\r", "").replace("\n", " ");
             Some(Ok(Event::default().data(clean)))
         }
-        Err(_) => {
-            Some(Ok(Event::default().data("[STREAM NOTICE] Event burst: log stream caught up (full log preserved in console)")))
-        }
+        Err(_) => Some(Ok(Event::default().data(
+            "[STREAM NOTICE] Event burst: log stream caught up (full log preserved in console)",
+        ))),
     });
 
     let combined = initial_stream.chain(live_stream);
     Sse::new(combined).keep_alive(KeepAlive::default())
 }
-
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateOmpRequest {
@@ -1855,6 +2272,7 @@ mod tests {
             budget_usd: None,
             timeout_min: None,
             eval_only: None,
+            queue: false,
         }
     }
 
@@ -1899,23 +2317,152 @@ mod tests {
         assert!(q[0].id.starts_with('q'));
     }
 
+    fn extend_queue_body() -> ExtendBody {
+        ExtendBody {
+            trials: Some(3),
+            max_turns: None,
+            budget_usd: None,
+            timeout_min: None,
+            eval_only: None,
+            queue: true,
+        }
+    }
+
+    fn write_parent_result(dir: &std::path::Path, id: &str, n_subs: usize, pass_each: f64) {
+        let subs: Vec<serde_json::Value> = (1..=n_subs)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("{id}_trial{i}"), "model": "m", "task": "redis",
+                    "language": "Go", "pass_rate": pass_each,
+                    "passed_stages": 6, "total_stages": 6,
+                    "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+                    "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+                    "timestamp": "2026-09-12T08:00:00Z"
+                })
+            })
+            .collect();
+        let v = serde_json::json!({
+            "id": id, "model": "m", "task": "redis", "language": "Go",
+            "pass_rate": pass_each, "passed_stages": 6, "total_stages": 6,
+            "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+            "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+            "timestamp": "2026-09-12T08:00:00Z", "subruns": subs,
+        });
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("qtest_parent.json"), serde_json::to_string(&v).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_extend_queue_missing_parent_404() {
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        let res = extend_parent_run(
+            State(state.clone()),
+            AxumPath("qtest_parent".to_string()),
+            Json(extend_queue_body()),
+        )
+        .await;
+        assert!(res.is_err());
+        // Slot untouched: still busy, queue empty.
+        assert!(state.is_running.load(Ordering::SeqCst));
+        assert!(get_queue(State(state)).await.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extend_queue_unstable_parent_pending() {
+        // Unstable = pass spread across trials (100, 0): needs more trials.
+        let dir = std::env::temp_dir().join(format!("qtest_res_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let subs = serde_json::json!([
+            {"id": "qp_trial1", "model": "m", "task": "redis", "language": "Go",
+             "pass_rate": 100.0, "passed_stages": 6, "total_stages": 6,
+             "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+             "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+             "timestamp": "2026-09-12T08:00:00Z"},
+            {"id": "qp_trial2", "model": "m", "task": "redis", "language": "Go",
+             "pass_rate": 0.0, "passed_stages": 0, "total_stages": 6,
+             "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+             "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+             "timestamp": "2026-09-12T08:00:00Z"}
+        ]);
+        let v = serde_json::json!({
+            "id": "qp", "model": "m", "task": "redis", "language": "Go",
+            "pass_rate": 50.0, "passed_stages": 3, "total_stages": 6,
+            "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+            "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+            "timestamp": "2026-09-12T08:00:00Z", "subruns": subs,
+        });
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("qp.json"), serde_json::to_string(&v).unwrap()).unwrap();
+        // Point SDB_HOME at the temp dir so resolve uses it... instead:
+        // cheap_check uses get_repo_root; emulate by writing into the real
+        // results dir and cleaning up (suffix is unique to this test).
+        let real = crate::config::get_repo_root().join("results");
+        let _ = std::fs::create_dir_all(&real);
+        std::fs::write(
+            real.join("qp_qtest_unstable.json"),
+            serde_json::to_string(&serde_json::json!({
+                "id": "qp_qtest_unstable", "model": "m", "task": "redis", "language": "Go",
+                "pass_rate": 50.0, "passed_stages": 3, "total_stages": 6,
+                "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+                "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+                "timestamp": "2026-09-12T08:00:00Z", "subruns": subs,
+            })).unwrap(),
+        )
+        .unwrap();
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        let res = extend_parent_run(
+            State(state.clone()),
+            AxumPath("qp_qtest_unstable".to_string()),
+            Json(extend_queue_body()),
+        )
+        .await;
+        assert!(res.is_ok(), "unstable parent must queue while busy");
+        let body = res.unwrap().0;
+        assert!(body.get("queued").is_some());
+        let q = get_queue(State(state.clone())).await.0;
+        assert_eq!(q.len(), 1);
+        assert!(matches!(q[0].kind, QueueKind::Extend(_)));
+        // Pending extends are removable like runs.
+        assert!(remove_queued_run(State(state.clone()), AxumPath(q[0].id.clone()))
+            .await
+            .is_ok());
+        let _ = std::fs::remove_file(real.join("qp_qtest_unstable.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn test_queue_remove_and_clear() {
         let state = create_test_state();
         state.is_running.store(true, Ordering::SeqCst);
-        let a = enqueue_run(State(state.clone()), Json(queue_test_req())).await.unwrap().0;
-        let b = enqueue_run(State(state.clone()), Json(queue_test_req())).await.unwrap().0;
+        let a = enqueue_run(State(state.clone()), Json(queue_test_req()))
+            .await
+            .unwrap()
+            .0;
+        let b = enqueue_run(State(state.clone()), Json(queue_test_req()))
+            .await
+            .unwrap()
+            .0;
         let ida = a["id"].as_str().unwrap().to_string();
         let idb = b["id"].as_str().unwrap().to_string();
-        assert!(remove_queued_run(State(state.clone()), AxumPath(ida.clone())).await.is_ok());
+        assert!(
+            remove_queued_run(State(state.clone()), AxumPath(ida.clone()))
+                .await
+                .is_ok()
+        );
         // Removing twice -> not found.
-        assert!(remove_queued_run(State(state.clone()), AxumPath(ida)).await.is_err());
+        assert!(remove_queued_run(State(state.clone()), AxumPath(ida))
+            .await
+            .is_err());
         // Running items cannot be removed.
         {
             let mut q = state.queue.lock().unwrap();
             q.iter_mut().find(|i| i.id == idb).unwrap().status = QueueStatus::Running;
         }
-        assert!(remove_queued_run(State(state.clone()), AxumPath(idb)).await.is_err());
+        assert!(remove_queued_run(State(state.clone()), AxumPath(idb))
+            .await
+            .is_err());
         assert_eq!(get_queue(State(state.clone())).await.0.len(), 1);
         let msg = clear_queue(State(state.clone())).await;
         assert!(msg.contains("Cleared 0"));
@@ -2281,7 +2828,10 @@ mod tests {
             .unwrap();
         assert_eq!(status_res.status(), 200);
         let status_body: StatusResponse = status_res.json().await.unwrap();
-        assert_eq!(status_body.last_run.as_ref().and_then(|r| r.total_subruns), Some(2));
+        assert_eq!(
+            status_body.last_run.as_ref().and_then(|r| r.total_subruns),
+            Some(2)
+        );
 
         // 19. GET /api/models
         let res = client
@@ -2351,10 +2901,13 @@ mod tests {
             git_commit: None,
             total_trials: None,
             pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
         };
         let manifest_b = RunManifest {
             run_id: run_b_id.to_string(),
@@ -2392,10 +2945,13 @@ mod tests {
             git_commit: None,
             total_trials: None,
             pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
             stability: None,
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
+            rules_version: None,
         };
 
         fs::write(
@@ -2572,7 +3128,6 @@ mod tests {
                 }
             }
         }
-
     }
 
     #[test]
@@ -2637,23 +3192,36 @@ mod tests {
             ]
         }"#;
 
-        let parsed: OpenRouterResponse = serde_json::from_str(sample_json).expect("deserialize sample");
+        let parsed: OpenRouterResponse =
+            serde_json::from_str(sample_json).expect("deserialize sample");
         assert_eq!(parsed.data.len(), 3);
 
         let gemini = &parsed.data[0];
         assert_eq!(gemini.id, "google/gemini-3.8-flash");
         let r = gemini.reasoning.as_ref().unwrap();
-        assert_eq!(r.supported_efforts.as_ref().unwrap(), &vec!["high", "medium", "low"]);
+        assert_eq!(
+            r.supported_efforts.as_ref().unwrap(),
+            &vec!["high", "medium", "low"]
+        );
         assert_eq!(r.default_effort.as_deref(), Some("medium"));
 
         let meta = &parsed.data[1];
-        let mut meta_efforts = meta.reasoning.as_ref().unwrap().supported_efforts.clone().unwrap();
+        let mut meta_efforts = meta
+            .reasoning
+            .as_ref()
+            .unwrap()
+            .supported_efforts
+            .clone()
+            .unwrap();
         if meta.id.starts_with("meta/") {
             meta_efforts.retain(|e| e != "max");
         }
         assert_eq!(meta_efforts, vec!["high", "medium", "low"]);
 
         let qwen = &parsed.data[2];
-        assert_eq!(qwen.reasoning.as_ref().unwrap().supports_max_tokens, Some(true));
+        assert_eq!(
+            qwen.reasoning.as_ref().unwrap().supports_max_tokens,
+            Some(true)
+        );
     }
 }
