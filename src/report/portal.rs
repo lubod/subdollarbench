@@ -1212,10 +1212,27 @@ const PORTAL_JS: &str = r#"
   // Cross-task rollup: one row per model+effort over non-quarantined tasks.
   // Pooled P@1 = passing trials / all trials; cost/turns summed; avg% averaged.
   function aggregateModels() {
-    const groups = {};
+    // 1. Group runs by (model, effort, task) and pick canonical run (highest trials, latest timestamp)
+    const canonical = {};
     for (const r of RUNS_DATA) {
       const task = (r.task || '').toLowerCase();
       if (task === 'dns') continue;
+      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task;
+      const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
+      const existing = canonical[key];
+      if (!existing) {
+        canonical[key] = r;
+      } else {
+        const exN = existing.total_trials || (existing.subruns && existing.subruns.length) || 1;
+        if (n > exN || (n === exN && (r.timestamp || '') > (existing.timestamp || ''))) {
+          canonical[key] = r;
+        }
+      }
+    }
+
+    // 2. Aggregate only canonical runs across tasks
+    const groups = {};
+    for (const r of Object.values(canonical)) {
       const key = (r.model || '?') + '\u0001' + (r.effort || 'auto');
       const g = groups[key] || (groups[key] = {
         model: r.model || '?', effort: r.effort || 'auto',
