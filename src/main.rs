@@ -822,6 +822,32 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     runs.len()
                 );
             }
+            let runs_dir = subdollarbench::report::RunArchiver::resolve_runs_dir();
+            let mut run_imported = 0usize;
+            let mut run_skipped = 0usize;
+            if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+                for entry in entries.flatten() {
+                    let manifest_file = entry.path().join("manifest.json");
+                    if !manifest_file.exists() {
+                        continue;
+                    }
+                    match std::fs::read_to_string(&manifest_file)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<subdollarbench::report::RunManifest>(&t).ok())
+                    {
+                        Some(m) => {
+                            if store.upsert_run_manifest(&m).is_ok() {
+                                run_imported += 1;
+                            } else {
+                                run_skipped += 1;
+                            }
+                        }
+                        None => run_skipped += 1,
+                    }
+                }
+            }
+            let run_count = store.run_manifest_count();
+            println!("migrate: runs {run_imported} imported, {run_skipped} skipped, total {run_count}");
         }
 
         Commands::MatrixReport { results_dir } => {

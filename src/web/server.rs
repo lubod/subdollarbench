@@ -2,7 +2,7 @@ use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
     assess_stability, is_hidden, set_hidden, BenchmarkRunResult, EnvironmentInfo, FileInfo,
-    LeaderboardManager, PortalExporter, RunArchiver, RunManifest, Stability,
+    LeaderboardManager, PortalExporter, RunArchiver, RunManifest, Stability, Store,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -77,6 +77,7 @@ pub struct AppState {
     pub task_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
     pub queue_seq: Arc<AtomicU64>,
+    pub store: Arc<Store>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -166,6 +167,108 @@ impl QueuedRun {
             QueueKind::Extend(_) => None,
         }
     }
+}
+
+/// Last-resort in-memory Store when even the temp fallback cannot open
+/// (e.g. read-only filesystem): creates a temp-dir DB that is never read
+/// back. Queue dispatch never blocks on persistence.
+fn tempfile_mem_store() -> Store {
+    let fallback = std::env::temp_dir().join(format!(
+        "sdb-queue-mem-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    Store::open(&fallback).expect("temp queue store must open")
+}
+
+/// Current time as RFC3339; used for queue dispatch/completion stamps.
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+/// Best-effort mirror of an in-memory queue transition into bench.db.
+/// Memory stays dispatch truth; DB failures are logged, never fatal.
+fn db_mirror(state: &AppState, what: &str, f: impl FnOnce(&Store)) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&state.store))) {
+        Ok(()) => {}
+        Err(_) => eprintln!("[QUEUE-DB] {what}: store panicked (memory still authoritative)"),
+    }
+}
+
+/// Mirror helper that logs DB-side errors without touching dispatch.
+fn db_try(what: &str, r: anyhow::Result<()>) {
+    if let Err(e) = r {
+        eprintln!("[QUEUE-DB] {what}: {e:#}");
+    }
+}
+
+/// Mark a queue item finished in both memory and the DB mirror.
+fn mark_queue_done(state: &AppState, queue_id: &str) {
+    {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
+            item.status = QueueStatus::Done;
+        }
+    }
+    let now = now_rfc3339();
+    let qid = queue_id.to_string();
+    db_mirror(state, "mark done", move |store| {
+        db_try(
+            &format!("mark {qid} Done"),
+            store.update_queue_status(&qid, "Done", None, Some(&now)),
+        );
+    });
+}
+
+/// Replay durable queue rows into memory at startup. Running rows reset to
+/// Pending (the previous process died mid-dispatch); finished history is
+/// not replayed. Returns the replayed items in enqueue order.
+fn replay_queue(store: &Store) -> Vec<QueuedRun> {
+    let mut items = store.load_queue(false);
+    for item in items.iter_mut() {
+        if item.status == QueueStatus::Running {
+            item.status = QueueStatus::Pending;
+        }
+    }
+    items
+}
+
+#[cfg(test)]
+pub fn test_queue_item(id: &str) -> QueuedRun {
+    QueuedRun {
+        id: id.to_string(),
+        enqueued_at: "2026-09-25T00:00:00Z".to_string(),
+        status: QueueStatus::Pending,
+        kind: QueueKind::Run(RunRequest {
+            model: "test-model".to_string(),
+            task: "dns".to_string(),
+            api_key: None,
+            budget_usd: 0.10,
+            max_turns: 5,
+            eval_only: true,
+            effort: Some("low".to_string()),
+            timeout_min: Some(1),
+            trials: 1,
+            extend_if_unstable: false,
+            max_trials: 9,
+            save_results: None,
+            review_model: None,
+        }),
+    }
+}
+
+/// Next queue sequence start so replayed ids never collide with new ones.
+/// Parses the numeric suffix of `q<N>` ids; falls back to the row count.
+fn queue_seq_start(items: &[QueuedRun]) -> u64 {
+    items
+        .iter()
+        .filter_map(|i| i.id.strip_prefix('q'))
+        .filter_map(|n| n.parse::<u64>().ok())
+        .max()
+        .unwrap_or(items.len() as u64)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +579,33 @@ impl UiServer {
             let _ = std::env::set_current_dir(&repo);
         }
         let (log_sender, _) = broadcast::channel(4096);
+        let db_path = repo.join("bench.db");
+        let store = match Store::open(&db_path) {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                eprintln!("[QUEUE-DB] open {} failed ({e:#}); memory-only queue", db_path.display());
+                let fallback = std::env::temp_dir().join(format!("sdb-queue-fallback-{}.db", std::process::id()));
+                match Store::open(&fallback) {
+                    Ok(store) => Arc::new(store),
+                    Err(_) => {
+                        let mem = tempfile_mem_store();
+                        Arc::new(mem)
+                    }
+                }
+            }
+        };
+        let replayed = replay_queue(&store);
+        let seq_start = queue_seq_start(&replayed);
+        // Reset replayed Running rows to Pending in the mirror too, so a
+        // second restart does not see stale Running rows.
+        for item in &replayed {
+            if item.status == QueueStatus::Pending {
+                let _ = store.update_queue_status(&item.id, "Pending", None, None);
+            }
+        }
+        if !replayed.is_empty() {
+            println!("[QUEUE-DB] replayed {} pending item(s) from bench.db", replayed.len());
+        }
         let state = AppState {
             log_sender,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -484,8 +614,9 @@ impl UiServer {
             last_run: Arc::new(RwLock::new(None)),
             log_buffer: Arc::new(RwLock::new(Vec::new())),
             task_handle: Arc::new(std::sync::Mutex::new(None)),
-            queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
-            queue_seq: Arc::new(AtomicU64::new(0)),
+            queue: Arc::new(std::sync::Mutex::new(VecDeque::from(replayed))),
+            queue_seq: Arc::new(AtomicU64::new(seq_start)),
+            store,
         };
 
         let app = Self::build_app(state);
@@ -923,9 +1054,26 @@ async fn stop_run(State(state): State<AppState>) -> Response {
 
     *state.current_run.write().unwrap() = None;
     {
-        let mut q = state.queue.lock().unwrap();
-        for item in q.iter_mut().filter(|i| i.status == QueueStatus::Running) {
-            item.status = QueueStatus::Cancelled;
+        let cancelled: Vec<String> = {
+            let mut q = state.queue.lock().unwrap();
+            q.iter_mut()
+                .filter(|i| i.status == QueueStatus::Running)
+                .map(|item| {
+                    item.status = QueueStatus::Cancelled;
+                    item.id.clone()
+                })
+                .collect()
+        };
+        if !cancelled.is_empty() {
+            let now = now_rfc3339();
+            db_mirror(&state, "mark cancelled", move |store| {
+                for id in &cancelled {
+                    db_try(
+                        &format!("mark {id} Cancelled"),
+                        store.update_queue_status(id, "Cancelled", None, Some(&now)),
+                    );
+                }
+            });
         }
     }
     state.is_running.store(false, Ordering::SeqCst);
@@ -1286,6 +1434,16 @@ fn pump_queue(state: &AppState) -> bool {
                 (item.kind.clone(), item.id.clone())
             })
     };
+    if let Some((_, ref id)) = next {
+        let now = now_rfc3339();
+        let id = id.clone();
+        db_mirror(state, "mark running", move |store| {
+            db_try(
+                &format!("mark {id} Running"),
+                store.update_queue_status(&id, "Running", Some(&now), None),
+            );
+        });
+    }
     match next {
         Some((QueueKind::Run(req), id)) => {
             let _ = state
@@ -1318,10 +1476,7 @@ fn spawn_extend_body(state: &AppState, ext: ExtendRequest, queue_id: String) {
 async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: String) {
     let tx = state.log_sender.clone();
     let finish_item = |state: &AppState, note: &str| {
-        let mut q = state.queue.lock().unwrap();
-        if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
-            item.status = QueueStatus::Done;
-        }
+        mark_queue_done(state, &queue_id);
         let _ = tx.send(note.to_string());
     };
     let parent_path = crate::config::get_repo_root()
@@ -1450,12 +1605,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
             "[EXTEND-QUEUE] {queue_id}: all extension trials failed; parent untouched."
         ));
     }
-    {
-        let mut q = state.queue.lock().unwrap();
-        if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
-            item.status = QueueStatus::Done;
-        }
-    }
+    mark_queue_done(&state, &queue_id);
     *state.task_handle.lock().unwrap() = None;
     if !pump_queue(&state) {
         state.is_running.store(false, Ordering::SeqCst);
@@ -1771,10 +1921,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     }
     *state.task_handle.lock().unwrap() = None;
     if let Some(qid) = queue_id {
-        let mut q = state.queue.lock().unwrap();
-        if let Some(item) = q.iter_mut().find(|i| i.id == qid) {
-            item.status = QueueStatus::Done;
-        }
+        mark_queue_done(&state, &qid);
     }
     // Runner-slot handoff: only the slot holder spawns the next run.
     // is_running stays true across the handoff; stored false only when idle.
@@ -2026,12 +2173,16 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
             }
         };
         match head {
-            Some((QueueKind::Run(req), id)) => {
-                spawn_run_body(state, req, Some(id));
-                return true;
-            }
-            Some((QueueKind::Extend(ext), id)) => {
-                spawn_extend_body(state, ext, id);
+            Some((kind, id)) => {
+                let now = now_rfc3339();
+                db_try(
+                    &format!("mark {id} Running"),
+                    state.store.update_queue_status(&id, "Running", Some(&now), None),
+                );
+                match kind {
+                    QueueKind::Run(req) => spawn_run_body(state, req, Some(id)),
+                    QueueKind::Extend(ext) => spawn_extend_body(state, ext, id),
+                }
                 return true;
             }
             None => {}
@@ -2047,7 +2198,7 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
 /// Push a queue item, returning its id. Callers own kick/start decisions.
 fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
     let id = format!("q{}", state.queue_seq.fetch_add(1, Ordering::SeqCst) + 1);
-    {
+    let evicted: Vec<String> = {
         let mut q = state.queue.lock().unwrap();
         q.push_back(QueuedRun {
             id: id.clone(),
@@ -2056,16 +2207,32 @@ fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
             kind,
         });
         // Bound history: drop oldest finished entries past 100.
+        let mut dropped = Vec::new();
         while q.len() > 100 {
             if let Some(pos) = q
                 .iter()
                 .position(|i| i.status == QueueStatus::Done || i.status == QueueStatus::Cancelled)
             {
-                q.remove(pos);
+                dropped.push(q.remove(pos).map(|item| item.id).unwrap_or_default());
             } else {
                 break;
             }
         }
+        dropped
+    };
+    // Durability mirror: memory stays source of truth; DB failures only log.
+    if let Some(item) = state.queue.lock().unwrap().iter().find(|i| i.id == id).cloned() {
+        let sid = id.clone();
+        db_mirror(state, "enqueue", move |store| {
+            db_try(&format!("enqueue {sid}"), store.enqueue_run(&item));
+        });
+    }
+    if !evicted.is_empty() {
+        db_mirror(state, "evict history", move |store| {
+            for eid in &evicted {
+                db_try(&format!("evict {eid}"), store.remove_queued(eid));
+            }
+        });
     }
     id
 }
@@ -2108,31 +2275,56 @@ async fn remove_queued_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<String, Response> {
-    let mut q = state.queue.lock().unwrap();
-    match q.iter().position(|i| i.id == id) {
-        Some(pos) if q[pos].status == QueueStatus::Pending => {
-            q.remove(pos);
-            Ok(format!("Removed {id} from queue"))
+    let removed = {
+        let mut q = state.queue.lock().unwrap();
+        match q.iter().position(|i| i.id == id) {
+            Some(pos) if q[pos].status == QueueStatus::Pending => {
+                q.remove(pos);
+                true
+            }
+            Some(_) => {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("{id} is already running or finished"),
+                )
+                    .into_response())
+            }
+            None => {
+                return Err((
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("{id} not in queue"),
+                )
+                    .into_response())
+            }
         }
-        Some(_) => Err((
-            axum::http::StatusCode::CONFLICT,
-            format!("{id} is already running or finished"),
-        )
-            .into_response()),
-        None => Err((
+    };
+    if removed {
+        let rid = id.clone();
+        db_mirror(&state, "remove queued", move |store| {
+            db_try(&format!("remove {rid}"), store.remove_queued(&rid));
+        });
+        Ok(format!("Removed {id} from queue"))
+    } else {
+        Err((
             axum::http::StatusCode::NOT_FOUND,
             format!("{id} not in queue"),
         )
-            .into_response()),
+            .into_response())
     }
 }
 
 async fn clear_queue(State(state): State<AppState>) -> String {
     // Drops finished history only; pending work is never discarded here.
-    let mut q = state.queue.lock().unwrap();
-    let n_before = q.len();
-    q.retain(|i| i.status == QueueStatus::Pending || i.status == QueueStatus::Running);
-    format!("Cleared {} finished run(s)", n_before - q.len())
+    let n_before = state.queue.lock().unwrap().len();
+    {
+        let mut q = state.queue.lock().unwrap();
+        q.retain(|i| i.status == QueueStatus::Pending || i.status == QueueStatus::Running);
+    }
+    db_mirror(&state, "clear finished", |store| {
+        db_try("clear finished", store.clear_finished_queue().map(|_| ()));
+    });
+    let n_after = state.queue.lock().unwrap().len();
+    format!("Cleared {} finished run(s)", n_before - n_after)
 }
 
 async fn start_run(
@@ -2244,7 +2436,24 @@ mod tests {
             task_handle: Arc::new(std::sync::Mutex::new(None)),
             queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             queue_seq: Arc::new(AtomicU64::new(0)),
+            store: Arc::new(tempfile_mem_store()),
         }
+    }
+
+    #[test]
+    fn queue_replay_resets_running_and_seq() {
+        let store = tempfile_mem_store();
+        let mut running = crate::web::server::test_queue_item("q7");
+        running.status = QueueStatus::Running;
+        store.enqueue_run(&running).expect("enqueue");
+        store
+            .update_queue_status("q7", "Running", Some("2026-09-25T00:00:01Z"), None)
+            .expect("mark running");
+        store.enqueue_run(&crate::web::server::test_queue_item("q8")).expect("enqueue");
+        let replayed = replay_queue(&store);
+        assert_eq!(replayed.len(), 2);
+        assert!(replayed.iter().all(|i| i.status == QueueStatus::Pending));
+        assert_eq!(queue_seq_start(&replayed), 8);
     }
 
     fn queue_test_req() -> RunRequest {

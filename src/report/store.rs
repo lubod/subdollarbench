@@ -3,7 +3,9 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
+use super::archive::RunManifest;
 use super::leaderboard::BenchmarkRunResult;
+use crate::web::server::{QueueStatus, QueuedRun};
 
 /// SQLite-backed primary store for consolidated benchmark results.
 ///
@@ -11,8 +13,22 @@ use super::leaderboard::BenchmarkRunResult;
 /// The full [`BenchmarkRunResult`] JSON lives in `doc`; the other columns are
 /// queryable projections of the same data. `results/*.json` files remain as
 /// export copies for one release.
+///
+/// The `queue` table mirrors the in-memory web queue so pending work survives
+/// restarts (memory stays dispatch truth; the DB is the durability mirror).
+/// The `runs` table indexes per-trial `runs/*/manifest.json` records; logs
+/// and workspaces stay on the filesystem.
 pub struct Store {
     conn: Mutex<Connection>,
+}
+
+fn queue_status_str(status: &QueueStatus) -> &'static str {
+    match status {
+        QueueStatus::Pending => "Pending",
+        QueueStatus::Running => "Running",
+        QueueStatus::Done => "Done",
+        QueueStatus::Cancelled => "Cancelled",
+    }
 }
 
 impl Store {
@@ -54,6 +70,25 @@ impl Store {
                 cost_usd REAL,
                 duration_s REAL,
                 turns INTEGER,
+                doc TEXT
+            );
+            CREATE TABLE IF NOT EXISTS queue (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                enqueued_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                doc TEXT
+            );
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                model TEXT,
+                task TEXT,
+                status TEXT,
+                pass_rate REAL,
+                cost_usd REAL,
+                duration_s REAL,
+                completed_at TEXT,
                 doc TEXT
             );",
         )?;
@@ -153,11 +188,118 @@ impl Store {
         })
         .unwrap_or(0) as usize
     }
+
+    /// Mirror a freshly enqueued item; dispatch-time fields start NULL.
+    pub fn enqueue_run(&self, q: &QueuedRun) -> Result<()> {
+        let doc = serde_json::to_string(q)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO queue
+                (id, status, enqueued_at, started_at, finished_at, doc)
+             VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+            params![q.id, queue_status_str(&q.status), q.enqueued_at, doc],
+        )?;
+        Ok(())
+    }
+
+    /// Mirror a dispatch/completion transition. `started_at`/`finished_at`
+    /// pass through only when `Some`; a `None` keeps the stored value.
+    pub fn update_queue_status(
+        &self,
+        id: &str,
+        status: &str,
+        started_at: Option<&str>,
+        finished_at: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE queue SET status = ?2,
+                started_at = COALESCE(?3, started_at),
+                finished_at = COALESCE(?4, finished_at)
+             WHERE id = ?1",
+            params![id, status, started_at, finished_at],
+        )?;
+        Ok(())
+    }
+
+    /// Load queued items in enqueue order by parsing the stored `doc` JSON;
+    /// bad rows are skipped. Without `include_done`, finished history
+    /// (`Done`, `Cancelled`) is excluded — the replay path for restarts.
+    pub fn load_queue(&self, include_done: bool) -> Vec<QueuedRun> {
+        let conn = self.conn.lock();
+        let sql = if include_done {
+            "SELECT doc FROM queue ORDER BY rowid"
+        } else {
+            "SELECT doc FROM queue WHERE status NOT IN ('Done', 'Cancelled') ORDER BY rowid"
+        };
+        let mut stmt = match conn.prepare(sql) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows
+            .filter_map(|row| row.ok())
+            .filter_map(|doc| serde_json::from_str(&doc).ok())
+            .collect()
+    }
+
+    /// Drop one queue row (used when a pending item is removed or the
+    /// in-memory history bound evicts a finished entry).
+    pub fn remove_queued(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM queue WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Delete finished history (`Done`, `Cancelled`); returns rows removed.
+    pub fn clear_finished_queue(&self) -> Result<usize> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM queue WHERE status IN ('Done', 'Cancelled')",
+            [],
+        )?;
+        Ok(conn.changes() as usize)
+    }
+
+    /// Index one `runs/*/manifest.json` record; logs/workspaces stay on FS.
+    pub fn upsert_run_manifest(&self, m: &RunManifest) -> Result<()> {
+        let doc = serde_json::to_string(m)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO runs
+                (run_id, model, task, status, pass_rate, cost_usd, duration_s, completed_at, doc)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                m.run_id,
+                m.model,
+                m.task,
+                m.status,
+                m.pass_rate,
+                m.cost_usd,
+                m.duration_seconds,
+                m.completed_at,
+                doc,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn run_manifest_count(&self) -> usize {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT COUNT(*) FROM runs", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::server::{QueueKind, RunRequest};
 
     fn sample_result(id: &str) -> BenchmarkRunResult {
         BenchmarkRunResult {
@@ -199,6 +341,58 @@ mod tests {
         }
     }
 
+    fn sample_queue_item(id: &str) -> QueuedRun {
+        QueuedRun {
+            id: id.to_string(),
+            enqueued_at: "2026-09-25T00:00:00Z".to_string(),
+            status: QueueStatus::Pending,
+            kind: QueueKind::Run(RunRequest {
+                model: "test-model".to_string(),
+                task: "dns".to_string(),
+                api_key: None,
+                budget_usd: 0.10,
+                max_turns: 5,
+                eval_only: true,
+                effort: Some("low".to_string()),
+                timeout_min: Some(1),
+                trials: 1,
+                extend_if_unstable: false,
+                max_trials: 9,
+                save_results: None,
+                review_model: None,
+            }),
+        }
+    }
+
+    fn sample_manifest(run_id: &str) -> RunManifest {
+        serde_json::from_value(serde_json::json!({
+            "run_id": run_id,
+            "model": "test-model",
+            "task": "dns",
+            "status": "passed",
+            "language": "Go",
+            "started_at": "2026-09-25T00:00:00Z",
+            "completed_at": "2026-09-25T00:01:00Z",
+            "duration_seconds": 60.0,
+            "pass_rate": 100.0,
+            "passed_stages": 6,
+            "total_stages": 6,
+            "stages": [],
+            "throughput_req_sec": null,
+            "tokens": {
+                "prompt_tokens": 100,
+                "cached_tokens": 0,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            },
+            "cost_usd": 0.01,
+            "savings_percent": 90.0,
+            "efficiency_score": 1.0,
+            "files": []
+        }))
+        .expect("sample manifest")
+    }
+
     #[test]
     fn round_trip_parent_with_subruns() {
         let db = std::env::temp_dir().join(format!("store-test-{}.db", std::process::id()));
@@ -238,6 +432,48 @@ mod tests {
         store.delete_parent("parent-1").expect("delete");
         assert_eq!(store.parent_count(), 0);
         assert!(store.load_all_parents().is_empty());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn queue_lifecycle_and_runs_index() {
+        let db = std::env::temp_dir().join(format!("store-queue-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let store = Store::open(&db).expect("open");
+        assert!(store.load_queue(false).is_empty());
+
+        store.enqueue_run(&sample_queue_item("q1")).expect("enqueue q1");
+        store.enqueue_run(&sample_queue_item("q2")).expect("enqueue q2");
+        let pending = store.load_queue(false);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, "q1");
+        assert_eq!(pending[1].id, "q2");
+        assert!(pending.iter().all(|q| q.status == QueueStatus::Pending));
+
+        store
+            .update_queue_status("q1", "Running", Some("2026-09-25T00:00:01Z"), None)
+            .expect("mark running");
+        store
+            .update_queue_status("q1", "Done", None, Some("2026-09-25T00:02:00Z"))
+            .expect("mark done");
+        // Pending-only load hides the finished item; full load keeps it.
+        let pending = store.load_queue(false);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "q2");
+        assert_eq!(store.load_queue(true).len(), 2);
+
+        store.remove_queued("q2").expect("remove q2");
+        assert!(store.load_queue(false).is_empty());
+        let cleared = store.clear_finished_queue().expect("clear finished");
+        assert_eq!(cleared, 1);
+        assert!(store.load_queue(true).is_empty());
+
+        let manifest = sample_manifest("run-1");
+        store.upsert_run_manifest(&manifest).expect("upsert run");
+        assert_eq!(store.run_manifest_count(), 1);
+        // Re-upsert replaces without duplicating.
+        store.upsert_run_manifest(&manifest).expect("re-upsert run");
+        assert_eq!(store.run_manifest_count(), 1);
         let _ = std::fs::remove_file(&db);
     }
 }
