@@ -391,6 +391,18 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [maintain] One-shot import of results/*.json export copies into bench.db.
+    /// Dry run by default; --yes writes.
+    Migrate {
+        /// Path to results directory
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+
+        /// Actually write rows to bench.db (without it, only prints the plan)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
     /// [operate] Live engine status: idle/running, current + last run (GET /api/status)
     Status {
         /// `ui` engine base URL (or SDB_SERVER)

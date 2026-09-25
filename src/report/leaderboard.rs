@@ -551,6 +551,12 @@ impl LeaderboardManager {
             for sub in subrun_results {
                 let _ = fs::remove_file(results_dir.join(format!("{}.json", sub.id)));
             }
+            // Drop matching rows from the primary store so DB reads match the export copies.
+            if let Some(store) = Self::open_store_if_exists() {
+                for sub in subrun_results {
+                    let _ = store.delete_parent(&sub.id);
+                }
+            }
             // Mark trial subruns hidden so run lists show the consolidated parent
             let trial_runs_dir = crate::report::RunArchiver::resolve_runs_dir();
             for sub in subrun_results {
@@ -704,6 +710,22 @@ impl LeaderboardManager {
     }
 
     pub fn reconsolidate_saved_results(results_dir: &str) -> Result<usize> {
+        // DB primary (canonical dir only): iterate stored parents when bench.db exists.
+        if Self::use_db(results_dir) {
+            if let Some(store) = Self::open_store_if_exists() {
+                let mut count = 0;
+                for run in store.load_all_parents() {
+                    if !run.subruns.is_empty() {
+                        if Self::consolidate_multi_trial_run(&run.id, &run.subruns, true, None)
+                            .is_some()
+                        {
+                            count += 1;
+                        }
+                    }
+                }
+                return Ok(count);
+            }
+        }
         let path = Path::new(results_dir);
         let mut count = 0;
         if let Ok(entries) = fs::read_dir(path) {
@@ -739,10 +761,86 @@ impl LeaderboardManager {
 
         let data = serde_json::to_string_pretty(result)?;
         fs::write(filepath, data)?;
+
+        // Primary store: upsert into bench.db (best-effort; the JSON export
+        // copy above stays for one release). Temp-dir callers (tests, CLI
+        // previews) skip the DB so they never touch the shared repo-root
+        // store; only the canonical results dir (or an explicit
+        // `$SDB_BENCH_DB` override) writes through.
+        if Self::use_db(results_dir) {
+            if let Ok(store) = crate::report::Store::open(&Self::db_path()) {
+                let _ = store.upsert_parent(result);
+            }
+        }
         Ok(())
     }
 
     pub fn load_all(results_dir: &str) -> Vec<BenchmarkRunResult> {
+        // DB primary (canonical dir only): one SELECT over parents.
+        // Missing/empty DB falls back to the JSON export scan until
+        // migration is verified; temp dirs always scan the exports.
+        let mut list = if Self::use_db(results_dir) {
+            Self::load_all_from_db()
+        } else {
+            Vec::new()
+        };
+        if list.is_empty() {
+            list = Self::load_all_from_dir(results_dir);
+        }
+        Self::finalize_results(list)
+    }
+
+    /// Primary-store path: `$SDB_BENCH_DB` override (isolated tests) else
+    /// repo-root bench.db.
+    fn db_path() -> std::path::PathBuf {
+        match std::env::var("SDB_BENCH_DB") {
+            Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+            _ => crate::config::get_repo_root().join("bench.db"),
+        }
+    }
+
+    /// True when `dir` is the canonical repo `results/` dir (absolute, or
+    /// relative to a repo-root cwd such as `./results`).
+    fn is_canonical_results_dir(dir: &str) -> bool {
+        let canonical = crate::config::get_repo_root().join("results");
+        let p = Path::new(dir);
+        if p == canonical {
+            return true;
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            if cwd.join(p) == canonical {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The DB is authoritative only for the canonical results dir (or when
+    /// `$SDB_BENCH_DB` is set); temp-dir callers stay on the JSON export
+    /// copies so tests never touch the shared repo-root bench.db.
+    fn use_db(results_dir: &str) -> bool {
+        if Self::is_canonical_results_dir(results_dir) {
+            return true;
+        }
+        matches!(std::env::var("SDB_BENCH_DB"), Ok(p) if !p.trim().is_empty())
+    }
+
+    /// Read-only open of the primary store; never creates bench.db.
+    fn open_store_if_exists() -> Option<crate::report::Store> {
+        let db_path = Self::db_path();
+        if !db_path.exists() {
+            return None;
+        }
+        crate::report::Store::open(&db_path).ok()
+    }
+
+    fn load_all_from_db() -> Vec<BenchmarkRunResult> {
+        Self::open_store_if_exists()
+            .map(|store| store.load_all_parents())
+            .unwrap_or_default()
+    }
+
+    fn load_all_from_dir(results_dir: &str) -> Vec<BenchmarkRunResult> {
         let path = Path::new(results_dir);
         let mut list = Vec::new();
 
@@ -751,15 +849,23 @@ impl LeaderboardManager {
                 let p = entry.path();
                 if p.extension().and_then(|s| s.to_str()) == Some("json") {
                     if let Ok(data) = fs::read_to_string(p) {
-                        if let Ok(mut res) = serde_json::from_str::<BenchmarkRunResult>(&data) {
-                            if res.total_tokens == 0 {
-                                res.total_tokens =
-                                    res.prompt_tokens + res.cached_tokens + res.completion_tokens;
-                            }
+                        if let Ok(res) = serde_json::from_str::<BenchmarkRunResult>(&data) {
                             list.push(res);
                         }
                     }
                 }
+            }
+        }
+        list
+    }
+
+    /// Shared post-processing for both readers: token fallback, child-subrun
+    /// filter, loose-trial regroup, ranking sort.
+    fn finalize_results(mut list: Vec<BenchmarkRunResult>) -> Vec<BenchmarkRunResult> {
+        for res in &mut list {
+            if res.total_tokens == 0 {
+                res.total_tokens =
+                    res.prompt_tokens + res.cached_tokens + res.completion_tokens;
             }
         }
 
@@ -1698,6 +1804,23 @@ mod tests {
             "Reconsolidated {} historical multi-trial runs in results/",
             count
         );
+    }
+
+    #[test]
+    fn test_canonical_results_dir_gate() {
+        let canonical = crate::config::get_repo_root().join("results");
+        let canon_str = canonical.to_str().unwrap();
+        assert!(LeaderboardManager::is_canonical_results_dir(canon_str));
+        assert!(LeaderboardManager::use_db(canon_str));
+        // Without an override, temp dirs must stay on the JSON exports.
+        if std::env::var("SDB_BENCH_DB").is_err() {
+            let temp =
+                std::env::temp_dir().join(format!("test_gate_{}", std::process::id()));
+            assert!(!LeaderboardManager::is_canonical_results_dir(
+                temp.to_str().unwrap()
+            ));
+            assert!(!LeaderboardManager::use_db(temp.to_str().unwrap()));
+        }
     }
 
     #[test]

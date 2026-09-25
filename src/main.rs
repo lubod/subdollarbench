@@ -776,6 +776,54 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
+        Commands::Migrate { results_dir, yes } => {
+            use std::path::Path;
+            let path = Path::new(&results_dir);
+            let mut entries: Vec<String> = std::fs::read_dir(path)
+                .with_context(|| format!("read results dir {results_dir}"))?
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".json"))
+                .collect();
+            entries.sort();
+            let mut runs = Vec::new();
+            let mut skipped = 0usize;
+            for name in &entries {
+                let fp = path.join(name);
+                let Ok(text) = std::fs::read_to_string(&fp) else {
+                    skipped += 1;
+                    continue;
+                };
+                match serde_json::from_str::<subdollarbench::report::BenchmarkRunResult>(&text) {
+                    Ok(run) => runs.push(run),
+                    Err(_) => skipped += 1,
+                }
+            }
+            if !yes {
+                println!(
+                    "migrate plan: {} to import, {} skipped (re-run with --yes)",
+                    runs.len(),
+                    skipped
+                );
+                return Ok(());
+            }
+            let db_path = subdollarbench::config::get_repo_root().join("bench.db");
+            let store = subdollarbench::report::Store::open(&db_path)?;
+            let mut imported = 0usize;
+            for run in &runs {
+                store.upsert_parent(run)?;
+                imported += 1;
+            }
+            let count = store.parent_count();
+            println!("migrate: imported {imported}, skipped {skipped}, parents {count}");
+            if count != runs.len() {
+                anyhow::bail!(
+                    "parent count {count} != file count {}; files stay authoritative",
+                    runs.len()
+                );
+            }
+        }
+
         Commands::MatrixReport { results_dir } => {
             let all = LeaderboardManager::load_all(&results_dir);
             if all.is_empty() {
