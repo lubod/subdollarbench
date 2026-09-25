@@ -287,6 +287,37 @@ impl Store {
         Ok(())
     }
 
+    /// Load every indexed run manifest (`runs` table), newest first by
+    /// `completed_at`; bad rows are skipped. Empty until `migrate` runs.
+    pub fn load_run_manifests(&self) -> Vec<RunManifest> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT doc FROM runs ORDER BY completed_at DESC") {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows
+            .filter_map(|row| row.ok())
+            .filter_map(|doc| serde_json::from_str(&doc).ok())
+            .collect()
+    }
+
+    /// Fetch one indexed run manifest by id; None when absent or corrupt.
+    pub fn get_run_manifest(&self, run_id: &str) -> Option<RunManifest> {
+        let conn = self.conn.lock();
+        let doc: String = conn
+            .query_row(
+                "SELECT doc FROM runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&doc).ok()
+    }
+
     pub fn run_manifest_count(&self) -> usize {
         let conn = self.conn.lock();
         conn.query_row("SELECT COUNT(*) FROM runs", [], |row| {
@@ -474,6 +505,16 @@ mod tests {
         // Re-upsert replaces without duplicating.
         store.upsert_run_manifest(&manifest).expect("re-upsert run");
         assert_eq!(store.run_manifest_count(), 1);
+        // Readers serve the indexed rows; unknown ids miss.
+        let got = store.get_run_manifest("run-1").expect("get run-1");
+        assert_eq!(
+            serde_json::to_value(&got).expect("to_value"),
+            serde_json::to_value(&manifest).expect("to_value")
+        );
+        assert!(store.get_run_manifest("no-such-run").is_none());
+        let all = store.load_run_manifests();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].run_id, "run-1");
         let _ = std::fs::remove_file(&db);
     }
 }

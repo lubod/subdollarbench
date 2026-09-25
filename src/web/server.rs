@@ -260,15 +260,18 @@ pub fn test_queue_item(id: &str) -> QueuedRun {
     }
 }
 
-/// Next queue sequence start so replayed ids never collide with new ones.
-/// Parses the numeric suffix of `q<N>` ids; falls back to the row count.
-fn queue_seq_start(items: &[QueuedRun]) -> u64 {
-    items
+/// Next queue sequence start so new ids never collide with finished history.
+/// Scans ALL queue rows (including Done/Cancelled), so a restart on a clean
+/// queue never reissues `q1` over prior runs. Parses the numeric suffix of
+/// `q<N>` ids; empty history starts at 0.
+fn queue_seq_start(store: &Store) -> u64 {
+    store
+        .load_queue(true)
         .iter()
         .filter_map(|i| i.id.strip_prefix('q'))
         .filter_map(|n| n.parse::<u64>().ok())
         .max()
-        .unwrap_or(items.len() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,7 +598,7 @@ impl UiServer {
             }
         };
         let replayed = replay_queue(&store);
-        let seq_start = queue_seq_start(&replayed);
+        let seq_start = queue_seq_start(&store);
         // Reset replayed Running rows to Pending in the mirror too, so a
         // second restart does not see stale Running rows.
         for item in &replayed {
@@ -618,6 +621,23 @@ impl UiServer {
             queue_seq: Arc::new(AtomicU64::new(seq_start)),
             store,
         };
+
+        // Replay auto-dispatch: pending work that survived the restart runs
+        // without a manual kick. is_running starts false; the memory queue
+        // stays authoritative and the DB mirror is best-effort in kick_runner.
+        if let Some(first_id) = state
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.status == QueueStatus::Pending)
+            .map(|i| i.id.clone())
+        {
+            let kick_state = state.clone();
+            tokio::spawn(async move {
+                kick_runner(&kick_state, &first_id).await;
+            });
+        }
 
         let app = Self::build_app(state);
 
@@ -939,19 +959,25 @@ async fn rebuild_portal() -> Response {
     }
 }
 
-async fn get_runs() -> Json<Vec<serde_json::Value>> {
-    let r_dir = RunArchiver::resolve_runs_dir();
-    Json(
-        RunArchiver::list_runs(&r_dir)
-            .iter()
-            .map(manifest_with_portal_flag)
-            .collect(),
-    )
+async fn get_runs(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    // DB-first (same pattern as load_all); FS fallback until migration.
+    let from_db = state.store.load_run_manifests();
+    let list = if from_db.is_empty() {
+        RunArchiver::list_runs(&RunArchiver::resolve_runs_dir())
+    } else {
+        from_db
+    };
+    Json(list.iter().map(manifest_with_portal_flag).collect())
 }
 
 async fn get_run_detail(
+    State(state): State<AppState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, Response> {
+    // DB-first with filesystem fallback (same pattern as load_all).
+    if let Some(m) = state.store.get_run_manifest(&run_id) {
+        return Ok(Json(manifest_with_portal_flag(&m)));
+    }
     let r_dir = RunArchiver::resolve_runs_dir();
     match RunArchiver::get_run(&r_dir, &run_id) {
         Some(m) => Ok(Json(manifest_with_portal_flag(&m))),
@@ -2453,7 +2479,17 @@ mod tests {
         let replayed = replay_queue(&store);
         assert_eq!(replayed.len(), 2);
         assert!(replayed.iter().all(|i| i.status == QueueStatus::Pending));
-        assert_eq!(queue_seq_start(&replayed), 8);
+        assert_eq!(queue_seq_start(&store), 8);
+        // Seq survives a clean restart: finish everything so the replay is
+        // empty, but the max still comes from finished history (never q1).
+        store
+            .update_queue_status("q7", "Done", None, Some("2026-09-25T00:02:00Z"))
+            .expect("done q7");
+        store
+            .update_queue_status("q8", "Done", None, Some("2026-09-25T00:02:00Z"))
+            .expect("done q8");
+        assert!(replay_queue(&store).is_empty());
+        assert_eq!(queue_seq_start(&store), 8);
     }
 
     fn queue_test_req() -> RunRequest {
@@ -2535,30 +2571,6 @@ mod tests {
             eval_only: None,
             queue: true,
         }
-    }
-
-    fn write_parent_result(dir: &std::path::Path, id: &str, n_subs: usize, pass_each: f64) {
-        let subs: Vec<serde_json::Value> = (1..=n_subs)
-            .map(|i| {
-                serde_json::json!({
-                    "id": format!("{id}_trial{i}"), "model": "m", "task": "redis",
-                    "language": "Go", "pass_rate": pass_each,
-                    "passed_stages": 6, "total_stages": 6,
-                    "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
-                    "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
-                    "timestamp": "2026-09-12T08:00:00Z"
-                })
-            })
-            .collect();
-        let v = serde_json::json!({
-            "id": id, "model": "m", "task": "redis", "language": "Go",
-            "pass_rate": pass_each, "passed_stages": 6, "total_stages": 6,
-            "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
-            "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
-            "timestamp": "2026-09-12T08:00:00Z", "subruns": subs,
-        });
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join("qtest_parent.json"), serde_json::to_string(&v).unwrap()).unwrap();
     }
 
     #[tokio::test]

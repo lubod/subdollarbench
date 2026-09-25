@@ -571,7 +571,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     skipped += 1;
                     continue;
                 };
-                let Ok(mut run) =
+                let Ok(run) =
                     serde_json::from_str::<subdollarbench::report::BenchmarkRunResult>(&text)
                 else {
                     skipped += 1;

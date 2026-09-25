@@ -1111,6 +1111,12 @@ impl BenchmarkPipeline {
             let runs_dir = RunArchiver::resolve_runs_dir();
             let console_log = buffering_logger.get_logs();
             let _ = RunArchiver::archive_run(&runs_dir, &manifest, &config.workdir, &console_log);
+            // Runs index mirror (best-effort, never fatal): the new trial
+            // manifest is queryable via /api/runs without an FS scan.
+            // archive_run stays FS-pure; this callsite owns the DB write.
+            if let Ok(store) = crate::report::Store::open(&get_repo_root().join("bench.db")) {
+                let _ = store.upsert_run_manifest(&manifest);
+            }
             let results_dir = get_repo_root().join("results");
             let _ = LeaderboardManager::save_result(
                 results_dir.to_str().unwrap_or("./results"),

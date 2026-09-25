@@ -6,3 +6,7 @@ results/
 portal/
 *.log
 .env
+
+# SQLite primary store (rebuilt by migrate --yes on fresh checkout)
+bench.db
+bench.db-*
