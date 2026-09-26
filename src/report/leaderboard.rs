@@ -1044,7 +1044,8 @@ impl LeaderboardManager {
                 "Turns",
                 "Throughput",
                 "Regime",
-                "Cost ($)",
+                "API cost ($)",
+                "Effective cost ($)",
                 "Cache Savings",
                 "Score / ¢",
             ]);
@@ -1143,6 +1144,7 @@ impl LeaderboardManager {
                 Cell::new(tp),
                 Cell::new(BenchmarkRunResult::regime_of(r)),
                 Cell::new(format!("${:.4}", r.total_cost_usd)).fg(Color::Magenta),
+                Cell::new(format!("${:.4}", r.effective_cost())).fg(Color::Magenta),
                 Cell::new(savings_str).fg(Color::Green),
                 Cell::new(match r.throughput_score {
                     Some(tp) => format!("{tp:.1}"),

@@ -1233,7 +1233,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <tr>
                   <th style="width: 38%;">Model & Benchmark Run</th>
                   <th style="width: 18%;">Pass Rate & Effort</th>
-                  <th style="width: 14%;">Cost & Tokens</th>
+                  <th style="width: 14%;">API cost / Effective cost & Tokens</th>
                   <th style="width: 14%;">Score & Throughput</th>
                   <th style="width: 16%; text-align: right;">Actions</th>
                 </tr>
@@ -2570,7 +2570,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <td>
               <div style="display: flex; flex-direction: column; gap: 2px;">
                 <div>
-                  <span style="font-weight: 600; color: var(--accent); font-size: 0.88rem;">$${((r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.cost_usd).toFixed(4)}</span>
+                  <div><span style="font-size: 0.7rem; color: var(--text-muted);">API</span> <span style="font-weight: 600; font-size: 0.85rem;">$${r.cost_usd.toFixed(4)}</span></div><div><span style="font-size: 0.7rem; color: var(--text-muted);">Effective</span> <span style="font-weight: 600; color: var(--accent); font-size: 0.88rem;">$${((r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.cost_usd).toFixed(4)}</span></div>
                   ${(r.effective_cost_usd !== undefined && r.effective_cost_usd !== null && Math.abs(r.effective_cost_usd - r.cost_usd) > 0.00001) ? `<span style="font-size: 0.7rem; color: var(--text-muted);" title="Model API Spend">(API: $${r.cost_usd.toFixed(4)})</span>` : ''}
                 </div>
                 <span style="font-size: 0.72rem; color: var(--text-muted);">${tokensStr}</span>
@@ -2631,8 +2631,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <div style="font-weight: 700; color: var(--primary); font-size: 0.85rem; margin-top: 2px;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)}</div>
               </div>
               <div>
-                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Eff Cost</div>
-                <div style="font-weight: 600; color: var(--accent); font-size: 0.78rem; margin-top: 2px;">$${((r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.cost_usd).toFixed(4)}</div>
+                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">API / Eff Cost</div>
+                <div style="font-weight: 600; font-size: 0.78rem; margin-top: 2px;">API $${r.cost_usd.toFixed(4)}</div><div style="font-weight: 600; color: var(--accent); font-size: 0.78rem;">Eff $${((r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.cost_usd).toFixed(4)}</div>
               </div>
               <div>
                 <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Throughput</div>

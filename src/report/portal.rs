@@ -60,6 +60,8 @@ pub struct ModelRollupRow {
     pub p1_hi: f64,
     pub total_cost_usd: f64,
     pub avg_cost_usd: f64,
+    pub total_api_cost_usd: f64,
+    pub avg_api_cost_usd: f64,
     pub stability: Option<String>,
 }
 
@@ -888,6 +890,9 @@ const PORTAL_JS: &str = r#"
       } else if (sortCol === 'tp') {
         vA = a.throughput_req_sec || 0;
         vB = b.throughput_req_sec || 0;
+      } else if (sortCol === 'api_cost') {
+        vA = a.total_cost_usd || 0;
+        vB = b.total_cost_usd || 0;
       } else if (sortCol === 'cost') {
         vA = (a.effective_cost_usd !== undefined && a.effective_cost_usd !== null) ? a.effective_cost_usd : a.total_cost_usd;
         vB = (b.effective_cost_usd !== undefined && b.effective_cost_usd !== null) ? b.effective_cost_usd : b.total_cost_usd;
@@ -902,7 +907,7 @@ const PORTAL_JS: &str = r#"
 
   function renderRowsHtml(runs, showTaskCol, defaultRanks) {
     if (!runs || runs.length === 0) {
-      const colSpan = showTaskCol ? 9 : 8;
+      const colSpan = showTaskCol ? 10 : 9;
       return `<tr><td colspan="${colSpan}" style="text-align: center; color: var(--mut); padding: 28px;">No matching runs recorded.</td></tr>`;
     }
 
@@ -972,6 +977,7 @@ const PORTAL_JS: &str = r#"
         : '';
       
       const effCost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.total_cost_usd;
+      const apiCost = r.total_cost_usd;
       const apiDiff = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null && Math.abs(r.effective_cost_usd - r.total_cost_usd) > 0.0001)
         ? `<span style="font-size: 0.7rem; color: var(--mut);">(API: $${r.total_cost_usd.toFixed(4)})</span>`
         : '';
@@ -1028,7 +1034,8 @@ const PORTAL_JS: &str = r#"
         <td>
           <div style="display: flex; flex-direction: column; gap: 2px;">
             <div>
-              <span style="font-weight: 600; color: var(--gold);">$${effCost.toFixed(4)}</span>
+              <div><span style="font-size: 0.7rem; color: var(--mut);">API</span> <span style="font-weight: 600;">$${apiCost.toFixed(4)}</span></div>
+              <div><span style="font-size: 0.7rem; color: var(--mut);">Effective</span> <span style="font-weight: 600; color: var(--gold);">$${effCost.toFixed(4)}</span></div>
               ${apiDiff}
             </div>
             <span style="font-size: 0.72rem; color: var(--mut);">${tokStr}</span>
@@ -1127,7 +1134,8 @@ const PORTAL_JS: &str = r#"
               <th onclick="window.__subdollar_sort('dur')">Duration</th>
               <th style="text-align: center;" onclick="window.__subdollar_sort('turns')">Turns</th>
               <th onclick="window.__subdollar_sort('tp')">Throughput</th>
-              <th onclick="window.__subdollar_sort('cost')">Cost & Tokens</th>
+              <th onclick="window.__subdollar_sort('api_cost')">API cost & Tokens</th>
+              <th onclick="window.__subdollar_sort('cost')">Effective cost</th>
               <th onclick="window.__subdollar_sort('score')">Score pts/¢</th>
               <th>Action</th>
             </tr>
@@ -1269,7 +1277,7 @@ const PORTAL_JS: &str = r#"
       const g = groups[key] || (groups[key] = {
         model: r.model || '?', effort: r.effort || 'auto',
         tasks: {}, nTrials: 0, nPass: 0, sumAvg: 0, nParents: 0,
-        sumCost: 0, sumTurns: 0,
+        sumCost: 0, sumApiCost: 0, sumTurns: 0,
       });
       g.tasks[r.task] = true;
       const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
@@ -1281,6 +1289,7 @@ const PORTAL_JS: &str = r#"
       g.sumAvg += ((r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? r.avg_pass_rate : (r.pass_rate || 0));
       g.nParents += 1;
       g.sumCost += (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
+      g.sumApiCost += (r.total_cost_usd || 0);
       g.sumTurns += (r.turns || 0);
     }
     const rows = Object.values(groups).map(g => {
@@ -1292,7 +1301,7 @@ const PORTAL_JS: &str = r#"
         avgPct: g.sumAvg / Math.max(1, g.nParents),
         p1: g.nTrials ? (100 * g.nPass / g.nTrials) : 0,
         lo, hi, nTrials: g.nTrials, nPass: g.nPass,
-        cost: g.sumCost, turns: g.sumTurns,
+        cost: g.sumCost, apiCost: g.sumApiCost, turns: g.sumTurns,
       };
     });
     rows.sort((a, b) => (b.lo - a.lo) || (b.p1 - a.p1) || (a.cost - b.cost));
@@ -1304,6 +1313,7 @@ const PORTAL_JS: &str = r#"
     if (col === 'tasks') return r.nTasks;
     if (col === 'avg') return r.avgPct;
     if (col === 'cost') return r.cost;
+    if (col === 'apiCost') return r.apiCost;
     if (col === 'turns') return r.turns;
     if (col === 'p1') return r.p1;
     return r.lo;
@@ -1335,6 +1345,7 @@ const PORTAL_JS: &str = r#"
         <td style="text-align: center; font-weight: 700;">${r.avgPct.toFixed(0)}%</td>
         <td style="text-align: center; font-weight: 700;">${r.p1.toFixed(0)}% <span style="font-size: 0.7rem; color: var(--mut);">(${r.lo.toFixed(0)}–${r.hi.toFixed(0)})</span>
           <div style="font-size: 0.7rem; color: var(--mut);">${r.nPass}/${r.nTrials} trials</div></td>
+        <td style="text-align: center;">$${r.apiCost.toFixed(4)}</td>
         <td style="text-align: center;">$${r.cost.toFixed(4)}</td>
         <td style="text-align: center;">${r.turns}</td>
       </tr>`;
@@ -1351,7 +1362,8 @@ const PORTAL_JS: &str = r#"
           <th onclick="window.__subdollar_models_sort('tasks')" style="cursor: pointer;">Tasks${arrow('tasks')}</th>
           <th onclick="window.__subdollar_models_sort('avg')" style="cursor: pointer;">Mean avg%${arrow('avg')}</th>
           <th onclick="window.__subdollar_models_sort('p1lo')" style="cursor: pointer;">Pooled P@1 (95% CI)${arrow('p1lo')}</th>
-          <th onclick="window.__subdollar_models_sort('cost')" style="cursor: pointer;">Total cost${arrow('cost')}</th>
+          <th onclick="window.__subdollar_models_sort('apiCost')" style="cursor: pointer;">Total API cost${arrow('apiCost')}</th>
+          <th onclick="window.__subdollar_models_sort('cost')" style="cursor: pointer;">Total effective cost${arrow('cost')}</th>
           <th onclick="window.__subdollar_models_sort('turns')" style="cursor: pointer;">Total turns${arrow('turns')}</th>
         </tr></thead>
         <tbody>${body}</tbody>
@@ -1615,6 +1627,7 @@ impl PortalExporter {
             n_pass: usize,
             sum_avg: f64,
             sum_cost: f64,
+            sum_api_cost: f64,
             worst_stab: u8,
         }
         fn stab_rank(stability: Option<&str>) -> u8 {
@@ -1634,6 +1647,7 @@ impl PortalExporter {
                 n_pass: 0,
                 sum_avg: 0.0,
                 sum_cost: 0.0,
+                sum_api_cost: 0.0,
                 worst_stab: 0,
             });
             g.tasks.insert(r.task.clone());
@@ -1653,6 +1667,7 @@ impl PortalExporter {
             g.sum_avg += r.avg_pass_rate.unwrap_or(r.pass_rate);
             // Prefer effective (API + compute) cost, fall back to API-only.
             g.sum_cost += r.effective_cost_usd.unwrap_or(r.total_cost_usd);
+            g.sum_api_cost += r.total_cost_usd;
             g.worst_stab = g.worst_stab.max(stab_rank(r.stability.as_deref()));
         }
 
@@ -1679,6 +1694,8 @@ impl PortalExporter {
                     p1_hi,
                     total_cost_usd: g.sum_cost,
                     avg_cost_usd: g.sum_cost / g.n_parents.max(1) as f64,
+                    total_api_cost_usd: g.sum_api_cost,
+                    avg_api_cost_usd: g.sum_api_cost / g.n_parents.max(1) as f64,
                     stability: match g.worst_stab {
                         3 => Some("unstable".to_string()),
                         2 => Some("watch".to_string()),
@@ -1757,7 +1774,9 @@ impl PortalExporter {
                  <td style=\"text-align:center;\">{ntrials} <span style=\"font-size:0.72rem;color:var(--mut);\">trials / {nparents} runs</span></td>\
                  <td style=\"text-align:center;font-weight:700;\">{avg:.0}%</td>\
                  <td style=\"text-align:center;font-weight:700;\">{p1:.0}% <span style=\"font-size:0.72rem;color:var(--mut);\">({lo:.0}–{hi:.0})</span></td>\
+                 <td style=\"text-align:center;\">${total_api:.4}</td>\
                  <td style=\"text-align:center;\">${total:.4}</td>\
+                 <td style=\"text-align:center;\">${avg_api:.4}</td>\
                  <td style=\"text-align:center;\">${avgc:.4}</td>\
                  <td style=\"text-align:center;\">{stab}</td></tr>\n",
                 medal = medal,
@@ -1773,6 +1792,8 @@ impl PortalExporter {
                 hi = r.p1_hi,
                 total = r.total_cost_usd,
                 avgc = r.avg_cost_usd,
+                total_api = r.total_api_cost_usd,
+                avg_api = r.avg_api_cost_usd,
                 stab = stab,
             ));
         }
@@ -1786,7 +1807,7 @@ impl PortalExporter {
              <p style=\"font-size:0.8rem;color:var(--mut);\">Per-run detail (logs, code, workspaces) is internal and not published here.</p>\
              <table><thead><tr>\
              <th>#</th><th>Model</th><th>Tasks</th><th>Trials</th><th>Avg pass</th>\
-             <th>P@1 (lo-hi)</th><th>Total cost</th><th>Avg cost/run</th><th>Stability</th>\
+             <th>P@1 (lo-hi)</th><th>Total API cost</th><th>Total effective cost</th><th>Avg API cost/run</th><th>Avg effective cost/run</th><th>Stability</th>\
              </tr></thead><tbody>{trs}</tbody></table>{methodology}{floor_note}\
              <footer class=\"muted\">SubDollarBench rollup · {now}</footer></main></body></html>",
             css = PORTAL_CSS,
@@ -2060,6 +2081,7 @@ impl PortalExporter {
                 3 => "🥉 #3".to_string(),
                 n => format!("#{}", n),
             };
+            let api_c = r.total_cost_usd;
             let eff_c = r.effective_cost_usd.unwrap_or(r.total_cost_usd);
             let dur_s = r.duration_seconds.unwrap_or(0.0);
             let dur_txt = format_duration(dur_s);
@@ -2126,7 +2148,7 @@ impl PortalExporter {
 
             let (m_fam, m_icon, m_color, m_bg, m_border) = Self::get_model_meta(&r.model);
             initial_rows.push_str(&format!(
-                "<tr data-href=\"runs/{}/\" class=\"leaderboard-row\" style=\"border-left: 4px solid {}; background: linear-gradient(90deg, {} 0%, rgba(18, 23, 36, 0.6) 12%, transparent 100%);\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><div class=\"model-pill\" style=\"background:{};border:1px solid {};\"><span class=\"model-icon\" title=\"{}\">{}</span><a href=\"runs/{}/\" style=\"font-weight:600;color:{};text-decoration:none;\" title=\"{}\">{}</a></div> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
+                "<tr data-href=\"runs/{}/\" class=\"leaderboard-row\" style=\"border-left: 4px solid {}; background: linear-gradient(90deg, {} 0%, rgba(18, 23, 36, 0.6) 12%, transparent 100%);\"><td style=\"text-align:center;\">{}</td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap;\"><div class=\"model-pill\" style=\"background:{};border:1px solid {};\"><span class=\"model-icon\" title=\"{}\">{}</span><a href=\"runs/{}/\" style=\"font-weight:600;color:{};text-decoration:none;\" title=\"{}\">{}</a></div> <span class=\"badge badge-info\">{}</span>{} <span class=\"badge\" style=\"background:rgba(63,185,80,0.15);color:var(--grn);\">{}</span></div><div style=\"font-size:0.72rem;color:var(--mut);\">{}</div>{}</div></td>                 <td><div style=\"display:flex;flex-direction:column;gap:3px;\"><div>{}</div>{}<div><span class=\"badge badge-effort\">effort: {}</span></div></div></td>                 <td><span style=\"font-weight:500;\">{}</span></td>                 <td style=\"text-align:center;\"><span class=\"badge\" style=\"background:rgba(88,166,255,0.15);color:var(--acc);font-weight:600;\">{}</span></td>                 <td><span style=\"font-weight:600;\">{}</span></td>                 <td><div style=\"display:flex;flex-direction:column;gap:2px;\"><div><span style=\"font-size:0.72rem;color:var(--mut);\">API </span><span style=\"font-weight:600;\">${:.4}</span></div><div><span style=\"font-size:0.72rem;color:var(--mut);\">Effective </span><span style=\"font-weight:600;color:var(--gold);\">${:.4}</span></div><span style=\"font-size:0.72rem;color:var(--mut);\">{}</span></div></td>                 <td class=\"score\"><div style=\"font-size:0.95rem;font-weight:700;\">{:.1} <small style=\"font-size:0.72rem;color:var(--mut);\">pts/¢</small></div></td>                 <td><a href=\"runs/{}/\" class=\"badge badge-info\" style=\"text-decoration:none;padding:4px 8px;\">Inspect &rarr;</a></td></tr>\n",
                 Self::esc(&r.id),
                 m_color,
                 m_bg,
@@ -2150,6 +2172,7 @@ impl PortalExporter {
                 dur_txt,
                 turns_str,
                 tp,
+                api_c,
                 eff_c,
                 tok_txt,
                 score,
@@ -2714,6 +2737,10 @@ mod tests {
         assert!((a.avg_pass_rate - 75.0).abs() < 1e-9);
         assert!((a.total_cost_usd - 0.30).abs() < 1e-9);
         assert!((a.avg_cost_usd - 0.15).abs() < 1e-9);
+        // Dual cost columns: API-only sums tracked separately from effective.
+        // model-a: API 0.10 + 0.20 = 0.30; effective 0.10 + 0.20 (fallback) = 0.30.
+        assert!((a.total_api_cost_usd - 0.30).abs() < 1e-9);
+        assert!((a.avg_api_cost_usd - 0.15).abs() < 1e-9);
         // Pooled P@1: 3 passing of 6 trials; Wilson interval brackets it.
         assert!((a.p1 - 50.0).abs() < 1e-9);
         assert!(a.p1_lo <= a.p1 && a.p1 <= a.p1_hi);
@@ -2726,6 +2753,10 @@ mod tests {
         assert!(html.contains("model-b"));
         assert!(html.contains("75%"));
         assert!(html.contains("P@1 (lo-hi)"));
+        assert!(html.contains("Total API cost"));
+        assert!(html.contains("Total effective cost"));
+        assert!(html.contains("Avg API cost/run"));
+        assert!(html.contains("Avg effective cost/run"));
         assert!(html.contains("<style>:root{color-scheme:dark;--bg:"));
         assert!(!html.contains("{{"));
         // Zero per-run detail: no run ids, no per-run links.
