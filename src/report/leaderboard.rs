@@ -765,6 +765,17 @@ impl LeaderboardManager {
     }
 
     pub fn save_result(results_dir: &str, result: &BenchmarkRunResult) -> Result<()> {
+        // Publish hygiene: test/CI probe runs (ids starting with `test_`) must
+        // never reach the primary store or the export copies. Refuse loudly
+        // (warn on stderr, Ok to the caller) so probes stay invisible to the
+        // leaderboard, portal, and rollup.
+        if result.id.starts_with("test_") {
+            eprintln!(
+                "[LEADERBOARD] save_result: refusing to publish test run `{}`; skipped",
+                result.id
+            );
+            return Ok(());
+        }
         // Fail-closed ordering: the DB upsert runs BEFORE the JSON export
         // copy. On DB error the write aborts before touching the filesystem
         // (loud anyhow context, not a silent skip), so the export copy can
@@ -1861,5 +1872,55 @@ mod tests {
             LeaderboardManager::short_model_name("gemini-3.8-flash"),
             "gemini-3.8-flash"
         );
+    }
+
+    #[test]
+    fn test_save_result_refuses_test_ids() {
+        let temp = std::env::temp_dir().join(format!("test_guard_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        let mk = |id: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "probe-model".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.001,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-09-26T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+        };
+        // test_ ids are refused: Ok, but nothing written.
+        LeaderboardManager::save_result(temp.to_str().unwrap(), &mk("test_probe_1")).unwrap();
+        assert!(!temp.join("test_probe_1.json").exists());
+        // Ordinary ids still save.
+        LeaderboardManager::save_result(temp.to_str().unwrap(), &mk("real_run_1")).unwrap();
+        assert!(temp.join("real_run_1.json").exists());
+        let _ = fs::remove_dir_all(&temp);
     }
 }

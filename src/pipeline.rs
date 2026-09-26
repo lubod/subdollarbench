@@ -1114,8 +1114,12 @@ impl BenchmarkPipeline {
             // Runs index mirror (best-effort, never fatal): the new trial
             // manifest is queryable via /api/runs without an FS scan.
             // archive_run stays FS-pure; this callsite owns the DB write.
-            if let Ok(store) = crate::report::Store::open(&get_repo_root().join("bench.db")) {
-                let _ = store.upsert_run_manifest(&manifest);
+            // Publish hygiene: test/CI probe runs never reach the shared store
+            // (mirrors the save_result `test_` guard, which covers parents + JSON).
+            if !manifest.run_id.starts_with("test_") {
+                if let Ok(store) = crate::report::Store::open(&get_repo_root().join("bench.db")) {
+                    let _ = store.upsert_run_manifest(&manifest);
+                }
             }
             let results_dir = get_repo_root().join("results");
             let _ = LeaderboardManager::save_result(
@@ -1290,10 +1294,14 @@ mod tests {
                 && first_line.contains("] [PIPELINE] Starting benchmark run")
         );
 
-        // Clean up
+        // Clean up, including the probe's DB rows (parents + runs tables).
         let _ = fs::remove_dir_all(&temp_workdir);
         let _ = fs::remove_dir_all(runs_dir.join(&run_id));
         let results_dir = get_repo_root().join("results");
         let _ = fs::remove_file(results_dir.join(format!("{}.json", run_id)));
+        if let Ok(store) = crate::report::Store::open(&get_repo_root().join("bench.db")) {
+            let _ = store.delete_parent(&run_id);
+            let _ = store.delete_run_manifest(&run_id);
+        }
     }
 }
