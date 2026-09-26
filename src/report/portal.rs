@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::report::archive::RunManifest;
-use crate::report::leaderboard::{format_duration, LeaderboardManager};
+use crate::report::leaderboard::{format_duration, wilson_interval_95, LeaderboardManager};
 
 pub const PORTAL_HIDDEN_FILE: &str = ".portal_hidden";
 
@@ -42,6 +43,24 @@ pub fn set_hidden(runs_dir: &Path, run_id: &str, hidden: bool) -> anyhow::Result
 pub struct PortalSummary {
     pub run_count: usize,
     pub out_dir: PathBuf,
+}
+
+/// One aggregated row of the public model rollup: a model across all tasks.
+#[derive(Debug, Clone)]
+pub struct ModelRollupRow {
+    pub model: String,
+    pub n_tasks: usize,
+    pub tasks: Vec<String>,
+    pub n_parents: usize,
+    pub n_trials: usize,
+    pub n_pass: usize,
+    pub avg_pass_rate: f64,
+    pub p1: f64,
+    pub p1_lo: f64,
+    pub p1_hi: f64,
+    pub total_cost_usd: f64,
+    pub avg_cost_usd: f64,
+    pub stability: Option<String>,
 }
 
 const PORTAL_CSS: &str = r#":root{color-scheme:dark;--bg:#0b0e14;
@@ -1518,6 +1537,234 @@ impl PortalExporter {
         })
     }
 
+
+    /// Model-rollup-only export for the public portal: one row per model
+    /// across ALL tasks. No per-run detail, no run ids or links, no
+    /// console/workspace content. Writes ONLY `index.html` and leaves any
+    /// existing `runs/` directory as-is, so stale per-run pages are never
+    /// served as fresh output. Per-run detail stays internal (see `export`
+    /// above); the public portal is aggregated by design.
+    pub fn export_rollup(results_dir: &str, out: &str, base_url: &str) -> Result<PortalSummary> {
+        let results = LeaderboardManager::load_all(results_dir);
+        let rows = Self::rollup_models(&results);
+        let out_dir = Path::new(out);
+        fs::create_dir_all(out_dir)
+            .with_context(|| format!("create portal dir {}", out_dir.display()))?;
+        fs::write(
+            out_dir.join("index.html"),
+            Self::render_rollup_index(&rows, base_url),
+        )?;
+        Ok(PortalSummary {
+            run_count: rows.len(),
+            out_dir: out_dir.to_path_buf(),
+        })
+    }
+
+    /// Aggregate parents into one row per model across all tasks.
+    /// Step 1 (dedup): one canonical parent per (model, effort, task) —
+    /// highest trial count wins, latest timestamp breaks ties — mirroring
+    /// the `aggregateModels` cross-task rollup in PORTAL_JS. Step 2: group
+    /// canonical parents by model only (no per-task split).
+    fn rollup_models(
+        results: &[crate::report::leaderboard::BenchmarkRunResult],
+    ) -> Vec<ModelRollupRow> {
+        let mut canonical: HashMap<
+            (String, String, String),
+            &crate::report::leaderboard::BenchmarkRunResult,
+        > = HashMap::new();
+        for r in results {
+            let key = (
+                r.model.clone(),
+                r.effort.clone().unwrap_or_else(|| "auto".to_string()),
+                r.task.to_lowercase(),
+            );
+            let n = r.total_trials.unwrap_or(r.subruns.len() as u32).max(1);
+            let replace = match canonical.get(&key) {
+                None => true,
+                Some(ex) => {
+                    let ex_n = ex.total_trials.unwrap_or(ex.subruns.len() as u32).max(1);
+                    n > ex_n || (n == ex_n && r.timestamp > ex.timestamp)
+                }
+            };
+            if replace {
+                canonical.insert(key, r);
+            }
+        }
+
+        struct Acc {
+            tasks: HashSet<String>,
+            n_parents: usize,
+            n_trials: usize,
+            n_pass: usize,
+            sum_avg: f64,
+            sum_cost: f64,
+            worst_stab: u8,
+        }
+        fn stab_rank(stability: Option<&str>) -> u8 {
+            match stability {
+                Some("unstable") => 3,
+                Some("watch") => 2,
+                Some("stable") => 1,
+                _ => 0,
+            }
+        }
+        let mut groups: HashMap<String, Acc> = HashMap::new();
+        for r in canonical.into_values() {
+            let g = groups.entry(r.model.clone()).or_insert_with(|| Acc {
+                tasks: HashSet::new(),
+                n_parents: 0,
+                n_trials: 0,
+                n_pass: 0,
+                sum_avg: 0.0,
+                sum_cost: 0.0,
+                worst_stab: 0,
+            });
+            g.tasks.insert(r.task.clone());
+            let n = r.total_trials.unwrap_or(r.subruns.len() as u32).max(1) as usize;
+            let c = if r.subruns.is_empty() {
+                if r.avg_pass_rate.unwrap_or(r.pass_rate) >= 100.0 {
+                    n
+                } else {
+                    0
+                }
+            } else {
+                r.subruns.iter().filter(|s| s.pass_rate >= 100.0).count()
+            };
+            g.n_parents += 1;
+            g.n_trials += n;
+            g.n_pass += c;
+            g.sum_avg += r.avg_pass_rate.unwrap_or(r.pass_rate);
+            // Prefer effective (API + compute) cost, fall back to API-only.
+            g.sum_cost += r.effective_cost_usd.unwrap_or(r.total_cost_usd);
+            g.worst_stab = g.worst_stab.max(stab_rank(r.stability.as_deref()));
+        }
+
+        let mut rows: Vec<ModelRollupRow> = groups
+            .into_iter()
+            .map(|(model, g)| {
+                let (p1_lo, p1_hi) = wilson_interval_95(g.n_trials, g.n_pass);
+                let mut tasks: Vec<String> = g.tasks.into_iter().collect();
+                tasks.sort();
+                ModelRollupRow {
+                    n_tasks: tasks.len(),
+                    tasks,
+                    model,
+                    n_parents: g.n_parents,
+                    n_trials: g.n_trials,
+                    n_pass: g.n_pass,
+                    avg_pass_rate: g.sum_avg / g.n_parents.max(1) as f64,
+                    p1: if g.n_trials > 0 {
+                        100.0 * g.n_pass as f64 / g.n_trials as f64
+                    } else {
+                        0.0
+                    },
+                    p1_lo,
+                    p1_hi,
+                    total_cost_usd: g.sum_cost,
+                    avg_cost_usd: g.sum_cost / g.n_parents.max(1) as f64,
+                    stability: match g.worst_stab {
+                        3 => Some("unstable".to_string()),
+                        2 => Some("watch".to_string()),
+                        1 => Some("stable".to_string()),
+                        _ => None,
+                    },
+                }
+            })
+            .collect();
+        // Rank by average pass rate (desc), then P@1 lower bound, then cost.
+        rows.sort_by(|a, b| {
+            b.avg_pass_rate
+                .partial_cmp(&a.avg_pass_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.p1_lo
+                        .partial_cmp(&a.p1_lo)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.total_cost_usd
+                        .partial_cmp(&b.total_cost_usd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        rows
+    }
+
+    /// Rollup `index.html`: one row per model, zero per-run links or ids.
+    fn render_rollup_index(rows: &[ModelRollupRow], base_url: &str) -> String {
+        let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+        let base_info = if base_url.is_empty() {
+            String::new()
+        } else {
+            format!(" · Base: {}", Self::esc(base_url))
+        };
+        let mut trs = String::new();
+        for (i, r) in rows.iter().enumerate() {
+            let medal = match i + 1 {
+                1 => "🥇 #1".to_string(),
+                2 => "🥈 #2".to_string(),
+                3 => "🥉 #3".to_string(),
+                n => format!("#{}", n),
+            };
+            let stab = match r.stability.as_deref() {
+                Some("stable") => {
+                    "<span class=\"badge badge-pass\">🟢 stable</span>".to_string()
+                }
+                Some("watch") => {
+                    "<span class=\"badge badge-info\">🟡 watch</span>".to_string()
+                }
+                Some("unstable") => {
+                    "<span class=\"badge badge-fail\">🔴 unstable</span>".to_string()
+                }
+                _ => "<span style=\"color:var(--mut);\">-</span>".to_string(),
+            };
+            trs.push_str(&format!(
+                "<tr><td style=\"text-align:center;\">{medal}</td>\
+                 <td><span style=\"font-weight:600;\" title=\"{model}\">{short}</span></td>\
+                 <td style=\"text-align:center;\">{ntasks} <span style=\"font-size:0.72rem;color:var(--mut);\" title=\"{tasks}\">{tasks}</span></td>\
+                 <td style=\"text-align:center;\">{ntrials} <span style=\"font-size:0.72rem;color:var(--mut);\">trials / {nparents} runs</span></td>\
+                 <td style=\"text-align:center;font-weight:700;\">{avg:.0}%</td>\
+                 <td style=\"text-align:center;font-weight:700;\">{p1:.0}% <span style=\"font-size:0.72rem;color:var(--mut);\">({lo:.0}–{hi:.0})</span></td>\
+                 <td style=\"text-align:center;\">${total:.4}</td>\
+                 <td style=\"text-align:center;\">${avgc:.4}</td>\
+                 <td style=\"text-align:center;\">{stab}</td></tr>\n",
+                medal = medal,
+                model = Self::esc(&r.model),
+                short = Self::esc(LeaderboardManager::short_model_name(&r.model)),
+                ntasks = r.n_tasks,
+                tasks = Self::esc(&r.tasks.join(", ")),
+                ntrials = r.n_trials,
+                nparents = r.n_parents,
+                avg = r.avg_pass_rate,
+                p1 = r.p1,
+                lo = r.p1_lo,
+                hi = r.p1_hi,
+                total = r.total_cost_usd,
+                avgc = r.avg_cost_usd,
+                stab = stab,
+            ));
+        }
+        format!(
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+             <title>SubDollarBench Model Rollup</title>\
+             <style>{css}</style></head><body><main>\
+             <h1>🏆 SubDollarBench Model Rollup</h1>\
+             <div class=\"sub\">Public aggregate: one row per model across all tasks · {n} models · {now}{base_info}</div>\
+             <p style=\"font-size:0.8rem;color:var(--mut);\">Per-run detail (logs, code, workspaces) is internal and not published here.</p>\
+             <table><thead><tr>\
+             <th>#</th><th>Model</th><th>Tasks</th><th>Trials</th><th>Avg pass</th>\
+             <th>P@1 (lo-hi)</th><th>Total cost</th><th>Avg cost/run</th><th>Stability</th>\
+             </tr></thead><tbody>{trs}</tbody></table>\
+             <footer class=\"muted\">SubDollarBench rollup · {now}</footer></main></body></html>",
+            css = PORTAL_CSS,
+            n = rows.len(),
+            now = now,
+            base_info = base_info,
+            trs = trs,
+        )
+    }
+
     fn secret_patterns() -> Vec<Regex> {
         [
             r"sk-or-v1-[A-Za-z0-9_-]+",
@@ -2358,6 +2605,133 @@ mod tests {
         assert!(run_page.contains("done well"));
         let log = fs::read_to_string(out_dir.join("runs/demo_run_1/console.log")).unwrap();
         assert!(!log.contains("sk-or-v1-zzz"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    fn rollup_parent(
+        id: &str,
+        model: &str,
+        task: &str,
+        pass: f64,
+        cost: f64,
+        effective: Option<f64>,
+        trials: u32,
+        stab: Option<&str>,
+    ) -> crate::report::leaderboard::BenchmarkRunResult {
+        crate::report::leaderboard::BenchmarkRunResult {
+            id: id.to_string(),
+            model: model.to_string(),
+            task: task.to_string(),
+            language: "Python".to_string(),
+            effort: Some("high".to_string()),
+            pass_rate: pass,
+            passed_stages: 5,
+            total_stages: 5,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: cost,
+            effective_cost_usd: effective,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-09-26T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: vec![],
+            total_trials: Some(trials),
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: Some(pass),
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: stab.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_rollup_groups_by_model_across_tasks() {
+        let parents = vec![
+            rollup_parent("roll_a1", "model-a", "http", 100.0, 0.10, Some(0.10), 3, Some("stable")),
+            // effective cost absent -> falls back to total_cost_usd.
+            rollup_parent("roll_a2", "model-a", "redis", 50.0, 0.20, None, 3, Some("watch")),
+            rollup_parent("roll_b1", "model-b", "http", 100.0, 0.05, Some(0.05), 1, None),
+        ];
+        let rows = PortalExporter::rollup_models(&parents);
+        assert_eq!(rows.len(), 2);
+        // Sorted by avg pass desc: model-b (100) before model-a (75).
+        assert_eq!(rows[0].model, "model-b");
+        assert_eq!(rows[1].model, "model-a");
+        let a = &rows[1];
+        assert_eq!(a.n_tasks, 2);
+        assert_eq!(a.tasks, vec!["http".to_string(), "redis".to_string()]);
+        assert_eq!(a.n_trials, 6);
+        assert_eq!(a.n_parents, 2);
+        assert!((a.avg_pass_rate - 75.0).abs() < 1e-9);
+        assert!((a.total_cost_usd - 0.30).abs() < 1e-9);
+        assert!((a.avg_cost_usd - 0.15).abs() < 1e-9);
+        // Pooled P@1: 3 passing of 6 trials; Wilson interval brackets it.
+        assert!((a.p1 - 50.0).abs() < 1e-9);
+        assert!(a.p1_lo <= a.p1 && a.p1 <= a.p1_hi);
+        assert!(a.p1_hi - a.p1_lo > 1.0);
+        // Stability is worst-case across the model's parents.
+        assert_eq!(a.stability.as_deref(), Some("watch"));
+
+        let html = PortalExporter::render_rollup_index(&rows, "");
+        assert!(html.contains("model-a"));
+        assert!(html.contains("model-b"));
+        assert!(html.contains("75%"));
+        assert!(html.contains("P@1 (lo-hi)"));
+        assert!(html.contains("<style>:root{color-scheme:dark;--bg:"));
+        assert!(!html.contains("{{"));
+        // Zero per-run detail: no run ids, no per-run links.
+        for id in ["roll_a1", "roll_a2", "roll_b1"] {
+            assert!(!html.contains(id), "run id {id} leaked into rollup");
+        }
+        assert!(!html.contains("runs/"));
+    }
+
+    #[test]
+    fn test_export_rollup_writes_index_only() {
+        let base = std::env::temp_dir().join(format!("test_portal_rollup_{}", std::process::id()));
+        let results_dir = base.join("results");
+        let out_dir = base.join("portal");
+        fs::create_dir_all(&results_dir).unwrap();
+        let parents = vec![
+            rollup_parent("roll_c1", "model-c", "http", 100.0, 0.10, Some(0.10), 2, Some("stable")),
+            rollup_parent("roll_c2", "model-c", "wal", 100.0, 0.10, Some(0.10), 2, Some("stable")),
+        ];
+        for p in &parents {
+            fs::write(
+                results_dir.join(format!("{}.json", p.id)),
+                serde_json::to_string_pretty(p).unwrap(),
+            )
+            .unwrap();
+        }
+        let summary = PortalExporter::export_rollup(
+            results_dir.to_str().unwrap(),
+            out_dir.to_str().unwrap(),
+            "",
+        )
+        .unwrap();
+        assert_eq!(summary.run_count, 1);
+        let index = fs::read_to_string(out_dir.join("index.html")).unwrap();
+        assert!(index.contains("model-c"));
+        assert!(!index.contains("roll_c1"));
+        assert!(!index.contains("roll_c2"));
+        assert!(!index.contains("runs/"));
+        // Rollup mode writes index.html only: no per-run pages, no results.json.
+        assert!(!out_dir.join("runs").exists());
+        assert!(!out_dir.join("results.json").exists());
 
         let _ = fs::remove_dir_all(&base);
     }

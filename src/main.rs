@@ -869,6 +869,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             out,
             base_url,
             keep,
+            rollup_only,
         } => {
             let runs_path = std::path::Path::new(&runs_dir);
             let mut ids: Vec<String> = std::fs::read_dir(runs_path)
@@ -929,10 +930,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            let summary = PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?;
+            let summary = if rollup_only {
+                PortalExporter::export_rollup(&results_dir, &out, &base_url)?
+            } else {
+                PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?
+            };
             println!(
-                "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} runs",
-                summary.run_count
+                "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} {}",
+                summary.run_count,
+                if rollup_only { "models (rollup-only)" } else { "runs" },
             );
         }
         Commands::Portal {

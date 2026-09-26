@@ -148,6 +148,10 @@ pub enum Commands {
         /// Maximum number of runs to include (newest first)
         #[arg(long, default_value_t = 200)]
         keep: usize,
+
+        /// Model-rollup-only portal (one row per model, no per-run pages)
+        #[arg(long, default_value_t = false)]
+        rollup_only: bool,
     },
     Portal {
         /// Path to runs directory
