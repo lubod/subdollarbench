@@ -771,7 +771,7 @@ async fn get_models(
                         .and_then(|r| r.default_enabled)
                         .unwrap_or(false);
 
-                if prompt_p <= 1.0 && comp_p <= 5.0 && (prompt_p > 0.0 || comp_p > 0.0) {
+                if prompt_p <= 1.0 && comp_p <= 1.0 && (prompt_p > 0.0 || comp_p > 0.0) {
                     models.push(SubDollarModel {
                         id: item.id,
                         name: item.name,
