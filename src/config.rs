@@ -65,9 +65,9 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         queue: bool,
 
-        /// `ui` engine base URL (or SDB_SERVER); only used with --queue
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL (only used with --queue). Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
 
         /// Model used for the end-of-run code review judge (defaults to openrouter/meta/muse-spark-1.3-contributor)
         #[arg(long)]
@@ -192,6 +192,7 @@ pub enum Commands {
     },
 
     /// [operate] Follow a live run's console log (stage markers highlighted)
+    #[command(hide = true)]
     Watch {
         /// Run id or unambiguous prefix (see `runs`)
         run: String,
@@ -278,6 +279,7 @@ pub enum Commands {
     },
 
     /// [operate] Plan an effort x model x task comparison wave (prints shell commands)
+    #[command(hide = true)]
     Matrix {
         /// Comma-separated models (default: all four cheap models)
         #[arg(
@@ -409,9 +411,9 @@ pub enum Commands {
 
     /// [operate] Live engine status: idle/running, current + last run (GET /api/status)
     Status {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
 
         /// Emit raw JSON
         #[arg(long, default_value_t = false)]
@@ -420,9 +422,9 @@ pub enum Commands {
 
     /// [operate] Live queue contents (GET /api/queue)
     Queue {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
 
         /// Emit raw JSON
         #[arg(long, default_value_t = false)]
@@ -430,10 +432,11 @@ pub enum Commands {
     },
 
     /// [operate] Merged engine view: live queue head + archived manifests with filters
+    #[command(hide = true)]
     Ps {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
 
         /// Filter by model substring
         #[arg(long)]
@@ -514,12 +517,13 @@ pub enum Commands {
         #[arg(long)]
         review_model: Option<String>,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Queue an extension behind the live job (POST /api/runs/:id/extend)
+    #[command(hide = true)]
     QueueExtend {
         /// Parent run id or unambiguous prefix
         parent: String,
@@ -548,9 +552,9 @@ pub enum Commands {
         #[arg(long, default_value = "./results")]
         results_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Remove one pending queue item (DELETE /api/queue/:id)
@@ -558,23 +562,23 @@ pub enum Commands {
         /// Queue id (e.g. q4)
         id: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Drop finished queue history (DELETE /api/queue; pending work untouched)
     QueueClear {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Stop the live run: cancel flag + abort + sandbox cleanup (POST /api/run/stop)
     Stop {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Live console tail from the engine buffer (GET /api/console)
@@ -596,9 +600,9 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         follow: bool,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] Archived manifest for a run (GET /api/runs/:id)
@@ -614,12 +618,13 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] Stage-by-stage server diff of two runs (GET /api/compare)
+    #[command(hide = true)]
     Sdiff {
         /// Baseline run id or prefix
         a: String,
@@ -631,9 +636,9 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] Workspace file list for a run (GET /api/runs/:id/files)
@@ -645,9 +650,9 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] One workspace file for a run (GET /api/runs/:id/file)
@@ -662,9 +667,9 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] Code review judge output for a run (GET /api/runs/:id/review)
@@ -676,12 +681,13 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] Leaderboard rows from the engine (GET /api/leaderboard)
+    #[command(hide = true)]
     Lboard {
         /// Filter by task ('http', 'redis', 'dns', or 'all')
         #[arg(short, long, default_value = "all")]
@@ -691,9 +697,9 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [analyze] Task prompt from the engine (GET /api/prompt/:task)
@@ -705,16 +711,16 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         save: bool,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] Host environment from the engine (GET /api/env)
     Env {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Model catalog under $1/M with prices and effort levels (GET /api/models)
@@ -739,16 +745,16 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] OMP sandbox status via the engine (GET /api/sandbox/omp)
     Omp {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] Update the sandbox image via the engine (POST /api/sandbox/omp/update)
@@ -757,16 +763,16 @@ pub enum Commands {
         #[arg(short, long)]
         version: Option<String>,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] Rebuild the static portal via the engine (POST /api/portal/rebuild)
     PortalRebuild {
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] Show or hide a run in the portal (POST /api/runs/:id/portal)
@@ -782,9 +788,9 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] Delete a run and its result (DELETE /api/runs/:id)
@@ -800,9 +806,9 @@ pub enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
-        /// `ui` engine base URL (or SDB_SERVER)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        server: String,
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [maintain] Pre-flight checks: docker, images, API key, ports, leaks (read-only)
@@ -1264,14 +1270,63 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_engine_commands() {
+        // `SDB_SERVER` is process-global: hold the shared env guard so
+        // parallel env tests (e.g. remote's resolver test) cannot leak in.
+        let _env_guard = crate::remote::keep_env();
         let cli = Cli::try_parse_from(["subdollarbench", "status"]).unwrap();
         match cli.command {
             Commands::Status { server, json } => {
-                assert_eq!(server, "http://127.0.0.1:3000");
+                assert_eq!(server, None);
                 assert!(!json);
+                assert_eq!(
+                    crate::remote::resolve_server(server.as_deref()),
+                    crate::remote::DEFAULT_SERVER
+                );
             }
             _ => panic!("Expected Status command"),
         }
+        // SDB_SERVER fills --server when the flag is absent; the flag wins.
+        // NOTE: clap `env` is deliberately NOT used on --server (a hard
+        // default_value would shadow the env var). The field stays None and
+        // the canonical remote::resolve_server applies flag > env > default.
+        std::env::set_var("SDB_SERVER", "http://env:4000");
+        let cli = Cli::try_parse_from(["subdollarbench", "status"]).unwrap();
+        match cli.command {
+            Commands::Status { server, .. } => {
+                // Clap `env` pickup is disabled, so the field stays None and
+                // the canonical resolver applies the env value.
+                assert_eq!(server, None);
+                assert_eq!(
+                    crate::remote::resolve_server(server.as_deref()),
+                    "http://env:4000"
+                );
+                // Direct resolver contract: flag > env > default.
+                assert_eq!(
+                    crate::remote::resolve_server(Some("http://flag:5000")),
+                    "http://flag:5000"
+                );
+            }
+            _ => panic!("Expected Status command"),
+        }
+        // The explicit flag also wins while the env var is set.
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "status",
+            "--server",
+            "http://flag:5000",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Status { server, .. } => {
+                assert_eq!(server, Some("http://flag:5000".to_string()));
+                assert_eq!(
+                    crate::remote::resolve_server(server.as_deref()),
+                    "http://flag:5000"
+                );
+            }
+            _ => panic!("Expected Status command"),
+        }
+        std::env::remove_var("SDB_SERVER");
         let cli = Cli::try_parse_from(["subdollarbench", "queue", "--json"]).unwrap();
         match cli.command {
             Commands::Queue { json, .. } => assert!(json),

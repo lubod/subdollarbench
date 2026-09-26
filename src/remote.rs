@@ -607,19 +607,49 @@ pub fn render_log(body: &str, tail: usize, stages_only: bool) -> String {
         .join("\n")
 }
 
+/// Process-wide guard serializing `SDB_SERVER` env access in tests.
+/// `std::env` is process-global: parallel tests that set/remove
+/// `SDB_SERVER` race each other, so every env-touching test must hold this.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
+
+/// Hold the env lock AND snapshot `SDB_SERVER`; on drop the lock releases
+/// and the previous value (or absence) is restored, even on panic.
+/// Usage: `let _guard = crate::remote::keep_env();` as the first line.
+#[cfg(test)]
+pub(crate) fn keep_env() -> impl Drop {
+    struct Guard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("SDB_SERVER", v),
+                None => std::env::remove_var("SDB_SERVER"),
+            }
+        }
+    }
+    let lock = TEST_ENV_LOCK.lock().unwrap();
+    let prev = std::env::var("SDB_SERVER").ok();
+    Guard { _lock: lock, prev }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_resolve_server_default_and_env() {
+        let _guard = keep_env();
         std::env::remove_var("SDB_SERVER");
         assert_eq!(resolve_server(None), DEFAULT_SERVER);
         assert_eq!(resolve_server(Some("http://x:3000/")), "http://x:3000");
         std::env::set_var("SDB_SERVER", "http://env:4000/");
         assert_eq!(resolve_server(None), "http://env:4000");
+        assert_eq!(resolve_server(Some("http://flag:5000")), "http://flag:5000");
         assert_eq!(resolve_server(Some("")), "http://env:4000");
-        std::env::remove_var("SDB_SERVER");
     }
 
     #[test]

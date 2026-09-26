@@ -829,7 +829,7 @@ impl LeaderboardManager {
     }
 
     /// Read-only open of the primary store; never creates bench.db.
-    fn open_store_if_exists() -> Option<crate::report::Store> {
+    pub fn open_store_if_exists() -> Option<crate::report::Store> {
         let db_path = Self::db_path();
         if !db_path.exists() {
             return None;

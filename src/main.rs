@@ -217,7 +217,13 @@ async fn run_trial_batch(
     })
 }
 
+/// Resolve `--server` for remote commands: flag > SDB_SERVER env > default.
+fn resolve_server_flag(server: &Option<String>) -> String {
+    remote::resolve_server(server.as_deref())
+}
+
 pub async fn run_cli(cli: Cli) -> Result<()> {
+    tracing::info!("repo root: {}", subdollarbench::config::get_repo_root().display());
     match cli.command {
         Commands::Run {
             model,
@@ -238,6 +244,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             max_trials,
         } => {
             if queue {
+                let server = resolve_server_flag(&server);
                 // Engine path: identical payload to `enqueue`, so matrix
                 // output stays uniform. Foreground stays the default.
                 let body = remote::run_request(
@@ -659,6 +666,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         if yes {
                             let data = serde_json::to_string_pretty(&out)?;
                             std::fs::write(&fp, data)?;
+                            // Best-effort DB mirror (same gating as consolidate); never fatal.
+                            if let Some(store) = LeaderboardManager::open_store_if_exists() {
+                                if let Err(e) = store.upsert_parent(&out) {
+                                    tracing::warn!(
+                                        "backfill DB upsert {} failed: {:#}",
+                                        out.id,
+                                        e
+                                    );
+                                }
+                            }
                             // Mirror the stamp into the parent manifest.
                             let mpath = subdollarbench::report::RunArchiver::resolve_runs_dir()
                                 .join(&run.id)
@@ -704,6 +721,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 if yes {
                     let data = serde_json::to_string_pretty(&out)?;
                     std::fs::write(&fp, data)?;
+                    // Best-effort DB mirror (same gating as consolidate); never fatal.
+                    if let Some(store) = LeaderboardManager::open_store_if_exists() {
+                        if let Err(e) = store.upsert_parent(&out) {
+                            tracing::warn!("backfill DB upsert {} failed: {:#}", out.id, e);
+                        }
+                    }
                     // Mirror headline + Wilson + rules into the parent manifest.
                     let mpath = subdollarbench::report::RunArchiver::resolve_runs_dir()
                         .join(&run.id)
@@ -1500,6 +1523,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Status { server, json } => {
+            let server = resolve_server_flag(&server);
             let v = remote::get_json(&server, "/api/status").await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -1509,6 +1533,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Queue { server, json } => {
+            let server = resolve_server_flag(&server);
             let v = remote::get_json(&server, "/api/queue").await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -1526,6 +1551,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             limit,
             runs_dir,
         } => {
+            let server = resolve_server_flag(&server);
             // Both calls are read-only; the engine keeps running untouched.
             let queue = remote::get_json(&server, "/api/queue").await?;
             let runs = remote::get_json(&server, "/api/runs").await?;
@@ -1560,6 +1586,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             review_model,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let body = remote::run_request(
                 &model,
                 &task.to_string(),
@@ -1599,6 +1626,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             results_dir,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let pid = resolve_parent_id(&results_dir, &parent)?;
             let body = remote::extend_body(
                 trials,
@@ -1624,15 +1652,18 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Dequeue { id, server } => {
+            let server = resolve_server_flag(&server);
             println!("{}", remote::delete_text(&server, &format!("/api/queue/{id}")).await?);
         }
 
         Commands::QueueClear { server } => {
+            let server = resolve_server_flag(&server);
             // Server only drops finished history; pending work is untouched.
             println!("{}", remote::delete_text(&server, "/api/queue").await?);
         }
 
         Commands::Stop { server } => {
+            let server = resolve_server_flag(&server);
             println!("{}", remote::post_empty(&server, "/api/run/stop").await?);
         }
 
@@ -1643,6 +1674,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             follow,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             // Poll the in-memory buffer (pre-flush live tail); --follow ends
             // when the engine goes idle. Read-only against the engine.
             let show = |line: &str| {
@@ -1684,6 +1716,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             runs_dir,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             let v = remote::get_json(&server, &format!("/api/runs/{id}")).await?;
             if json {
@@ -1694,6 +1727,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Sdiff { a, b, runs_dir, server } => {
+            let server = resolve_server_flag(&server);
             let ida = resolve_run_id(&runs_dir, &a)?;
             let idb = resolve_run_id(&runs_dir, &b)?;
             let v = remote::get_json(&server, &format!("/api/compare?run_a={ida}&run_b={idb}")).await?;
@@ -1701,6 +1735,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Ls { run, runs_dir, server } => {
+            let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             let v = remote::get_json(&server, &format!("/api/runs/{id}/files")).await?;
             let files = v.as_array().cloned().unwrap_or_default();
@@ -1717,17 +1752,20 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             runs_dir,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             print!("{}", remote::get_file_text(&server, &id, &file).await?);
         }
 
         Commands::Review { run, runs_dir, server } => {
+            let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             let v = remote::get_json(&server, &format!("/api/runs/{id}/review")).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
 
         Commands::Lboard { task, json, server } => {
+            let server = resolve_server_flag(&server);
             let v = remote::get_json(&server, &format!("/api/leaderboard?task={task}")).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -1744,6 +1782,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Prompt { task, save, server } => {
+            let server = resolve_server_flag(&server);
             if save {
                 let mut body = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)?;
@@ -1754,6 +1793,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Env { server } => {
+            let server = resolve_server_flag(&server);
             let v = remote::get_json(&server, "/api/env").await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
@@ -1766,6 +1806,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             json,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let v = remote::get_json(&server, "/api/models").await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -1784,17 +1825,20 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Omp { server } => {
+            let server = resolve_server_flag(&server);
             let v = remote::get_json(&server, "/api/sandbox/omp").await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
 
         Commands::OmpUpdate { version, server } => {
+            let server = resolve_server_flag(&server);
             let body = serde_json::json!({ "version": version });
             let v = remote::post_json(&server, "/api/sandbox/omp/update", &body).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
 
         Commands::PortalRebuild { server } => {
+            let server = resolve_server_flag(&server);
             println!("{}", remote::post_empty(&server, "/api/portal/rebuild").await?);
         }
 
@@ -1804,6 +1848,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             runs_dir,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             let body = serde_json::json!({ "hidden": !show });
             let v = remote::post_json(&server, &format!("/api/runs/{id}/portal"), &body).await?;
@@ -1816,6 +1861,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             runs_dir,
             server,
         } => {
+            let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             if !yes {
                 anyhow::bail!("refusing to delete {id} without --yes");
@@ -2048,7 +2094,7 @@ mod tests {
                 trials: 2,
                 no_save: true,
                 queue: false,
-                server: "http://127.0.0.1:3000".to_string(),
+                server: Some("http://127.0.0.1:3000".to_string()),
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
@@ -2104,7 +2150,7 @@ mod tests {
                 trials: 1,
                 no_save: true,
                 queue: false,
-                server: "http://127.0.0.1:3000".to_string(),
+                server: Some("http://127.0.0.1:3000".to_string()),
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
@@ -2156,7 +2202,7 @@ mod tests {
                 trials: 1,
                 no_save: true,
                 queue: false,
-                server: "http://127.0.0.1:3000".to_string(),
+                server: Some("http://127.0.0.1:3000".to_string()),
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
