@@ -878,6 +878,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             if all.is_empty() {
                 println!("No benchmark results found in {}", results_dir);
             } else {
+                subdollarbench::report::validate_comparison_wave(&all)?;
                 LeaderboardManager::print_effort_matrix(&all);
             }
         }
@@ -1326,6 +1327,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             tasks,
             trials,
             extra,
+            per_effort_columns,
         } => {
             let models: Vec<String> = models
                 .split(',')
@@ -1345,6 +1347,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             for t in &tasks {
                 parse_task(t)?;
             }
+            subdollarbench::report::validate_matrix_plan(&efforts, per_effort_columns)?;
             println!(
                 "# effort x model matrix: {} models x {} efforts x {} tasks x {} trials ({} runs)",
                 models.len(),

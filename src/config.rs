@@ -303,6 +303,12 @@ pub enum Commands {
         /// Extra flags appended to every generated `run` command
         #[arg(long, default_value = "")]
         extra: String,
+
+        /// Explicit per-effort-columns mode: efforts are displayed as
+        /// separate columns and never pooled into one ranking. Without
+        /// this flag a matrix wave requires uniform effort.
+        #[arg(long, default_value_t = false)]
+        per_effort_columns: bool,
     },
 
     /// [operate] Run 3 more trials for an unstable parent and re-merge
@@ -1229,12 +1235,14 @@ mod tests {
                 tasks,
                 trials,
                 extra,
+                per_effort_columns,
             } => {
                 assert!(models.contains("muse-spark"));
                 assert_eq!(efforts, "minimal,max");
                 assert_eq!(tasks, "redis,proxy,pdf");
                 assert_eq!(trials, 3);
                 assert_eq!(extra, "");
+                assert!(!per_effort_columns);
             }
             _ => panic!("Expected Matrix command"),
         }
