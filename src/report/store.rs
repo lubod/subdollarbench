@@ -325,6 +325,13 @@ impl Store {
         })
         .unwrap_or(0) as usize
     }
+
+    /// Delete one indexed run manifest row; missing rows are a no-op.
+    pub fn delete_run_manifest(&self, run_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -515,6 +522,11 @@ mod tests {
         let all = store.load_run_manifests();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].run_id, "run-1");
+        // Delete removes the row; deleting a missing id is a no-op.
+        store.delete_run_manifest("run-1").expect("delete run-1");
+        assert_eq!(store.run_manifest_count(), 0);
+        assert!(store.get_run_manifest("run-1").is_none());
+        store.delete_run_manifest("no-such-run").expect("delete missing ok");
         let _ = std::fs::remove_file(&db);
     }
 }

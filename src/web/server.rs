@@ -885,7 +885,7 @@ async fn get_run_review(AxumPath(run_id): AxumPath<String>) -> Response {
         Err(_) => (StatusCode::NOT_FOUND, "review not found").into_response(),
     }
 }
-async fn delete_run(AxumPath(run_id): AxumPath<String>) -> Response {
+async fn delete_run(State(state): State<AppState>, AxumPath(run_id): AxumPath<String>) -> Response {
     let clean = match clean_run_id(&run_id) {
         Some(c) => c,
         None => return (StatusCode::BAD_REQUEST, "invalid run id").into_response(),
@@ -914,6 +914,13 @@ async fn delete_run(AxumPath(run_id): AxumPath<String>) -> Response {
             )
                 .into_response();
         }
+    }
+    // Best-effort DB cleanup; FS stays authoritative so failures are logged, never fatal.
+    if let Err(e) = state.store.delete_parent(&clean) {
+        eprintln!("[DELETE-RUN] delete_parent {}: {:#}", clean, e);
+    }
+    if let Err(e) = state.store.delete_run_manifest(&clean) {
+        eprintln!("[DELETE-RUN] delete_run_manifest {}: {:#}", clean, e);
     }
     refresh_portal();
     Json(serde_json::json!({"deleted": clean})).into_response()

@@ -3445,7 +3445,7 @@ function copyRunId() {
       }
 
       try {
-        const res = await fetch(`/api/compare?a=${encodeURIComponent(runA)}&b=${encodeURIComponent(runB)}`);
+        const res = await fetch(`/api/compare?run_a=${encodeURIComponent(runA)}&run_b=${encodeURIComponent(runB)}`);
         if (!res.ok) {
           const err = await res.text();
           throw new Error(err);
@@ -3543,17 +3543,17 @@ function copyRunId() {
       const tabsContainer = document.getElementById('diffFileTabs');
       tabsContainer.innerHTML = '';
 
-      if (!currentCompareData || !currentCompareData.diffs || currentCompareData.diffs.length === 0) {
+      if (!currentCompareData || !currentCompareData.file_diffs || currentCompareData.file_diffs.length === 0) {
         tabsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem;">No files found or identical workspaces.</div>';
         return;
       }
 
-      currentCompareData.diffs.forEach((d, idx) => {
+      currentCompareData.file_diffs.forEach((d, idx) => {
         const btn = document.createElement('button');
         btn.className = `preset-btn ${idx === activeDiffFileIdx ? 'active' : ''}`;
         btn.style.fontSize = '0.75rem';
         btn.style.padding = '4px 8px';
-        btn.textContent = `${getFileIcon(d.filename)} ${d.filename}`;
+        btn.textContent = `${getFileIcon(d.path)} ${d.path}`;
         btn.onclick = () => {
           activeDiffFileIdx = idx;
           renderDiffFileTabs();
@@ -3565,14 +3565,14 @@ function copyRunId() {
 
     function renderActiveDiffContent() {
       const outputContainer = document.getElementById('diffOutputContainer');
-      if (!currentCompareData || !currentCompareData.diffs || currentCompareData.diffs.length === 0) {
+      if (!currentCompareData || !currentCompareData.file_diffs || currentCompareData.file_diffs.length === 0) {
         outputContainer.innerHTML = '<div class="diff-pane" style="color: var(--text-muted);">No modified files between runs.</div>';
         return;
       }
 
-      const diff = currentCompareData.diffs[activeDiffFileIdx] || currentCompareData.diffs[0];
+      const diff = currentCompareData.file_diffs[activeDiffFileIdx] || currentCompareData.file_diffs[0];
       if (activeDiffMode === 'unified') {
-        const lines = diff.unified_diff.split('\n');
+        const lines = diff.diff.split('\n');
         let renderedLines = '';
         lines.forEach(l => {
           if (l.startsWith('+') && !l.startsWith('+++')) {
@@ -3585,8 +3585,8 @@ function copyRunId() {
         });
         outputContainer.innerHTML = `<pre class="diff-pane">${renderedLines}</pre>`;
       } else {
-        const aContent = diff.file_a_content || '(File did not exist in Run A)';
-        const bContent = diff.file_b_content || '(File did not exist in Run B)';
+        const aContent = diff.content_a || '(File did not exist in Run A)';
+        const bContent = diff.content_b || '(File did not exist in Run B)';
         outputContainer.innerHTML = `
           <div class="side-by-side">
             <div class="diff-container">
@@ -3720,7 +3720,7 @@ function copyRunId() {
           if (q.kind && q.kind.Extend) {
             const e = q.kind.Extend;
             const short = (e.parent_run_id || '').slice(-14);
-            return `<div class="queue-row"><span class="badge">${q.id}</span> extend ${escapeHtml(short)} · +${e.trials ?? '?'} trial(s) <span class="${pill}">${q.status}</span>${rm}</div>`;
+            return `<div class="queue-row"><span class="badge">${q.id}</span> <span class="badge badge-effort">extend</span> ${escapeHtml(short)} · +${e.trials ?? '?'} trial(s) <span class="${pill}">${q.status}</span>${rm}</div>`;
           }
           const r = (q.kind && q.kind.Run) || q.request || {};
           const modelShort = (r.model || '').split('/').pop();
