@@ -538,6 +538,13 @@ impl ComplianceChecker {
 
         // Distinct vendor daemon signatures to detect forbidden pre-compiled daemons.
         // Narrowed to avoid false positives on legitimate candidate strings (e.g. nginx/1.x vs bare nginx/)
+        // NOTE: `apache2/` is handled separately below, not in this list: the Go
+        // toolchain embeds the fallback path `/etc/apache2/mime.types` in every
+        // binary that transitively links `mime`/`net/http` (verified: a trivial
+        // `mime.TypeByExtension` hello-world builds to an ELF containing exactly
+        // one `apache2/` hit, always inside `/etc/apache2/mime.types`, alongside
+        // the `gopclntab` marker). Flagging that string raw disqualified 24/66
+        // cheat-DQ trials, all Go brokers whose only hit was the mime path.
         let signatures: &[&[u8]] = &[
             b"redis-server",
             b"nginx/1.",
@@ -545,14 +552,36 @@ impl ComplianceChecker {
             b"pdftotext",
             b"coredns",
             b"lighttpd/",
-            b"apache2/",
         ];
+        // The benign Go embedding, matched case-insensitively like the rest.
+        const APACHE_MIME_PATH: &[u8] = b"/etc/apache2/mime.types";
+        const APACHE_SIG: &[u8] = b"apache2/";
+        // Go runtime markers distinguishing a Go-built binary from a foreign daemon.
+        const GO_MARKERS: &[&[u8]] = &[b"gopclntab", b"Go build"];
+        // Overlap must preserve the longest match unit across chunk boundaries:
+        // vendor sigs, the full mime path plus its "/etc/" prefix check, and Go markers.
+        const ETC_PREFIX: &[u8] = b"/etc/";
         let max_sig = signatures.iter().map(|s| s.len()).max().unwrap_or(0);
+        let overlap_keep = max_sig
+            .max(APACHE_MIME_PATH.len() + ETC_PREFIX.len())
+            .max(GO_MARKERS.iter().map(|m| m.len()).max().unwrap_or(0));
         let mut buf = vec![0u8; 64 * 1024];
         buf[..4].copy_from_slice(&header);
         let mut overlap_len = 4;
         let mut total_read = 4;
         const MAX_SCAN_BYTES: usize = 32 * 1024 * 1024; // Limit scan to first 32MB
+        // Latched across chunks: Go markers may appear anywhere in the file, and
+        // an apache2/ hit in one chunk must not be forgotten when a later chunk
+        // proves (or fails to prove) a Go build.
+        let mut go_seen = false;
+        let mut apache_seen = false;
+        let mut apache_nonmime_seen = false;
+        // `apache2/` hits whose `mime.types` tail is cut off at a window edge are
+        // re-presented next window via the carried overlap (overlap_keep covers the
+        // whole mime path). Only a hit in the final bytes of the file has no next
+        // window; for those, the `/etc/` prefix already read decides: a missing
+        // prefix proves "not the mime path" even with the tail cut off.
+        let mut apache_truncated_nonprefix_seen = false;
 
         loop {
             if total_read >= MAX_SCAN_BYTES {
@@ -581,12 +610,59 @@ impl ComplianceChecker {
                 }
             }
 
-            if valid_len > max_sig {
-                overlap_len = max_sig;
-                buf.copy_within(valid_len - max_sig..valid_len, 0);
+            if !go_seen
+                && GO_MARKERS.iter().any(|m| {
+                    current_window
+                        .windows(m.len())
+                        .any(|w| w.eq_ignore_ascii_case(m))
+                })
+            {
+                go_seen = true;
+            }
+            for (i, w) in current_window.windows(APACHE_SIG.len()).enumerate() {
+                if !w.eq_ignore_ascii_case(APACHE_SIG) {
+                    continue;
+                }
+                apache_seen = true;
+                // Benign only as part of the Go mime.types fallback path:
+                // `/etc/` immediately before plus `mime.types` immediately after.
+                // Re-scanning carried bytes across windows is harmless (latches are
+                // monotonic), and it keeps split hits evaluable in the next window.
+                let prefix_ok = i >= ETC_PREFIX.len()
+                    && current_window[i - ETC_PREFIX.len()..i].eq_ignore_ascii_case(ETC_PREFIX);
+                const MIME_TAIL: &[u8] = b"mime.types";
+                let tail_end = i + APACHE_SIG.len() + MIME_TAIL.len();
+                if tail_end > valid_len {
+                    // Tail cut off at the window edge: the carried overlap
+                    // (overlap_keep covers the whole mime path) re-presents this
+                    // hit next window, so defer judgment rather than latching
+                    // (the final window's deferral is resolved after the loop).
+                    if !prefix_ok {
+                        apache_truncated_nonprefix_seen = true;
+                    }
+                    continue;
+                }
+                let tail_ok =
+                    current_window[i + APACHE_SIG.len()..tail_end].eq_ignore_ascii_case(MIME_TAIL);
+                if !(prefix_ok && tail_ok) {
+                    apache_nonmime_seen = true;
+                }
+            }
+
+            if valid_len > overlap_keep {
+                overlap_len = overlap_keep;
+                buf.copy_within(valid_len - overlap_keep..valid_len, 0);
             } else {
                 overlap_len = valid_len;
             }
+        }
+        if apache_nonmime_seen || apache_truncated_nonprefix_seen {
+            return Some(Some(String::from_utf8_lossy(APACHE_SIG).into_owned()));
+        }
+        if apache_seen && !go_seen {
+            // Non-Go binary mentioning apache2/ (even only via the mime path):
+            // stay conservative and flag; the whitelist is Go-builds-only.
+            return Some(Some(String::from_utf8_lossy(APACHE_SIG).into_owned()));
         }
         Some(None) // Is an ELF binary, but no forbidden signature found
     }
@@ -1350,6 +1426,39 @@ RUN apk add redis
         fs::write(temp_dir.join("safe_server"), safe_elf).unwrap();
         let res_safe_elf = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(res_safe_elf.is_ok());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+    #[test]
+    fn test_compliance_checker_allows_go_mime_apache2_embedding() {
+        // Regression: the Go toolchain embeds `/etc/apache2/mime.types` in every
+        // binary linking `mime`/`net/http`; that alone must not disqualify.
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_gomime_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mut go_elf = b"\x7fELFfakeheader".to_vec();
+        go_elf.extend_from_slice(b"runtime/gopclntab invalid URI for request/etc/apache2/mime.types");
+        fs::write(temp_dir.join("wsbroker"), go_elf).unwrap();
+        assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
+        let _ = fs::remove_file(temp_dir.join("wsbroker"));
+
+        // Bare `apache2/` outside the mime path still flags, even in a Go binary.
+        let mut bad_go_elf = b"\x7fELFfakeheader".to_vec();
+        bad_go_elf.extend_from_slice(b"runtime/gopclntab Server: apache2/2.4.1 (unix)");
+        fs::write(temp_dir.join("wsbroker"), bad_go_elf).unwrap();
+        let res = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("apache2/"));
+        let _ = fs::remove_file(temp_dir.join("wsbroker"));
+
+        // Non-Go binary: mime path alone stays conservative and flags.
+        let mut nongo_elf = b"\x7fELFfakeheader".to_vec();
+        nongo_elf.extend_from_slice(b"no runtime here /etc/apache2/mime.types");
+        fs::write(temp_dir.join("broker"), nongo_elf).unwrap();
+        let res2 = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("apache2/"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

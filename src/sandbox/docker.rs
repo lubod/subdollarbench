@@ -738,13 +738,51 @@ impl SandboxManager {
         }
     }
 
+    /// Remove stale `subdollar-net-*` networks left behind by crashed runs.
+    ///
+    /// NEVER removes a network with live/starting containers attached: each
+    /// candidate is inspected first and skipped unless its container count is
+    /// exactly zero. `docker network rm` itself also refuses networks with
+    /// active endpoints, so a container attaching between our inspect and rm
+    /// still fails safe (rm errors, network survives). Unparseable inspect
+    /// output fails closed (skip) for the same reason.
+    ///
+    /// Background: an unconditional `ls -q | xargs docker network rm` raced
+    /// pool-exhaustion retries against concurrently starting runs, deleting a
+    /// just-created but not-yet-attached network (infra-failure race).
     pub fn prune_stale_networks() {
-        let _ = Command::new("sh")
-            .args([
-                "-c",
-                "docker network ls --filter 'name=subdollar-net-' -q | xargs -r docker network rm 2>/dev/null || true",
-            ])
+        let ls = Command::new("docker")
+            .args(["network", "ls", "--filter", "name=subdollar-net-", "-q"])
             .output();
+        let ids = match ls {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return,
+        };
+        for id in Self::parse_network_ids(&ids) {
+            let inspect = Command::new("docker")
+                .args(["network", "inspect", id, "--format", "{{len .Containers}}"])
+                .output();
+            let count_out = match inspect {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+                _ => continue, // Inspect failed: fail closed, skip the network.
+            };
+            if !Self::network_is_detached(&count_out) {
+                continue;
+            }
+            let _ = Command::new("docker").args(["network", "rm", id]).output();
+        }
+    }
+
+    /// Parse `docker network ls -q` output into non-empty network IDs.
+    fn parse_network_ids(output: &str) -> Vec<&str> {
+        output.split_whitespace().collect()
+    }
+
+    /// True only when `docker network inspect --format '{{len .Containers}}'`
+    /// output parses to exactly 0. Anything else (attached containers or
+    /// unparseable output) means "do not touch".
+    fn network_is_detached(count_output: &str) -> bool {
+        matches!(count_output.trim().parse::<u64>(), Ok(0))
     }
 
     pub fn cleanup(&self) {
@@ -960,5 +998,25 @@ mod tests {
         sm.cleanup();
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+    #[test]
+    fn test_prune_skips_attached_networks_by_container_count() {
+        // The prune gate: only a zero-container network may be removed.
+        assert!(SandboxManager::network_is_detached("0"));
+        assert!(SandboxManager::network_is_detached("0\n"));
+        assert!(!SandboxManager::network_is_detached("1"));
+        assert!(!SandboxManager::network_is_detached("3\n"));
+        // Unparseable inspect output fails closed: skip, never delete.
+        assert!(!SandboxManager::network_is_detached(""));
+        assert!(!SandboxManager::network_is_detached("<no value>"));
+        assert!(!SandboxManager::network_is_detached("template parsing error"));
+    }
+
+    #[test]
+    fn test_prune_parses_network_id_list() {
+        assert!(SandboxManager::parse_network_ids("").is_empty());
+        assert!(SandboxManager::parse_network_ids("   \n").is_empty());
+        let ids = SandboxManager::parse_network_ids("abc123\ndef456\n");
+        assert_eq!(ids, vec!["abc123", "def456"]);
     }
 }
