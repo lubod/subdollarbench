@@ -142,7 +142,7 @@ impl SandboxManager {
                 "--cpus=2.0",
                 "--pids-limit=256",
                 "-p",
-                &format!("{}:6379", port),
+                &format!("127.0.0.1:{}:6379", port),
                 REF_REDIS_IMAGE,
             ])
             .output();
@@ -175,7 +175,7 @@ impl SandboxManager {
                 "--cpus=2.0",
                 "--pids-limit=256",
                 "-p",
-                &format!("{}:80", port),
+                &format!("127.0.0.1:{}:80", port),
                 REF_NGINX_IMAGE,
             ])
             .output();
@@ -261,7 +261,7 @@ impl SandboxManager {
                 "--memory=512m",
                 "--cpus=1.0",
                 "-p",
-                &format!("{}:80", port),
+                &format!("127.0.0.1:{}:80", port),
                 "-v",
                 &format!(
                     "{}:/usr/share/nginx/html/index.html:ro",
@@ -347,7 +347,7 @@ impl SandboxManager {
                 "--memory=512m",
                 "--cpus=1.0",
                 "-p",
-                &format!("{}:53/udp", port),
+                &format!("127.0.0.1:{}:53/udp", port),
                 "-v",
                 &format!("{}:/Corefile:ro", corefile.display()),
                 REF_DNS_IMAGE,
@@ -571,8 +571,10 @@ impl SandboxManager {
             })
         };
 
-        let port_tcp = format!("{}:{}", port, port);
-        let port_udp = format!("{}:{}/udp", port, port);
+        // Loopback-only publish: candidates are probed from the host, never
+        // from the LAN. Docker still routes container->host via the bridge.
+        let port_tcp = format!("127.0.0.1:{}:{}", port, port);
+        let port_udp = format!("127.0.0.1:{}:{}/udp", port, port);
 
         // CASE A: Candidate provided their own Dockerfile
         let dockerfile = canonical_workdir.join("Dockerfile");
