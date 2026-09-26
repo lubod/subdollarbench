@@ -6,8 +6,9 @@ use crate::report::{
 };
 use crate::sandbox::SandboxManager;
 use axum::{
-    extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{Path as AxumPath, Query, Request, State},
+    http::{header, HeaderMap, Method, StatusCode},
+    middleware,
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Redirect, Response,
@@ -156,6 +157,11 @@ pub struct ExtendRequest {
     pub timeout_min: Option<u64>,
     #[serde(default)]
     pub eval_only: Option<bool>,
+    /// API key from the triggering extend request; falls back to
+    /// `OPENROUTER_API_KEY` env at dispatch. Queued extends are
+    /// deserialized with `#[serde(default)]` so pre-key payloads keep working.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +221,15 @@ fn db_try(what: &str, r: anyhow::Result<()>) {
 }
 
 /// Mark a queue item finished in both memory and the DB mirror.
+/// Broadcast a status/console line AND mirror it into the in-memory console
+/// buffer so late SSE joiners (replay) and /api/console readers see the same
+/// lifecycle tail (DONE/STOP/STATUS/[EXTEND]/[MULTI-TRIAL]) that live
+/// subscribers got over the channel.
+fn send_status(tx: &broadcast::Sender<String>, log_buf: &Arc<RwLock<Vec<String>>>, line: String) {
+    push_console_line(log_buf, line.clone());
+    let _ = tx.send(line);
+}
+
 fn mark_queue_done(state: &AppState, queue_id: &str) {
     {
         let mut q = state.queue.lock().unwrap();
@@ -582,6 +597,7 @@ impl UiServer {
             .route("/api/sandbox/omp", get(get_sandbox_omp_status))
             .route("/api/sandbox/omp/update", post(update_sandbox_omp))
             .route("/api/env", get(get_env))
+            .route_layer(axum::middleware::from_fn(csrf_guard))
             .with_state(state)
     }
 
@@ -591,7 +607,7 @@ impl UiServer {
             let _ = std::env::set_current_dir(&repo);
         }
         let (log_sender, _) = broadcast::channel(4096);
-        let db_path = repo.join("bench.db");
+        let db_path = Store::resolve_db_path();
         let (store, db_fallback) = match Store::open(&db_path) {
             Ok(store) => (Arc::new(store), false),
             Err(e) => {
@@ -880,6 +896,63 @@ fn refresh_portal() {
     );
 }
 
+/// Same-origin guard for mutating endpoints. Browser navigations always
+/// attach Origin (or Referer for same-origin form/DELETE submissions);
+/// curl/CLI send neither and stay allowed. Loopback origins are always
+/// trusted; anything else is rejected as cross-site.
+fn csrf_origin_allowed(headers: &HeaderMap) -> bool {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let candidate = if !origin.is_empty() { origin } else { referer };
+    if candidate.is_empty() {
+        return true;
+    }
+    let host = candidate
+        .split("://")
+        .last()
+        .unwrap_or(candidate)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
+}
+
+fn csrf_reject() -> Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        "Cross-origin request rejected (Origin/Referer check)",
+    )
+        .into_response()
+}
+
+/// Axum layer guarding every mutating endpoint (POST/PUT/PATCH/DELETE).
+/// Browser cross-site requests always carry Origin; curl/CLI send neither
+/// (allowed) and loopback Origins are trusted. Rejection happens before
+/// dispatch, so direct handler unit tests (no Origin) stay green.
+async fn csrf_guard(req: Request, next: middleware::Next) -> Response {
+    let mutating = matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if mutating && !csrf_origin_allowed(req.headers()) {
+        return csrf_reject();
+    }
+    next.run(req).await
+}
+
 fn clean_run_id(run_id: &str) -> Option<String> {
     let name = Path::new(run_id).file_name()?.to_str()?;
     if name.is_empty() || name == "." || name != run_id {
@@ -1090,7 +1163,10 @@ async fn stop_run(State(state): State<AppState>) -> Response {
 
     state.cancel_requested.store(true, Ordering::SeqCst);
     let tx = state.log_sender.clone();
-    let _ = tx.send(
+    let log_buf = state.log_buffer.clone();
+    send_status(
+        &tx,
+        &log_buf,
         "[USER ACTION] Cancellation requested. Terminating sandbox containers...".to_string(),
     );
 
@@ -1133,7 +1209,11 @@ async fn stop_run(State(state): State<AppState>) -> Response {
         }
     }
     state.is_running.store(false, Ordering::SeqCst);
-    let _ = tx.send("[DONE] Benchmark run was stopped by user.".to_string());
+    send_status(
+        &tx,
+        &log_buf,
+        "[DONE] Benchmark run was stopped by user.".to_string(),
+    );
 
     (axum::http::StatusCode::OK, "Benchmark run stopped").into_response()
 }
@@ -1380,10 +1460,11 @@ async fn run_extension_batch(
         match crate::bench::batch_ref::BatchRef::start(&spec.task, &spec.parent_run_id, batch_log) {
             Ok(b) => b,
             Err(e) => {
-                let _ = tx.send(format!(
-                    "[BATCH-REF] setup failed ({}); trials use live refs.",
-                    e
-                ));
+                send_status(
+                    tx,
+                    log_buf,
+                    format!("[BATCH-REF] setup failed ({}); trials use live refs.", e),
+                );
                 None
             }
         }
@@ -1394,7 +1475,7 @@ async fn run_extension_batch(
     let mut passing = 0usize;
     for i in 0..spec.count {
         if cancel.load(Ordering::SeqCst) {
-            let _ = tx.send("[STOP] Extension cancelled by user.".to_string());
+            send_status(tx, log_buf, "[STOP] Extension cancelled by user.".to_string());
             break;
         }
         let trial_idx = spec.start_idx + i;
@@ -1502,9 +1583,11 @@ fn pump_queue(state: &AppState) -> bool {
     }
     match next {
         Some((QueueKind::Run(req), id)) => {
-            let _ = state
-                .log_sender
-                .send(format!("[QUEUE] Starting queued run {id}..."));
+            send_status(
+                &state.log_sender,
+                &state.log_buffer,
+                format!("[QUEUE] Starting queued run {id}..."),
+            );
             spawn_run_body(state, req, Some(id));
             true
         }
@@ -1531,9 +1614,10 @@ fn spawn_extend_body(state: &AppState, ext: ExtendRequest, queue_id: String) {
 /// on one parent never collide on trial dirs.
 async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: String) {
     let tx = state.log_sender.clone();
+    let log_buf = state.log_buffer.clone();
     let finish_item = |state: &AppState, note: &str| {
         mark_queue_done(state, &queue_id);
-        let _ = tx.send(note.to_string());
+        send_status(&tx, &log_buf, note.to_string());
     };
     let parent_path = crate::config::get_repo_root()
         .join("results")
@@ -1551,7 +1635,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
             *state.task_handle.lock().unwrap() = None;
             if !pump_queue(&state) {
                 state.is_running.store(false, Ordering::SeqCst);
-                let _ = tx.send("[DONE]".to_string());
+                send_status(&tx, &log_buf, "[DONE]".to_string());
             }
             return;
         }
@@ -1564,7 +1648,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         *state.task_handle.lock().unwrap() = None;
         if !pump_queue(&state) {
             state.is_running.store(false, Ordering::SeqCst);
-            let _ = tx.send("[DONE]".to_string());
+            send_status(&tx, &log_buf, "[DONE]".to_string());
         }
         return;
     }
@@ -1577,7 +1661,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         *state.task_handle.lock().unwrap() = None;
         if !pump_queue(&state) {
             state.is_running.store(false, Ordering::SeqCst);
-            let _ = tx.send("[DONE]".to_string());
+            send_status(&tx, &log_buf, "[DONE]".to_string());
         }
         return;
     }
@@ -1598,7 +1682,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
             *state.task_handle.lock().unwrap() = None;
             if !pump_queue(&state) {
                 state.is_running.store(false, Ordering::SeqCst);
-                let _ = tx.send("[DONE]".to_string());
+                send_status(&tx, &log_buf, "[DONE]".to_string());
             }
             return;
         }
@@ -1613,7 +1697,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         max_turns: ext.max_turns.unwrap_or(100),
         budget_usd: ext.budget_usd.unwrap_or(1.0),
         timeout_min: ext.timeout_min.unwrap_or(30),
-        api_key: None,
+        api_key: ext.api_key.clone(),
         eval_only: ext.eval_only.unwrap_or(false),
         save_results: true,
         review_model: None,
@@ -1623,17 +1707,21 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         display_total: total,
     };
     state.cancel_requested.store(false, Ordering::SeqCst);
-    let _ = tx.send(format!(
-        "[EXTEND-QUEUE] {queue_id}: {reason}; running {count} more trial(s) for {} (trials {start_idx}-{total})...",
-        ext.parent_run_id
-    ));
+    send_status(
+        &tx,
+        &log_buf,
+        format!(
+            "[EXTEND-QUEUE] {queue_id}: {reason}; running {count} more trial(s) for {} (trials {start_idx}-{total})...",
+            ext.parent_run_id
+        ),
+    );
     let out = run_extension_batch(
         &tx,
         &state.log_buffer,
         &state.current_run,
         &state.cancel_requested,
         &|m: &str| {
-            let _ = tx.send(m.to_string());
+            send_status(&tx, &log_buf, m.to_string());
         },
         spec,
     )
@@ -1650,22 +1738,28 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         );
         let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
         let (stab2, reason2) = assess_stability(&parked);
-        let _ = tx.send(format!(
-            "[EXTEND-QUEUE] {queue_id}: {}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
-            ext.parent_run_id,
-            combined.len(),
-            compute_pass_at_k(combined.len(), passing, 1) * 100.0
-        ));
+        send_status(
+            &tx,
+            &log_buf,
+            format!(
+                "[EXTEND-QUEUE] {queue_id}: {}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
+                ext.parent_run_id,
+                combined.len(),
+                compute_pass_at_k(combined.len(), passing, 1) * 100.0
+            ),
+        );
     } else {
-        let _ = tx.send(format!(
-            "[EXTEND-QUEUE] {queue_id}: all extension trials failed; parent untouched."
-        ));
+        send_status(
+            &tx,
+            &log_buf,
+            format!("[EXTEND-QUEUE] {queue_id}: all extension trials failed; parent untouched."),
+        );
     }
     mark_queue_done(&state, &queue_id);
     *state.task_handle.lock().unwrap() = None;
     if !pump_queue(&state) {
         state.is_running.store(false, Ordering::SeqCst);
-        let _ = tx.send("[DONE]".to_string());
+        send_status(&tx, &log_buf, "[DONE]".to_string());
     }
 }
 
@@ -1677,6 +1771,7 @@ fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>) {
 
 async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<String>) {
     let tx = state.log_sender.clone();
+    let run_log_buf = state.log_buffer.clone();
     let mut total_trials = req.trials.max(1);
     let mut passing_trials = 0;
     let mut subrun_results = Vec::new();
@@ -1688,8 +1783,9 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         run_timestamp
     );
 
+    let log_buf_batch = state.log_buffer.clone();
     let batch_log = |m: &str| {
-        let _ = tx.send(m.to_string());
+        send_status(&tx, &log_buf_batch, m.to_string());
     };
     // Batch reference: one shared denominator for all trials.
     // Fallback is live per-trial measurement inside the pipeline.
@@ -1721,7 +1817,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
 
     for trial_idx in 1..=total_trials {
         if state.cancel_requested.load(Ordering::SeqCst) {
-            let _ = tx.send("[STOP] Run cancelled by user before next trial.".to_string());
+            send_status(&tx, &run_log_buf, "[STOP] Run cancelled by user before next trial.".to_string());
             break;
         }
 
@@ -1898,14 +1994,15 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             };
             let (stab, reason) = assess_stability(&merged.subruns);
             if stab == Stability::Stable {
-                let _ = tx.send(format!("[EXTEND] stable: {}; done.", reason));
+                send_status(&tx, &run_log_buf, format!("[EXTEND] stable: {}; done.", reason));
                 break;
             }
             let add = (max_total - total_trials).min(3);
-            let _ = tx.send(format!(
-                "[EXTEND] unstable ({}); running {} more trial(s)...",
-                reason, add
-            ));
+            send_status(
+                &tx,
+                &run_log_buf,
+                format!("[EXTEND] unstable ({}); running {} more trial(s)...", reason, add),
+            );
             let out = run_extension_batch(
                 &tx,
                 &state.log_buffer,
@@ -1931,7 +2028,9 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             )
             .await;
             if out.results.is_empty() {
-                let _ = tx.send(
+                send_status(
+                    &tx,
+                    &run_log_buf,
                     "[EXTEND] all extension trials failed; keeping current merge.".to_string(),
                 );
                 break;
@@ -1952,21 +2051,28 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
         let pass_at_k =
             compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize) * 100.0;
-        let _ = tx.send(format!(
-            "[MULTI-TRIAL] Trials: {}, Passing: {}, Pass@1: {:.1}%, Pass@{}: {:.1}%",
-            total_trials, passing_trials, pass_at_1, total_trials, pass_at_k
-        ));
+        send_status(
+            &tx,
+            &run_log_buf,
+            format!(
+                "[MULTI-TRIAL] Trials: {}, Passing: {}, Pass@1: {:.1}%, Pass@{}: {:.1}%",
+                total_trials, passing_trials, pass_at_1, total_trials, pass_at_k
+            ),
+        );
     }
 
     if passing_trials == total_trials as usize && total_trials > 0 {
-        let _ = tx.send("[STATUS] All trials passed (100% pass rate).".to_string());
+        send_status(&tx, &run_log_buf, "[STATUS] All trials passed (100% pass rate).".to_string());
     } else if passing_trials > 0 {
-        let _ = tx.send(format!(
-            "[STATUS] Partial pass: {}/{} trials passed.",
-            passing_trials, total_trials
-        ));
+        send_status(
+            &tx,
+            &run_log_buf,
+            format!("[STATUS] Partial pass: {}/{} trials passed.", passing_trials, total_trials),
+        );
     } else {
-        let _ = tx.send(
+        send_status(
+            &tx,
+            &run_log_buf,
             "[STATUS] Benchmark completed with 0 passing trials (0.0% pass rate).".to_string(),
         );
     }
@@ -1985,7 +2091,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         return;
     }
     state.is_running.store(false, Ordering::SeqCst);
-    let _ = tx.send("[DONE]".to_string());
+    send_status(&tx, &run_log_buf, "[DONE]".to_string());
 }
 
 #[derive(Deserialize)]
@@ -1995,6 +2101,11 @@ struct ExtendBody {
     budget_usd: Option<f64>,
     timeout_min: Option<u64>,
     eval_only: Option<bool>,
+    /// Optional caller key; forwarded into the extend spec so extension
+    /// trials bill the same account as the triggering request. Falls back
+    /// to `OPENROUTER_API_KEY` env when absent.
+    #[serde(default)]
+    api_key: Option<String>,
     /// When true and the runner is busy, enqueue behind the running job
     /// instead of failing with 409. Stability re-validates at dispatch:
     /// a parent stabilized meanwhile skips with a log line, never runs.
@@ -2055,6 +2166,7 @@ async fn extend_parent_run(
             budget_usd: body.budget_usd,
             timeout_min: body.timeout_min,
             eval_only: body.eval_only,
+            api_key: body.api_key.clone(),
         };
         let qid = push_queue_item(&state, QueueKind::Extend(ext));
         let position = state
@@ -2132,7 +2244,7 @@ async fn extend_parent_run(
         max_turns: body.max_turns.unwrap_or(100),
         budget_usd: body.budget_usd.unwrap_or(1.0),
         timeout_min: body.timeout_min.unwrap_or(30),
-        api_key: None,
+        api_key: body.api_key.clone(),
         eval_only: body.eval_only.unwrap_or(false),
         save_results: true,
         review_model: None,
@@ -2146,16 +2258,19 @@ async fn extend_parent_run(
     let handle = tokio::spawn(async move {
         state_clone.cancel_requested.store(false, Ordering::SeqCst);
         let tx = state_clone.log_sender.clone();
-        let _ = tx.send(format!(
-            "[EXTEND] {reason}; running {count} more trial(s) for {clean_for_task}..."
-        ));
+        let ext_log_buf = state_clone.log_buffer.clone();
+        send_status(
+            &tx,
+            &ext_log_buf,
+            format!("[EXTEND] {reason}; running {count} more trial(s) for {clean_for_task}..."),
+        );
         let out = run_extension_batch(
             &tx,
             &state_clone.log_buffer,
             &state_clone.current_run,
             &state_clone.cancel_requested,
             &|m: &str| {
-                let _ = tx.send(m.to_string());
+                send_status(&tx, &ext_log_buf, m.to_string());
             },
             spec,
         )
@@ -2172,16 +2287,20 @@ async fn extend_parent_run(
             );
             let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
             let (stab2, reason2) = assess_stability(&parked);
-            let _ = tx.send(format!(
-                "[EXTEND] {clean_for_task}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
-                combined.len(),
-                compute_pass_at_k(combined.len(), passing, 1) * 100.0
-            ));
+            send_status(
+                &tx,
+                &ext_log_buf,
+                format!(
+                    "[EXTEND] {clean_for_task}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
+                    combined.len(),
+                    compute_pass_at_k(combined.len(), passing, 1) * 100.0
+                ),
+            );
         }
         *state_clone.task_handle.lock().unwrap() = None;
         if !pump_queue(&state_clone) {
             state_clone.is_running.store(false, Ordering::SeqCst);
-            let _ = tx.send("[DONE]".to_string());
+            send_status(&tx, &ext_log_buf, "[DONE]".to_string());
         }
     });
     *state.task_handle.lock().unwrap() = Some(handle);
@@ -2569,8 +2688,29 @@ mod tests {
             budget_usd: None,
             timeout_min: None,
             eval_only: None,
+            api_key: None,
             queue: false,
         }
+    }
+
+    #[test]
+    fn test_extend_request_carries_caller_key() {
+        // Queue-path construction (mirrors extend_parent_run): the caller
+        // key rides along; absent keys stay None for env fallback.
+        let with_key = ExtendRequest {
+            parent_run_id: "p".to_string(),
+            trials: 3,
+            max_turns: None,
+            budget_usd: None,
+            timeout_min: None,
+            eval_only: None,
+            api_key: Some("sk-test-key".to_string()),
+        };
+        assert_eq!(with_key.api_key.as_deref(), Some("sk-test-key"));
+        // Pre-key payloads still deserialize (serde default).
+        let legacy: ExtendRequest =
+            serde_json::from_str(r#"{"parent_run_id":"p","trials":3}"#).unwrap();
+        assert_eq!(legacy.api_key, None);
     }
 
     #[tokio::test]
@@ -2621,6 +2761,7 @@ mod tests {
             budget_usd: None,
             timeout_min: None,
             eval_only: None,
+            api_key: None,
             queue: true,
         }
     }
@@ -2796,7 +2937,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_csrf_origin_policy() {
+        // curl/CLI (no Origin/Referer) stays allowed; loopback Origins are
+        // trusted; cross-site browser Origins are rejected.
+        let bare = HeaderMap::new();
+        assert!(csrf_origin_allowed(&bare));
+        let mut local = HeaderMap::new();
+        local.insert(header::ORIGIN, "http://127.0.0.1:3000".parse().unwrap());
+        assert!(csrf_origin_allowed(&local));
+        let mut host = HeaderMap::new();
+        host.insert(header::ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(csrf_origin_allowed(&host));
+        let mut evil = HeaderMap::new();
+        evil.insert(header::ORIGIN, "https://evil.example.com".parse().unwrap());
+        assert!(!csrf_origin_allowed(&evil));
+        // Referer fallback covers same-origin form/DELETE submissions.
+        let mut ref_ok = HeaderMap::new();
+        ref_ok.insert(
+            header::REFERER,
+            "http://127.0.0.1:3000/api/queue".parse().unwrap(),
+        );
+        assert!(csrf_origin_allowed(&ref_ok));
+        let mut ref_evil = HeaderMap::new();
+        ref_evil.insert(
+            header::REFERER,
+            "https://evil.example.com/pwn".parse().unwrap(),
+        );
+        assert!(!csrf_origin_allowed(&ref_evil));
+    }
+
     #[tokio::test]
+    async fn test_log_buffer_mirrors_lifecycle_tail() {
+        // send_status mirrors every lifecycle line into the console buffer
+        // so late SSE joiners and /api/console readers see DONE/STOP tails.
+        let (tx, _) = broadcast::channel(16);
+        let buf = Arc::new(RwLock::new(Vec::new()));
+        send_status(&tx, &buf, "[DONE]".to_string());
+        send_status(&tx, &buf, "[STATUS] All trials passed (100% pass rate).".to_string());
+        send_status(&tx, &buf, "[STOP] Run cancelled by user.".to_string());
+        {
+            let snap = buf.read().unwrap();
+            assert_eq!(snap.len(), 3);
+            assert!(snap[0].contains("[DONE]"));
+            assert!(snap[2].contains("[STOP]"));
+        }
+        // push_console_line itself caps; mirror a small overflow directly.
+        for i in 0..10 {
+            push_console_line(&buf, format!("line {i}"));
+        }
+        assert_eq!(buf.read().unwrap().len(), 3 + 10);
+        // Cap behavior itself lives in push_console_line: verified cheaply
+        // with a local buffer instead of 3000+ sends.
+        let small = Arc::new(RwLock::new(Vec::new()));
+        for i in 0..(MAX_CONSOLE_LINES + 10) {
+            push_console_line(&small, format!("line {i}"));
+        }
+        assert_eq!(small.read().unwrap().len(), MAX_CONSOLE_LINES);
+    }
+
     async fn test_run_delete_guards() {
         let state = create_test_state();
         let app = UiServer::build_app(state);

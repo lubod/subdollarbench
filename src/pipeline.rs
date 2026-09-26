@@ -112,19 +112,52 @@ pub struct PipelineOutput {
 /// Publish the WAL crash-recovery probe: 2000 MSGs on `recovery_probe`,
 /// counting acks. The caller SIGKILLs the candidate next; `check_recovery`
 /// then requires this state back.
+///
+/// Bounded by an overall 60s deadline so one wedged candidate cannot stall
+/// the pipeline past the trial timeout. Acks collected before the deadline
+/// are kept, never zeroed: check_recovery demands every acked message back,
+/// so partial progress stays verifiable instead of discarded.
 async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let (rh, mut wh) = stream.into_split();
     let mut rd = tokio::io::BufReader::new(rh);
     let mut acks = 0usize;
     for i in 0..2000usize {
-        wh.write_all(format!("PUB recovery_probe msg-{}\n", i).as_bytes())
-            .await?;
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("WAL probe hit 60s overall deadline; keeping {} partial acks", acks);
+            break;
+        }
+        if let Err(e) = wh.write_all(format!("PUB recovery_probe msg-{}\n", i).as_bytes()).await {
+            tracing::warn!("WAL probe write failed; keeping {} partial acks: {:#}", acks, e);
+            break;
+        }
+        // Flush per write so a buffered but unsent prefix is never mistaken
+        // for candidate side fsync loss after SIGKILL.
+        if let Err(e) = wh.flush().await {
+            tracing::warn!("WAL probe flush failed; keeping {} partial acks: {:#}", acks, e);
+            break;
+        }
+        let per_read = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(std::time::Duration::from_secs(5));
         let mut line = String::new();
-        tokio::time::timeout(std::time::Duration::from_secs(5), rd.read_line(&mut line)).await??;
-        if line.starts_with("+OK") {
-            acks += 1;
+        match tokio::time::timeout(per_read, rd.read_line(&mut line)).await {
+            Ok(Ok(0)) => {
+                tracing::warn!("WAL probe hit EOF; keeping {} partial acks", acks);
+                break;
+            }
+            Ok(Ok(_)) if line.starts_with("+OK") => acks += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("WAL probe read failed; keeping {} partial acks: {:#}", acks, e);
+                break;
+            }
+            Err(_) => {
+                tracing::warn!("WAL probe read timed out; keeping {} partial acks", acks);
+                break;
+            }
         }
     }
     Ok(acks)
@@ -1117,7 +1150,7 @@ impl BenchmarkPipeline {
             // Publish hygiene: test/CI probe runs never reach the shared store
             // (mirrors the save_result `test_` guard, which covers parents + JSON).
             if !manifest.run_id.starts_with("test_") {
-                if let Ok(store) = crate::report::Store::open(&get_repo_root().join("bench.db")) {
+                if let Ok(store) = crate::report::Store::open(&crate::report::Store::resolve_db_path()) {
                     let _ = store.upsert_run_manifest(&manifest);
                 }
             }
@@ -1299,9 +1332,35 @@ mod tests {
         let _ = fs::remove_dir_all(runs_dir.join(&run_id));
         let results_dir = get_repo_root().join("results");
         let _ = fs::remove_file(results_dir.join(format!("{}.json", run_id)));
-        if let Ok(store) = crate::report::Store::open(&get_repo_root().join("bench.db")) {
+        if let Ok(store) = crate::report::Store::open(&crate::report::Store::resolve_db_path()) {
             let _ = store.delete_parent(&run_id);
             let _ = store.delete_run_manifest(&run_id);
         }
+    }
+
+    #[tokio::test]
+    async fn test_wal_probe_partial_acks_survive_eof() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await {
+                let (rh, mut wh) = socket.into_split();
+                let mut rd = tokio::io::BufReader::new(rh);
+                for _ in 0..3 {
+                    let mut line = String::new();
+                    if rd.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if wh.write_all(b"+OK\n").await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        // The mock closes after 3 acks; the probe must return 3, not an error.
+        let n = publish_wal_probe(port).await.expect("probe keeps partial acks on EOF");
+        assert_eq!(n, 3);
     }
 }

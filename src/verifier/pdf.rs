@@ -319,12 +319,24 @@ impl PdfVerifier {
                 Ok::<(), String>(())
             }));
         }
-        let mut fails = Vec::new();
-        for t in tasks {
-            if let Err(e) = t.await.unwrap_or(Err("join failed".to_string())) {
-                fails.push(e);
+        // Outer stage timeout so one wedged extraction cannot stall the
+        // stage past the client timeouts. Spawned tasks are bounded by the
+        // 10s reqwest client timeout each and drain on their own; the join
+        // only bounds how long the stage waits for them.
+        let fails = match tokio::time::timeout(Duration::from_secs(60), async {
+            let mut fails = Vec::new();
+            for t in tasks {
+                if let Err(e) = t.await.unwrap_or(Err("join failed".to_string())) {
+                    fails.push(e);
+                }
             }
-        }
+            fails
+        })
+        .await
+        {
+            Ok(fails) => fails,
+            Err(_) => vec!["burst join timed out after 60s".to_string()],
+        };
         if fails.is_empty() {
             StageResult {
                 stage: 6,

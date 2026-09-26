@@ -1825,8 +1825,11 @@ impl PortalExporter {
             r"sk-or-v1-[A-Za-z0-9_-]+",
             r"sk-proj-[A-Za-z0-9_-]+",
             r"sk-ant-[A-Za-z0-9_-]+",
+            r"sk-[A-Za-z0-9_-]{8,}",
             r"hf_[A-Za-z0-9_-]{16,}",
             r"(?i)bearer\s+[A-Za-z0-9_\-\.~\+/=]+",
+            r"(?i)(?:api_key|auth_token|access_token|token)\s*[:=]\s*\S+",
+            r"(?i)\b[A-Za-z0-9_]*_(?:KEY|SECRET)\s*=\s*\S+",
             r"(?i)(?:openrouter_api_key|openai_api_key|anthropic_api_key)\s*=\s*\S+",
             r"--api-key(?:\s+|=)\S+",
         ]
@@ -2550,6 +2553,21 @@ mod tests {
         assert!(clean.contains("***REDACTED***"));
         // Ordinary text survives redaction.
         assert!(clean.contains("export"));
+    }
+
+    #[test]
+    fn test_portal_redaction_generic_keys_and_env_dumps() {
+        let patterns = PortalExporter::secret_patterns();
+        let dirty = "config api_key=yyy123secret token: tok_abc456 here\nMY_CUSTOM_KEY=supersecretvalue ok\nplain sk-abcdefgh12345678 leaked";
+        let clean = PortalExporter::redact(dirty, &patterns);
+        assert!(!clean.contains("yyy123secret"));
+        assert!(!clean.contains("tok_abc456"));
+        assert!(!clean.contains("supersecretvalue"));
+        assert!(!clean.contains("sk-abcdefgh12345678"));
+        assert!(clean.contains("***REDACTED***"));
+        // Ordinary prose survives redaction.
+        assert!(clean.contains("config"));
+        assert!(clean.contains("here"));
     }
 
     #[test]

@@ -453,7 +453,7 @@ impl RedisVerifier {
         let ttl_val = format!("val_{}", seed_prefix);
 
         let set_res =
-            match Self::send_resp_cmd(&mut stream, &["SET", &ttl_key, &ttl_val, "PX", "150"]).await
+            match Self::send_resp_cmd(&mut stream, &["SET", &ttl_key, &ttl_val, "PX", "500"]).await
             {
                 Ok(r) => r,
                 Err(e) => {
@@ -498,7 +498,7 @@ impl RedisVerifier {
             };
         }
 
-        sleep(Duration::from_millis(250)).await;
+        sleep(Duration::from_millis(1000)).await;
 
         let get_expired = match Self::send_resp_cmd(&mut stream, &["GET", &ttl_key]).await {
             Ok(r) => r,

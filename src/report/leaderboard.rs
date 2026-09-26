@@ -203,15 +203,17 @@ impl BenchmarkRunResult {
         if subruns.len() == 1 {
             let mut single = subruns.into_iter().next().unwrap();
             single.id = parent_id.to_string();
-            let p1 = if single.pass_rate >= 100.0 {
-                100.0
-            } else {
-                0.0
-            };
+            let c = usize::from(single.pass_rate >= 100.0);
+            let p1 = if c == 1 { 100.0 } else { 0.0 };
+            // Single-trial Wilson: n=1 keeps the lower bound honest so a lone
+            // 1/1 (lo ~20.7) ranks below a 9/9 (lo ~70.0) under rank_lo.
+            let (w_lo, w_hi) = wilson_interval_95(1, c);
             single.total_trials = Some(1);
             single.pass_at_1 = Some(p1);
             single.pass_at_k = Some(p1);
             single.avg_pass_rate = Some(single.pass_rate);
+            single.pass_at_1_lo = Some(w_lo);
+            single.pass_at_1_hi = Some(w_hi);
             single.stability = Some("stable".to_string());
             return Some(single);
         }
@@ -821,13 +823,10 @@ impl LeaderboardManager {
         Self::finalize_results(list)
     }
 
-    /// Primary-store path: `$SDB_BENCH_DB` override (isolated tests) else
-    /// repo-root bench.db.
+    /// Primary-store path: shared helper on Store so every `Store::open`
+    /// callsite resolves `$SDB_BENCH_DB` override vs repo-root identically.
     fn db_path() -> std::path::PathBuf {
-        match std::env::var("SDB_BENCH_DB") {
-            Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
-            _ => crate::config::get_repo_root().join("bench.db"),
-        }
+        crate::report::Store::resolve_db_path()
     }
 
     /// True when `dir` is the canonical repo `results/` dir (absolute, or
@@ -1837,6 +1836,64 @@ mod tests {
             "Reconsolidated {} historical multi-trial runs in results/",
             count
         );
+    }
+
+    #[test]
+    fn test_single_trial_wilson_orders_below_nine() {
+        // A lone 1/1 must not outrank a 9/9: n=1 Wilson lo (~20.7)
+        // sits well below n=9 9/9 lo (~70.0).
+        let (lo1, hi1) = wilson_interval_95(1, 1);
+        let (lo9, hi9) = wilson_interval_95(9, 9);
+        assert!(lo1 < lo9, "1/1 lo {lo1} should be below 9/9 lo {lo9}");
+        assert!((hi1 - 100.0).abs() < 1e-9);
+        assert!((hi9 - 100.0).abs() < 1e-9);
+        let mk = |id: &str, pass: f64| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "dns".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: pass,
+            passed_stages: 6,
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            effective_cost_usd: Some(0.01),
+            duration_seconds: Some(10.0),
+            turns: Some(5),
+            savings_percent: 0.0,
+            efficiency_score: 1.0,
+            throughput_score: None,
+            timestamp: "2026-09-12T08:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+        };
+        let one = BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None).unwrap();
+        assert!(one.pass_at_1_lo.unwrap() > 0.0);
+        let (olo, ohi) = (one.pass_at_1_lo.unwrap(), one.pass_at_1_hi.unwrap());
+        assert!((olo - lo1).abs() < 1e-9, "merged 1/1 lo {olo} != wilson {lo1}");
+        assert!((ohi - hi1).abs() < 1e-9);
+        assert!(olo < lo9, "single-trial lo {olo} should rank below 9/9 lo {lo9}");
+        // A lone failure pins lo at 0 with a wide upper bound.
+        let zero = BenchmarkRunResult::merge_subruns("zero", vec![mk("z", 0.0)], None).unwrap();
+        assert!((zero.pass_at_1_lo.unwrap() - 0.0).abs() < 1e-9);
+        assert!(zero.pass_at_1_hi.unwrap() > 50.0);
     }
 
     #[test]

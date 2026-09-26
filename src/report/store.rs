@@ -1,5 +1,6 @@
 use anyhow::Result;
 use parking_lot::Mutex;
+use tracing::warn;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
@@ -32,6 +33,16 @@ fn queue_status_str(status: &QueueStatus) -> &'static str {
 }
 
 impl Store {
+    /// Primary-store path shared by every `Store::open` callsite:
+    /// `$SDB_BENCH_DB` override (isolated tests) else repo-root bench.db.
+    /// Blank values fall through to the repo root.
+    pub fn resolve_db_path() -> std::path::PathBuf {
+        match std::env::var("SDB_BENCH_DB") {
+            Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+            _ => crate::config::get_repo_root().join("bench.db"),
+        }
+    }
+
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -182,17 +193,25 @@ impl Store {
     /// Load every parent by parsing the stored `doc` JSON; bad rows are skipped.
     pub fn load_all_parents(&self) -> Vec<BenchmarkRunResult> {
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare("SELECT doc FROM parents") {
+        let mut stmt = match conn.prepare("SELECT id, doc FROM parents") {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+        let rows = match stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
         rows
             .filter_map(|row| row.ok())
-            .filter_map(|doc| serde_json::from_str(&doc).ok())
+            .filter_map(|(id, doc)| match serde_json::from_str(&doc) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    warn!("store: skipping corrupt parent row {id}: {e}");
+                    None
+                }
+            })
             .collect()
     }
 
@@ -202,6 +221,13 @@ impl Store {
             row.get::<_, i64>(0)
         })
         .unwrap_or(0) as usize
+    }
+
+    /// True when a parent row with this id exists (migrate delta check).
+    pub fn parent_exists(&self, id: &str) -> bool {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT 1 FROM parents WHERE id = ?1", params![id], |_| Ok(()))
+            .is_ok()
     }
 
     /// Mirror a freshly enqueued item; dispatch-time fields start NULL.
@@ -306,17 +332,25 @@ impl Store {
     /// `completed_at`; bad rows are skipped. Empty until `migrate` runs.
     pub fn load_run_manifests(&self) -> Vec<RunManifest> {
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare("SELECT doc FROM runs ORDER BY completed_at DESC") {
+        let mut stmt = match conn.prepare("SELECT run_id, doc FROM runs ORDER BY completed_at DESC") {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+        let rows = match stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
         rows
             .filter_map(|row| row.ok())
-            .filter_map(|doc| serde_json::from_str(&doc).ok())
+            .filter_map(|(id, doc)| match serde_json::from_str(&doc) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    warn!("store: skipping corrupt run row {id}: {e}");
+                    None
+                }
+            })
             .collect()
     }
 
@@ -562,5 +596,90 @@ mod tests {
         assert!(store.get_run_manifest("run-1").is_none());
         store.delete_run_manifest("no-such-run").expect("delete missing ok");
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn corrupt_rows_skipped_others_load() {
+        let db = std::env::temp_dir().join(format!("store-corrupt-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let store = Store::open(&db).expect("open");
+        store.upsert_parent(&sample_result("good-1")).expect("upsert");
+        store.upsert_parent(&sample_result("good-2")).expect("upsert");
+        store
+            .conn
+            .lock()
+            .execute("INSERT INTO parents (id, doc) VALUES ('bad-1', '{not json')", [])
+            .expect("inject bad parent");
+        assert!(store.parent_exists("good-1"));
+        assert!(!store.parent_exists("nope"));
+        let loaded = store.load_all_parents();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|r| r.id == "good-1"));
+        assert!(loaded.iter().any(|r| r.id == "good-2"));
+
+        store
+            .upsert_run_manifest(&sample_manifest("run-ok"))
+            .expect("upsert run");
+        store
+            .conn
+            .lock()
+            .execute("INSERT INTO runs (run_id, doc) VALUES ('run-bad', 'zzz')", [])
+            .expect("inject bad run");
+        let runs = store.load_run_manifests();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run-ok");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn migrate_delta_idempotent_with_preexisting() {
+        // Simulates `migrate --yes`: delta (after - before) must equal the
+        // number of newly added ids, both with pre-existing rows and on re-run.
+        let db = std::env::temp_dir().join(format!("store-delta-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let store = Store::open(&db).expect("open");
+        store.upsert_parent(&sample_result("pre-existing")).expect("upsert");
+        let before = store.parent_count();
+
+        let file_runs = vec![sample_result("pre-existing"), sample_result("new-1")];
+        let mut added = 0usize;
+        for run in &file_runs {
+            if !store.parent_exists(&run.id) {
+                added += 1;
+            }
+            store.upsert_parent(run).expect("upsert");
+        }
+        assert_eq!(added, 1);
+        assert_eq!(store.parent_count() - before, added);
+
+        // Re-run over the same files: nothing new, delta zero.
+        let before2 = store.parent_count();
+        let mut added2 = 0usize;
+        for run in &file_runs {
+            if !store.parent_exists(&run.id) {
+                added2 += 1;
+            }
+            store.upsert_parent(run).expect("upsert");
+        }
+        assert_eq!(added2, 0);
+        assert_eq!(store.parent_count() - before2, added2);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn resolve_db_path_respects_env_override() {
+        let custom = std::env::temp_dir().join("sdb-custom-override.db");
+        std::env::set_var("SDB_BENCH_DB", &custom);
+        assert_eq!(Store::resolve_db_path(), custom);
+        std::env::set_var("SDB_BENCH_DB", "   ");
+        assert_eq!(
+            Store::resolve_db_path(),
+            crate::config::get_repo_root().join("bench.db")
+        );
+        std::env::remove_var("SDB_BENCH_DB");
+        assert_eq!(
+            Store::resolve_db_path(),
+            crate::config::get_repo_root().join("bench.db")
+        );
     }
 }

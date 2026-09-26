@@ -120,6 +120,9 @@ pub struct TailSessionContext {
     /// Set when the spike extension streams BENCH-EVENT lines: the tailer
     /// then renders assistant/tool session lines as token stats only.
     pub extension_feed_active: Arc<AtomicBool>,
+    /// Model id used to derive per-event cost from token counts when the
+    /// session event carries no explicit `usage.cost.total`.
+    pub model: String,
 }
 
 /// All launch parameters for one agent session. Bundled in a struct so the
@@ -265,6 +268,9 @@ impl OmpRunner {
                 std::fs::Permissions::from_mode(0o755),
             );
         }
+        // The agent persists sessions/state under ~/.omp, so this mount stays
+        // read-write: omp writes sessions, data, state, and cache inside the
+        // container (see --session-dir below). Read-only would break resume.
         let mount_omp = format!("{}:/home/ubuntu/.omp", host_omp_dir.display());
 
         // Cloud-only: every model resolves to OpenRouter. Local backends
@@ -289,6 +295,12 @@ impl OmpRunner {
             .arg("--memory=3g")
             .arg("--cpus=3.0")
             .arg("--pids-limit=512")
+            // Drop all Linux capabilities: the agent compiles and runs
+            // untrusted model code. No pcap, no raw sockets, no mounts.
+            .arg("--cap-drop=ALL")
+            // No new privileges: blocks setuid binaries from escalating
+            // even if the image ships one.
+            .arg("--security-opt=no-new-privileges")
             .arg("--add-host=host.docker.internal:host-gateway")
             .arg("-v")
             .arg(&mount_workdir)
@@ -554,6 +566,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             limit_reason: limit_reason.clone(),
             cancel_flag: cancel_flag.clone(),
             extension_feed_active: extension_feed.clone(),
+            model: effective_model.clone(),
         };
 
         let tailer_handle = thread::spawn(move || {
@@ -836,12 +849,50 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                     }
                                 }
                             }
-                            // 2. Budget check
+                            // 2. Budget check: explicit per-event cost wins; when
+                            // `usage.cost.total` is absent, estimate from token counts x
+                            // per-model rates so max_budget_usd still trips mid-session.
                             let mut cost_updated = false;
-                            if let Some(cost) = val
+                            let usage_node = val.pointer("/message/usage").or_else(|| val.get("usage"));
+                            let delta_cost: Option<f64> = val
                                 .pointer("/message/usage/cost/total")
                                 .and_then(|c| c.as_f64())
-                            {
+                                .or_else(|| {
+                                    let usage = usage_node?;
+                                    let tin = usage
+                                        .get("input")
+                                        .or_else(|| usage.get("prompt_tokens"))
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                    let tout = usage
+                                        .get("output")
+                                        .or_else(|| usage.get("completion_tokens"))
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                    let tcached = usage
+                                        .get("cacheRead")
+                                        .or_else(|| usage.get("cache_read_input_tokens"))
+                                        .and_then(|x| x.as_u64())
+                                        .or_else(|| {
+                                            usage
+                                                .get("prompt_tokens_details")
+                                                .and_then(|d| d.get("cached_tokens"))
+                                                .and_then(|x| x.as_u64())
+                                        })
+                                        .unwrap_or(0);
+                                    if tin + tout + tcached == 0 {
+                                        None
+                                    } else {
+                                        let pricing =
+                                            crate::cost::ModelPricing::for_model(&ctx.model);
+                                        Some(
+                                            pricing
+                                                .compute_cost_with_cache(tin, tcached, tout)
+                                                .total_cost_usd,
+                                        )
+                                    }
+                                });
+                            if let Some(cost) = delta_cost {
                                 if let Ok(mut c_lock) = ctx.accumulated_cost.lock() {
                                     *c_lock += cost;
                                     cost_updated = true;
@@ -1943,6 +1994,7 @@ mod tests {
             limit_reason,
             cancel_flag: None,
             extension_feed_active: Arc::new(AtomicBool::new(false)),
+            model: "test-model".to_string(),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2094,6 +2146,7 @@ mod tests {
             limit_reason,
             cancel_flag: None,
             extension_feed_active: Arc::new(AtomicBool::new(false)),
+            model: "test-model".to_string(),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2169,5 +2222,57 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(rel_dir);
+    }
+
+    #[test]
+    fn test_tail_budget_derived_from_tokens_without_cost_field() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_tail_derived_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // No `cost.total` — only raw token counts.
+        let line = r#"{"message":{"role":"assistant","usage":{"input":1000000,"output":1000000},"content":[{"type":"text","text":"hi"}]}}"#;
+        let session_file = temp_dir.join("session.jsonl");
+        std::fs::write(&session_file, format!("{}\n", line)).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let active_file = Arc::new(Mutex::new(Some(session_file.clone())));
+        let accumulated_cost = Arc::new(Mutex::new(0.0f64));
+        let limit_reached = Arc::new(AtomicBool::new(false));
+        let limits = AgentExecutionLimits {
+            max_turns: Some(100),
+            max_budget_usd: Some(0.20),
+            timeout_seconds: Some(10),
+        };
+        let tail_ctx = TailSessionContext {
+            start_time: SystemTime::now() - Duration::from_secs(5),
+            existing: HashSet::new(),
+            active_file,
+            running: running.clone(),
+            tx,
+            limits,
+            turn_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            accumulated_cost: accumulated_cost.clone(),
+            accumulated_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            limit_reached: limit_reached.clone(),
+            limit_reason: Arc::new(Mutex::new(None)),
+            cancel_flag: None,
+            extension_feed_active: Arc::new(AtomicBool::new(false)),
+            model: "google/gemini-2.5-flash".to_string(),
+        };
+        let handle = std::thread::spawn(move || {
+            OmpRunner::tail_session_file(tail_ctx);
+        });
+
+        std::thread::sleep(Duration::from_millis(500));
+        // 1M in @ $0.15/M + 1M out @ $0.60/M = $0.75 >= $0.20 cap.
+        assert!(limit_reached.load(Ordering::SeqCst));
+        assert!(*accumulated_cost.lock().unwrap() >= 0.20);
+
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

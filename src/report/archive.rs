@@ -125,7 +125,14 @@ impl RunArchiver {
             .unwrap_or(&manifest.run_id);
 
         let run_dir = runs_dir.join(clean_id);
-        fs::create_dir_all(&run_dir)?;
+        // Write into `<id>.tmp` and rename into place so a crash mid-archive
+        // never leaves a partial dir that looks like a completed run.
+        // Best-effort cleanup of stale `.tmp` leftovers from a previous crash
+        // (before creating our own staging dir, which cleanup would remove).
+        Self::cleanup_stale_tmp_dirs(runs_dir);
+        let tmp_dir = runs_dir.join(format!("{clean_id}.tmp"));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir)?;
 
         let mut manifest_to_save = manifest.clone();
 
@@ -138,24 +145,29 @@ impl RunArchiver {
 
         // 1. Write manifest.json
         let manifest_json = serde_json::to_string_pretty(&manifest_to_save)?;
-        fs::write(run_dir.join("manifest.json"), manifest_json)?;
+        fs::write(tmp_dir.join("manifest.json"), manifest_json)?;
 
         // 2. Write console.log
-        fs::write(run_dir.join("console.log"), console_log)?;
+        fs::write(tmp_dir.join("console.log"), console_log)?;
 
         // 3. Write env.json if available
         if let Some(ref env) = manifest_to_save.env {
             if let Ok(env_json) = serde_json::to_string_pretty(env) {
-                let _ = fs::write(run_dir.join("env.json"), env_json);
+                let _ = fs::write(tmp_dir.join("env.json"), env_json);
             }
         }
 
         // 4. Snapshot candidate workspace files
-        let ws_dest = run_dir.join("workspace");
+        let ws_dest = tmp_dir.join("workspace");
         fs::create_dir_all(&ws_dest)?;
         if workspace_dir.exists() {
             Self::copy_dir_recursive(workspace_dir, &ws_dest)?;
         }
+
+        // 5. Publish atomically: a pre-existing complete dir is replaced only
+        // after every byte above landed on disk.
+        let _ = fs::remove_dir_all(&run_dir);
+        fs::rename(&tmp_dir, &run_dir)?;
 
         Ok(run_dir)
     }
@@ -164,6 +176,9 @@ impl RunArchiver {
         let mut manifests = Vec::new();
         if let Ok(entries) = fs::read_dir(runs_dir) {
             for entry in entries.flatten() {
+                if Self::is_staging_dir(&entry.path()) {
+                    continue;
+                }
                 let manifest_file = entry.path().join("manifest.json");
                 if manifest_file.exists() {
                     if let Ok(content) = fs::read_to_string(&manifest_file) {
@@ -180,19 +195,51 @@ impl RunArchiver {
 
     pub fn get_run(runs_dir: &Path, run_id: &str) -> Option<RunManifest> {
         let clean_id = Path::new(run_id).file_name()?.to_str()?;
+        if clean_id.ends_with(".tmp") || clean_id.starts_with('.') {
+            return None;
+        }
         let manifest_file = runs_dir.join(clean_id).join("manifest.json");
         let content = fs::read_to_string(manifest_file).ok()?;
         serde_json::from_str::<RunManifest>(&content).ok()
     }
 
+    /// True for in-progress/stale staging dirs (`.tmp` suffix, dot dirs)
+    /// that readers must never treat as completed runs.
+    fn is_staging_dir(path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        name.ends_with(".tmp") || name.starts_with('.')
+    }
+
+    /// Remove stale `<id>.tmp` leftovers from crashed archives. Called on
+    /// every archive and from `migrate` at startup.
+    pub fn cleanup_stale_tmp_dirs(runs_dir: &Path) {
+        if let Ok(entries) = fs::read_dir(runs_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && Self::is_staging_dir(&p) {
+                    let _ = fs::remove_dir_all(&p);
+                }
+            }
+        }
+    }
+
     pub fn get_console_log(runs_dir: &Path, run_id: &str) -> Option<String> {
         let clean_id = Path::new(run_id).file_name()?.to_str()?;
+        if clean_id.ends_with(".tmp") || clean_id.starts_with('.') {
+            return None;
+        }
         let log_file = runs_dir.join(clean_id).join("console.log");
         fs::read_to_string(log_file).ok()
     }
 
     pub fn get_workspace_file(runs_dir: &Path, run_id: &str, filename: &str) -> Option<String> {
         let clean_id = Path::new(run_id).file_name()?.to_str()?;
+        if clean_id.ends_with(".tmp") || clean_id.starts_with('.') {
+            return None;
+        }
         if filename.contains("..") || filename.starts_with('/') {
             return None;
         }
@@ -410,6 +457,89 @@ mod tests {
                 "Symlink escape outside workspace should be denied"
             );
         }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_partial_archive_invisible_to_readers() {
+        // A crashed archive leaves only `runs/<id>.tmp`; list_runs/get_run
+        // must not see it, and the next successful archive (or cleanup) heals.
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_archive_crash_{}", std::process::id()));
+        let runs_dir = temp_dir.join("runs");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        let stale = runs_dir.join("crashed_run.tmp");
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("manifest.json"), "{partial").unwrap();
+
+        assert!(RunArchiver::list_runs(&runs_dir).is_empty());
+        assert!(RunArchiver::get_run(&runs_dir, "crashed_run").is_none());
+        // Direct staging-id reads are refused even though the .tmp dir exists.
+        assert!(RunArchiver::get_run(&runs_dir, "crashed_run.tmp").is_none());
+        assert!(RunArchiver::get_console_log(&runs_dir, "crashed_run.tmp").is_none());
+        assert!(RunArchiver::get_workspace_file(&runs_dir, "crashed_run.tmp", "x").is_none());
+
+        RunArchiver::cleanup_stale_tmp_dirs(&runs_dir);
+        assert!(!stale.exists());
+
+        // A `.tmp` dir for a live id must not shadow the complete archive.
+        let ws = temp_dir.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let manifest = RunManifest {
+            run_id: "live_run".to_string(),
+            model: "m".to_string(),
+            task: "t".to_string(),
+            status: "completed".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            started_at: "2026-09-25T00:00:00Z".to_string(),
+            completed_at: "2026-09-25T00:01:00Z".to_string(),
+            duration_seconds: 1.0,
+            turns: None,
+            pass_rate: 100.0,
+            passed_stages: 1,
+            total_stages: 1,
+            stages: vec![],
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            tokens: RunTokenUsage {
+                prompt_tokens: 1,
+                cached_tokens: 0,
+                completion_tokens: 1,
+                total_tokens: 2,
+            },
+            cost_usd: 0.0,
+            effective_cost_usd: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            files: vec![],
+            env: None,
+            git_commit: None,
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            trial_pass_rates: vec![],
+            is_published: None,
+            method_version: None,
+            rules_version: None,
+        };
+        RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();
+        assert!(!runs_dir.join("live_run.tmp").exists());
+        assert_eq!(RunArchiver::list_runs(&runs_dir).len(), 1);
+        assert!(RunArchiver::get_run(&runs_dir, "live_run").is_some());
+        // Re-archive replaces the complete dir (no duplicate, no .tmp left).
+        RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log2").unwrap();
+        assert!(!runs_dir.join("live_run.tmp").exists());
+        assert_eq!(RunArchiver::list_runs(&runs_dir).len(), 1);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

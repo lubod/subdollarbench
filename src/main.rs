@@ -44,6 +44,7 @@ fn resolve_run_id(runs_dir: &str, prefix: &str) -> Result<String> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|id| !id.ends_with(".tmp") && !id.starts_with('.'))
         .filter(|id| id.starts_with(prefix))
         .collect();
     hits.sort();
@@ -830,26 +831,42 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 );
                 return Ok(());
             }
-            let db_path = subdollarbench::config::get_repo_root().join("bench.db");
+            let db_path = subdollarbench::report::Store::resolve_db_path();
             let store = subdollarbench::report::Store::open(&db_path)?;
+            let count_before = store.parent_count();
             let mut imported = 0usize;
+            let mut added = 0usize;
             for run in &runs {
+                // Upserts replace same-id rows, so only genuinely new ids
+                // grow the table; count those to keep re-runs idempotent.
+                if !store.parent_exists(&run.id) {
+                    added += 1;
+                }
                 store.upsert_parent(run)?;
                 imported += 1;
             }
-            let count = store.parent_count();
-            println!("migrate: imported {imported}, skipped {skipped}, parents {count}");
-            if count != runs.len() {
+            let count_after = store.parent_count();
+            let delta = count_after.saturating_sub(count_before);
+            println!("migrate: imported {imported} ({added} new), skipped {skipped}, parents {count_after}");
+            if delta != added {
                 anyhow::bail!(
-                    "parent count {count} != file count {}; files stay authoritative",
-                    runs.len()
+                    "migrate delta {delta} (before {count_before}, after {count_after}) != newly added {added} of {imported} files upserted; files stay authoritative"
                 );
             }
             let runs_dir = subdollarbench::report::RunArchiver::resolve_runs_dir();
+            subdollarbench::report::RunArchiver::cleanup_stale_tmp_dirs(&runs_dir);
             let mut run_imported = 0usize;
             let mut run_skipped = 0usize;
             if let Ok(entries) = std::fs::read_dir(&runs_dir) {
                 for entry in entries.flatten() {
+                    // Never import staging leftovers from a crashed archive.
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".tmp")
+                    {
+                        continue;
+                    }
                     let manifest_file = entry.path().join("manifest.json");
                     if !manifest_file.exists() {
                         continue;
