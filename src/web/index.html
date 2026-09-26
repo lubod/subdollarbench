@@ -1100,7 +1100,6 @@
         <div class="tabs">
           <button class="tab active" onclick="switchTab('console')">Live Console</button>
           <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
-          <button class="tab" id="tabBtn-compare" onclick="switchTab('compare')">⚖️ Compare Runs</button>
           <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
           <a class="tab" href="/portal/" target="_blank" rel="noopener" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">🏆 Leaderboard (Portal) ↗</a>
         </div>
@@ -1247,41 +1246,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
           <!-- Runs Cards View (Toggleable) -->
           <div id="runsCardsView" style="display: none; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px;">
-          </div>
-        </div>
-
-        <!-- Tab: Run Comparison & Code Diff -->
-        <div id="tab-compare" style="display: none; flex-direction: column; gap: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: #161b22; padding: 14px; border-radius: 6px; border: 1px solid var(--border);">
-            <div style="display: flex; gap: 12px; align-items: center; flex: 1; min-width: 320px;">
-              <div style="flex: 1;">
-                <label for="compareRunA" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; display: block;">Base Run (A)</label>
-                <select id="compareRunA" style="width: 100%;"></select>
-              </div>
-              <div style="font-size: 1.2rem; color: var(--text-muted); padding-top: 16px;">⇄</div>
-              <div style="flex: 1;">
-                <label for="compareRunB" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; display: block;">Comparison Run (B)</label>
-                <select id="compareRunB" style="width: 100%;"></select>
-              </div>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: flex-end;">
-              <button class="btn btn-primary" onclick="runCompare()">⚖️ Compare</button>
-            </div>
-          </div>
-
-          <div id="compareResults" style="display: none; flex-direction: column; gap: 14px;">
-            <div id="compareSummaryCard" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;"></div>
-            <div style="background: #161b22; border: 1px solid var(--border); border-radius: 6px; padding: 14px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                <h4 style="font-size: 0.85rem; font-weight: 600; color: #fff;">Workspace Code Diff</h4>
-                <div class="diff-mode-toggle">
-                  <button id="diffModeUnified" class="preset-btn active" onclick="setDiffMode('unified')">Unified</button>
-                  <button id="diffModeSide" class="preset-btn" onclick="setDiffMode('side')">Side-by-Side</button>
-                </div>
-              </div>
-              <div id="diffFileTabs" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;"></div>
-              <div id="diffOutputContainer" style="margin-top: 8px;"></div>
-            </div>
           </div>
         </div>
 
@@ -1689,8 +1653,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       document.getElementById('tab-console').style.display = 'none';
       document.getElementById('tab-traceability').style.display = 'none';
-      const compTab = document.getElementById('tab-compare');
-      if (compTab) compTab.style.display = 'none';
       document.getElementById('tab-prompt').style.display = 'none';
 
       const tabs = document.querySelectorAll('.tab');
@@ -1701,13 +1663,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         document.getElementById('tab-traceability').style.display = 'flex';
         if (tabs[1]) tabs[1].classList.add('active');
         if (!allRunsCache || !allRunsCache.length) loadRuns();
-      } else if (name === 'compare') {
-        if (compTab) compTab.style.display = 'flex';
-        if (tabs[2]) tabs[2].classList.add('active');
-        populateCompareDropdowns();
       } else if (name === 'prompt') {
         document.getElementById('tab-prompt').style.display = 'flex';
-        if (tabs[3]) tabs[3].classList.add('active');
+        if (tabs[2]) tabs[2].classList.add('active');
         loadPrompt();
       } else if (name === 'leaderboard') {
         window.open('/portal/', '_blank');
@@ -2629,7 +2587,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <td style="text-align: right;">
               <div style="display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap;">
                 <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; white-space: nowrap;" data-run-id="${escapeHtml(r.run_id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
-                <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="openCompareWith(this.dataset.runId)">⚖️ Compare</button>
+                
                 ${(r.total_trials > 1 && r.stability && r.stability !== 'stable') ? `<button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="extendRun(this.dataset.runId)" title="Run 3 more trials and re-merge">＋ Extend</button>` : ''}
                 ${pubBadge}
               </div>
@@ -2659,7 +2617,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               </div>
               <div style="display: flex; gap: 6px; align-items: center;">
                 <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
-                <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="openCompareWith(this.dataset.runId)">⚖️ Compare</button>
+                
               ${(r.total_trials > 1 && r.stability && r.stability !== 'stable') ? `<button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="extendRun(this.dataset.runId)" title="Run 3 more trials and re-merge">＋ Extend</button>` : ''}
               </div>
             </div>
@@ -3407,241 +3365,6 @@ function copyRunId() {
       }
     }
 
-    // =========================================================================
-    // Run Comparison & Code Diff Engine
-    // =========================================================================
-    let currentCompareData = null;
-    let activeDiffMode = 'unified';
-    let activeDiffFileIdx = 0;
-
-    function openCompareWith(runId) {
-      closeRunInspector();
-      switchTab('compare');
-      setTimeout(() => {
-        const selA = document.getElementById('compareRunA');
-        if (selA && runId) selA.value = runId;
-      }, 100);
-    }
-
-    async function populateCompareDropdowns() {
-      try {
-        const res = await fetch('/api/runs');
-        if (!res.ok) return;
-        const runs = await res.json();
-        cachedRuns = runs;
-
-        const selA = document.getElementById('compareRunA');
-        const selB = document.getElementById('compareRunB');
-        if (!selA || !selB) return;
-
-        const valA = selA.value;
-        const valB = selB.value;
-
-        selA.innerHTML = '';
-        selB.innerHTML = '';
-
-        if (runs.length === 0) {
-          selA.innerHTML = '<option disabled>No recorded runs found</option>';
-          selB.innerHTML = '<option disabled>No recorded runs found</option>';
-          return;
-        }
-
-        runs.forEach((r, idx) => {
-          const passIcon = r.pass_rate === 100 ? '✔' : '✘';
-          const label = `${r.run_id} [${r.task}] (${r.model.split('/').pop()} · ${r.effort}) - ${passIcon} ${r.pass_rate}% - $${r.cost_usd.toFixed(4)}`;
-          
-          const optA = document.createElement('option');
-          optA.value = r.run_id;
-          optA.textContent = label;
-          selA.appendChild(optA);
-
-          const optB = document.createElement('option');
-          optB.value = r.run_id;
-          optB.textContent = label;
-          selB.appendChild(optB);
-        });
-
-        if (valA && Array.from(selA.options).some(o => o.value === valA)) selA.value = valA;
-        if (valB && Array.from(selB.options).some(o => o.value === valB)) selB.value = valB;
-        else if (runs.length > 1) selB.selectedIndex = 1;
-
-      } catch (e) {
-        console.error('Failed to populate compare dropdowns', e);
-      }
-    }
-
-    async function runCompare() {
-      const runA = document.getElementById('compareRunA').value;
-      const runB = document.getElementById('compareRunB').value;
-
-      if (!runA || !runB) {
-        alert('Please select two runs to compare.');
-        return;
-      }
-
-      if (runA === runB) {
-        alert('Please select two distinct runs to compare.');
-        return;
-      }
-
-      try {
-        const res = await fetch(`/api/compare?run_a=${encodeURIComponent(runA)}&run_b=${encodeURIComponent(runB)}`);
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(err);
-        }
-        currentCompareData = await res.json();
-        renderCompareView(currentCompareData);
-      } catch (e) {
-        alert(`Comparison failed: ${e.message}`);
-      }
-    }
-
-    function renderCompareView(data) {
-      const container = document.getElementById('compareResults');
-      container.style.display = 'flex';
-
-      const summaryCard = document.getElementById('compareSummaryCard');
-      const a = data.run_a;
-      const b = data.run_b;
-
-      const effCostA = (a.effective_cost_usd !== undefined && a.effective_cost_usd !== null) ? a.effective_cost_usd : a.cost_usd;
-      const effCostB = (b.effective_cost_usd !== undefined && b.effective_cost_usd !== null) ? b.effective_cost_usd : b.cost_usd;
-      const scoreDiff = (b.efficiency_score - a.efficiency_score).toFixed(1);
-      const costDiff = (effCostB - effCostA).toFixed(4);
-      const passDiff = (b.pass_rate - a.pass_rate).toFixed(0);
-
-      summaryCard.innerHTML = `
-        <div style="background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px;">
-          <div style="font-size: 0.75rem; color: var(--text-muted);">Pass Rate Comparison</div>
-          <div style="font-size: 1.1rem; font-weight: 700; margin-top: 4px;">
-            <span style="color: ${a.pass_rate === 100 ? 'var(--success)' : 'var(--danger)'}">${a.pass_rate}%</span>
-            <span style="color: var(--text-muted); font-size: 0.9rem;"> vs </span>
-            <span style="color: ${b.pass_rate === 100 ? 'var(--success)' : 'var(--danger)'}">${b.pass_rate}%</span>
-          </div>
-          <div style="font-size: 0.72rem; color: ${passDiff >= 0 ? 'var(--success)' : 'var(--danger)'}; margin-top: 2px;">
-            ${passDiff >= 0 ? '+' : ''}${passDiff}% difference
-          </div>
-        </div>
-
-        <div style="background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px;">
-          <div style="font-size: 0.75rem; color: var(--text-muted);">Cost Comparison</div>
-          <div style="font-size: 1.1rem; font-weight: 700; margin-top: 4px; color: var(--accent);">
-            $${a.cost_usd.toFixed(4)} vs $${b.cost_usd.toFixed(4)}
-          </div>
-          <div style="font-size: 0.72rem; color: ${costDiff <= 0 ? 'var(--success)' : 'var(--danger)'}; margin-top: 2px;">
-            ${costDiff <= 0 ? '' : '+'}$${costDiff} USD difference
-          </div>
-        </div>
-
-        <div style="background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px;">
-          <div style="font-size: 0.75rem; color: var(--text-muted);">Score / ¢ Efficiency</div>
-          <div style="font-size: 1.1rem; font-weight: 700; margin-top: 4px; color: var(--primary);">
-            ${((a.efficiency_score !== undefined && a.efficiency_score !== null) ? a.efficiency_score : (a.score_per_cent || 0)).toFixed(1)} vs ${((b.efficiency_score !== undefined && b.efficiency_score !== null) ? b.efficiency_score : (b.score_per_cent || 0)).toFixed(1)}
-          </div>
-          <div style="font-size: 0.72rem; color: ${scoreDiff >= 0 ? 'var(--success)' : 'var(--danger)'}; margin-top: 2px;">
-            ${scoreDiff >= 0 ? '+' : ''}${scoreDiff} pts/¢
-          </div>
-        </div>
-
-        <div style="background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px;">
-          <div style="font-size: 0.75rem; color: var(--text-muted);">Duration & Turns</div>
-          <div style="font-size: 1.0rem; font-weight: 700; margin-top: 4px; color: #fff;">
-            ${formatDuration(a.duration_seconds || 0)} (${(a.turns !== undefined && a.turns !== null) ? a.turns : '-'}t)
-            <span style="color: var(--text-muted); font-size: 0.8rem;"> vs </span>
-            ${formatDuration(b.duration_seconds || 0)} (${(b.turns !== undefined && b.turns !== null) ? b.turns : '-'}t)
-          </div>
-          <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;">
-            Δ ${(Math.round(b.duration_seconds || 0) - Math.round(a.duration_seconds || 0))}s wall time
-          </div>
-        </div>
-
-        <div style="background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px;">
-          <div style="font-size: 0.75rem; color: var(--text-muted);">Throughput & Language</div>
-          <div style="font-size: 0.95rem; font-weight: 600; margin-top: 4px;">
-            ${escapeHtml(a.language)} (${Math.round(a.throughput_req_sec || 0)} req/s)
-            <br>
-            <span style="color: var(--text-muted); font-size: 0.8rem;">vs</span>
-            ${escapeHtml(b.language)} (${Math.round(b.throughput_req_sec || 0)} req/s)
-          </div>
-        </div>
-      `;
-
-      activeDiffFileIdx = 0;
-      renderDiffFileTabs();
-      renderActiveDiffContent();
-    }
-
-    function setDiffMode(mode) {
-      activeDiffMode = mode;
-      document.getElementById('diffModeUnified').classList.toggle('active', mode === 'unified');
-      document.getElementById('diffModeSide').classList.toggle('active', mode === 'side');
-      renderActiveDiffContent();
-    }
-
-    function renderDiffFileTabs() {
-      const tabsContainer = document.getElementById('diffFileTabs');
-      tabsContainer.innerHTML = '';
-
-      if (!currentCompareData || !currentCompareData.file_diffs || currentCompareData.file_diffs.length === 0) {
-        tabsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem;">No files found or identical workspaces.</div>';
-        return;
-      }
-
-      currentCompareData.file_diffs.forEach((d, idx) => {
-        const btn = document.createElement('button');
-        btn.className = `preset-btn ${idx === activeDiffFileIdx ? 'active' : ''}`;
-        btn.style.fontSize = '0.75rem';
-        btn.style.padding = '4px 8px';
-        btn.textContent = `${getFileIcon(d.path)} ${d.path}`;
-        btn.onclick = () => {
-          activeDiffFileIdx = idx;
-          renderDiffFileTabs();
-          renderActiveDiffContent();
-        };
-        tabsContainer.appendChild(btn);
-      });
-    }
-
-    function renderActiveDiffContent() {
-      const outputContainer = document.getElementById('diffOutputContainer');
-      if (!currentCompareData || !currentCompareData.file_diffs || currentCompareData.file_diffs.length === 0) {
-        outputContainer.innerHTML = '<div class="diff-pane" style="color: var(--text-muted);">No modified files between runs.</div>';
-        return;
-      }
-
-      const diff = currentCompareData.file_diffs[activeDiffFileIdx] || currentCompareData.file_diffs[0];
-      if (activeDiffMode === 'unified') {
-        const lines = diff.diff.split('\n');
-        let renderedLines = '';
-        lines.forEach(l => {
-          if (l.startsWith('+') && !l.startsWith('+++')) {
-            renderedLines += `<span class="diff-line-add">${escapeHtml(l)}</span>`;
-          } else if (l.startsWith('-') && !l.startsWith('---')) {
-            renderedLines += `<span class="diff-line-del">${escapeHtml(l)}</span>`;
-          } else {
-            renderedLines += `<span>${escapeHtml(l)}\n</span>`;
-          }
-        });
-        outputContainer.innerHTML = `<pre class="diff-pane">${renderedLines}</pre>`;
-      } else {
-        const aContent = diff.content_a || '(File did not exist in Run A)';
-        const bContent = diff.content_b || '(File did not exist in Run B)';
-        outputContainer.innerHTML = `
-          <div class="side-by-side">
-            <div class="diff-container">
-              <div class="diff-pane-header">Run A: ${escapeHtml(currentCompareData.run_a.run_id)}</div>
-              <pre class="diff-pane">${escapeHtml(aContent)}</pre>
-            </div>
-            <div class="diff-container">
-              <div class="diff-pane-header">Run B: ${escapeHtml(currentCompareData.run_b.run_id)}</div>
-              <pre class="diff-pane">${escapeHtml(bContent)}</pre>
-            </div>
-          </div>
-        `;
-      }
-    }
-
     async function checkActiveRun() {
       try {
         const res = await fetch('/api/status');
@@ -3985,7 +3708,7 @@ function copyRunId() {
         <div class="modal-actions">
           <button id="modalTogglePortalBtn" class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="togglePortalVisibility()">Hide from portal</button>
           <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem; color: #f85149;" onclick="deleteCurrentRun()">Delete</button>
-          <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="openCompareWith(currentInspectRun ? currentInspectRun.run_id : '')">⚖️ Compare</button>
+          
           <button class="btn-secondary" style="padding: 5px 12px; font-size: 0.8rem; font-weight: 600;" onclick="closeRunInspector()" title="Close (Escape)">✕ Close</button>
         </div>
       </div>
