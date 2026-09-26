@@ -545,7 +545,16 @@ impl LeaderboardManager {
         if save_results {
             let repo_root = crate::config::get_repo_root();
             let results_dir = repo_root.join("results");
-            let _ = Self::save_result(results_dir.to_str().unwrap_or("./results"), &merged);
+            // DB-first (fail-closed): save_result upserts bench.db before
+            // touching the export copy. A DB failure aborts here — the
+            // export copy and trial cleanup below are skipped — so the
+            // merged parent can never exist on FS without its DB row.
+            if let Err(e) =
+                Self::save_result(results_dir.to_str().unwrap_or("./results"), &merged)
+            {
+                eprintln!("[LEADERBOARD] consolidate {parent_run_id}: DB-first save failed: {e:#}");
+                return None;
+            }
 
             // Clean up individual trial JSON files from results/ so only the merged parent appears
             for sub in subrun_results {
@@ -756,6 +765,25 @@ impl LeaderboardManager {
     }
 
     pub fn save_result(results_dir: &str, result: &BenchmarkRunResult) -> Result<()> {
+        // Fail-closed ordering: the DB upsert runs BEFORE the JSON export
+        // copy. On DB error the write aborts before touching the filesystem
+        // (loud anyhow context, not a silent skip), so the export copy can
+        // never claim a row the primary store rejected. Temp-dir callers
+        // (tests, CLI previews) skip the DB so they never touch the shared
+        // repo-root store; only the canonical results dir (or an explicit
+        // `$SDB_BENCH_DB` override) writes through.
+        // `consolidate_multi_trial_run` funnels through here, so it inherits
+        // the same DB-first ordering.
+        if Self::use_db(results_dir) {
+            let db_path = Self::db_path();
+            let store = crate::report::Store::open(&db_path).map_err(|e| {
+                anyhow::anyhow!("DB upsert {} failed; export copy not written: {e:#}", result.id)
+            })?;
+            store.upsert_parent(result).map_err(|e| {
+                anyhow::anyhow!("DB upsert {} failed; export copy not written: {e:#}", result.id)
+            })?;
+        }
+
         let path = Path::new(results_dir);
         fs::create_dir_all(path)?;
 
@@ -764,17 +792,6 @@ impl LeaderboardManager {
 
         let data = serde_json::to_string_pretty(result)?;
         fs::write(filepath, data)?;
-
-        // Primary store: upsert into bench.db (best-effort; the JSON export
-        // copy above stays for one release). Temp-dir callers (tests, CLI
-        // previews) skip the DB so they never touch the shared repo-root
-        // store; only the canonical results dir (or an explicit
-        // `$SDB_BENCH_DB` override) writes through.
-        if Self::use_db(results_dir) {
-            if let Ok(store) = crate::report::Store::open(&Self::db_path()) {
-                let _ = store.upsert_parent(result);
-            }
-        }
         Ok(())
     }
 

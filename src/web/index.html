@@ -1224,6 +1224,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="loadRuns()">🔄 Refresh</button>
             </div>
           </div>
+          <div id="runsErrorBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.4); color: #ff7b72;"></div>
+          <div id="dbFallbackBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(187,128,9,0.12); border: 1px solid rgba(187,128,9,0.4); color: #d29922;">⚠️ Server is running on a temporary DB (bench.db unavailable) — queue history is not durable.</div>
 
           <!-- Runs List Table View (Zero horizontal scroll) -->
           <div id="runsTableView" style="width: 100%;">
@@ -2419,14 +2421,43 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       renderRuns();
     }
 
+    // Runs fetch health: 'loading' | 'ok' | 'error'. renderRuns splits the
+    // empty states: no runs at all vs filter-matched-none vs offline/error.
+    let runsFetchState = 'loading';
+    let runsFetchError = '';
+
+    function setRunsError(msg) {
+      runsFetchState = 'error';
+      runsFetchError = msg || '';
+      const banner = document.getElementById('runsErrorBanner');
+      if (banner) {
+        if (msg) {
+          banner.style.display = 'block';
+          banner.textContent = `⚠️ Could not load runs: ${msg}`;
+        } else {
+          banner.style.display = 'none';
+          banner.textContent = '';
+        }
+      }
+    }
+
     async function loadRuns() {
       try {
         const res = await fetch('/api/runs');
-        if (!res.ok) return;
+        if (!res.ok) {
+          setRunsError(`HTTP ${res.status}`);
+          renderRuns();
+          return;
+        }
         allRunsCache = await res.json();
+        runsFetchState = 'ok';
+        runsFetchError = '';
+        const banner = document.getElementById('runsErrorBanner');
+        if (banner) { banner.style.display = 'none'; banner.textContent = ''; }
         renderRuns();
       } catch (e) {
-        console.error('Failed to load runs:', e);
+        setRunsError(e.message || String(e));
+        renderRuns();
       }
     }
 
@@ -2503,11 +2534,20 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const cardsContainer = document.getElementById('runsCardsView');
 
       if (runs.length === 0) {
-        const emptyMsg = allRunsCache.length === 0 
-          ? 'No archived runs found in runs/.' 
-          : `No runs matched search query "${q}".`;
-        if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">${emptyMsg}</td></tr>`;
-        if (cardsContainer) cardsContainer.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 24px;">${emptyMsg}</div>`;
+        let emptyMsg;
+        let emptyColor = 'var(--text-muted)';
+        if (runsFetchState === 'error') {
+          emptyMsg = `Runs unavailable (offline or server error${runsFetchError ? `: ${runsFetchError}` : ''}). Showing last good data.`;
+          emptyColor = '#ff7b72';
+        } else if (runsFetchState === 'loading') {
+          emptyMsg = 'Loading runs...';
+        } else if (allRunsCache.length === 0) {
+          emptyMsg = 'No archived runs found in runs/.';
+        } else {
+          emptyMsg = `No runs matched search query "${q}".`;
+        }
+        if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: ${emptyColor}; padding: 24px;">${escapeHtml(emptyMsg)}</td></tr>`;
+        if (cardsContainer) cardsContainer.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: ${emptyColor}; padding: 24px;">${escapeHtml(emptyMsg)}</div>`;
         return;
       }
 
@@ -3653,6 +3693,8 @@ function copyRunId() {
             updateTelemetryDisplay();
           }
         }
+        const fb = document.getElementById('dbFallbackBanner');
+        if (fb) fb.style.display = data.db_fallback ? 'block' : 'none';
       } catch (e) {
         console.warn('Status check failed:', e);
       }
@@ -3918,6 +3960,8 @@ function copyRunId() {
     }
 
     setInterval(() => { checkActiveRun(); refreshQueue(); }, 5000);
+    setInterval(() => { loadRuns(); }, 30000);
+    loadRuns();
     refreshQueue();
     fetchOmpStatus();
     setInterval(fetchOmpStatus, 30000);

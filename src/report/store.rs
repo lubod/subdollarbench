@@ -99,6 +99,21 @@ impl Store {
 
     /// Insert or replace the parent row plus one `trials` row per subrun
     /// (`trial_no` = subrun index + 1) in a single transaction.
+    ///
+    /// Per-trial `status` has no dedicated field on [`BenchmarkRunResult`],
+    /// so it is derived from the subrun's own signal: `pass_rate >= 100.0`
+    /// stores `"passed"`, anything lower stores `"failed"`. Rows written
+    /// before this derivation keep `""` until re-migrated.
+    /// Per-subrun pass/fail verdict used for `trials.status` (see
+    /// [`Store::upsert_parent`]): full pass rate means passed, else failed.
+    pub fn trial_status(pass_rate: f64) -> &'static str {
+        if pass_rate >= 100.0 {
+            "passed"
+        } else {
+            "failed"
+        }
+    }
+
     pub fn upsert_parent(&self, result: &BenchmarkRunResult) -> Result<()> {
         let doc = serde_json::to_string(result)?;
         let mut conn = self.conn.lock();
@@ -141,7 +156,7 @@ impl Store {
                     result.id,
                     i as i64 + 1,
                     sub.pass_rate,
-                    "",
+                    Self::trial_status(sub.pass_rate),
                     sub.total_cost_usd,
                     sub.duration_seconds,
                     sub.turns.map(|t| t as i64),
@@ -437,9 +452,11 @@ mod tests {
         let _ = std::fs::remove_file(&db);
         let store = Store::open(&db).expect("open");
         let mut parent = sample_result("parent-1");
+        let mut failing = sample_result("trial-2");
+        failing.pass_rate = 50.0;
         parent.subruns = vec![
             sample_result("trial-1"),
-            sample_result("trial-2"),
+            failing,
             sample_result("trial-3"),
         ];
         parent.total_trials = Some(3);
@@ -466,6 +483,23 @@ mod tests {
             )
             .expect("count trials");
         assert_eq!(trial_count, 3);
+        let statuses: Vec<String> = store
+            .conn
+            .lock()
+            .prepare("SELECT status FROM trials WHERE parent_id = 'parent-1' ORDER BY trial_no")
+            .expect("prepare statuses")
+            .query_map([], |row| row.get(0))
+            .expect("query statuses")
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                "passed".to_string(),
+                "failed".to_string(),
+                "passed".to_string()
+            ]
+        );
         // Delete removes the parent and its trials.
         store.delete_parent("parent-1").expect("delete");
         assert_eq!(store.parent_count(), 0);

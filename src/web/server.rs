@@ -78,6 +78,9 @@ pub struct AppState {
     pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
     pub queue_seq: Arc<AtomicU64>,
     pub store: Arc<Store>,
+    /// True when `bench.db` failed to open and the server fell back to a
+    /// temp-dir DB (queue durability degraded); surfaced via /api/status.
+    pub db_fallback: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,6 +88,11 @@ pub struct StatusResponse {
     pub is_running: bool,
     pub current_run: Option<ActiveRunInfo>,
     pub last_run: Option<ActiveRunInfo>,
+    /// True when the server runs on a temp-dir fallback DB instead of
+    /// repo-root bench.db (queue history not durable). Defaults false for
+    /// older clients that omit the field.
+    #[serde(default)]
+    pub db_fallback: bool,
 }
 
 async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -95,6 +103,7 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
         is_running,
         current_run,
         last_run,
+        db_fallback: state.db_fallback,
     })
 }
 
@@ -583,16 +592,29 @@ impl UiServer {
         }
         let (log_sender, _) = broadcast::channel(4096);
         let db_path = repo.join("bench.db");
-        let store = match Store::open(&db_path) {
-            Ok(store) => Arc::new(store),
+        let (store, db_fallback) = match Store::open(&db_path) {
+            Ok(store) => (Arc::new(store), false),
             Err(e) => {
-                eprintln!("[QUEUE-DB] open {} failed ({e:#}); memory-only queue", db_path.display());
+                tracing::warn!(
+                    "bench.db open {} failed ({e:#}); falling back to temp-dir DB — queue history NOT durable",
+                    db_path.display()
+                );
+                eprintln!("[QUEUE-DB] open {} failed ({e:#}); falling back to temp-dir DB", db_path.display());
                 let fallback = std::env::temp_dir().join(format!("sdb-queue-fallback-{}.db", std::process::id()));
                 match Store::open(&fallback) {
-                    Ok(store) => Arc::new(store),
-                    Err(_) => {
+                    Ok(store) => {
+                        tracing::warn!(
+                            "using temp fallback DB {}; queue history will not survive restarts",
+                            fallback.display()
+                        );
+                        (Arc::new(store), true)
+                    }
+                    Err(e2) => {
+                        tracing::warn!(
+                            "temp fallback DB open failed ({e2:#}); last-resort temp store — queue history NOT durable"
+                        );
                         let mem = tempfile_mem_store();
-                        Arc::new(mem)
+                        (Arc::new(mem), true)
                     }
                 }
             }
@@ -620,6 +642,7 @@ impl UiServer {
             queue: Arc::new(std::sync::Mutex::new(VecDeque::from(replayed))),
             queue_seq: Arc::new(AtomicU64::new(seq_start)),
             store,
+            db_fallback,
         };
 
         // Replay auto-dispatch: pending work that survived the restart runs
@@ -2470,7 +2493,29 @@ mod tests {
             queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             queue_seq: Arc::new(AtomicU64::new(0)),
             store: Arc::new(tempfile_mem_store()),
+            db_fallback: false,
         }
+    }
+
+    #[test]
+    fn status_response_reports_db_fallback_flag() {
+        // get_status surfaces AppState::db_fallback so the GUI can show a
+        // degraded-durability banner; default (false) keeps old shape.
+        let mut state = create_test_state();
+        assert!(!state.db_fallback);
+        let resp = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(get_status(State(state.clone())));
+        assert!(!resp.0.db_fallback);
+        state.db_fallback = true;
+        let resp = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(get_status(State(state)));
+        assert!(resp.0.db_fallback);
     }
 
     #[test]
