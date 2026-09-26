@@ -641,6 +641,9 @@ impl LeaderboardManager {
                     if let Ok(m_json) = serde_json::to_string_pretty(&manifest) {
                         let _ = fs::write(parent_dir.join("manifest.json"), m_json);
                     }
+                    if let Some(store) = Self::open_store_if_exists() {
+                        let _ = store.upsert_run_manifest(&manifest);
+                    }
                 }
             }
 

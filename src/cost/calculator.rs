@@ -119,7 +119,13 @@ impl ModelPricing {
 
     pub fn for_model(model_name: &str) -> Self {
         let m = model_name.to_lowercase();
-        if m.contains("gemini-2.5-flash") {
+        if m.contains("gemini-3.8-flash") {
+            ModelPricing {
+                prompt_per_million: 0.75,
+                completion_per_million: 3.75,
+                cache_read_per_million: 0.075,
+            }
+        } else if m.contains("gemini-2.5-flash") {
             ModelPricing {
                 prompt_per_million: 0.15,
                 completion_per_million: 0.60,
