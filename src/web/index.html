@@ -1972,7 +1972,18 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
     function renderLines(lines){
       let html = '';
+      // Collapse consecutive [WAITING] progress spam to the latest line:
+      // the elapsed counter updates every few seconds and each unique text
+      // would otherwise append+trim churn the whole window = flicker.
+      const out = [];
       for (const raw of lines) {
+        if (raw && raw.includes('[WAITING]')) {
+          const prev = out[out.length - 1];
+          if (prev && prev.includes('[WAITING]')) out.pop();
+        }
+        out.push(raw);
+      }
+      for (const raw of out) {
         if (!raw) continue;
         if (parseTelemetryLine(raw)) continue;
         const cat = catFor(raw);
