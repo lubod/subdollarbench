@@ -1764,6 +1764,10 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
 }
 
 fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>) {
+    // A previous `stop` must never poison the next run: the cancel flag is
+    // per-run, cleared at dispatch. (Stale global flag once ate 15 queued
+    // cells with 0-trial Dones.)
+    state.cancel_requested.store(false, Ordering::SeqCst);
     let state_clone = state.clone();
     let handle = tokio::spawn(execute_run_body(state_clone, req, queue_id));
     *state.task_handle.lock().unwrap() = Some(handle);
@@ -2047,7 +2051,13 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         }
     }
 
-    if total_trials > 1 {
+    if subrun_results.is_empty() {
+        send_status(
+            &tx,
+            &run_log_buf,
+            "[STATUS] No trials completed (cancelled or all errored); nothing persisted.".to_string(),
+        );
+    } else if total_trials > 1 {
         let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
         let pass_at_k =
             compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize) * 100.0;
@@ -2255,6 +2265,7 @@ async fn extend_parent_run(
     };
     let state_clone = state.clone();
     let clean_for_task = clean.clone();
+    state.cancel_requested.store(false, Ordering::SeqCst);
     let handle = tokio::spawn(async move {
         state_clone.cancel_requested.store(false, Ordering::SeqCst);
         let tx = state_clone.log_sender.clone();
@@ -2598,6 +2609,32 @@ mod tests {
     use super::*;
     use crate::report::RunTokenUsage;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_dispatch_clears_stale_cancel_flag() {
+        // Regression: a `stop` during run N left cancel_requested=true and
+        // the next queued run aborted all trials before trial 1 (15 cells
+        // with 0-trial Dones). Dispatch must clear the flag per run.
+        let state = create_test_state();
+        state.cancel_requested.store(true, Ordering::SeqCst);
+        let req = RunRequest {
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            api_key: None,
+            budget_usd: 1.0,
+            max_turns: 1,
+            eval_only: false,
+            effort: Some("high".to_string()),
+            timeout_min: None,
+            trials: 1,
+            extend_if_unstable: false,
+            max_trials: 1,
+            save_results: Some(false),
+            review_model: None,
+        };
+        spawn_run_body(&state, req, Some("q-test-cancel".to_string()));
+        assert!(!state.cancel_requested.load(Ordering::SeqCst));
+    }
 
     fn create_test_state() -> AppState {
         let (log_sender, _) = broadcast::channel(100);
