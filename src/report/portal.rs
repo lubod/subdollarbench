@@ -1178,7 +1178,7 @@ const PORTAL_JS: &str = r#"
     return `
       <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span>📐</span>
-        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>HTTP/Proxy</strong> (Nginx, live), <strong>Redis</strong> (live). <strong>DNS</strong> (live CoreDNS where measured), <strong>PDF/WAL/PubSub</strong> timings are reported but unscored (--). DNS is quarantined from the global board pending verifier investigation.</span>
+        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>HTTP/Proxy</strong> (Nginx, live), <strong>Redis</strong> (live). <strong>DNS</strong> (live CoreDNS where measured), <strong>PDF/WAL/PubSub</strong> timings are reported but unscored (--). DNS rejoined the global board 2026-09-27 after healthy fresh-wave cells.</span>
         ${customBadge}
       </div>
     `;
@@ -1270,14 +1270,15 @@ const PORTAL_JS: &str = r#"
     return [Math.max(0, center - half) * 100, Math.min(1, center + half) * 100];
   }
 
-  // Cross-task rollup: one row per model+effort over non-quarantined tasks.
+  // Cross-task rollup: one row per model+effort over all tasks.
   // Pooled P@1 = passing trials / all trials; cost/turns summed; avg% averaged.
+  // (DNS quarantine lifted 2026-09-27: fresh-wave dns cells healthy, e.g.
+  // muse-spark dns 100%/watch; backend QUARANTINED_TASKS already empty.)
   function aggregateModels() {
     // 1. Group runs by (model, effort, task) and pick canonical run (highest trials, latest timestamp)
     const canonical = {};
     for (const r of RUNS_DATA) {
       const task = (r.task || '').toLowerCase();
-      if (task === 'dns') continue;
       const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task;
       const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
       const existing = canonical[key];
@@ -1374,7 +1375,7 @@ const PORTAL_JS: &str = r#"
     const arrow = (c) => modelsSortCol === c ? (modelsSortDir === 1 ? ' ▲' : ' ▼') : '';
     return `
       <div style="margin-bottom: 10px; padding: 8px 12px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.76rem; color: var(--mut);">
-        🏅 <strong>Cross-task rollup</strong> (DNS quarantined): one row per model+effort across all tasks. Ranked by pooled P@1 lower bound — the honest answer to "which cheap model codes best".
+        🏅 <strong>Cross-task rollup</strong>: one row per model+effort across all tasks. Ranked by pooled P@1 lower bound — the honest answer to "which cheap model codes best".
       </div>
       <div class="table-wrap"><table>
         <thead><tr>
