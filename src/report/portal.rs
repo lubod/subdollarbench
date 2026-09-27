@@ -67,7 +67,7 @@ pub struct ModelRollupRow {
 
 /// Static publish-hygiene note rendered into both portal indexes (full +
 /// rollup). Short, factual, no per-run data.
-const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (DNS) are judged on pass spread alone; single-trial runs default to <em>stable</em>.</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens), falling back to API-only spend when compute metering is absent; avg cost/run is total divided by runs.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS scope:</strong> the verifier scores six MUST stages (header handshake, example.com A, localhost A, test TXT, NXDOMAIN-or-empty for unknown names, 800-query burst with at least 760 ID-matched); TTL values are parsed but never asserted, and forwarding/caching are SHOULD-have judge scope only.</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li></ul></section>"#;
+const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (DNS) are judged on pass spread alone; single-trial runs default to <em>stable</em>.</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens), falling back to API-only spend when compute metering is absent; avg cost/run is total divided by runs.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS scope:</strong> the verifier scores six MUST stages (header handshake, example.com A, localhost A, test TXT, NXDOMAIN-or-empty for unknown names, 800-query burst with at least 760 ID-matched); TTL values are parsed but never asserted, and forwarding/caching are SHOULD-have judge scope only.</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li><li><strong>Publish freeze:</strong> only runs graded at or after the 2026-09-26 anti-cheat fix are published (timestamp &ge; 2026-09-26T15:34:10Z); earlier rows were graded under a stricter rule that has since changed. Fingerprint allowlists alone are insufficient because graded content changed without a version bump.</li><li><strong>Integrity limits:</strong> egress/static anti-cheat blocklists are self-admitted; a DNS candidate forwarding to the reference is indistinguishable from a real resolver by design; binproto STREAM, proxy X-Forwarded-For, and pubsub 1,000-subscriber requirements are published as specified but verified at reduced scale; the LLM judge may review its own model family rows; the API key travels in the agent container env.</li></ul></section>"#;
 
 /// Rollup page appends the coverage-floor note to the shared methodology.
 const ROLLUP_FLOOR_NOTE_HTML: &str =  r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 8 tasks and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
@@ -77,6 +77,27 @@ const ROLLUP_FLOOR_NOTE_HTML: &str =  r#"<p style="font-size:0.82rem;color:var(-
 /// single-task probe) would otherwise top average-pass sorting on noise.
 pub const ROLLUP_MIN_TASKS: usize = 6;
 pub const ROLLUP_MIN_TRIALS: usize = 18;
+
+/// Publish freeze: only rows at or after the last grading-content change are
+/// published. Rationale: `fingerprint()` hashes graded inputs
+/// (tasks/*/prompt.md + src/verifier/*.rs incl. compliance.rs), but the
+/// 2026-09-24.2 line has THREE hashes (91939c3e/e3d2bf2b/b371d2d4) because
+/// graded content changed without a RULES_VERSION bump (notably the
+/// 2026-09-26 Go-mime apache2 whitelist in compliance.rs, commit 2bf3a60 —
+/// an anti-cheat grading change that cleared 21 DQ trials). A fingerprint
+/// allowlist alone would still publish rows graded under the old rule, so the
+/// gate is an as-of timestamp cutoff instead: rows with timestamp BEFORE this
+/// instant are excluded from both portal exports with a stderr count.
+/// Update this when grading changes (it marks the new publish baseline).
+/// Timestamps here are RFC3339; row timestamps are naive local ISO
+/// (YYYY-MM-DDTHH:MM:SS); string compare works within one format, so the
+/// freeze is stored naive to match row format.
+pub const PUBLISH_FREEZE_TS: &str = "2026-09-26T15:34:10";
+
+/// True when a naive ISO timestamp is new enough to publish.
+pub fn publishable(timestamp: &str) -> bool {
+    timestamp >= PUBLISH_FREEZE_TS
+}
 
 const PORTAL_CSS: &str = r#":root{color-scheme:dark;--bg:#0b0e14;
   --panel: #121724;
@@ -1510,6 +1531,17 @@ impl PortalExporter {
             .into_iter()
             .filter(|r| !is_hidden(runs_path, &r.id) && !r.id.starts_with("test_"))
             .collect();
+        let pre_freeze = visible.len();
+        let visible: Vec<_> = visible
+            .into_iter()
+            .filter(|r| publishable(&r.timestamp))
+            .collect();
+        let frozen_cut = pre_freeze - visible.len();
+        if frozen_cut > 0 {
+            eprintln!(
+                "[PORTAL] freeze: excluded {frozen_cut} pre-freeze row(s) (timestamp < {PUBLISH_FREEZE_TS})"
+            );
+        }
         let out_dir = Path::new(out);
         let runs_out = out_dir.join("runs");
         fs::create_dir_all(&runs_out)
@@ -1571,7 +1603,18 @@ impl PortalExporter {
     /// above); the public portal is aggregated by design.
     pub fn export_rollup(results_dir: &str, out: &str, base_url: &str) -> Result<PortalSummary> {
         let results = LeaderboardManager::load_all(results_dir);
-        let rows = Self::apply_rollup_floor(Self::rollup_models(&results));
+        let pre_freeze = results.len();
+        let fresh: Vec<_> = results
+            .into_iter()
+            .filter(|r| publishable(&r.timestamp))
+            .collect();
+        let frozen_cut = pre_freeze - fresh.len();
+        if frozen_cut > 0 {
+            eprintln!(
+                "[PORTAL] freeze: excluded {frozen_cut} pre-freeze row(s) from rollup (timestamp < {PUBLISH_FREEZE_TS})"
+            );
+        }
+        let rows = Self::apply_rollup_floor(Self::rollup_models(&fresh));
         let out_dir = Path::new(out);
         fs::create_dir_all(out_dir)
             .with_context(|| format!("create portal dir {}", out_dir.display()))?;
@@ -1778,7 +1821,7 @@ impl PortalExporter {
                  <td style=\"text-align:center;\">${total:.4}</td>\
                  <td style=\"text-align:center;\">${avg_api:.4}</td>\
                  <td style=\"text-align:center;\">${avgc:.4}</td>\
-                 <td style=\"text-align:center;\">{stab}</td></tr>\n",
+                 <td style=\"text-align:center;\">{stab}</td><td style=\"text-align:center;font-size:0.72rem;color:var(--mut);\">post-2026-09-26</td></tr>\n",
                 medal = medal,
                 model = Self::esc(&r.model),
                 short = Self::esc(LeaderboardManager::short_model_name(&r.model)),
@@ -1803,11 +1846,12 @@ impl PortalExporter {
              <title>SubDollarBench Model Rollup</title>\
              <style>{css}</style></head><body><main>\
              <h1>🏆 SubDollarBench Model Rollup</h1>\
+             <div class=\"sub\">Publish freeze 2026-09-26T15:34:10Z: pre-freeze rows excluded; graded content changed without a version bump, so fingerprint allowlists alone are insufficient.</div>\
              <div class=\"sub\">Public aggregate: one row per model across all tasks · {n} models · {now}{base_info}</div>\
              <p style=\"font-size:0.8rem;color:var(--mut);\">Per-run detail (logs, code, workspaces) is internal and not published here.</p>\
              <table><thead><tr>\
              <th>#</th><th>Model</th><th>Tasks</th><th>Trials</th><th>Avg pass</th>\
-             <th>P@1 (lo-hi)</th><th>Total API cost</th><th>Total effective cost</th><th>Avg API cost/run</th><th>Avg effective cost/run</th><th>Stability</th>\
+             <th>P@1 (lo-hi)</th><th>Total API cost</th><th>Total effective cost</th><th>Avg API cost/run</th><th>Avg effective cost/run</th><th>Stability</th><th>Rules</th>\
              </tr></thead><tbody>{trs}</tbody></table>{methodology}{floor_note}\
              <footer class=\"muted\">SubDollarBench rollup · {now}</footer></main></body></html>",
             css = PORTAL_CSS,
@@ -2720,7 +2764,7 @@ mod tests {
             savings_percent: 0.0,
             efficiency_score: 0.0,
             throughput_score: None,
-            timestamp: "2026-09-26T00:00:00Z".to_string(),
+            timestamp: "2026-09-26T16:00:00".to_string(),
             method_version: None,
             rules_version: None,
             subruns: vec![],
@@ -2862,5 +2906,24 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, "probe-model");
         assert_eq!(rows[0].n_parents, 1);
+    }
+
+    #[test]
+    fn test_freeze_cutoff() {
+        assert!(!publishable("2026-09-26T15:34:09"));
+        assert!(publishable("2026-09-26T15:34:10"));
+        assert!(publishable("2026-09-26T19:45:16.109579"));
+        assert!(!publishable("2026-09-16T14:54:59.418874"));
+    }
+
+    #[test]
+    fn test_freeze_filters_rollup_input() {
+        let mut old = rollup_parent("old_1", "m", "http", 100.0, 0.01, None, 9, None);
+        old.timestamp = "2026-09-16T14:54:59".to_string();
+        let mut new = rollup_parent("new_1", "m", "http", 0.0, 0.01, None, 9, None);
+        new.timestamp = "2026-09-26T19:45:16.109579".to_string();
+        let fresh: Vec<_> = vec![old, new].into_iter().filter(|r| publishable(&r.timestamp)).collect();
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].id, "new_1");
     }
 }
