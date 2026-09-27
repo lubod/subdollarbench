@@ -637,7 +637,16 @@ impl UiServer {
                 }
             }
         };
-        let replayed = replay_queue(&store);
+        // Proxy mode: the engine owns dispatch. Never replay, never reset
+        // Running rows, never auto-kick — otherwise this process would
+        // double-spawn the engine's active cell.
+        let proxy_mode = !engine_url.is_empty();
+        let replayed: Vec<QueuedRun> = if proxy_mode {
+            println!("[QUEUE-DB] proxy mode: queue owned by engine, no replay");
+            Vec::new()
+        } else {
+            replay_queue(&store)
+        };
         let seq_start = queue_seq_start(&store);
         // Reset replayed Running rows to Pending in the mirror too, so a
         // second restart does not see stale Running rows.
@@ -664,21 +673,27 @@ impl UiServer {
             engine_url: engine_url.to_string(),
         };
 
-        // Replay auto-dispatch: pending work that survived the restart runs
-        // without a manual kick. is_running starts false; the memory queue
-        // stays authoritative and the DB mirror is best-effort in kick_runner.
-        if let Some(first_id) = state
-            .queue
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|i| i.status == QueueStatus::Pending)
-            .map(|i| i.id.clone())
-        {
-            let kick_state = state.clone();
-            tokio::spawn(async move {
-                kick_runner(&kick_state, &first_id).await;
-            });
+        // Replay auto-dispatch (engine only; proxy never kicks).
+        // Pending work that survived the restart runs without a manual kick.
+        // is_running starts false; the memory queue stays authoritative and
+        // the DB mirror is best-effort in kick_runner.
+        if proxy_mode {
+            println!("[QUEUE-DB] proxy mode: auto-dispatch disabled (engine owns it)");
+        }
+        if !proxy_mode {
+            if let Some(first_id) = state
+                .queue
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.status == QueueStatus::Pending)
+                .map(|i| i.id.clone())
+            {
+                let kick_state = state.clone();
+                tokio::spawn(async move {
+                    kick_runner(&kick_state, &first_id).await;
+                });
+            }
         }
 
         let app = Self::build_app(state);
