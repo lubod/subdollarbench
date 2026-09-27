@@ -928,9 +928,17 @@
       </div>
     </header>
 
-    <div class="grid">
-      <!-- Setup Tab Panel (was sidebar) -->
-      <div id="tab-setup" class="card" style="flex-direction: column; gap: 16px;">
+      <!-- Main Display Tabs -->
+      <main class="card">
+        <div class="tabs">
+          <button class="tab active" onclick="switchTab('setup')">⚙️ Setup</button>
+          <button class="tab" onclick="switchTab('console')">Live Console</button>
+          <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
+          <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
+          <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
+        </div>
+        <!-- Setup Tab Panel (was sidebar) -->
+      <div id="tab-setup" style="flex-direction: column; gap: 16px;">
         <h2>
           <span>⚙️ Benchmark Setup</span>
           <span id="modelCountBadge" class="badge badge-pass" style="font-size: 0.7rem;">Loading models...</span>
@@ -1094,15 +1102,7 @@
         </div>
       </div>
 
-      <!-- Main Display Tabs -->
-      <main class="card">
-        <div class="tabs">
-          <button class="tab active" onclick="switchTab('setup')">⚙️ Setup</button>
-          <button class="tab" onclick="switchTab('console')">Live Console</button>
-          <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
-          <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
-          <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
-        </div>
+
 
         <!-- Tab 1: Terminal Console -->
         <div id="tab-console" class="console-container" style="display: none;">
