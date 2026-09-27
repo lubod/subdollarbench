@@ -2996,6 +2996,7 @@ mod tests {
         assert_eq!(small.read().unwrap().len(), MAX_CONSOLE_LINES);
     }
 
+    #[tokio::test]
     async fn test_run_delete_guards() {
         let state = create_test_state();
         let app = UiServer::build_app(state);
