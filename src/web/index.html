@@ -1101,7 +1101,7 @@
           <button class="tab active" onclick="switchTab('console')">Live Console</button>
           <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
           <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
-          <a class="tab" href="/portal/" target="_blank" rel="noopener" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">🏆 Leaderboard (Portal) ↗</a>
+          <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
         </div>
 
         <!-- Tab 1: Terminal Console -->
@@ -1247,6 +1247,42 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <!-- Runs Cards View (Toggleable) -->
           <div id="runsCardsView" style="display: none; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px;">
           </div>
+        </div>
+
+        <!-- Tab: Leaderboard (detailed per model x task, internal) -->
+        <div id="tab-leaderboard" style="display: none; flex-direction: column; gap: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 10px; flex: 1; max-width: 520px;">
+              <input type="text" id="lbSearchInput" placeholder="🔍 Filter by model, task, effort..." oninput="filterLeaderboard(this.value)" style="flex: 1; padding: 6px 12px; font-size: 0.78rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
+              <span id="lbCountBadge" class="badge badge-info" style="font-size: 0.72rem; white-space: nowrap;">Loading...</span>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Show hidden runs">
+                <input type="checkbox" onchange="toggleLbHidden(this.checked)"> 👁 Hidden
+              </label>
+              <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="loadLeaderboard()">🔄 Refresh</button>
+              <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 5px 12px; font-size: 0.78rem; text-decoration: none;" title="Public rollup: one row per model">↗ Public rollup</a>
+            </div>
+          </div>
+          <div id="lbErrorBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.4); color: #ff7b72;"></div>
+          <div style="width: 100%; overflow-x: auto;">
+            <table class="responsive-runs-table">
+              <thead>
+                <tr>
+                  <th style="width: 26%;">Model & Task</th>
+                  <th style="width: 14%;">Pass / P@1 (lo–hi)</th>
+                  <th style="width: 10%;">Trials / Stability</th>
+                  <th style="width: 14%;">API cost / Effective</th>
+                  <th style="width: 10%;">Rules</th>
+                  <th style="width: 12%;">When</th>
+                </tr>
+              </thead>
+              <tbody id="lbTableBody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading leaderboard...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="font-size: 0.75rem;">Internal detail board: one row per model × task. Public portal shows one row per model only.</p>
         </div>
 
         <!-- Tab 3: Prompt Specification -->
@@ -1655,6 +1691,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       document.getElementById('tab-console').style.display = 'none';
       document.getElementById('tab-traceability').style.display = 'none';
       document.getElementById('tab-prompt').style.display = 'none';
+      document.getElementById('tab-leaderboard').style.display = 'none';
 
       const tabs = document.querySelectorAll('.tab');
       if (name === 'console') {
@@ -1669,7 +1706,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         if (tabs[2]) tabs[2].classList.add('active');
         loadPrompt();
       } else if (name === 'leaderboard') {
-        window.open('/portal/', '_blank');
+        document.getElementById('tab-leaderboard').style.display = 'flex';
+        if (tabs[3]) tabs[3].classList.add('active');
+        if (!lbCache || !lbCache.length) loadLeaderboard();
       }
     }
 
@@ -2418,6 +2457,97 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         setRunsError(e.message || String(e));
         renderRuns();
       }
+    }
+
+    let lbCache = [];
+    let lbFilter = '';
+    let lbShowHidden = false;
+
+    async function loadLeaderboard() {
+      try {
+        const res = await fetch('/api/leaderboard?task=all');
+        if (!res.ok) {
+          const b = document.getElementById('lbErrorBanner');
+          if (b) { b.style.display = 'block'; b.textContent = `Leaderboard HTTP ${res.status}`; }
+          renderLeaderboard();
+          return;
+        }
+        lbCache = await res.json();
+        const b = document.getElementById('lbErrorBanner');
+        if (b) { b.style.display = 'none'; b.textContent = ''; }
+        renderLeaderboard();
+      } catch (e) {
+        const b = document.getElementById('lbErrorBanner');
+        if (b) { b.style.display = 'block'; b.textContent = `Leaderboard offline: ${e.message || e}`; }
+        renderLeaderboard();
+      }
+    }
+
+    function filterLeaderboard(q) {
+      lbFilter = (q || '').trim().toLowerCase();
+      renderLeaderboard();
+    }
+
+    function toggleLbHidden(show) {
+      lbShowHidden = show;
+      renderLeaderboard();
+    }
+
+    function renderLeaderboard() {
+      const badge = document.getElementById('lbCountBadge');
+      const tbody = document.getElementById('lbTableBody');
+      const rows = (lbCache || []).filter(r => {
+        if (r.portal_hidden && !lbShowHidden) return false;
+        if (!lbFilter) return true;
+        const text = `${r.model} ${r.task} ${r.effort || ''} ${r.stability || ''}`.toLowerCase();
+        return text.includes(lbFilter);
+      });
+      // Sort: avg pass desc, then P@1 lo desc (mirror server finalize_results).
+      rows.sort((a, b) => {
+        const ap = (a.avg_pass_rate ?? a.pass_rate) - (b.avg_pass_rate ?? b.pass_rate);
+        if (ap !== 0) return -ap;
+        return (b.pass_at_1_lo ?? b.pass_at_1 ?? 0) - (a.pass_at_1_lo ?? a.pass_at_1 ?? 0);
+      });
+      if (badge) badge.textContent = `${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`;
+      if (!tbody) return;
+      if (rows.length === 0) {
+        const msg = (lbCache || []).length === 0
+          ? 'No leaderboard rows yet — run the wave first.'
+          : `No rows matched filter "${lbFilter}".`;
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = '';
+      rows.forEach(r => {
+        const meta = getModelMeta(r.model);
+        const avg = r.avg_pass_rate ?? r.pass_rate;
+        const p1 = r.pass_at_1 ?? r.pass_rate;
+        const lo = r.pass_at_1_lo, hi = r.pass_at_1_hi;
+        const ci = (lo != null && hi != null) ? ` <span style="font-size:0.72rem;color:var(--text-muted);">(${Math.round(lo)}–${Math.round(hi)})</span>` : '';
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const stab = r.stability
+          ? (r.stability === 'stable' ? '🟢' : r.stability === 'watch' ? '🟡' : '🔴') + ' ' + escapeHtml(r.stability)
+          : '<span style="color:var(--text-muted);">-</span>';
+        const api = r.total_cost_usd != null ? '$' + Number(r.total_cost_usd).toFixed(4) : 'n/a';
+        const eff = r.effective_cost_usd != null ? '$' + Number(r.effective_cost_usd).toFixed(4) : 'n/a';
+        const rules = r.rules_version ? escapeHtml(String(r.rules_version).split('+')[0]) : '<span style="color:var(--text-muted);">legacy</span>';
+        const when = r.timestamp ? escapeHtml(String(r.timestamp).slice(0, 16).replace('T', ' ')) : '-';
+        const tr = document.createElement('tr');
+        tr.style.borderLeft = `4px solid ${meta.color}`;
+        tr.innerHTML = `
+          <td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(r.model)}" style="font-weight:600;color:${meta.color};font-size:0.88rem;">${escapeHtml(shortModelName(r.model))}</span></span>
+            <span class="badge badge-info">${escapeHtml(r.task)}</span>
+            <span class="badge badge-effort">effort: ${escapeHtml(r.effort || 'n/a')}</span>
+            ${r.portal_hidden ? '<span class="badge" style="background:#6e7681;color:#fff;">Hidden</span>' : ''}
+          </div></td>
+          <td style="text-align:center;font-weight:700;">${Math.round(avg)}% / ${Math.round(p1)}%${ci}</td>
+          <td style="text-align:center;">${n}× / ${stab}</td>
+          <td style="text-align:center;">${api} / ${eff}</td>
+          <td style="text-align:center;font-size:0.75rem;">${rules}</td>
+          <td style="text-align:center;font-size:0.75rem;color:var(--text-muted);">${when}</td>`;
+        tbody.appendChild(tr);
+      });
     }
 
     function toggleHiddenRuns(show) {
