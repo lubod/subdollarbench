@@ -3316,11 +3316,19 @@ function copyRunId() {
     let consoleKnownLines = 0;
     let consoleSynced = false;
 
+    // Max rendered rows in the terminal. The server caps its buffer at 3000;
+    // the DOM keeps a smaller window (800) so long runs stay smooth.
+    const MAX_RENDERED_LINES = 800;
+    function trimTerminal(term) {
+      let over = term.childElementCount - MAX_RENDERED_LINES;
+      while (over-- > 0 && term.firstChild) term.removeChild(term.firstChild);
+    }
     function appendConsoleLines(lines) {
       const term = document.getElementById('terminalOutput');
       const wrap = document.createElement('div');
       wrap.innerHTML = renderLines(lines);
       while (wrap.firstChild) term.appendChild(wrap.firstChild);
+      trimTerminal(term);
       const autoScroll = document.getElementById('autoScrollCheck');
       if (!autoScroll || autoScroll.checked) {
         term.scrollTop = term.scrollHeight;
@@ -3349,7 +3357,7 @@ function copyRunId() {
         const term = document.getElementById('terminalOutput');
         // Fresh snapshot (manual refresh or first paint): render capped tail.
         if (force || !consoleSynced) {
-          const res = await fetch('/api/console?tail=3000');
+          const res = await fetch('/api/console?tail=800');
           if (res.ok) {
             const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
             const body = await res.text();
@@ -3373,7 +3381,7 @@ function copyRunId() {
             const text = await res.text();
             // Server resends the capped tail when the cursor is stale
             // (trim/restart/desync): re-render, then resume deltas.
-            if (text && total > 0 && total - consoleKnownLines > 3000) {
+            if (text && total > 0 && total - consoleKnownLines > 800) {
               term.innerHTML = renderLines(renderConsoleBody(term, text));
             } else if (text.trim()) {
               appendConsoleLines(renderConsoleBody(term, text));
