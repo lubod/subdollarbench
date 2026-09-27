@@ -98,7 +98,44 @@ pub struct StatusResponse {
     pub db_fallback: bool,
 }
 
-async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
+/// Read-through from the engine in GUI-proxy mode.
+/// Returns Some(response) when proxied; None in single-process mode.
+async fn proxy_read(state: &AppState, path: &str, query: &str) -> Option<Response> {
+    if state.engine_url.is_empty() {
+        return None;
+    }
+    let url = format!("{}{}{}", state.engine_url.trim_end_matches('/'), path, query);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let mut builder = axum::http::Response::builder().status(status);
+            for key in ["x-console-total", "content-type"] {
+                if let Some(v) = headers.get(key) {
+                    builder = builder.header(key, v.clone());
+                }
+            }
+            builder.body(axum::body::Body::from(bytes.to_vec())).ok()
+        }
+        Err(e) => Some(
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("engine unreachable at {url}: {e:#}"),
+            )
+                .into_response(),
+        ),
+    }
+}
+
+async fn get_status(State(state): State<AppState>) -> Response {
+    if let Some(proxied) = proxy_read(&state, "/api/status", "").await {
+        return proxied;
+    }
     let is_running = state.is_running.load(Ordering::SeqCst);
     let current_run = state.current_run.read().unwrap().clone();
     let last_run = state.last_run.read().unwrap().clone();
@@ -108,6 +145,7 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
         last_run,
         db_fallback: state.db_fallback,
     })
+    .into_response()
 }
 
 fn default_trials() -> u32 {
@@ -1149,7 +1187,14 @@ struct ConsoleQuery {
 async fn get_active_console(
     State(state): State<AppState>,
     Query(q): Query<ConsoleQuery>,
+    request: axum::extract::Request,
 ) -> Response {
+    if !state.engine_url.is_empty() {
+        let qs = request.uri().query().map(|x| format!("?{x}")).unwrap_or_default();
+        if let Some(proxied) = proxy_read(&state, "/api/console", &qs).await {
+            return proxied;
+        }
+    }
     let buf = state.log_buffer.read().unwrap();
     let total = buf.len();
     let cap = q.tail.unwrap_or(MAX_CONSOLE_LINES).min(total.max(1));
@@ -2350,8 +2395,11 @@ async fn extend_parent_run(
     })))
 }
 
-async fn get_queue(State(state): State<AppState>) -> Json<Vec<QueuedRun>> {
-    Json(state.queue.lock().unwrap().iter().cloned().collect())
+async fn get_queue(State(state): State<AppState>) -> Response {
+    if let Some(proxied) = proxy_read(&state, "/api/queue", "").await {
+        return proxied;
+    }
+    Json::<Vec<QueuedRun>>(state.queue.lock().unwrap().iter().cloned().collect()).into_response()
 }
 
 /// Try to start the head of the queue. Returns true when a run was spawned
@@ -2649,7 +2697,19 @@ async fn start_run(
 
 async fn stream_logs(
     State(state): State<AppState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Sse<std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>>> {
+    if !state.engine_url.is_empty() {
+        // Proxy mode: one-shot snapshot of the engine console tail as SSE
+        // events (the GUI also polls /api/console every 2s = the live path).
+        let url = format!("{}/api/console?tail=200", state.engine_url.trim_end_matches('/'));
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
+        let text = match client.get(&url).send().await {
+            Ok(resp) => resp.text().await.unwrap_or_else(|_| "[STREAM NOTICE] engine console unreadable".to_string()),
+            Err(_) => "[STREAM NOTICE] engine console down".to_string(),
+        };
+        let evts: Vec<Result<Event, Infallible>> = text.lines().map(|l| Ok(Event::default().data(l.to_string()))).collect();
+        return Sse::new(Box::pin(tokio_stream::iter(evts)) as std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>>).keep_alive(KeepAlive::default());
+    }
     let rx = state.log_sender.subscribe();
 
     let initial_events: Vec<Event> = {
@@ -2678,7 +2738,7 @@ async fn stream_logs(
     });
 
     let combined = initial_stream.chain(live_stream);
-    Sse::new(combined).keep_alive(KeepAlive::default())
+    Sse::new(Box::pin(combined) as std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>>).keep_alive(KeepAlive::default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2733,6 +2793,12 @@ mod tests {
         assert!(!state.cancel_requested.load(Ordering::SeqCst));
     }
 
+    async fn test_queue_of(state: &AppState) -> Vec<QueuedRun> {
+        let resp = get_queue(State(state.clone())).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     fn create_test_state() -> AppState {
         let (log_sender, _) = broadcast::channel(100);
         AppState {
@@ -2751,25 +2817,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_response_reports_db_fallback_flag() {
+    #[tokio::test]
+    async fn status_response_reports_db_fallback_flag() {
         // get_status surfaces AppState::db_fallback so the GUI can show a
         // degraded-durability banner; default (false) keeps old shape.
         let mut state = create_test_state();
         assert!(!state.db_fallback);
-        let resp = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rt")
-            .block_on(get_status(State(state.clone())));
-        assert!(!resp.0.db_fallback);
+        let resp = get_status(State(state.clone())).await;
+        {
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v.get("db_fallback"), Some(&serde_json::Value::Bool(false)));
+        }
         state.db_fallback = true;
-        let resp = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rt")
-            .block_on(get_status(State(state)));
-        assert!(resp.0.db_fallback);
+        let resp = get_status(State(state)).await;
+        {
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v.get("db_fallback"), Some(&serde_json::Value::Bool(true)));
+        }
     }
 
     #[test]
@@ -2883,7 +2949,7 @@ mod tests {
         assert!(res.is_ok());
         let body = res.unwrap().0;
         assert_eq!(body["started"], false);
-        let q = get_queue(State(state)).await.0;
+        let q = test_queue_of(&state).await;
         assert_eq!(q.len(), 1);
         assert_eq!(q[0].status, QueueStatus::Pending);
         assert!(q[0].id.starts_with('q'));
@@ -2914,7 +2980,7 @@ mod tests {
         assert!(res.is_err());
         // Slot untouched: still busy, queue empty.
         assert!(state.is_running.load(Ordering::SeqCst));
-        assert!(get_queue(State(state)).await.0.is_empty());
+        assert!(test_queue_of(&state).await.is_empty());
     }
 
     #[tokio::test]
@@ -2970,7 +3036,7 @@ mod tests {
         assert!(res.is_ok(), "unstable parent must queue while busy");
         let body = res.unwrap().0;
         assert!(body.get("queued").is_some());
-        let q = get_queue(State(state.clone())).await.0;
+        let q = test_queue_of(&state).await;
         assert_eq!(q.len(), 1);
         assert!(matches!(q[0].kind, QueueKind::Extend(_)));
         // Pending extends are removable like runs.
@@ -3012,7 +3078,7 @@ mod tests {
         assert!(remove_queued_run(State(state.clone()), AxumPath(idb))
             .await
             .is_err());
-        assert_eq!(get_queue(State(state.clone())).await.0.len(), 1);
+        assert_eq!(test_queue_of(&state).await.len(), 1);
         let msg = clear_queue(State(state.clone())).await;
         assert!(msg.contains("Cleared 0"));
         {
@@ -3021,7 +3087,7 @@ mod tests {
         }
         let msg = clear_queue(State(state.clone())).await;
         assert!(msg.contains("Cleared 1"));
-        assert!(get_queue(State(state)).await.0.is_empty());
+        assert!(test_queue_of(&state).await.is_empty());
     }
 
     #[test]
