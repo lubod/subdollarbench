@@ -83,7 +83,7 @@
     /* Layout Grid */
     .grid {
       display: grid;
-      grid-template-columns: 460px 1fr;
+      grid-template-columns: 1fr;
       gap: 20px;
     }
     @media (max-width: 1000px) {
@@ -917,7 +917,6 @@
       <div style="display: flex; align-items: center; gap: 12px;">
         <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">🏆 Leaderboard (Portal) ↗</a>
         <button class="btn-secondary" onclick="rebuildPortalNow()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;" title="Regenerate the static portal from current runs">Rebuild portal</button>
-        <button class="btn-secondary" id="toggleSidebarBtn" onclick="toggleSidebar()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;">◀ Hide Setup Panel</button>
         <div class="status-badge" id="ompStatusBadge" title="OMP Agent Sandbox Status" style="cursor: pointer;" onclick="checkOrUpdateOmp()">
           <span class="status-dot" id="ompDot" style="background: var(--primary);"></span>
           <span id="ompText">OMP: checking...</span>
@@ -930,8 +929,8 @@
     </header>
 
     <div class="grid">
-      <!-- Configuration Panel -->
-      <aside class="card">
+      <!-- Setup Tab Panel (was sidebar) -->
+      <div id="tab-setup" class="card" style="flex-direction: column; gap: 16px;">
         <h2>
           <span>⚙️ Benchmark Setup</span>
           <span id="modelCountBadge" class="badge badge-pass" style="font-size: 0.7rem;">Loading models...</span>
@@ -1093,19 +1092,20 @@
           </div>
           <div id="queueList"><div class="hint">Empty — queue runs to run them hands-free.</div></div>
         </div>
-      </aside>
+      </div>
 
       <!-- Main Display Tabs -->
       <main class="card">
         <div class="tabs">
-          <button class="tab active" onclick="switchTab('console')">Live Console</button>
+          <button class="tab active" onclick="switchTab('setup')">⚙️ Setup</button>
+          <button class="tab" onclick="switchTab('console')">Live Console</button>
           <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
           <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
           <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
         </div>
 
         <!-- Tab 1: Terminal Console -->
-        <div id="tab-console" class="console-container">
+        <div id="tab-console" class="console-container" style="display: none;">
           <div id="currentRunCard" style="display: none; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px;">
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
               <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">● Current run</div>
@@ -1686,28 +1686,33 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       updateEffortControlsForModel(targetModel, { applyDefault: true });
     }
 
+    // Setup panel lives outside <main> (single-column grid stacks it above).
     function switchTab(name) {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.getElementById('tab-setup').style.display = 'none';
       document.getElementById('tab-console').style.display = 'none';
       document.getElementById('tab-traceability').style.display = 'none';
       document.getElementById('tab-prompt').style.display = 'none';
       document.getElementById('tab-leaderboard').style.display = 'none';
 
       const tabs = document.querySelectorAll('.tab');
-      if (name === 'console') {
-        document.getElementById('tab-console').style.display = 'flex';
+      if (name === 'setup') {
+        document.getElementById('tab-setup').style.display = 'flex';
         if (tabs[0]) tabs[0].classList.add('active');
+      } else if (name === 'console') {
+        document.getElementById('tab-console').style.display = 'flex';
+        if (tabs[1]) tabs[1].classList.add('active');
       } else if (name === 'traceability') {
         document.getElementById('tab-traceability').style.display = 'flex';
-        if (tabs[1]) tabs[1].classList.add('active');
+        if (tabs[2]) tabs[2].classList.add('active');
         if (!allRunsCache || !allRunsCache.length) loadRuns();
       } else if (name === 'prompt') {
         document.getElementById('tab-prompt').style.display = 'flex';
-        if (tabs[2]) tabs[2].classList.add('active');
+        if (tabs[3]) tabs[3].classList.add('active');
         loadPrompt();
       } else if (name === 'leaderboard') {
         document.getElementById('tab-leaderboard').style.display = 'flex';
-        if (tabs[3]) tabs[3].classList.add('active');
+        if (tabs[4]) tabs[4].classList.add('active');
         if (!lbCache || !lbCache.length) loadLeaderboard();
       }
     }
@@ -2354,22 +2359,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     let currentRunsView = localStorage.getItem('runs_view_mode') || 'table';
 
     function toggleSidebar() {
-      const aside = document.querySelector('aside.card');
-      const grid = document.querySelector('.grid');
-      const btn = document.getElementById('toggleSidebarBtn');
-      if (!aside || !grid) return;
-      const isHidden = aside.style.display === 'none';
-      if (isHidden) {
-        aside.style.display = 'flex';
-        grid.style.gridTemplateColumns = '460px 1fr';
-        if (btn) btn.textContent = '◀ Hide Setup Panel';
-        localStorage.setItem('sidebar_hidden', 'false');
-      } else {
-        aside.style.display = 'none';
-        grid.style.gridTemplateColumns = '1fr';
-        if (btn) btn.textContent = '⚙️ Show Setup Panel';
-        localStorage.setItem('sidebar_hidden', 'true');
-      }
+      // Legacy: setup is now a tab; jump to it.
+      switchTab('setup');
     }
 
     function formatTimestamp(ts) {
@@ -3740,7 +3731,7 @@ function copyRunId() {
     const initialSavedTask = localStorage.getItem('selected_benchmark_task') || 'redis';
     onTaskChange(initialSavedTask);
     toggleAutoRefresh(true);
-    if (localStorage.getItem('sidebar_hidden') === 'true') { toggleSidebar(); }
+
     setRunsViewMode(currentRunsView);
     setPromptViewMode(currentPromptViewMode);
     checkActiveRun();
