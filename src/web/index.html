@@ -1972,14 +1972,19 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
     function renderLines(lines){
       let html = '';
-      // Collapse consecutive [WAITING] progress spam to the latest line:
-      // the elapsed counter updates every few seconds and each unique text
-      // would otherwise append+trim churn the whole window = flicker.
+      // Collapse [WAITING] progress spam: the elapsed counter updates every
+      // few seconds and each unique text would churn the DOM = flicker.
+      // Keep one waiting line per batch AND skip it entirely when the DOM
+      // already shows one — progress stays visible via the telemetry bar
+      // (turns/elapsed tick every second without touching the log).
+      const domHasWaiting = (typeof document !== 'undefined') &&
+        !!document.getElementById('terminalOutput')?.querySelector('.ln-waiting');
       const out = [];
       for (const raw of lines) {
         if (raw && raw.includes('[WAITING]')) {
           const prev = out[out.length - 1];
           if (prev && prev.includes('[WAITING]')) out.pop();
+          if (domHasWaiting) continue;
         }
         out.push(raw);
       }
