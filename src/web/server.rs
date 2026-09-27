@@ -79,6 +79,8 @@ pub struct AppState {
     pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
     pub queue_seq: Arc<AtomicU64>,
     pub store: Arc<Store>,
+    /// Engine base URL in GUI-proxy mode (empty = single-process engine).
+    pub engine_url: String,
     /// True when `bench.db` failed to open and the server fell back to a
     /// temp-dir DB (queue durability degraded); surfaced via /api/status.
     pub db_fallback: bool,
@@ -601,7 +603,7 @@ impl UiServer {
             .with_state(state)
     }
 
-    pub async fn start(host: &str, port: u16) -> anyhow::Result<()> {
+    pub async fn start(host: &str, port: u16, engine_url: &str) -> anyhow::Result<()> {
         let repo = crate::config::get_repo_root();
         if repo.exists() {
             let _ = std::env::set_current_dir(&repo);
@@ -659,6 +661,7 @@ impl UiServer {
             queue_seq: Arc::new(AtomicU64::new(seq_start)),
             store,
             db_fallback,
+            engine_url: engine_url.to_string(),
         };
 
         // Replay auto-dispatch: pending work that survived the restart runs
@@ -1152,6 +1155,9 @@ async fn get_env() -> Json<EnvironmentInfo> {
 }
 
 async fn stop_run(State(state): State<AppState>) -> Response {
+    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/run/stop", None).await {
+        return proxied;
+    }
     eprintln!("[AUDIT] POST /api/run/stop at {}", Utc::now().to_rfc3339());
     if !state.is_running.load(Ordering::SeqCst) {
         return (
@@ -2104,7 +2110,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     send_status(&tx, &run_log_buf, "[DONE]".to_string());
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ExtendBody {
     trials: Option<u32>,
     max_turns: Option<u32>,
@@ -2131,6 +2137,15 @@ async fn extend_parent_run(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<ExtendBody>,
 ) -> Result<Json<serde_json::Value>, Response> {
+    if let Some(proxied) = proxy_mutation(&state, "POST", &format!("/api/runs/{id}/extend"), Some(serde_json::to_value(&body).unwrap_or_default())).await {
+        let status = proxied.status();
+        if status.is_success() {
+            let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            return Ok(Json(v));
+        }
+        return Err(proxied);
+    }
     let fail = |code: StatusCode, msg: String| (code, msg).into_response();
     let clean = clean_run_id(&id)
         .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("invalid run id '{id}'")))?;
@@ -2423,10 +2438,59 @@ fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
     id
 }
 
+/// Forward a mutation to the engine in GUI-proxy mode.
+/// Returns Some(response) when proxying applied; None in single-process mode.
+async fn proxy_mutation(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Option<Response> {
+    if state.engine_url.is_empty() {
+        return None;
+    }
+    let url = format!("{}{}", state.engine_url.trim_end_matches('/'), path);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
+    let mut rb = match method {
+        "DELETE" => client.delete(&url),
+        _ => client.post(&url),
+    };
+    if let Some(b) = body {
+        rb = rb.json(&b);
+    }
+    match rb.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            Some((status, bytes.to_vec()).into_response())
+        }
+        Err(e) => Some(
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("engine unreachable at {url}: {e:#}"),
+            )
+                .into_response(),
+        ),
+    }
+}
+
 async fn enqueue_run(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<serde_json::Value>, Response> {
+    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/queue", Some(serde_json::to_value(&req).unwrap_or_default())).await {
+        let status = proxied.status();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if status.is_success() {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            return Ok(Json(v));
+        }
+        return Err((status, text).into_response());
+    }
     if !matches!(
         req.task.as_str(),
         "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
@@ -2461,6 +2525,13 @@ async fn remove_queued_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<String, Response> {
+    if let Some(proxied) = proxy_mutation(&state, "DELETE", &format!("/api/queue/{id}"), None).await {
+        let status = proxied.status();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if status.is_success() { return Ok(text); }
+        return Err((status, text).into_response());
+    }
     let removed = {
         let mut q = state.queue.lock().unwrap();
         match q.iter().position(|i| i.id == id) {
@@ -2500,6 +2571,10 @@ async fn remove_queued_run(
 }
 
 async fn clear_queue(State(state): State<AppState>) -> String {
+    if let Some(proxied) = proxy_mutation(&state, "DELETE", "/api/queue", None).await {
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        return String::from_utf8_lossy(&bytes).to_string();
+    }
     // Drops finished history only; pending work is never discarded here.
     let n_before = state.queue.lock().unwrap().len();
     {
@@ -2517,6 +2592,13 @@ async fn start_run(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
 ) -> Result<String, Response> {
+    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/run", Some(serde_json::to_value(&req).unwrap_or_default())).await {
+        let status = proxied.status();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if status.is_success() { return Ok(text); }
+        return Err((status, text).into_response());
+    }
     if state
         .is_running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -2650,6 +2732,7 @@ mod tests {
             queue_seq: Arc::new(AtomicU64::new(0)),
             store: Arc::new(tempfile_mem_store()),
             db_fallback: false,
+            engine_url: String::new(),
         }
     }
 

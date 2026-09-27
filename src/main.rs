@@ -1889,8 +1889,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("{}", remote::delete_text(&server, &format!("/api/runs/{id}")).await?);
         }
 
-        Commands::Ui { port, host } => {
-            web::UiServer::start(&host, port).await?;
+        Commands::Ui {
+            port,
+            host,
+            engine_url,
+        } => {
+            web::UiServer::start(&host, port, &engine_url).await?;
         }
 
     }
@@ -2258,6 +2262,7 @@ mod tests {
             command: Commands::Ui {
                 host: "127.0.0.1".to_string(),
                 port: 0,
+                engine_url: String::new(),
             },
         };
         let _ = tokio::time::timeout(Duration::from_millis(150), run_cli(cli_ui)).await;

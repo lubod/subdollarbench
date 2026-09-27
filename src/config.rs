@@ -189,6 +189,14 @@ pub enum Commands {
         /// Host address to bind
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+
+        /// Engine base URL for GUI proxy mode (e.g. http://127.0.0.1:3000).
+        /// When set, this process serves the GUI + read APIs locally and
+        /// proxies queue/run mutations to the engine. Restart freely:
+        /// the engine keeps running trials. When empty, single-process
+        /// mode (GUI + engine together, as before).
+        #[arg(long, default_value = "")]
+        engine_url: String,
     },
 
     /// [operate] Follow a live run's console log (stage markers highlighted)
@@ -1207,7 +1215,7 @@ mod tests {
         ];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
-            Commands::Ui { port, host } => {
+            Commands::Ui { port, host, .. } => {
                 assert_eq!(port, 8080);
                 assert_eq!(host, "127.0.0.1");
             }
@@ -1217,7 +1225,7 @@ mod tests {
         let args_default = ["subdollarbench", "ui"];
         let cli_default = Cli::try_parse_from(args_default).unwrap();
         match cli_default.command {
-            Commands::Ui { port, host } => {
+            Commands::Ui { port, host, .. } => {
                 assert_eq!(port, 3000);
                 assert_eq!(host, "127.0.0.1");
             }
