@@ -830,8 +830,8 @@ async fn get_models(
     }
 
     models.sort_by(|a, b| {
-        a.prompt_price_per_m
-            .partial_cmp(&b.prompt_price_per_m)
+        ((a.prompt_price_per_m + a.completion_price_per_m) / 2.0)
+            .partial_cmp(&((b.prompt_price_per_m + b.completion_price_per_m) / 2.0))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 

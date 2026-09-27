@@ -1547,9 +1547,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (sortMode === 'newest') {
         filtered.sort((a, b) => (b.created || 0) - (a.created || 0));
       } else if (sortMode === 'price_asc') {
-        filtered.sort((a, b) => a.prompt_price_per_m - b.prompt_price_per_m);
+        filtered.sort((a, b) => ((a.prompt_price_per_m + a.completion_price_per_m) / 2) - ((b.prompt_price_per_m + b.completion_price_per_m) / 2));
       } else if (sortMode === 'price_desc') {
-        filtered.sort((a, b) => b.prompt_price_per_m - a.prompt_price_per_m);
+        filtered.sort((a, b) => ((b.prompt_price_per_m + b.completion_price_per_m) / 2) - ((a.prompt_price_per_m + a.completion_price_per_m) / 2));
       } else if (sortMode === 'name') {
         filtered.sort((a, b) => a.name.localeCompare(b.name));
       }
@@ -1588,7 +1588,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           }
         }
 
-        opt.textContent = `${dateBadge}${m.name}${effortTag} — [In: $${m.prompt_price_per_m.toFixed(2)} / Out: $${m.completion_price_per_m.toFixed(2)}]`;
+        opt.textContent = `${dateBadge}${m.name}${effortTag} — [In: $${m.prompt_price_per_m.toFixed(2)} / Out: $${m.completion_price_per_m.toFixed(2)} / Avg: $${((m.prompt_price_per_m + m.completion_price_per_m) / 2).toFixed(2)}]`;
         select.appendChild(opt);
       });
 
@@ -1643,6 +1643,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         <span>📅 Released: <b>${escapeHtml(opt.dataset.relDate)}</b></span> • 
         <span>📥 Input: <b>$${escapeHtml(opt.dataset.promptPrice)}/1M</b></span> • 
         <span>📤 Output: <b>$${escapeHtml(opt.dataset.compPrice)}/1M</b></span> • 
+        <span>📊 Avg: <b>$${((parseFloat(opt.dataset.promptPrice) + parseFloat(opt.dataset.compPrice)) / 2).toFixed(2)}/1M</b></span> • 
         <span>🧠 Ctx: <b>${parseInt(opt.dataset.context || 0).toLocaleString()}</b></span>${effortBadge}
       `;
 
