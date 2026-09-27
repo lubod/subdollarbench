@@ -941,15 +941,20 @@ async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<serd
     )
 }
 
+/// Refresh the PUBLIC portal: models summary only (no per-run pages).
+/// Per-run detail lives in the GUI (Runs + Leaderboard tabs), never on disk here.
 fn refresh_portal() {
     let root = crate::config::get_repo_root();
-    let _ = PortalExporter::export(
-        RunArchiver::resolve_runs_dir().to_str().unwrap_or("./runs"),
+    let out = root.join("portal");
+    let _ = PortalExporter::export_rollup(
         resolve_results_dir().to_str().unwrap_or("./results"),
-        root.join("portal").to_str().unwrap_or("./portal"),
+        out.to_str().unwrap_or("./portal"),
         "",
-        200,
     );
+    // Rollup writes index.html only; drop stale per-run artifacts so the
+    // public surface never serves run detail.
+    let _ = std::fs::remove_dir_all(out.join("runs"));
+    let _ = std::fs::remove_file(out.join("results.json"));
 }
 
 /// Same-origin guard for mutating endpoints. Browser navigations always
@@ -1101,20 +1106,17 @@ async fn set_run_portal_visibility(
 }
 
 async fn rebuild_portal() -> Response {
-    let root = crate::config::get_repo_root();
-    match PortalExporter::export(
-        RunArchiver::resolve_runs_dir().to_str().unwrap_or("./runs"),
-        resolve_results_dir().to_str().unwrap_or("./results"),
-        root.join("portal").to_str().unwrap_or("./portal"),
-        "",
-        200,
-    ) {
-        Ok(summary) => Json(serde_json::json!({"run_count": summary.run_count})).into_response(),
-        Err(e) => (
+    // Public portal is models-summary-only (rollup + prune stale per-run pages).
+    refresh_portal();
+    let idx = crate::config::get_repo_root().join("portal").join("index.html");
+    if idx.exists() {
+        Json(serde_json::json!({"ok": true, "rollup": true})).into_response()
+    } else {
+        (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("portal export failed: {}", e),
+            "portal export failed: missing index.html",
         )
-            .into_response(),
+            .into_response()
     }
 }
 
