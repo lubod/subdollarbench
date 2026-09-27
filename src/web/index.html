@@ -1989,10 +1989,11 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
     function scrollTerm(){
       const autoScroll = document.getElementById('autoScrollCheck');
-      if (!autoScroll || autoScroll.checked) {
-        const term = document.getElementById('terminalOutput');
-        term.scrollTop = term.scrollHeight;
-      }
+      if (!autoScroll || !autoScroll.checked) return;
+      const term = document.getElementById('terminalOutput');
+      // Stick to bottom only when already near it; never yank while reading.
+      const nearBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 120;
+      if (nearBottom) term.scrollTop = term.scrollHeight;
     }
     function appendLog(line) {
       if (!line) return;
@@ -2017,6 +2018,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       div.className = cat ? 'ln ln-' + cat : 'ln';
       div.textContent = line;
       term.appendChild(div);
+      trimTerminal(term);
       scrollTerm();
     }
     // Markdown Parser
@@ -3329,10 +3331,7 @@ function copyRunId() {
       wrap.innerHTML = renderLines(lines);
       while (wrap.firstChild) term.appendChild(wrap.firstChild);
       trimTerminal(term);
-      const autoScroll = document.getElementById('autoScrollCheck');
-      if (!autoScroll || autoScroll.checked) {
-        term.scrollTop = term.scrollHeight;
-      }
+      scrollTerm();
     }
 
     function renderConsoleBody(term, body) {
@@ -3368,10 +3367,7 @@ function copyRunId() {
             }
             consoleKnownLines = total;
             consoleSynced = true;
-            const autoScroll = document.getElementById('autoScrollCheck');
-            if (autoScroll && autoScroll.checked) {
-              term.scrollTop = term.scrollHeight;
-            }
+            scrollTerm();
           }
         } else {
           // Steady state: append only lines newer than the cursor.
@@ -3420,10 +3416,11 @@ function copyRunId() {
 
     let activeEventSource = null;
 
+    let lastStreamAttach = 0;
     function attachLogStream() {
-      if (activeEventSource) {
-        try { activeEventSource.close(); } catch(e) {}
-      }
+      const now = Date.now();
+      if (activeEventSource || now - lastStreamAttach < 5000) return;
+      lastStreamAttach = now;
       activeEventSource = new EventSource('/api/stream');
       const badge = document.getElementById('consolePulseBadge');
       const pText = document.getElementById('consolePulseText');
