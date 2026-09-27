@@ -2018,12 +2018,16 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const cat = catFor(line);
       if (cat === 'skip') return;
       if (cat === 'waiting') {
-        const prev = term.querySelector('.ln-waiting:last-of-type');
-        if (prev) {
-          prev.textContent = line;
+        // Replace in place when the waiting line is the visible tail;
+        // otherwise drop the stale one wherever it sits and append fresh.
+        // (:last-of-type breaks once any later sibling lands.)
+        const last = term.lastElementChild;
+        if (last && last.classList.contains('ln-waiting')) {
+          last.textContent = line;
           scrollTerm();
           return;
         }
+        term.querySelectorAll('.ln-waiting').forEach(el => el.remove());
       }
       const div = document.createElement('div');
       div.className = cat ? 'ln ln-' + cat : 'ln';
@@ -3245,7 +3249,7 @@ function copyRunId() {
       const res = await fetch('/api/portal/rebuild', {method: 'POST'});
       if (!res.ok) { alert('Portal rebuild failed'); return; }
       const data = await res.json();
-      alert(`Portal rebuilt (${data.run_count} runs)`);
+      alert(data.rollup ? 'Models summary rebuilt' : `Portal rebuilt (${data.run_count} runs)`);
       refreshAfterRunMutation();
     }
 
@@ -3340,6 +3344,12 @@ function copyRunId() {
       const term = document.getElementById('terminalOutput');
       const wrap = document.createElement('div');
       wrap.innerHTML = renderLines(lines);
+      // At most one WAITING line may exist in the DOM: drop all stale ones,
+      // then let the batch's (single, collapsed) line append normally.
+      const freshWaiting = wrap.querySelector('.ln-waiting');
+      if (freshWaiting) {
+        term.querySelectorAll('.ln-waiting').forEach(el => el.remove());
+      }
       while (wrap.firstChild) term.appendChild(wrap.firstChild);
       trimTerminal(term);
       scrollTerm();
