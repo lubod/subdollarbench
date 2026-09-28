@@ -889,9 +889,31 @@ impl LeaderboardManager {
         list
     }
 
-    /// Shared post-processing for both readers: token fallback, child-subrun
-    /// filter, loose-trial regroup, ranking sort.
+    /// Shared post-processing for both readers: junk filter, token fallback,
+    /// child-subrun filter, loose-trial regroup, ranking sort.
     fn finalize_results(mut list: Vec<BenchmarkRunResult>) -> Vec<BenchmarkRunResult> {
+        // Defense in depth: refuse rows that must never publish, even if they
+        // reached the store before the write-time guards (killed-run debris,
+        // double-spawn orphans, CI probes). Mirrors save_result's refusals.
+        let pre = list.len();
+        list.retain(|r| {
+            if r.id.starts_with("test_") {
+                return false;
+            }
+            // 0-trial junk: loose *trial* rows with no evidence (no subruns,
+            // no trial count). Legacy single-trial rows share the shape but
+            // carry bare ids (no `_trialN`); they pass through — only `_trial`
+            // rows are debris candidates (killed-run/double-spawn leftovers).
+            let n = r.total_trials.unwrap_or(r.subruns.len() as u32);
+            if n == 0 && r.subruns.is_empty() && r.id.contains("_trial") {
+                return false;
+            }
+            true
+        });
+        let cut = pre - list.len();
+        if cut > 0 {
+            eprintln!("[LEADERBOARD] finalize: filtered {cut} junk row(s) (test_/0-trial)");
+        }
         for res in &mut list {
             if res.total_tokens == 0 {
                 res.total_tokens =
@@ -1689,6 +1711,57 @@ mod tests {
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
+    }
+
+    #[test]
+    fn test_finalize_filters_trial_junk_but_keeps_legacy_singles() {
+        // Junk: loose `_trial` row with no subruns/count (killed-run debris).
+        let junk = sample_junk_row("cell_trial3");
+        // Legacy single: same shape but bare id (pre-subrun format).
+        let legacy = sample_junk_row("legacy_single");
+        let list = LeaderboardManager::finalize_results(vec![junk, legacy]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "legacy_single");
+    }
+
+    fn sample_junk_row(id: &str) -> BenchmarkRunResult {
+        BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Rust".to_string(),
+            effort: None,
+            pass_rate: 0.0,
+            passed_stages: 0,
+            total_stages: 4,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-09-28T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+        }
     }
 
     #[test]

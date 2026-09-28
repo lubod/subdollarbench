@@ -703,6 +703,19 @@ impl UiServer {
         if !replayed.is_empty() {
             println!("[QUEUE-DB] replayed {} pending item(s) from bench.db", replayed.len());
         }
+        // Boot integrity audit (warn-only; `migrate-check` exits 1 for CI).
+        {
+            let orphans = store.orphan_trial_count();
+            if orphans > 0 {
+                tracing::warn!("integrity: {orphans} orphan trial(s); run `migrate-check`");
+                eprintln!("[INTEGRITY] {orphans} orphan trial(s); run `migrate-check`");
+            }
+            let junk = store.junk_parent_count();
+            if junk > 0 {
+                tracing::warn!("integrity: {junk} junk parent row(s); run `migrate-check`");
+                eprintln!("[INTEGRITY] {junk} junk parent row(s); run `migrate-check`");
+            }
+        }
         let state = AppState {
             log_sender,
             is_running: Arc::new(AtomicBool::new(false)),

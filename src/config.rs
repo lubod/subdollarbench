@@ -411,6 +411,10 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [maintain] Report-only integrity audit (orphans, junk rows, row-file drift).
+    /// Exit 1 on findings. Also runs warn-only on every engine boot.
+    MigrateCheck,
+
     /// [maintain] One-shot import of results/*.json export copies into bench.db.
     /// Dry run by default; --yes writes.
     Migrate {

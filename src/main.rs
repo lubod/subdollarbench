@@ -890,6 +890,37 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("migrate: runs {run_imported} imported, {run_skipped} skipped, total {run_count}");
         }
 
+        Commands::MigrateCheck => {
+            // Report-only integrity audit: orphans, junk rows, row-file drift.
+            // Runs on every engine boot (warn-only); exit 1 on findings.
+            let db_path = subdollarbench::report::Store::resolve_db_path();
+            let store = subdollarbench::report::Store::open(&db_path)?;
+            let mut bad = 0usize;
+            let orphans = store.orphan_trial_count();
+            if orphans > 0 {
+                println!("check: {orphans} orphan trial(s) (parent row missing)");
+                bad += orphans;
+            }
+            let junk = store.junk_parent_count();
+            if junk > 0 {
+                println!("check: {junk} junk parent row(s) (test_/0-trial)");
+                bad += junk;
+            }
+            let (db_parents, files) = store.parent_file_drift(
+                &subdollarbench::config::get_repo_root().join("results"),
+            );
+            if db_parents != files {
+                println!("check: row-file drift (db parents {db_parents} vs files {files})");
+                bad += 1;
+            }
+            if bad == 0 {
+                println!("check: clean (0 orphans, 0 junk, rows match files)");
+            }
+            if bad > 0 {
+                anyhow::bail!("integrity check found {bad} issue(s)");
+            }
+        }
+
         Commands::MatrixReport { results_dir } => {
             let all = LeaderboardManager::load_all(&results_dir);
             if all.is_empty() {

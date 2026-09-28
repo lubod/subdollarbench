@@ -226,6 +226,61 @@ impl Store {
         .unwrap_or(0) as usize
     }
 
+    /// Orphan trials: rows whose parent row is missing (double-spawn
+    /// debris, killed-run leftovers). migrate --check reports them.
+    pub fn orphan_trial_count(&self) -> usize {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM trials WHERE parent_id NOT IN (SELECT id FROM parents)",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as usize
+    }
+
+    /// Junk parents: test_ probes and 0-trial rows that slipped past the
+    /// write-time guards. migrate --check reports them; finalize filters them.
+    pub fn junk_parent_count(&self) -> usize {
+        let conn = self.conn.lock();
+        let test_rows: i64 = conn
+            .query_row(r"SELECT COUNT(*) FROM parents WHERE id LIKE 'test\_%' ESCAPE '\'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap_or(0);
+        // 0-trial rows: no subruns evidence. Doc scan (small table, rare op).
+        let mut zero_trial = 0i64;
+        if let Ok(mut stmt) = conn.prepare("SELECT doc FROM parents") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for row in rows.flatten() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&row) {
+                        let n = v.get("total_trials").and_then(|x| x.as_u64()).unwrap_or(
+                            v.get("subruns").and_then(|x| x.as_array()).map(|a| a.len() as u64).unwrap_or(0),
+                        );
+                        if n == 0 {
+                            zero_trial += 1;
+                        }
+                    }
+                }
+            }
+        }
+        (test_rows + zero_trial) as usize
+    }
+
+    /// Row-file drift: (db parents, results/*.json files). Migrate --check
+    /// reports mismatch; files stay authoritative.
+    pub fn parent_file_drift(&self, results_dir: &std::path::Path) -> (usize, usize) {
+        let db = self.parent_count();
+        let files = std::fs::read_dir(results_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .count()
+            })
+            .unwrap_or(0);
+        (db, files)
+    }
+
     /// True when a parent row with this id exists (migrate delta check).
     pub fn parent_exists(&self, id: &str) -> bool {
         let conn = self.conn.lock();
