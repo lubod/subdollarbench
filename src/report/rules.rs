@@ -8,6 +8,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-09-28.1`: binproto throughput probe; repro fields
+///   (temperature/top_p/seed/prompt_sha) on manifests; runs-table
+///   probe columns. New publish baseline.
 /// - `2026-09-22.1`: first fingerprinted version (post cheat-stage).
 /// - `2026-09-24.2`: binproto task (SDB1 binary RPC) added.
 /// - `2026-09-24.1`: proportional efficiency credit (98% earns 98%, no
@@ -15,7 +18,7 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
-pub const RULES_VERSION: &str = "2026-09-24.2";
+pub const RULES_VERSION: &str = "2026-09-28.1";
 
 /// Files whose content defines grading. Relative to repo root.
 const GRADED_FILES: &[&str] = &[

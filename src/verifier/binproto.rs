@@ -227,6 +227,27 @@ impl BinprotoVerifier {
     }
 
     /// All 5 stages: handshake, ping/echo, integrity, KV, pipeline.
+    /// Throughput probe: 200 pipelined ECHO frames, ops/sec.
+    /// Same shape as stage5 (validates framing under burst); unscored
+    /// until a reference harness exists (throughput_score stays None).
+    pub async fn measure_throughput(&self) -> Option<f64> {
+        use std::time::Instant;
+        let mut c = Conn::connect(self.target_port).await.ok()?;
+        let mut burst = Vec::new();
+        for i in 0..200u16 {
+            let payload = format!("tput{i:03}");
+            burst.extend_from_slice(&encode_frame(2000 + i, OP_ECHO, payload.as_bytes()));
+        }
+        let start = Instant::now();
+        c.send(&burst).await.ok()?;
+        let frames = c.read_frames(200, PIPELINE_DEADLINE).await.ok()?;
+        let elapsed = start.elapsed().as_secs_f64();
+        if frames.len() != 200 || elapsed <= 0.0 {
+            return None;
+        }
+        Some(200.0 / elapsed)
+    }
+
     pub async fn run_all(&self) -> BinprotoTestSummary {
         let stages = vec![
             self.stage1_handshake().await,

@@ -100,6 +100,9 @@ impl Store {
                 cost_usd REAL,
                 duration_s REAL,
                 completed_at TEXT,
+                prompt_sha TEXT,
+                throughput REAL,
+                reference_tp REAL,
                 doc TEXT
             );",
         )?;
@@ -309,10 +312,14 @@ impl Store {
     pub fn upsert_run_manifest(&self, m: &RunManifest) -> Result<()> {
         let doc = serde_json::to_string(m)?;
         let conn = self.conn.lock();
+        // Lazily add probe-era columns to pre-existing DBs.
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN prompt_sha TEXT", []);
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN throughput REAL", []);
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN reference_tp REAL", []);
         conn.execute(
             "INSERT OR REPLACE INTO runs
-                (run_id, model, task, status, pass_rate, cost_usd, duration_s, completed_at, doc)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (run_id, model, task, status, pass_rate, cost_usd, duration_s, completed_at, prompt_sha, throughput, reference_tp, doc)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 m.run_id,
                 m.model,
@@ -322,6 +329,9 @@ impl Store {
                 m.cost_usd,
                 m.duration_seconds,
                 m.completed_at,
+                m.prompt_sha,
+                m.throughput_req_sec,
+                m.reference_throughput_req_sec,
                 doc,
             ],
         )?;

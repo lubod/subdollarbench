@@ -90,6 +90,17 @@ pub struct RunManifest {
     pub is_published: Option<bool>,
     #[serde(default)]
     pub method_version: Option<String>,
+    /// Sampling params at run time (None = provider default; OMP passes
+    /// model defaults through, so most runs record None = reproducible-by-default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    /// SHA-256 of tasks/<task>/prompt.md at run time (reproducibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_sha: Option<String>,
 }
 
 impl RunManifest {
@@ -411,6 +422,10 @@ mod tests {
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
+            temperature: None,
+            top_p: None,
+            seed: None,
+            prompt_sha: None,
             rules_version: None,
         };
 
@@ -530,6 +545,10 @@ mod tests {
             trial_pass_rates: vec![],
             is_published: None,
             method_version: None,
+            temperature: None,
+            top_p: None,
+            seed: None,
+            prompt_sha: None,
             rules_version: None,
         };
         RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();

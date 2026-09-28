@@ -2052,6 +2052,10 @@ mod tests {
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
+            temperature: None,
+            top_p: None,
+            seed: None,
+            prompt_sha: None,
             rules_version: None,
         };
         fs::write(

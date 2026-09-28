@@ -102,6 +102,10 @@ func main() {
         trial_pass_rates: Vec::new(),
         is_published: None,
         method_version: Some("0.1.0".to_string()),
+        temperature: None,
+        top_p: None,
+        seed: None,
+        prompt_sha: None,
     };
 
     let console_log = r#"[12:00:00] [INIT] Starting benchmark for google/gemini-2.5-flash on task 'redis'...

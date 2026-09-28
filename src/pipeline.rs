@@ -1085,6 +1085,24 @@ impl BenchmarkPipeline {
             env: None,
             git_commit: None,
             rules_version: Some(crate::report::rules_fingerprint()),
+            // Sampling: OMP passes provider defaults through (no explicit
+            // temp/top_p/seed knobs), so None = reproducible-by-default.
+            // Prompt hash pins the graded input for this run.
+            temperature: None,
+            top_p: None,
+            seed: None,
+            prompt_sha: {
+                let p = crate::config::get_repo_root()
+                    .join("tasks")
+                    .join(config.task.to_string())
+                    .join("prompt.md");
+                std::fs::read(&p).ok().map(|b| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    b.hash(&mut h);
+                    format!("{:016x}", h.finish())
+                })
+            },
             total_trials: None,
             pass_at_1: None,
             pass_at_1_lo: None,
