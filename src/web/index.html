@@ -2671,7 +2671,13 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <td style="text-align:center;">${api} / ${eff}</td>
           <td style="text-align:center;" title="API cost per passing trial">${cpp}</td>
           <td style="text-align:center;font-size:0.75rem;">${(() => {
-            if (r.throughput_req_sec == null) return '<span style="color:var(--text-muted);">-</span>';
+            if (r.throughput_req_sec == null) {
+              // Ran but probe produced nothing (candidate too slow/broken) vs task unscored.
+              const ran = (r.total_trials ?? (r.subruns || []).length ?? 0) > 0;
+              return ran
+                ? '<span title="Candidate ran but throughput probe produced no measurement">no probe</span>'
+                : '<span style="color:var(--text-muted);">-</span>';
+            }
             const ref = r.reference_throughput_req_sec;
             const ratio = (ref && ref > 0) ? (r.throughput_req_sec / ref) : null;
             return `<b>${fmtTp(r.throughput_req_sec)}</b>` + (ratio != null ? `<br><span style="color:var(--text-muted);">${ratio.toFixed(2)}x ref</span>` : '');
@@ -2692,7 +2698,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               subs.map((t, i) => {
                 const ok = (t.pass_rate ?? 0) >= 100;
                 const tc = t.total_cost_usd ?? t.effective_cost_usd;
-                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : 'var(--danger)'};">${Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td><td>${t.throughput_req_sec != null ? fmtTp(t.throughput_req_sec) : '-'}</td></tr>`;
+                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : 'var(--danger)'};">${Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td><td>${t.throughput_req_sec != null ? fmtTp(t.throughput_req_sec) : '<span title="Probe produced no measurement">no probe</span>'}</td></tr>`;
               }).join('') + '</tbody></table>';
           }
           dr.appendChild(dc);
