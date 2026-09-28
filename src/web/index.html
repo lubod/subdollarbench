@@ -936,6 +936,9 @@
           <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
           <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
           <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
+          <button class="tab" onclick="switchTab('models')">Models</button>
+          <button class="tab" onclick="switchTab('tasks')">Tasks</button>
+          <button class="tab" onclick="switchTab('formula')">Formula</button>
         </div>
         <!-- Setup Tab Panel (was sidebar) -->
       <div id="tab-setup" style="flex-direction: column; gap: 16px;">
@@ -1286,6 +1289,85 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             </table>
           </div>
           <p class="hint" style="font-size: 0.75rem;">Internal detail board: one row per model × task. Public portal shows one row per model only.</p>
+        </div>
+
+        <!-- Tab: Models (live per-model rollup + sort + $/pass) -->
+        <div id="tab-models" style="display: none; flex-direction: column; gap: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span class="hint" style="font-weight: 600; color: #fff;">Sort:</span>
+              <select id="modelsSort" onchange="renderModels()" style="padding: 4px 10px; font-size: 0.78rem;">
+                <option value="avg">Avg pass</option>
+                <option value="p1lo">P@1 lower bound</option>
+                <option value="cpp">Cost per pass (low first)</option>
+                <option value="cost">Total cost (low first)</option>
+                <option value="trials">Trials</option>
+              </select>
+              <span id="modelsCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
+            </div>
+            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => { renderModels(); renderTasks(); })">Refresh</button>
+          </div>
+          <div id="modelsErrorBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.4); color: #ff7b72;"></div>
+          <div style="width: 100%; overflow-x: auto;">
+            <table class="responsive-runs-table">
+              <thead><tr>
+                <th style="width: 4%;"></th><th>Model</th><th>Tasks</th><th>Trials</th>
+                <th>Avg pass</th><th>P@1 (lo–hi)</th><th>$/pass</th><th>Total API</th><th>Stability</th>
+              </tr></thead>
+              <tbody id="modelsTableBody">
+                <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading models...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="waveProgress" style="font-size: 0.78rem; color: var(--text-muted);"></div>
+          <p class="hint" style="font-size: 0.75rem;">Live rollup from leaderboard rows (hidden excluded). Public portal mirrors this at >=6 tasks.</p>
+        </div>
+
+        <!-- Tab: Tasks (transposed + verifier health) -->
+        <div id="tab-tasks" style="display: none; flex-direction: column; gap: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px;">
+            <span id="tasksCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
+            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => renderTasks())">Refresh</button>
+          </div>
+          <div style="width: 100%; overflow-x: auto;">
+            <table class="responsive-runs-table">
+              <thead><tr>
+                <th>Task</th><th>Models</th><th>Best</th><th>Spread</th><th>Avg pass</th><th>Health</th>
+              </tr></thead>
+              <tbody id="tasksTableBody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading tasks...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="font-size: 0.75rem;">Spread = max–min avg pass across models. Health flags verifier suspicion (identical low scores across models).</p>
+        </div>
+
+        <!-- Tab: Formula (weighted judge + live rank) -->
+        <div id="tab-formula" style="display: none; flex-direction: column; gap: 16px;">
+          <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end;">
+            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+              <label style="font-size: 0.75rem;">Skill (P@1 lo)<br><input type="range" id="fwSkill" min="0" max="100" value="50" oninput="renderFormula()" style="width: 130px;"></label>
+              <label style="font-size: 0.75rem;">Cheap ($/pass)<br><input type="range" id="fwCost" min="0" max="100" value="20" oninput="renderFormula()" style="width: 130px;"></label>
+              <label style="font-size: 0.75rem;">Reliable (stability)<br><input type="range" id="fwStab" min="0" max="100" value="20" oninput="renderFormula()" style="width: 130px;"></label>
+              <label style="font-size: 0.75rem;">Evidence (trials)<br><input type="range" id="fwTr" min="0" max="100" value="10" oninput="renderFormula()" style="width: 130px;"></label>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="setFormulaPreset(70,10,10,10)">Raw skill</button>
+              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="setFormulaPreset(20,60,10,10)">Budget</button>
+              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="setFormulaPreset(30,10,50,10)">Reliability</button>
+              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="copyFormulaLink()">Copy link</button>
+            </div>
+          </div>
+          <div id="formulaText" style="font-family: monospace; font-size: 0.78rem; color: var(--text-muted);"></div>
+          <div style="width: 100%; overflow-x: auto;">
+            <table class="responsive-runs-table">
+              <thead><tr><th style="width: 4%;"></th><th>Model</th><th>Score</th><th>P@1 lo</th><th>$/pass</th><th>Stability</th><th>Trials</th></tr></thead>
+              <tbody id="formulaTableBody">
+                <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="font-size: 0.75rem;">Weighted composite, renormalized live. Weights in URL hash (shareable). Published portal always ranks by P@1 lo alone.</p>
         </div>
 
         <!-- Tab 3: Prompt Specification -->
@@ -1698,6 +1780,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       document.getElementById('tab-traceability').style.display = 'none';
       document.getElementById('tab-prompt').style.display = 'none';
       document.getElementById('tab-leaderboard').style.display = 'none';
+      document.getElementById('tab-models').style.display = 'none';
+      document.getElementById('tab-tasks').style.display = 'none';
+      document.getElementById('tab-formula').style.display = 'none';
 
       const tabs = document.querySelectorAll('.tab');
       if (name === 'setup') {
@@ -1718,6 +1803,18 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         document.getElementById('tab-leaderboard').style.display = 'flex';
         if (tabs[4]) tabs[4].classList.add('active');
         if (!lbCache || !lbCache.length) loadLeaderboard();
+      } else if (name === 'models') {
+        document.getElementById('tab-models').style.display = 'flex';
+        if (tabs[5]) tabs[5].classList.add('active');
+        ensureBoardData().then(() => renderModels());
+      } else if (name === 'tasks') {
+        document.getElementById('tab-tasks').style.display = 'flex';
+        if (tabs[6]) tabs[6].classList.add('active');
+        ensureBoardData().then(() => renderTasks());
+      } else if (name === 'formula') {
+        document.getElementById('tab-formula').style.display = 'flex';
+        if (tabs[7]) tabs[7].classList.add('active');
+        ensureBoardData().then(() => { initFormulaFromHash(); renderFormula(); });
       }
     }
 
@@ -2592,6 +2689,227 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           dr.appendChild(dc);
           tbody.appendChild(dr);
         }
+      });
+    }
+
+    // ===== Shared board data: Models / Tasks / Formula tabs =====
+    let boardRows = [];
+    let boardQueue = { Running: 0, Pending: 0, Done: 0 };
+
+    async function ensureBoardData(force = false) {
+      if (boardRows.length && !force) return boardRows;
+      try {
+        const [lb, q] = await Promise.all([
+          fetch('/api/leaderboard?task=all').then(r => r.ok ? r.json() : []),
+          fetch('/api/queue').then(r => r.ok ? r.json() : []).catch(() => []),
+        ]);
+        boardRows = (lb || []).filter(r => !r.portal_hidden);
+        const c = { Running: 0, Pending: 0, Done: 0 };
+        (q || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
+        boardQueue = c;
+      } catch (e) {
+        const b = document.getElementById('modelsErrorBanner');
+        if (b) { b.style.display = 'block'; b.textContent = `Board offline: ${e.message || e}`; }
+      }
+      return boardRows;
+    }
+
+    function boardGroups() {
+      // Canonical per (model, effort, task): most trials wins, latest breaks ties.
+      const canon = {};
+      boardRows.forEach(r => {
+        if ((r.id || '').startsWith('test_')) return;
+        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}`;
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const ex = canon[key];
+        const exN = ex ? (ex.total_trials ?? (ex.subruns || []).length ?? 1) : -1;
+        if (!ex || n > exN || (n === exN && (r.timestamp || '') > (ex.timestamp || ''))) canon[key] = r;
+      });
+      const groups = {};
+      Object.values(canon).forEach(r => {
+        const g = groups[r.model] = groups[r.model] || { model: r.model, tasks: [], nTrials: 0, nPass: 0, sumAvg: 0, sumApi: 0, sumEff: 0, worstStab: 0, costs: [], stabs: [] };
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const subs = r.subruns || [];
+        const c = subs.length ? subs.filter(t => (t.pass_rate ?? 0) >= 100).length : ((r.avg_pass_rate ?? r.pass_rate) >= 100 ? n : 0);
+        g.tasks.push(r.task);
+        g.nTrials += n; g.nPass += c;
+        g.sumAvg += (r.avg_pass_rate ?? r.pass_rate);
+        g.sumApi += (r.total_cost_usd ?? 0); g.sumEff += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
+        const sr = r.stability === 'unstable' ? 3 : r.stability === 'watch' ? 2 : r.stability === 'stable' ? 1 : 0;
+        g.worstStab = Math.max(g.worstStab, sr);
+        g.costs.push(r.total_cost_usd ?? 0); g.stabs.push(r.stability || '-');
+      });
+      return Object.values(groups).map(g => {
+        const n = g.tasks.length;
+        // Wilson 95% on pooled trials.
+        const z = 1.96, t = Math.max(1, g.nTrials), p = g.nPass / t;
+        const d = 1 + z * z / t, cc = p + z * z / (2 * t);
+        const m = z * Math.sqrt(p * (1 - p) / t + z * z / (4 * t * t)) / d;
+        const lo = Math.max(0, (cc - m)) * 100, hi = Math.min(1, cc + m) * 100;
+        const passTrials = g.nTrials ? g.nPass : 0;
+        return {
+          model: g.model, nTasks: n, tasks: [...new Set(g.tasks)].sort(),
+          nTrials: g.nTrials, nPass: g.nPass,
+          avg: g.sumAvg / Math.max(1, n),
+          p1: t ? 100 * g.nPass / t : 0, p1lo: lo, p1hi: hi,
+          totalApi: g.sumApi, avgApi: g.sumApi / Math.max(1, n),
+          cpp: passTrials > 0 ? g.sumApi / passTrials : null,
+          stab: g.worstStab === 3 ? 'unstable' : g.worstStab === 2 ? 'watch' : g.worstStab === 1 ? 'stable' : '-',
+          stabRank: g.worstStab,
+          unstableCells: g.stabs.filter(x => x === 'unstable').length,
+          minCost: Math.min(...g.costs), maxCost: Math.max(...g.costs),
+        };
+      });
+    }
+
+    function stabBadge(s) {
+      return s === 'stable' ? '🟢 stable' : s === 'watch' ? '🟡 watch' : s === 'unstable' ? '🔴 unstable' : '-';
+    }
+
+    function renderModels() {
+      const badge = document.getElementById('modelsCountBadge');
+      const tbody = document.getElementById('modelsTableBody');
+      if (!tbody) return;
+      const mode = (document.getElementById('modelsSort') || {}).value || 'avg';
+      let rows = boardGroups();
+      const key = { avg: (a, b) => b.avg - a.avg, p1lo: (a, b) => b.p1lo - a.p1lo,
+        cpp: (a, b) => (a.cpp ?? 1e9) - (b.cpp ?? 1e9), cost: (a, b) => a.totalApi - b.totalApi,
+        trials: (a, b) => b.nTrials - a.nTrials }[mode] || ((a, b) => b.avg - a.avg);
+      rows.sort(key);
+      if (badge) badge.textContent = `${rows.length} models`;
+      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No rows yet.</td></tr>'; return; }
+      tbody.innerHTML = '';
+      rows.forEach((g, i) => {
+        const meta = getModelMeta(g.model);
+        const tr = document.createElement('tr');
+        tr.style.borderLeft = `4px solid ${meta.color}`;
+        tr.innerHTML = `
+          <td style="text-align:center;color:var(--text-muted);">${i + 1}</td>
+          <td><span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(g.model)}" style="font-weight:600;color:${meta.color};">${escapeHtml(shortModelName(g.model))}</span></span></td>
+          <td style="text-align:center;" title="${escapeHtml(g.tasks.join(', '))}">${g.nTasks} <span style="font-size:.72rem;color:var(--text-muted);">tasks</span></td>
+          <td style="text-align:center;">${g.nTrials}</td>
+          <td style="text-align:center;font-weight:700;">${Math.round(g.avg)}%</td>
+          <td style="text-align:center;font-weight:700;">${Math.round(g.p1)}% <span style="font-size:.72rem;color:var(--text-muted);">(${Math.round(g.p1lo)}–${Math.round(g.p1hi)})</span></td>
+          <td style="text-align:center;">${g.cpp != null ? '$' + g.cpp.toFixed(4) : '-'}</td>
+          <td style="text-align:center;">$${g.totalApi.toFixed(3)}</td>
+          <td style="text-align:center;font-size:.75rem;">${stabBadge(g.stab)}</td>`;
+        tbody.appendChild(tr);
+      });
+      const wp = document.getElementById('waveProgress');
+      if (wp) {
+        const q = boardQueue;
+        const done = boardRows.length;
+        wp.textContent = `Wave: ${done} result rows in store · queue ${q.Running} running / ${q.Pending} pending / ${q.Done} done`;
+      }
+    }
+
+    function renderTasks() {
+      const badge = document.getElementById('tasksCountBadge');
+      const tbody = document.getElementById('tasksTableBody');
+      if (!tbody) return;
+      const canon = {};
+      boardRows.forEach(r => {
+        if ((r.id || '').startsWith('test_')) return;
+        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}`;
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const ex = canon[key];
+        if (!ex || n > (ex.total_trials ?? 0)) canon[key] = r;
+      });
+      const byTask = {};
+      Object.values(canon).forEach(r => {
+        const t = (r.task || '').toLowerCase();
+        const b = byTask[t] = byTask[t] || { task: t, rows: [] };
+        b.rows.push(r);
+      });
+      const list = Object.values(byTask).map(b => {
+        const avgs = b.rows.map(r => r.avg_pass_rate ?? r.pass_rate);
+        const mx = Math.max(...avgs), mn = Math.min(...avgs);
+        const best = b.rows[avgs.indexOf(mx)];
+        // Health: identical low scores across models smell like verifier cliff.
+        const uniq = [...new Set(avgs.map(a => Math.round(a)))];
+        const health = (uniq.length === 1 && mx < 50) ? 'verifier? (identical ' + Math.round(mx) + '%)'
+          : (mx - mn > 40) ? 'discriminates' : 'flat-ish';
+        return { task: b.task, n: b.rows.length, best: shortModelName(best.model), bestAvg: mx, spread: mx - mn,
+          avg: avgs.reduce((a, x) => a + x, 0) / avgs.length, health };
+      }).sort((a, b) => b.spread - a.spread);
+      if (badge) badge.textContent = `${list.length} tasks`;
+      tbody.innerHTML = '';
+      list.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><span class="badge badge-info">${escapeHtml(t.task)}</span></td>
+          <td style="text-align:center;">${t.n}</td>
+          <td>${escapeHtml(t.best)} <span style="color:var(--text-muted);font-size:.75rem;">(${Math.round(t.bestAvg)}%)</span></td>
+          <td style="text-align:center;">${Math.round(t.spread)}pp</td>
+          <td style="text-align:center;">${Math.round(t.avg)}%</td>
+          <td style="font-size:.75rem;">${escapeHtml(t.health)}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function formulaWeights() {
+      const g = id => Number((document.getElementById(id) || {}).value || 0);
+      const w = { skill: g('fwSkill'), cost: g('fwCost'), stab: g('fwStab'), tr: g('fwTr') };
+      const sum = w.skill + w.cost + w.stab + w.tr || 1;
+      return { skill: w.skill / sum, cost: w.cost / sum, stab: w.stab / sum, tr: w.tr / sum };
+    }
+
+    function setFormulaPreset(a, b, c, d) {
+      document.getElementById('fwSkill').value = a; document.getElementById('fwCost').value = b;
+      document.getElementById('fwStab').value = c; document.getElementById('fwTr').value = d;
+      renderFormula();
+    }
+
+    function initFormulaFromHash() {
+      try {
+        const h = new URLSearchParams(location.hash.slice(1));
+        if (h.get('fwSkill')) document.getElementById('fwSkill').value = h.get('fwSkill');
+        if (h.get('fwCost')) document.getElementById('fwCost').value = h.get('fwCost');
+        if (h.get('fwStab')) document.getElementById('fwStab').value = h.get('fwStab');
+        if (h.get('fwTr')) document.getElementById('fwTr').value = h.get('fwTr');
+      } catch (e) {}
+    }
+
+    function copyFormulaLink() {
+      const w = formulaWeights();
+      const u = `${location.origin}${location.pathname}#fwSkill=${Math.round(w.skill * 100)}&fwCost=${Math.round(w.cost * 100)}&fwStab=${Math.round(w.stab * 100)}&fwTr=${Math.round(w.tr * 100)}`;
+      copyTextToClipboard(u).then(() => copyButtonFeedback('formulaCopyBtn', 'Copied!'));
+    }
+
+    function renderFormula() {
+      const w = formulaWeights();
+      try {
+        history.replaceState(null, '', `#fwSkill=${Math.round(w.skill * 100)}&fwCost=${Math.round(w.cost * 100)}&fwStab=${Math.round(w.stab * 100)}&fwTr=${Math.round(w.tr * 100)}`);
+      } catch (e) {}
+      const ft = document.getElementById('formulaText');
+      if (ft) ft.textContent = `score = ${w.skill.toFixed(2)}·P@1lo/100 + ${w.cost.toFixed(2)}·(1−norm_cost) + ${w.stab.toFixed(2)}·stab + ${w.tr.toFixed(2)}·trials/9`;
+      const tbody = document.getElementById('formulaTableBody');
+      if (!tbody) return;
+      const rows = boardGroups();
+      // log-normalized cost: cheapest→1, priciest→0.
+      const cpps = rows.map(g => g.cpp ?? 1e9).filter(x => x < 1e8);
+      const lo = Math.min(...cpps, 0), hi = Math.max(...cpps, 1e-9);
+      const llo = Math.log10(lo + 1e-9), lhi = Math.log10(hi + 1e-9);
+      const scored = rows.map(g => {
+        const norm = g.cpp == null ? 0 : (lhi === llo ? 1 : 1 - (Math.log10(g.cpp + 1e-9) - llo) / (lhi - llo));
+        const stab = g.stabRank === 1 ? 1 : g.stabRank === 2 ? 0.6 : g.stabRank === 3 ? 0.2 : 0.4;
+        const score = w.skill * (g.p1lo / 100) + w.cost * norm + w.stab * stab + w.tr * Math.min(1, g.nTrials / 9);
+        return { g, score };
+      }).sort((a, b) => b.score - a.score);
+      tbody.innerHTML = '';
+      scored.forEach(({ g, score }, i) => {
+        const meta = getModelMeta(g.model);
+        const tr = document.createElement('tr');
+        tr.style.borderLeft = `4px solid ${meta.color}`;
+        tr.innerHTML = `
+          <td style="text-align:center;color:var(--text-muted);">${i + 1}</td>
+          <td><span style="font-weight:600;color:${meta.color};">${escapeHtml(shortModelName(g.model))}</span></td>
+          <td style="text-align:center;font-weight:700;">${score.toFixed(3)}</td>
+          <td style="text-align:center;">${Math.round(g.p1lo)}%</td>
+          <td style="text-align:center;">${g.cpp != null ? '$' + g.cpp.toFixed(4) : '-'}</td>
+          <td style="text-align:center;font-size:.75rem;">${stabBadge(g.stab)}</td>
+          <td style="text-align:center;">${g.nTrials}</td>`;
+        tbody.appendChild(tr);
       });
     }
 
