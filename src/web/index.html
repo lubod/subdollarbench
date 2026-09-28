@@ -1270,12 +1270,14 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <table class="responsive-runs-table">
               <thead>
                 <tr>
-                  <th style="width: 26%;">Model & Task</th>
+                  <th style="width: 3%;"></th>
+                  <th style="width: 24%;">Model & Task</th>
                   <th style="width: 14%;">Pass / P@1 (lo–hi)</th>
                   <th style="width: 10%;">Trials / Stability</th>
-                  <th style="width: 14%;">API cost / Effective</th>
-                  <th style="width: 10%;">Rules</th>
-                  <th style="width: 12%;">When</th>
+                  <th style="width: 13%;">API cost / Effective</th>
+                  <th style="width: 9%;">$/pass</th>
+                  <th style="width: 9%;">Rules</th>
+                  <th style="width: 11%;">When</th>
                 </tr>
               </thead>
               <tbody id="lbTableBody">
@@ -2529,11 +2531,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const msg = (lbCache || []).length === 0
           ? 'No leaderboard rows yet — run the wave first.'
           : `No rows matched filter "${lbFilter}".`;
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
         return;
       }
       tbody.innerHTML = '';
-      rows.forEach(r => {
+      window._lbExpanded = window._lbExpanded || {};
+      rows.forEach((r, ri) => {
         const meta = getModelMeta(r.model);
         const avg = r.avg_pass_rate ?? r.pass_rate;
         const p1 = r.pass_at_1 ?? r.pass_rate;
@@ -2547,9 +2550,17 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const eff = r.effective_cost_usd != null ? '$' + Number(r.effective_cost_usd).toFixed(4) : 'n/a';
         const rules = r.rules_version ? escapeHtml(String(r.rules_version).split('+')[0]) : '<span style="color:var(--text-muted);">legacy</span>';
         const when = r.timestamp ? escapeHtml(String(r.timestamp).slice(0, 16).replace('T', ' ')) : '-';
+        const key = `${r.model}\u0001${r.task}\u0001${r.effort || ''}`;
+        const open = !!window._lbExpanded[key];
+        const subs = r.subruns || [];
+        const nPass = subs.filter(t => (t.pass_rate ?? 0) >= 100).length;
+        const cpp = nPass > 0 && r.total_cost_usd != null
+          ? '$' + (Number(r.total_cost_usd) / nPass).toFixed(4)
+          : '<span style="color:var(--text-muted);">-</span>';
         const tr = document.createElement('tr');
         tr.style.borderLeft = `4px solid ${meta.color}`;
         tr.innerHTML = `
+          <td style="text-align:center;"><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-lbkey="${escapeHtml(key)}" onclick="toggleLbRow(this.dataset.lbkey)" title="${subs.length ? 'Show per-trial breakdown' : 'No trial detail'}">${open ? '▾' : '▸'}</button></td>
           <td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
             <span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(r.model)}" style="font-weight:600;color:${meta.color};font-size:0.88rem;">${escapeHtml(shortModelName(r.model))}</span></span>
             <span class="badge badge-info">${escapeHtml(r.task)}</span>
@@ -2559,10 +2570,35 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <td style="text-align:center;font-weight:700;">${Math.round(avg)}% / ${Math.round(p1)}%${ci}</td>
           <td style="text-align:center;">${n}× / ${stab}</td>
           <td style="text-align:center;">${api} / ${eff}</td>
+          <td style="text-align:center;" title="API cost per passing trial">${cpp}</td>
           <td style="text-align:center;font-size:0.75rem;">${rules}</td>
           <td style="text-align:center;font-size:0.75rem;color:var(--text-muted);">${when}</td>`;
         tbody.appendChild(tr);
+        if (open) {
+          const dr = document.createElement('tr');
+          const dc = document.createElement('td');
+          dc.colSpan = 8;
+          dc.style.cssText = 'background:rgba(13,17,23,0.6);padding:6px 12px 10px 34px;';
+          if (!subs.length) {
+            dc.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No per-trial detail in this row.</span>';
+          } else {
+            dc.innerHTML = '<table style="width:100%;font-size:0.75rem;"><thead><tr style="color:var(--text-muted);text-align:left;"><th>Trial</th><th>Pass</th><th>Cost</th><th>Turns</th><th>Duration</th></tr></thead><tbody>' +
+              subs.map((t, i) => {
+                const ok = (t.pass_rate ?? 0) >= 100;
+                const tc = t.total_cost_usd ?? t.effective_cost_usd;
+                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : 'var(--danger)'};">${Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td></tr>`;
+              }).join('') + '</tbody></table>';
+          }
+          dr.appendChild(dc);
+          tbody.appendChild(dr);
+        }
       });
+    }
+
+    function toggleLbRow(key) {
+      window._lbExpanded = window._lbExpanded || {};
+      window._lbExpanded[key] = !window._lbExpanded[key];
+      renderLeaderboard();
     }
 
     function toggleHiddenRuns(show) {
