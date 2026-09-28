@@ -271,6 +271,27 @@ tbody td {
   vertical-align: middle;
 }
 tbody tr:last-child td { border-bottom: none; }
+table.roll tbody tr { cursor: default; }
+table.roll tbody tr.mrow:hover { background: rgba(88,165,255,.05); }
+.bignum { font-size: 1.7rem; font-weight: 800; text-align: center; }
+.bignum .pct { font-size: .95rem; color: var(--mut); font-weight: 600; }
+.mname { font-weight: 700; font-size: 1.02rem; }
+.mut { color: var(--mut); font-size: .75rem; }
+.rank { display: inline-flex; align-items: center; justify-content: center; width: 1.7rem; height: 1.7rem; border-radius: 50%; background: #212b3d; color: var(--mut); font-weight: 700; }
+.rank-1 { background: rgba(241,224,90,.18); color: var(--gold); }
+.rank-2 { background: rgba(232,237,244,.14); color: #e8edf4; }
+.rank-3 { background: rgba(242,114,68,.16); color: #f27244; }
+.stab { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600; text-transform: capitalize; }
+.stab i { width: .6rem; height: .6rem; border-radius: 50%; display: inline-block; }
+.stab-ok { background: var(--grn); } .stab-watch { background: var(--warning); } .stab-bad { background: var(--danger); } .stab-na { background: #484f58; }
+.cibar { display: block; position: relative; height: .45rem; background: #212b3d; border-radius: 99px; min-width: 7rem; margin-bottom: .3rem; }
+.cifill { position: absolute; top: 0; bottom: 0; background: rgba(88,165,255,.35); border-radius: 99px; }
+.cipoint { position: absolute; top: -2px; width: 2px; height: calc(.45rem + 4px); background: var(--acc); }
+.tdots { letter-spacing: .1em; }
+.tdot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; background: #212b3d; margin-right: .28rem; }
+.tdot.on { background: var(--grn); }
+details.method { margin-top: 1.4rem; border: 1px solid var(--line); border-radius: 8px; padding: .7rem 1rem; }
+details.method summary { cursor: pointer; font-weight: 700; }
 tbody tr {
   cursor: pointer;
   transition: background .12s;
@@ -1793,50 +1814,56 @@ impl PortalExporter {
         };
         let mut trs = String::new();
         for (i, r) in rows.iter().enumerate() {
-            let medal = match i + 1 {
-                1 => "🥇 #1".to_string(),
-                2 => "🥈 #2".to_string(),
-                3 => "🥉 #3".to_string(),
-                n => format!("#{}", n),
+            let rank = match i + 1 {
+                1 => "<span class=\"rank rank-1\">1</span>".to_string(),
+                2 => "<span class=\"rank rank-2\">2</span>".to_string(),
+                3 => "<span class=\"rank rank-3\">3</span>".to_string(),
+                n => format!("<span class=\"rank\">{n}</span>"),
             };
-            let stab = match r.stability.as_deref() {
-                Some("stable") => {
-                    "<span class=\"badge badge-pass\">🟢 stable</span>".to_string()
-                }
-                Some("watch") => {
-                    "<span class=\"badge badge-info\">🟡 watch</span>".to_string()
-                }
-                Some("unstable") => {
-                    "<span class=\"badge badge-fail\">🔴 unstable</span>".to_string()
-                }
-                _ => "<span style=\"color:var(--mut);\">-</span>".to_string(),
+            let (stab_dot, stab_txt) = match r.stability.as_deref() {
+                Some("stable") => ("stab-ok", "stable"),
+                Some("watch") => ("stab-watch", "watch"),
+                Some("unstable") => ("stab-bad", "unstable"),
+                _ => ("stab-na", "-"),
             };
+            let stab = format!("<span class=\"stab\"><i class=\"{stab_dot}\"></i>{stab_txt}</span>");
+            // CI bar: pooled P@1 with lo-hi whiskers on a 0-100 track.
+            let ci_bar = format!(
+                "<span class=\"cibar\" title=\"P@1 {p1:.0}% (95% CI {lo:.0}-{hi:.0})\"><span class=\"cifill\" style=\"left:{lo:.0}%;width:{w:.0}%\"></span><span class=\"cipoint\" style=\"left:{p1:.0}%\"></span></span>",
+                p1 = r.p1, lo = r.p1_lo, hi = r.p1_hi,
+                w = (r.p1_hi - r.p1_lo).max(2.0),
+            );
+            // Task dots: 8 possible tasks, filled = covered.
+            let all_tasks = ["binproto", "dns", "http", "pdf", "proxy", "pubsub", "redis", "wal"];
+            let mut dots = String::new();
+            for t in all_tasks {
+                let on = r.tasks.iter().any(|x| x == t);
+                dots.push_str(&format!(
+                    "<i class=\"tdot{}\" title=\"{t}\"></i>",
+                    if on { " on" } else { "" },
+                ));
+            }
             trs.push_str(&format!(
-                "<tr><td style=\"text-align:center;\">{medal}</td>\
-                 <td><span style=\"font-weight:600;\" title=\"{model}\">{short}</span></td>\
-                 <td style=\"text-align:center;\">{ntasks} <span style=\"font-size:0.72rem;color:var(--mut);\" title=\"{tasks}\">{tasks}</span></td>\
-                 <td style=\"text-align:center;\">{ntrials} <span style=\"font-size:0.72rem;color:var(--mut);\">trials / {nparents} runs</span></td>\
-                 <td style=\"text-align:center;font-weight:700;\">{avg:.0}%</td>\
-                 <td style=\"text-align:center;font-weight:700;\">{p1:.0}% <span style=\"font-size:0.72rem;color:var(--mut);\">({lo:.0}–{hi:.0})</span></td>\
-                 <td style=\"text-align:center;\">${total_api:.4}</td>\
-                 <td style=\"text-align:center;\">${total:.4}</td>\
-                 <td style=\"text-align:center;\">${avg_api:.4}</td>\
-                 <td style=\"text-align:center;\">${avgc:.4}</td>\
-                 <td style=\"text-align:center;\">{stab}</td><td style=\"text-align:center;font-size:0.72rem;color:var(--mut);\">post-2026-09-26</td></tr>\n",
-                medal = medal,
+                "<tr class=\"mrow\"><td style=\"text-align:center;\">{rank}</td>\
+                 <td><span class=\"mname\" title=\"{model}\">{short}</span><br><span class=\"tdots\" title=\"{tasks}\">{dots}</span></td>\
+                 <td class=\"bignum\">{avg:.0}<span class=\"pct\">%</span></td>\
+                 <td>{ci_bar}<br><span class=\"mut\">{p1:.0}% ({lo:.0}-{hi:.0})</span></td>\
+                 <td style=\"text-align:center;\" title=\"API ${total_api:.4} / effective ${total:.4}\"><b>${total_api:.2}</b><br><span class=\"mut\">${avg_api:.2}/run</span></td>\
+                 <td style=\"text-align:center;\">{stab}<br><span class=\"mut\">{ntrials}t/{nparents}r</span></td></tr>\n",
+                rank = rank,
                 model = Self::esc(&r.model),
                 short = Self::esc(LeaderboardManager::short_model_name(&r.model)),
-                ntasks = r.n_tasks,
                 tasks = Self::esc(&r.tasks.join(", ")),
+                dots = dots,
                 ntrials = r.n_trials,
                 nparents = r.n_parents,
                 avg = r.avg_pass_rate,
+                ci_bar = ci_bar,
                 p1 = r.p1,
                 lo = r.p1_lo,
                 hi = r.p1_hi,
-                total = r.total_cost_usd,
-                avgc = r.avg_cost_usd,
                 total_api = r.total_api_cost_usd,
+                total = r.total_cost_usd,
                 avg_api = r.avg_api_cost_usd,
                 stab = stab,
             ));
@@ -1846,18 +1873,18 @@ impl PortalExporter {
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
              <title>SubDollarBench Model Rollup</title>\
              <style>{css}</style></head><body><main>\
-             <h1>🏆 SubDollarBench Model Rollup</h1>\
-             <div class=\"sub\">Publish freeze 2026-09-26T15:34:10Z: pre-freeze rows excluded; graded content changed without a version bump, so fingerprint allowlists alone are insufficient.</div>\
-             <div class=\"sub\">Public aggregate: one row per model across all tasks · {n} models · {now}{base_info}</div>\
-             <p style=\"font-size:0.8rem;color:var(--mut);\">Per-run detail (logs, code, workspaces) is internal and not published here.</p>\
-             <table><thead><tr>\
-             <th>#</th><th>Model</th><th>Tasks</th><th>Trials</th><th>Avg pass</th>\
-             <th>P@1 (lo-hi)</th><th>Total API cost</th><th>Total effective cost</th><th>Avg API cost/run</th><th>Avg effective cost/run</th><th>Stability</th><th>Rules</th>\
-             </tr></thead><tbody>{trs}</tbody></table>{methodology}{floor_note}\
-             <footer class=\"muted\">SubDollarBench rollup · {now}</footer></main></body></html>",
+             <h1>SubDollarBench Model Rollup</h1>\
+             <div class=\"sub\">Public aggregate: one row per model across all tasks · {n} models · {now}{base_info} · publish freeze 2026-09-26 (pre-freeze rows excluded)</div>\
+             <table class=\"roll\"><thead><tr>\
+             <th></th><th>Model</th><th>Avg pass</th>\
+             <th>P@1 with 95% CI</th><th>Cost (API total / per run)</th><th>Status</th>\
+             </tr></thead><tbody>{trs}</tbody></table><details class=\"method\"><summary>Methodology & limitations</summary>{methodology_inner}{floor_note}</details>\
+             <footer class=\"muted\">SubDollarBench rollup · {now} · per-run detail is internal and not published here</footer></main></body></html>",
             css = PORTAL_CSS,
             n = rows.len(),
-            methodology = PORTAL_METHODOLOGY_HTML,
+            methodology_inner = PORTAL_METHODOLOGY_HTML
+                .replace("<section class=\"methodology\" style=\"margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;\">", "")
+                .replace("</section>", ""),
             floor_note = ROLLUP_FLOOR_NOTE_HTML,
             now = now,
             base_info = base_info,
@@ -2814,12 +2841,12 @@ mod tests {
         let html = PortalExporter::render_rollup_index(&rows, "");
         assert!(html.contains("model-a"));
         assert!(html.contains("model-b"));
-        assert!(html.contains("75%"));
-        assert!(html.contains("P@1 (lo-hi)"));
-        assert!(html.contains("Total API cost"));
-        assert!(html.contains("Total effective cost"));
-        assert!(html.contains("Avg API cost/run"));
-        assert!(html.contains("Avg effective cost/run"));
+        assert!(html.contains(">75<"));
+        assert!(html.contains("P@1 with 95% CI"));
+        assert!(html.contains("Cost (API total / per run)"));
+        assert!(html.contains("tdot"));
+        assert!(html.contains("cibar"));
+        assert!(html.contains("Methodology"));
         assert!(html.contains("<style>:root{color-scheme:dark;--bg:"));
         assert!(!html.contains("{{"));
         // Zero per-run detail: no run ids, no per-run links.
