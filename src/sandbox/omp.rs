@@ -635,7 +635,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             });
         }
 
-        // Spawn thread to read stderr
+        // Spawn thread to read stderr. Provider billing errors surface here
+        // (not the session file), so classify each line for the tripwire.
+        let billing_tripped_err = billing_tripped.clone();
         if let Some(stderr) = child.stderr.take() {
             let tx_err = tx.clone();
             thread::spawn(move || {
@@ -643,6 +645,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
+                        if classify_billing_error(trimmed).is_some() {
+                            billing_tripped_err.store(true, Ordering::SeqCst);
+                        }
                         let _ = tx_err.send(format!("[STDERR] {}", trimmed));
                     }
                 }

@@ -1520,6 +1520,8 @@ struct ExtBatchOut {
     results: Vec<BenchmarkRunResult>,
     passing: usize,
     drift: Option<bool>,
+    /// Provider billing trip during extensions: callers pause the queue.
+    billing_tripped: bool,
 }
 
 /// Run one extension batch (fresh batch reference, suffix-numbered trial dirs).
@@ -1549,6 +1551,7 @@ async fn run_extension_batch(
     };
     let mut results = Vec::new();
     let mut passing = 0usize;
+    let mut billing_tripped = false;
     for i in 0..spec.count {
         if cancel.load(Ordering::SeqCst) {
             send_status(tx, log_buf, "[STOP] Extension cancelled by user.".to_string());
@@ -1617,6 +1620,16 @@ async fn run_extension_batch(
                     logger.log("[PIPELINE] Run cancelled by user.");
                     break;
                 }
+                let msg = format!("{e:#}");
+                if msg.to_lowercase().contains("billing:")
+                    || crate::sandbox::omp::classify_billing_error(&msg).is_some() {
+                    logger.log(&format!(
+                        "[BILLING] Extension subrun {} hit provider billing error: {}; trial discarded.",
+                        trial_idx, msg
+                    ));
+                    billing_tripped = true;
+                    break;
+                }
                 logger.log(&format!(
                     "[SUBRUN ERROR] Extension subrun {} failed: {}",
                     trial_idx, e
@@ -1630,6 +1643,7 @@ async fn run_extension_batch(
         results,
         passing,
         drift,
+        billing_tripped,
     }
 }
 
@@ -1805,8 +1819,11 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         spec,
     )
     .await;
-    if !out.results.is_empty() {
-        let mut combined = data.subruns.clone();
+        if out.billing_tripped {
+            pause_queue(&state, "provider billing error in extension batch");
+        }
+        if !out.results.is_empty() {
+            let mut combined = data.subruns.clone();
         combined.extend(out.results);
         let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
         let merged = LeaderboardManager::consolidate_multi_trial_run(
@@ -2123,6 +2140,15 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
                 },
             )
             .await;
+            if out.billing_tripped {
+                send_status(
+                    &tx,
+                    &run_log_buf,
+                    "[BILLING] extension hit provider billing error; pausing queue, trials discarded.".to_string(),
+                );
+                pause_queue(&state, "provider billing error in extension batch");
+                break;
+            }
             if out.results.is_empty() {
                 send_status(
                     &tx,
@@ -2387,6 +2413,9 @@ async fn extend_parent_run(
             spec,
         )
         .await;
+        if out.billing_tripped {
+            pause_queue(&state_clone, "provider billing error in extension batch");
+        }
         if !out.results.is_empty() {
             let mut combined = data.subruns.clone();
             combined.extend(out.results);
@@ -2879,6 +2908,25 @@ mod tests {
         };
         spawn_run_body(&state, req, Some("q-test-cancel".to_string()));
         assert!(!state.cancel_requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_billing_pause_blocks_dispatch_and_resume_restores() {
+        // End-to-end breaker chain (mock, no spend): pause -> pump/kick refuse,
+        // resume -> dispatch works. Proves the wiring, not just classification.
+        let state = create_test_state();
+        // Seed one pending item directly.
+        let id = push_queue_item(&state, QueueKind::Run(queue_test_req()));
+        pause_queue(&state, "mock 402 in test");
+        assert!(state.queue_paused.load(Ordering::SeqCst));
+        assert!(!pump_queue(&state));
+        assert!(!kick_runner(&state, &id).await);
+        // Item untouched.
+        let q = test_queue_of(&state).await;
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].status, QueueStatus::Pending);
+        resume_queue(&state);
+        assert!(!state.queue_paused.load(Ordering::SeqCst));
     }
 
     async fn test_queue_of(state: &AppState) -> Vec<QueuedRun> {
