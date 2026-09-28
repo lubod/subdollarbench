@@ -819,6 +819,12 @@ impl BenchmarkPipeline {
                             s.stage, s.name, status_str, err_str
                         ));
                     }
+                    // Throughput probe (200-frame ECHO burst); unscored until
+                    // a reference harness exists (same rule as pubsub soak).
+                    if let Some(tp) = verifier.measure_throughput().await {
+                        logger.log(&format!("  Candidate Throughput: {tp:.0} ops/sec"));
+                        extra_throughput = Some(tp);
+                    }
                     (
                         summary.pass_rate,
                         summary.passed_count,

@@ -67,6 +67,22 @@ pub struct ActiveRunInfo {
     pub review_model: Option<String>,
 }
 
+/// Worker slots for parallel trial cells. Default 4, override with
+/// `SDB_WORKERS` (clamped 1..=8). `1` reproduces legacy single-runner behavior.
+pub fn worker_count() -> usize {
+    std::env::var("SDB_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 8)
+}
+
+/// Per-worker candidate port offset: base + worker*100 keeps every cell's
+/// ports disjoint (candidate, batch-ref, upstream pool).
+pub fn worker_port(base: u16, worker: u8) -> u16 {
+    base.saturating_add(worker as u16 * 100)
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub log_sender: broadcast::Sender<String>,
@@ -76,6 +92,14 @@ pub struct AppState {
     pub last_run: Arc<RwLock<Option<ActiveRunInfo>>>,
     pub log_buffer: Arc<RwLock<Vec<String>>>,
     pub task_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Parallel dispatch: busy worker ids. `is_running` mirrors any-busy for back-compat.
+    pub running_slots: Arc<std::sync::Mutex<std::collections::HashSet<u8>>>,
+    /// Per-worker live run info (worker -> ActiveRunInfo).
+    pub worker_runs: Arc<RwLock<std::collections::HashMap<u8, ActiveRunInfo>>>,
+    /// Per-worker task handles (worker -> JoinHandle).
+    pub worker_handles: Arc<std::sync::Mutex<std::collections::HashMap<u8, tokio::task::JoinHandle<()>>>>,
+    /// Per-run cancel flags (run_id -> flag). Replaces global-flag poisoning.
+    pub cancel_flags: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
     pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
     pub queue_seq: Arc<AtomicU64>,
     /// Billing circuit breaker: when true, pump/kick refuse new runs.
@@ -95,6 +119,9 @@ pub struct StatusResponse {
     pub is_running: bool,
     pub current_run: Option<ActiveRunInfo>,
     pub last_run: Option<ActiveRunInfo>,
+    /// Per-worker live runs (worker id -> run). Empty when idle.
+    #[serde(default)]
+    pub workers: std::collections::HashMap<u8, ActiveRunInfo>,
     /// True when the server runs on a temp-dir fallback DB instead of
     /// repo-root bench.db (queue history not durable). Defaults false for
     /// older clients that omit the field.
@@ -140,13 +167,21 @@ async fn get_status(State(state): State<AppState>) -> Response {
     if let Some(proxied) = proxy_read(&state, "/api/status", "").await {
         return proxied;
     }
-    let is_running = state.is_running.load(Ordering::SeqCst);
-    let current_run = state.current_run.read().unwrap().clone();
+    let workers = state.worker_runs.read().unwrap().clone();
+    // Legacy fields mirror slot state: running = any slot busy, current =
+    // lowest-id worker run (back-compat for single-slot clients).
+    let is_running = !workers.is_empty() || state.is_running.load(Ordering::SeqCst);
+    let current_run = workers
+        .iter()
+        .min_by_key(|(w, _)| *w)
+        .map(|(_, r)| r.clone())
+        .or_else(|| state.current_run.read().unwrap().clone());
     let last_run = state.last_run.read().unwrap().clone();
     Json(StatusResponse {
         is_running,
         current_run,
         last_run,
+        workers,
         db_fallback: state.db_fallback,
     })
     .into_response()
@@ -727,6 +762,10 @@ impl UiServer {
             queue: Arc::new(std::sync::Mutex::new(VecDeque::from(replayed))),
             queue_seq: Arc::new(AtomicU64::new(seq_start)),
             queue_paused: Arc::new(AtomicBool::new(false)),
+            running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            worker_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             store,
             db_fallback,
             engine_url: engine_url.to_string(),
@@ -2961,6 +3000,10 @@ mod tests {
             queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             queue_seq: Arc::new(AtomicU64::new(0)),
             queue_paused: Arc::new(AtomicBool::new(false)),
+            running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            worker_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             store: Arc::new(tempfile_mem_store()),
             db_fallback: false,
             engine_url: String::new(),
