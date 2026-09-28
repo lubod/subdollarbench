@@ -1279,7 +1279,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                   <th style="width: 10%;">Trials / Stability</th>
                   <th style="width: 13%;">API cost / Effective</th>
                   <th style="width: 9%;">$/pass</th>
-                  <th style="width: 9%;">Rules</th>
+                  <th style="width: 11%;">Throughput</th>
+                  <th style="width: 9%;">Efficiency</th>
+                  <th style="width: 8%;">Rules</th>
                   <th style="width: 11%;">When</th>
                 </tr>
               </thead>
@@ -1312,7 +1314,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <table class="responsive-runs-table">
               <thead><tr>
                 <th style="width: 4%;"></th><th>Model</th><th>Tasks</th><th>Trials</th>
-                <th>Avg pass</th><th>P@1 (lo–hi)</th><th>$/pass</th><th>Total API</th><th>Stability</th>
+                <th>Avg pass</th><th>P@1 (lo–hi)</th><th>$/pass</th><th>Total API</th><th>Throughput</th><th>Efficiency</th><th>Stability</th>
               </tr></thead>
               <tbody id="modelsTableBody">
                 <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading models...</td></tr>
@@ -2628,7 +2630,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const msg = (lbCache || []).length === 0
           ? 'No leaderboard rows yet — run the wave first.'
           : `No rows matched filter "${lbFilter}".`;
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
         return;
       }
       tbody.innerHTML = '';
@@ -2668,22 +2670,29 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <td style="text-align:center;">${n}× / ${stab}</td>
           <td style="text-align:center;">${api} / ${eff}</td>
           <td style="text-align:center;" title="API cost per passing trial">${cpp}</td>
+          <td style="text-align:center;font-size:0.75rem;">${(() => {
+            if (r.throughput_req_sec == null) return '<span style="color:var(--text-muted);">-</span>';
+            const ref = r.reference_throughput_req_sec;
+            const ratio = (ref && ref > 0) ? (r.throughput_req_sec / ref) : null;
+            return `<b>${fmtTp(r.throughput_req_sec)}</b>` + (ratio != null ? `<br><span style="color:var(--text-muted);">${ratio.toFixed(2)}x ref</span>` : '');
+          })()}</td>
+          <td style="text-align:center;" title="Efficiency score (pass-adjusted throughput per cost)">${r.efficiency_score != null ? Number(r.efficiency_score).toFixed(1) : '-'}</td>
           <td style="text-align:center;font-size:0.75rem;">${rules}</td>
           <td style="text-align:center;font-size:0.75rem;color:var(--text-muted);">${when}</td>`;
         tbody.appendChild(tr);
         if (open) {
           const dr = document.createElement('tr');
           const dc = document.createElement('td');
-          dc.colSpan = 8;
+          dc.colSpan = 10;
           dc.style.cssText = 'background:rgba(13,17,23,0.6);padding:6px 12px 10px 34px;';
           if (!subs.length) {
             dc.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No per-trial detail in this row.</span>';
           } else {
-            dc.innerHTML = '<table style="width:100%;font-size:0.75rem;"><thead><tr style="color:var(--text-muted);text-align:left;"><th>Trial</th><th>Pass</th><th>Cost</th><th>Turns</th><th>Duration</th></tr></thead><tbody>' +
+            dc.innerHTML = '<table style="width:100%;font-size:0.75rem;"><thead><tr style="color:var(--text-muted);text-align:left;"><th>Trial</th><th>Pass</th><th>Cost</th><th>Turns</th><th>Duration</th><th>Throughput</th></tr></thead><tbody>' +
               subs.map((t, i) => {
                 const ok = (t.pass_rate ?? 0) >= 100;
                 const tc = t.total_cost_usd ?? t.effective_cost_usd;
-                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : 'var(--danger)'};">${Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td></tr>`;
+                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : 'var(--danger)'};">${Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td><td>${t.throughput_req_sec != null ? fmtTp(t.throughput_req_sec) : '-'}</td></tr>`;
               }).join('') + '</tbody></table>';
           }
           dr.appendChild(dc);
@@ -2727,7 +2736,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
       const groups = {};
       Object.values(canon).forEach(r => {
-        const g = groups[r.model] = groups[r.model] || { model: r.model, tasks: [], nTrials: 0, nPass: 0, sumAvg: 0, sumApi: 0, sumEff: 0, worstStab: 0, costs: [], stabs: [] };
+        const g = groups[r.model] = groups[r.model] || { model: r.model, tasks: [], nTrials: 0, nPass: 0, sumAvg: 0, sumApi: 0, sumEff: 0, worstStab: 0, costs: [], stabs: [], bestTp: null, sumTpScore: 0, nTp: 0 };
         const n = r.total_trials ?? (r.subruns || []).length ?? 1;
         const subs = r.subruns || [];
         const c = subs.length ? subs.filter(t => (t.pass_rate ?? 0) >= 100).length : ((r.avg_pass_rate ?? r.pass_rate) >= 100 ? n : 0);
@@ -2735,6 +2744,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         g.nTrials += n; g.nPass += c;
         g.sumAvg += (r.avg_pass_rate ?? r.pass_rate);
         g.sumApi += (r.total_cost_usd ?? 0); g.sumEff += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
+        if (r.throughput_req_sec != null && (g.bestTp == null || r.throughput_req_sec > g.bestTp)) g.bestTp = r.throughput_req_sec;
+        if (r.efficiency_score != null) { g.sumTpScore += r.efficiency_score; g.nTp++; }
         const sr = r.stability === 'unstable' ? 3 : r.stability === 'watch' ? 2 : r.stability === 'stable' ? 1 : 0;
         g.worstStab = Math.max(g.worstStab, sr);
         g.costs.push(r.total_cost_usd ?? 0); g.stabs.push(r.stability || '-');
@@ -2753,6 +2764,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           avg: g.sumAvg / Math.max(1, n),
           p1: t ? 100 * g.nPass / t : 0, p1lo: lo, p1hi: hi,
           totalApi: g.sumApi, avgApi: g.sumApi / Math.max(1, n),
+          bestTp: g.bestTp, avgEff: g.nTp ? g.sumTpScore / g.nTp : null,
           cpp: passTrials > 0 ? g.sumApi / passTrials : null,
           stab: g.worstStab === 3 ? 'unstable' : g.worstStab === 2 ? 'watch' : g.worstStab === 1 ? 'stable' : '-',
           stabRank: g.worstStab,
@@ -2777,7 +2789,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         trials: (a, b) => b.nTrials - a.nTrials }[mode] || ((a, b) => b.avg - a.avg);
       rows.sort(key);
       if (badge) badge.textContent = `${rows.length} models`;
-      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No rows yet.</td></tr>'; return; }
+      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px;">No rows yet.</td></tr>'; return; }
       tbody.innerHTML = '';
       rows.forEach((g, i) => {
         const meta = getModelMeta(g.model);
@@ -2792,6 +2804,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <td style="text-align:center;font-weight:700;">${Math.round(g.p1)}% <span style="font-size:.72rem;color:var(--text-muted);">(${Math.round(g.p1lo)}–${Math.round(g.p1hi)})</span></td>
           <td style="text-align:center;">${g.cpp != null ? '$' + g.cpp.toFixed(4) : '-'}</td>
           <td style="text-align:center;">$${g.totalApi.toFixed(3)}</td>
+          <td style="text-align:center;">${g.bestTp != null ? fmtTp(g.bestTp) : '-'}</td>
+          <td style="text-align:center;">${g.avgEff != null ? g.avgEff.toFixed(1) : '-'}</td>
           <td style="text-align:center;font-size:.75rem;">${stabBadge(g.stab)}</td>`;
         tbody.appendChild(tr);
       });
@@ -2922,6 +2936,11 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     function toggleHiddenRuns(show) {
       showHiddenRuns = show;
       renderRuns();
+    }
+    function fmtTp(v) {
+      if (v == null) return '-';
+      if (v >= 1000) return (v / 1000).toFixed(1) + 'k/s';
+      return Math.round(v) + '/s';
     }
     function shortModelName(modelName) {
       if (!modelName) return '';
