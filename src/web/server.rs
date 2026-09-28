@@ -78,6 +78,10 @@ pub struct AppState {
     pub task_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
     pub queue_seq: Arc<AtomicU64>,
+    /// Billing circuit breaker: when true, pump/kick refuse new runs.
+    /// Pending rows stay queued, never deleted. Set by the 402/401 tripwire;
+    /// cleared by explicit resume.
+    pub queue_paused: Arc<AtomicBool>,
     pub store: Arc<Store>,
     /// Engine base URL in GUI-proxy mode (empty = single-process engine).
     pub engine_url: String,
@@ -617,6 +621,9 @@ impl UiServer {
                 "/api/queue",
                 get(get_queue).post(enqueue_run).delete(clear_queue),
             )
+            .route("/api/queue/pause", post(pause_queue_handler))
+            .route("/api/queue/resume", post(resume_queue_handler))
+            .route("/api/balance/check", get(balance_check_handler))
             .route("/api/queue/:id", delete(remove_queued_run))
             .route("/api/compare", get(compare_runs))
             .route("/api/stream", get(stream_logs))
@@ -706,6 +713,7 @@ impl UiServer {
             task_handle: Arc::new(std::sync::Mutex::new(None)),
             queue: Arc::new(std::sync::Mutex::new(VecDeque::from(replayed))),
             queue_seq: Arc::new(AtomicU64::new(seq_start)),
+            queue_paused: Arc::new(AtomicBool::new(false)),
             store,
             db_fallback,
             engine_url: engine_url.to_string(),
@@ -1630,6 +1638,9 @@ async fn run_extension_batch(
 /// winner). Extends re-validate at dispatch: a parent stabilized by an
 /// earlier item in the same chain is marked Done with a log line, never run.
 fn pump_queue(state: &AppState) -> bool {
+    if state.queue_paused.load(Ordering::SeqCst) {
+        return false;
+    }
     let next = {
         let mut q = state.queue.lock().unwrap();
         q.iter_mut()
@@ -2023,6 +2034,19 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
                     logger.log("[PIPELINE] Run cancelled by user.");
                     break;
                 }
+                // Billing tripwire: provider 402/401/429 (or OmpBillingError)
+                // pauses the wave. Trial NOT scored, NOT persisted.
+                let msg = format!("{e:#}");
+                let billing = msg.to_lowercase().contains("billing:")
+                    || crate::sandbox::omp::classify_billing_error(&msg).is_some();
+                if billing {
+                    logger.log(&format!(
+                        "[BILLING] Subrun {}/{} hit provider billing error: {}; pausing queue, trial discarded.",
+                        trial_idx, total_trials, msg
+                    ));
+                    pause_queue(&state, &format!("provider billing error in trial {trial_idx} ({msg})"));
+                    break;
+                }
                 logger.log(&format!(
                     "[SUBRUN ERROR] Subrun {}/{} failed: {}",
                     trial_idx, total_trials, e
@@ -2397,6 +2421,65 @@ async fn extend_parent_run(
     })))
 }
 
+/// Billing circuit breaker: pause the queue (Pending rows kept, never deleted).
+pub fn pause_queue(state: &AppState, reason: &str) {
+    state.queue_paused.store(true, Ordering::SeqCst);
+    send_status(
+        &state.log_sender,
+        &state.log_buffer,
+        format!("[BREAKER] Queue paused: {reason}. Top up balance to resume."),
+    );
+}
+
+/// Explicit operator resume after a billing pause.
+pub fn resume_queue(state: &AppState) {
+    state.queue_paused.store(false, Ordering::SeqCst);
+    send_status(
+        &state.log_sender,
+        &state.log_buffer,
+        "[BREAKER] Queue resumed by operator.".to_string(),
+    );
+}
+
+async fn pause_queue_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/queue/pause", None).await {
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        return Json(serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({"ok": false})));
+    }
+    pause_queue(&state, "paused by operator");
+    Json(serde_json::json!({"ok": true, "paused": true}))
+}
+
+async fn resume_queue_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/queue/resume", None).await {
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        return Json(serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({"ok": false})));
+    }
+    resume_queue(&state);
+    let first = state.queue.lock().unwrap().iter().find(|i| i.status == QueueStatus::Pending).map(|i| i.id.clone());
+    if let Some(id) = first {
+        kick_runner(&state, &id).await;
+    }
+    Json(serde_json::json!({"ok": true, "paused": false}))
+}
+
+/// Pre-flight balance gate: refuse new batches when credit is exhausted.
+/// Unknown balance = allow (fail open, tripwire guards).
+async fn balance_check_handler(State(_state): State<AppState>) -> Json<serde_json::Value> {
+    let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    if key.trim().is_empty() {
+        return Json(serde_json::json!({"ok": false, "reason": "no API key configured"}));
+    }
+    match crate::cost::ModelPricing::query_key_balance(&key).await {
+        Some(b) => {
+            let remaining = b.remaining();
+            let ok = remaining.map(|r| r >= 1.0).unwrap_or(true);
+            Json(serde_json::json!({"ok": ok, "usage": b.usage, "limit": b.limit, "remaining": remaining}))
+        }
+        None => Json(serde_json::json!({"ok": true, "unknown": true})),
+    }
+}
+
 async fn get_queue(State(state): State<AppState>) -> Response {
     if let Some(proxied) = proxy_read(&state, "/api/queue", "").await {
         return proxied;
@@ -2408,6 +2491,9 @@ async fn get_queue(State(state): State<AppState>) -> Response {
 /// or the item is already picked up. Bounded retries cover the
 /// pop-None/store-false handoff gap at the end of a run body.
 async fn kick_runner(state: &AppState, want_id: &str) -> bool {
+    if state.queue_paused.load(Ordering::SeqCst) {
+        return false;
+    }
     for _ in 0..50 {
         let head = {
             let mut q = state.queue.lock().unwrap();
@@ -2813,6 +2899,7 @@ mod tests {
             task_handle: Arc::new(std::sync::Mutex::new(None)),
             queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             queue_seq: Arc::new(AtomicU64::new(0)),
+            queue_paused: Arc::new(AtomicBool::new(false)),
             store: Arc::new(tempfile_mem_store()),
             db_fallback: false,
             engine_url: String::new(),

@@ -2332,3 +2332,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
+
+#[cfg(test)]
+mod billing_tripwire_tests {
+    use super::classify_billing_error;
+
+    #[test]
+    fn tripwire_fires_on_billing_signals() {
+        assert!(classify_billing_error("HTTP 402 Payment Required").is_some());
+        assert!(classify_billing_error("insufficient credit balance").is_some());
+        assert!(classify_billing_error("credit exhausted, top up").is_some());
+        assert!(classify_billing_error("Provider returned 429").is_some());
+        assert!(classify_billing_error("too many requests, slow down").is_some());
+        assert!(classify_billing_error("401 Unauthorized: invalid api key").is_some());
+        assert!(classify_billing_error("{\"error\":\"rate_limit_exceeded\"}").is_some());
+    }
+
+    #[test]
+    fn tripwire_ignores_model_failures() {
+        assert!(classify_billing_error("test failed: assertion left == right").is_none());
+        assert!(classify_billing_error("Read timed out").is_none());
+        assert!(classify_billing_error("exit code 1").is_none());
+        // Bare 14029 must not match 402.
+        assert!(classify_billing_error("port 14029 in use").is_none());
+        assert!(classify_billing_error("[SUBRUN ERROR] Subrun 1/3 failed: OMP agent exited").is_none());
+    }
+}

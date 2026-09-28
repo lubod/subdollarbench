@@ -1203,6 +1203,7 @@
 <button class="cat-chip on" onclick="toggleCat(this,'code')">Code</button>
 <button class="cat-chip on" onclick="toggleCat(this,'meta')">Meta</button>
 </div>
+<div id="breakerBanner" style="display: none; padding: 8px 12px; font-size: 0.8rem; border-radius: 4px; background: rgba(187,128,9,0.15); border: 1px solid rgba(187,128,9,0.5); color: #e3b341; margin-bottom: 8px;"></div>
 <div class="terminal" id="terminalOutput">SubDollarBench console initialized.
 Select a model, choose reasoning effort, and click "Start Benchmark Run" to begin.
 </div>
@@ -4216,7 +4217,40 @@ function copyRunId() {
       await fetchOmpStatus();
     }
 
-    setInterval(() => { checkActiveRun(); refreshQueue(); }, 5000);
+    setInterval(() => { checkActiveRun(); refreshQueue(); checkBreaker(); }, 5000);
+
+    async function checkBreaker() {
+      try {
+        const res = await fetch('/api/queue');
+        if (!res.ok) return;
+        const q = await res.json();
+        // paused = flag on server; infer via balance check only when needed.
+        // Cheap signal: any [BILLING] line in latest console tail.
+        const cres = await fetch('/api/console?tail=50');
+        const text = cres.ok ? await cres.text() : '';
+        const banner = document.getElementById('breakerBanner');
+        if (!banner) return;
+        const m = text.match(/\[BREAKER\] Queue paused: ([^\n]+)/);
+        // Show banner if the latest pause has no later resume.
+        const r = text.match(/\[BREAKER\] Queue resumed[^\n]*$/);
+        const pm = m ? text.lastIndexOf('[BREAKER] Queue paused') : -1;
+        const rm = r ? text.lastIndexOf('[BREAKER] Queue resumed') : -1;
+        if (pm >= 0 && pm > rm) {
+          banner.style.display = 'block';
+          const reason = (m[1] || 'billing').slice(0, 160);
+          banner.innerHTML = `Queue paused: ${escapeHtml(reason)} — top up balance, then <button class="btn-secondary" style="padding:2px 10px;font-size:0.75rem;" onclick="resumeQueue()">Resume</button>`;
+        } else {
+          banner.style.display = 'none';
+          banner.innerHTML = '';
+        }
+      } catch (e) {}
+    }
+
+    async function resumeQueue() {
+      const res = await fetch('/api/queue/resume', { method: 'POST' });
+      if (res.ok) { checkBreaker(); refreshQueue(); }
+      else alert('Resume failed');
+    }
     setInterval(() => { loadRuns(); }, 30000);
     loadRuns();
     refreshQueue();

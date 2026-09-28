@@ -429,6 +429,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_key_balance_limit_and_remaining() {
+        use tokio::net::TcpListener;
+        // Mock: usage 8.0, limit 10.0 -> remaining 2.0.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                use tokio::io::AsyncReadExt;
+                let _ = sock.read(&mut buf).await;
+                let body = "{\"data\":{\"usage\":8.0,\"limit\":10.0}}";
+                let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}", body.len(), body);
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let url = format!("http://127.0.0.1:{}/api/v1/auth/key", port);
+        let b = ModelPricing::query_key_balance_at("k", &url).await.unwrap();
+        assert_eq!(b.usage, 8.0);
+        assert_eq!(b.limit, Some(10.0));
+        assert_eq!(b.remaining(), Some(2.0));
+    }
+
     async fn test_query_openrouter_key_usage_mock() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
