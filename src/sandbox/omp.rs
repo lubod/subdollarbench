@@ -103,7 +103,29 @@ fn resolve_thinking_level(effort: Option<&str>, effective_model: &str) -> (Strin
     }
 }
 
-#[derive(Clone)]
+/// Billing tripwire: classify provider session errors that must pause the
+/// wave instead of scoring a 0% model failure. Matches HTTP billing/auth/
+/// throttle statuses in session JSON or stderr text (402/401/429 + phrases).
+/// Returns a human reason when tripped, else None.
+pub fn classify_billing_error(text: &str) -> Option<String> {
+    let low = text.to_lowercase();
+    // Bare status codes (word-boundary-ish: avoid matching e.g. 14029).
+    let has_code = |code: &str| {
+        low.split(|c: char| !c.is_ascii_digit())
+            .any(|tok| tok == code)
+    };
+    if has_code("402") || low.contains("payment required") || low.contains("insufficient credit") || low.contains("credit exhausted") || low.contains("out of credit") {
+        return Some("provider billing exhausted (HTTP 402)".to_string());
+    }
+    if has_code("401") || (low.contains("unauthorized") && (low.contains("key") || low.contains("token") || low.contains("auth"))) {
+        return Some("provider auth rejected (HTTP 401)".to_string());
+    }
+    if has_code("429") || (low.contains("rate limit") || low.contains("rate_limit") || low.contains("too many requests")) {
+        return Some("provider rate-limited (HTTP 429)".to_string());
+    }
+    None
+}
+
 pub struct TailSessionContext {
     pub start_time: SystemTime,
     pub existing: HashSet<PathBuf>,
@@ -123,6 +145,9 @@ pub struct TailSessionContext {
     /// Model id used to derive per-event cost from token counts when the
     /// session event carries no explicit `usage.cost.total`.
     pub model: String,
+    /// Set when classify_billing_error trips on a session line: the runner
+    /// pauses the queue instead of scoring the trial.
+    pub billing_tripped: Arc<AtomicBool>,
 }
 
 /// All launch parameters for one agent session. Bundled in a struct so the
@@ -146,6 +171,21 @@ pub struct OmpExecutionError {
     pub message: String,
     pub partial_stats: OmpSessionStats,
 }
+
+/// Provider billing/auth/throttle failure: pause the wave, never score.
+/// Carries the human reason from classify_billing_error.
+#[derive(Debug, Clone)]
+pub struct OmpBillingError {
+    pub reason: String,
+}
+
+impl std::fmt::Display for OmpBillingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "billing: {}", self.reason)
+    }
+}
+
+impl std::error::Error for OmpBillingError {}
 
 impl std::fmt::Display for OmpExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -539,6 +579,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             "[OMP-PROMPT] model={} thinking={}{} cwd=/workspace",
             effective_model, eff_level, eff_note
         ));
+        let billing_tripped = Arc::new(AtomicBool::new(false));
         for prompt_line in effective_prompt.lines() {
             let clean = prompt_line.trim_end();
             if clean.is_empty() {
@@ -567,6 +608,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             cancel_flag: cancel_flag.clone(),
             extension_feed_active: extension_feed.clone(),
             model: effective_model.clone(),
+            billing_tripped: billing_tripped.clone(),
         };
 
         let tailer_handle = thread::spawn(move || {
@@ -685,6 +727,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         }
 
         let stopped_by_limit = limit_reached.load(Ordering::SeqCst);
+        if billing_tripped.load(Ordering::SeqCst) {
+            return Err(anyhow::Error::new(OmpBillingError {
+                reason: "provider billing/auth/throttle tripped mid-session (see [BILLING] log)".to_string(),
+            }));
+        }
         let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
         let final_path = active_file.lock().unwrap().clone();
         let stats = match final_path.as_deref() {
@@ -830,6 +877,12 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 Ok(_) => {
                     last_activity = std::time::Instant::now();
                     if line_buf.ends_with('\n') {
+                        // Billing tripwire: provider 402/401/429 must pause the
+                        // wave, never score a 0% model failure.
+                        if let Some(reason) = crate::sandbox::omp::classify_billing_error(&line_buf) {
+                            ctx.billing_tripped.store(true, Ordering::SeqCst);
+                            let _ = ctx.tx.send(format!("[BILLING] {reason}; pausing queue."));
+                        }
                         // Check limits & telemetry in session line
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line_buf.trim())
                         {
@@ -1995,6 +2048,7 @@ mod tests {
             cancel_flag: None,
             extension_feed_active: Arc::new(AtomicBool::new(false)),
             model: "test-model".to_string(),
+            billing_tripped: Arc::new(AtomicBool::new(false)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2147,6 +2201,7 @@ mod tests {
             cancel_flag: None,
             extension_feed_active: Arc::new(AtomicBool::new(false)),
             model: "test-model".to_string(),
+            billing_tripped: Arc::new(AtomicBool::new(false)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2261,6 +2316,7 @@ mod tests {
             cancel_flag: None,
             extension_feed_active: Arc::new(AtomicBool::new(false)),
             model: "google/gemini-2.5-flash".to_string(),
+            billing_tripped: Arc::new(AtomicBool::new(false)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);

@@ -21,7 +21,77 @@ pub const COMPUTE_COST_PER_SECOND: f64 = 0.00003;
 /// Baseline token volume processing rate in USD per token ($0.05 per 1M tokens).
 pub const COMPUTE_COST_PER_TOKEN: f64 = 0.00000005;
 
+/// Key balance snapshot: cumulative usage + optional credit ceiling.
+/// `limit` is None for uncapped keys (fall back to caller threshold).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyBalance {
+    pub usage: f64,
+    pub limit: Option<f64>,
+}
+
+impl KeyBalance {
+    /// Remaining credit, if the key reports a ceiling.
+    pub fn remaining(&self) -> Option<f64> {
+        self.limit.map(|l| (l - self.usage).max(0.0))
+    }
+}
+
+
+pub async fn query_openrouter_key_usage_at(api_key: &str, url: &str) -> Option<f64> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .ok()?;
+
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("data")?.get("usage")?.as_f64()
+}
+
 impl ModelPricing {
+    pub async fn query_openrouter_key_usage(api_key: &str) -> Option<f64> {
+        query_openrouter_key_usage_at(api_key, "https://openrouter.ai/api/v1/auth/key").await
+    }
+
+    /// Balance snapshot (usage + limit/remaining) for the billing tripwire.
+    /// Non-success HTTP (401/402/…) or unparsable body yields None = unknown.
+    pub async fn query_key_balance(api_key: &str) -> Option<KeyBalance> {
+        Self::query_key_balance_at(api_key, "https://openrouter.ai/api/v1/auth/key").await
+    }
+
+    pub async fn query_key_balance_at(api_key: &str, url: &str) -> Option<KeyBalance> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", api_key.trim()))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: serde_json::Value = resp.json().await.ok()?;
+        let data = body.get("data")?;
+        let usage = data.get("usage")?.as_f64()?;
+        let limit = data.get("limit").and_then(|v| v.as_f64());
+        let remaining = data.get("limit_remaining").and_then(|v| v.as_f64());
+        // Prefer explicit remaining when present; else limit - usage.
+        let limit = limit.or_else(|| remaining.map(|r| r + usage));
+        Some(KeyBalance { usage, limit })
+    }
     /// Calculates the equivalent compute cost from execution duration and total token volume.
     pub fn compute_cost(duration_seconds: f64, total_tokens: u64) -> f64 {
         (duration_seconds * COMPUTE_COST_PER_SECOND)
@@ -207,31 +277,6 @@ impl ModelPricing {
     }
 
     /// Query OpenRouter /api/v1/auth/key to get the exact live cumulative dollar usage
-    pub async fn query_openrouter_key_usage(api_key: &str) -> Option<f64> {
-        Self::query_openrouter_key_usage_at(api_key, "https://openrouter.ai/api/v1/auth/key").await
-    }
-
-    pub async fn query_openrouter_key_usage_at(api_key: &str, url: &str) -> Option<f64> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(4))
-            .build()
-            .ok()?;
-
-        let resp = client
-            .get(url)
-            .header("Authorization", format!("Bearer {}", api_key.trim()))
-            .send()
-            .await
-            .ok()?;
-
-        if !resp.status().is_success() {
-            return None;
-        }
-
-        let body: serde_json::Value = resp.json().await.ok()?;
-        body.get("data")?.get("usage")?.as_f64()
-    }
-
     /// Query OpenRouter /api/v1/models to get live catalog pricing for a model
     pub async fn fetch_openrouter_model_pricing(model_name: &str) -> Option<ModelPricing> {
         Self::fetch_openrouter_model_pricing_at(model_name, "https://openrouter.ai/api/v1/models")
@@ -403,7 +448,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/api/v1/auth/key", port);
-        let usage = ModelPricing::query_openrouter_key_usage_at("test-key", &url).await;
+        let usage = query_openrouter_key_usage_at("test-key", &url).await;
         assert_eq!(usage, Some(0.4567));
     }
 
@@ -422,7 +467,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/api/v1/auth/key", port);
-        let usage = ModelPricing::query_openrouter_key_usage_at("bad-key", &url).await;
+        let usage = query_openrouter_key_usage_at("bad-key", &url).await;
         assert_eq!(usage, None);
     }
 
