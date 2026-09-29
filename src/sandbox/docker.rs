@@ -870,6 +870,20 @@ impl SandboxManager {
     /// must survive a sibling's prune.
     pub const NETWORK_STALE_AGE_SECS: i64 = 300;
 
+    /// True when the network has attached containers or is younger than the
+    /// staleness threshold (or inspect fails). Cleanup skips such networks.
+    /// Takes &str so Drop/cleanup paths share the prune gate logic.
+    pub fn network_in_use_or_young(net: &str) -> bool {
+        let out = std::process::Command::new("docker")
+            .args(["network", "inspect", net, "--format", "{{len .Containers}} {{.Created}}"])
+            .output();
+        let text = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return true, // fail closed: unknown state => keep.
+        };
+        !Self::network_is_stale(&text)
+    }
+
     pub fn prune_stale_networks() {
         let ls = Command::new("docker")
             .args(["network", "ls", "--filter", "name=subdollar-net-", "-q"])
@@ -986,6 +1000,14 @@ impl SandboxManager {
 
         // Egress sidecar shares the instance id: reaped with the rest.
         self.stop_egress_proxy();
+        // Never reap a live or newborn network: attached containers OR age
+        // under the staleness threshold mean a sibling worker is
+        // creating-then-attaching (parallel ghost-run race). remove_network
+        // refuses attached endpoints anyway; the age check covers the
+        // not-yet-attached window.
+        if Self::network_in_use_or_young(&net) {
+            return;
+        }
         Self::remove_network_retrying(&net);
         let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
         for idx in 1..=8u8 {
