@@ -2164,6 +2164,7 @@ mod tests {
             top_p: None,
             seed: None,
             prompt_sha: None,
+            omp_version: None,
             rules_version: None,
         };
         fs::write(
