@@ -663,12 +663,19 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     && run.subruns.iter().zip(out.subruns.iter()).all(|(a, b)| {
                         (a.efficiency_score - b.efficiency_score).abs() < 1e-9
                             && opt_eq(a.throughput_score, b.throughput_score)
+                            // Subrun stat backfills (billing telemetry:
+                            // turns/tokens/cost patched post-hoc) must
+                            // trigger the parent fair-cost recompute below.
+                            && (a.total_cost_usd - b.total_cost_usd).abs() < 1e-9
+                            && a.total_tokens == b.total_tokens
+                            && a.turns == b.turns
                     });
                 let same = (run.pass_rate - out.pass_rate).abs() < 1e-9
                     && opt_eq(run.pass_at_1_lo, out.pass_at_1_lo)
                     && opt_eq(run.pass_at_1_hi, out.pass_at_1_hi)
                     && opt_eq(run.throughput_score, out.throughput_score)
                     && (run.efficiency_score - out.efficiency_score).abs() < 1e-9
+                    && (run.total_cost_usd - out.total_cost_usd).abs() < 1e-9
                     && subs_same
                     && run.rules_version == out.rules_version;
                 if same {
