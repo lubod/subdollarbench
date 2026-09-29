@@ -9,7 +9,40 @@ use tracing::{info, warn};
 /// rebuilds silently move the denominator: a digest change is a declared new
 /// measurement regime, not silent drift. Re-pin quarterly or on CVE fixes.
 pub const REF_REDIS_IMAGE: &str = "docker.io/library/redis@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576";
+
+/// Egress allowlist for the per-run allowlist forward proxy. The agent NEEDS
+/// openrouter (model API) + language registries (builds). github.com is
+/// deliberately allowed (frameworks live in git; the tradeoff is documented
+/// in methodology). Everything else 403s. Raw sockets bypass proxy env
+/// (documented residual); the API key in-container is protected by channel
+/// blocking, not by secrecy.
+pub const EGRESS_ALLOWLIST: &[&str] = &[
+    "api.openrouter.ai",
+    "crates.io",
+    "static.crates.io",
+    "proxy.golang.org",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "github.com",
+    "objects.githubusercontent.com",
+    "codeload.github.com",
+];
+
+/// Egress sidecar: python:alpine + stdlib allowlist proxy script (no new image
+/// dependency; the `squid` image is absent from the registry mirror).
+pub const EGRESS_PROXY_IMAGE: &str = "docker.io/library/python@sha256:df494c1f9b0e47385077c35d2c7f3edb3267a894c5ae2269ff4ef74aa20d4de";
 pub const REF_NGINX_IMAGE: &str = "docker.io/library/nginx@sha256:17ad11d84df6c69e327c0894125f712ec1f1de627b5e5ed7e12ca2ed8cd5daf8";
+
+/// Host allowlist check (mirrors extensions/egress_proxy.py).
+pub fn egress_allowed(host: &str) -> bool {
+    let h = host.to_lowercase();
+    let h = h.split(':').next().unwrap_or("").trim();
+    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    EGRESS_ALLOWLIST.iter().any(|a| h == *a || h.ends_with(&format!(".{a}")))
+}
 pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
 /// Benchmark *client* images are pinned too: the client binary is half the
 /// measurement apparatus.
@@ -61,6 +94,52 @@ impl SandboxManager {
 
     pub fn candidate_container_name(&self) -> String {
         format!("subdollar-candidate-{}", self.instance_id)
+    }
+
+    pub fn egress_proxy_name(&self) -> String {
+        format!("subdollar-egress-{}", self.instance_id)
+    }
+
+    /// Start the per-run egress allowlist proxy sidecar on the run network
+    /// (alias `egress-proxy`, port 3128). Best-effort: failure only disables
+    /// filtering (agent runs unfiltered, logged), never fails the run.
+    /// Returns the proxy URL for agent env, or None when unavailable.
+    pub fn start_egress_proxy(&self) -> Option<String> {
+        let name = self.egress_proxy_name();
+        let net = self.network_name();
+        if self.ensure_network().is_err() {
+            return None;
+        }
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &name])
+            .output();
+        // Sidecar script lives in-repo; mount read-only.
+        let script = crate::config::get_repo_root().join("extensions/egress_proxy.py");
+        if !script.exists() {
+            return None;
+        }
+        let allow = EGRESS_ALLOWLIST.join(",");
+        let out = std::process::Command::new("docker")
+            .args([
+                "run", "-d", "--rm", "--name", &name,
+                "--network", &net, "--network-alias", "egress-proxy",
+                "--memory=128m", "--cpus=0.25", "--pids-limit=64",
+                "-v", &format!("{}:/proxy.py:ro", script.display()),
+                "-e", &format!("ALLOWLIST={allow}"),
+                EGRESS_PROXY_IMAGE, "python3", "/proxy.py", "3128",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => Some("http://egress-proxy:3128".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Stop the egress sidecar (cleanup path; missing container is fine).
+    pub fn stop_egress_proxy(&self) {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.egress_proxy_name()])
+            .output();
     }
 
     pub fn ref_redis_name(&self) -> String {
@@ -116,6 +195,7 @@ impl SandboxManager {
         }
         Err(anyhow!("docker network create failed: {}", stderr))
     }
+
 
     pub fn start_reference_redis(&self, port: u16) -> Result<()> {
         let name = self.ref_redis_name();
@@ -833,6 +913,8 @@ impl SandboxManager {
                 .output();
         }
 
+        // Egress sidecar shares the instance id: reaped with the rest.
+        self.stop_egress_proxy();
         Self::remove_network_retrying(&net);
         let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
         for idx in 1..=8u8 {
@@ -851,6 +933,17 @@ impl Drop for SandboxManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_egress_proxy_allowlist_blocks_exfil() {
+        use super::egress_allowed;
+        for h in ["api.openrouter.ai", "x.proxy.golang.org", "github.com", "a.b.github.com"] {
+            assert!(egress_allowed(h), "{}", h);
+        }
+        for h in ["evil.com", "1.2.3.4", "openrouter.ai.evil.com", "notgithub.com", ""] {
+            assert!(!egress_allowed(h), "{}", h);
+        }
+    }
+
     use super::*;
     use tokio::net::TcpListener;
 

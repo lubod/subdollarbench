@@ -368,6 +368,37 @@ impl OmpRunner {
             cmd.arg("--network=bridge");
         }
 
+        // Egress filtering: per-run allowlist proxy sidecar. The API key IS
+        // in-container (OPENROUTER_API_KEY); the allowlist blocks exfil
+        // *channels* to non-allowlisted hosts. Best-effort: sidecar failure
+        // only logs (agent runs unfiltered), never fails the run.
+        // NO_PROXY keeps run-network aliases + localhost direct (verifier
+        // traffic and ref probing must not route through the proxy).
+        // Both upper- and lower-case variants: pip/npm/go honor either.
+        let no_proxy = "ref-redis,ref-http,ref-dns,egress-proxy,localhost,127.0.0.1";
+        if let Some(proxy_url) = network
+            .and_then(|net| {
+                // Derive instance id from network name subdollar-net-<id>.
+                net.strip_prefix("subdollar-net-").map(|id| {
+                    crate::sandbox::docker::SandboxManager::with_id(id).start_egress_proxy()
+                })
+            })
+            .flatten()
+        {
+            for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                cmd.arg("-e").arg(format!("{var}={proxy_url}"));
+            }
+            for var in ["NO_PROXY", "no_proxy"] {
+                cmd.arg("-e").arg(format!("{var}={no_proxy}"));
+            }
+        } else {
+            // Sidecar unavailable: still export NO_PROXY so a stale proxy env
+            // never breaks ref/localhost traffic.
+            for var in ["NO_PROXY", "no_proxy"] {
+                cmd.arg("-e").arg(format!("{var}={no_proxy}"));
+            }
+        }
+
         let effective_key = api_key
             .map(|s| s.to_string())
             .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
