@@ -11,7 +11,7 @@ fail() { echo "LAUNCH ABORT: $1" >&2; exit 1; }
 
 # 2. Green suite (documented skip: parallel-flaky console test, isolated in #gate).
 export PATH=/home/ubuntu/.cargo/bin:$PATH
-cargo test --lib -- --skip pipeline::tests::test_pipeline_buffers_and_writes_console_log 2>&1 | tail -1 | grep -q "0 failed" || fail "suite not green"
+cargo test --lib -- --skip pipeline::tests::test_pipeline_buffers_and_writes_console_log 2>&1 | grep "test result" | grep -q "0 failed" || fail "suite not green"
 
 # 3. Engine idle.
 curl -s http://127.0.0.1:3000/api/status --max-time 10 | grep -q '"is_running":false' || fail "engine busy"
