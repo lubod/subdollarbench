@@ -15,6 +15,15 @@ use crate::report::judge::RunJudge;
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
 use crate::report::portal::PortalExporter;
 use crate::sandbox::docker::{SandboxManager, PROXY_UPSTREAM_PORTS};
+
+/// Upstream pool ports for a worker (base pool + worker*100 offset).
+fn worker_upstream_ports(worker: u8) -> [u16; 3] {
+    [
+        crate::web::server::worker_port(PROXY_UPSTREAM_PORTS[0], worker),
+        crate::web::server::worker_port(PROXY_UPSTREAM_PORTS[1], worker),
+        crate::web::server::worker_port(PROXY_UPSTREAM_PORTS[2], worker),
+    ]
+}
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::verifier::compliance::ComplianceChecker;
 use crate::verifier::dns::DnsVerifier;
@@ -72,6 +81,34 @@ impl PipelineLogger for BufferingPipelineLogger {
     }
 }
 
+/// Rewrite candidate-local port mentions for a parallel worker, leaving
+/// in-network reference aliases untouched.
+/// - Skipped entirely: lines containing ref-redis/ref-http/ref-dns/upstream
+///   (fixed in-network names/ports, same for every worker).
+/// - Rewritten with word boundaries: localhost:PORT, 0.0.0.0:PORT, -p PORT,
+///   port PORT, :PORT, exposes PORT. Bare-substring replace would corrupt
+///   coincidental digit runs (e.g. 16379) and ref lines.
+pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> String {
+    if worker == 0 {
+        return content.to_string();
+    }
+    let base = base_port.to_string();
+    let off = crate::web::server::worker_port(base_port, worker).to_string();
+    // Word-boundary pattern around the bare port number.
+    let word_pat = ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base))).unwrap();
+    content
+        .lines()
+        .map(|line| {
+            let low = line.to_lowercase();
+            if low.contains("ref-redis") || low.contains("ref-http") || low.contains("ref-dns") || low.contains("upstream") {
+                return line.to_string();
+            }
+            word_pat.replace_all(line, off.as_str()).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn hash_seed(s: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in s.as_bytes() {
@@ -99,6 +136,9 @@ pub struct BenchmarkConfig {
     /// own ref measurement and scores against this denominator. Per-trial ref
     /// containers still start: the agent keeps its black-box oracle.
     pub batch_reference: Option<f64>,
+    /// Parallel worker id (0..SDB_WORKERS). Offsets candidate/verifier ports
+    /// by worker*100 so concurrent cells never collide. 0 = legacy ports.
+    pub worker: u8,
 }
 
 #[derive(Debug)]
@@ -250,7 +290,7 @@ impl BenchmarkPipeline {
         logger.log("[SETUP] Starting official reference server in Docker...");
         match config.task {
             TaskType::Redis => {
-                if let Err(e) = sandbox.start_reference_redis(6380) {
+                if let Err(e) = sandbox.start_reference_redis(crate::web::server::worker_port(6380, config.worker)) {
                     logger.log(&format!(
                         "[SETUP] Warning: reference Redis unavailable: {}",
                         e
@@ -258,7 +298,7 @@ impl BenchmarkPipeline {
                 }
             }
             TaskType::Http => {
-                if let Err(e) = sandbox.start_reference_http(8081) {
+                if let Err(e) = sandbox.start_reference_http(crate::web::server::worker_port(8081, config.worker)) {
                     logger.log(&format!(
                         "[SETUP] Warning: reference HTTP unavailable: {}",
                         e
@@ -266,7 +306,7 @@ impl BenchmarkPipeline {
                 }
             }
             TaskType::Dns => {
-                if let Err(e) = sandbox.start_reference_dns(5354) {
+                if let Err(e) = sandbox.start_reference_dns(crate::web::server::worker_port(5354, config.worker)) {
                     logger.log(&format!(
                         "[SETUP] Warning: reference DNS unavailable: {}",
                         e
@@ -278,7 +318,7 @@ impl BenchmarkPipeline {
                     "[SETUP] PDF task uses verifier-generated fixtures; no reference container.",
                 );
             }
-            TaskType::Proxy => match sandbox.start_upstream_pool(&PROXY_UPSTREAM_PORTS) {
+            TaskType::Proxy => match sandbox.start_upstream_pool(&worker_upstream_ports(config.worker)) {
                 Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
                 Err(e) => logger.log(&format!(
                     "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
@@ -297,6 +337,19 @@ impl BenchmarkPipeline {
             .join("prompt.md");
         let prompt_content = fs::read_to_string(&prompt_file)
             .map_err(|_| anyhow!("Could not read prompt file: {}", prompt_file.display()))?;
+        // Port templating (parallel workers): prompt files carry the canonical
+        // port; worker>0 cells substitute their offset port so agents build on
+        // the ports their containers actually publish. Worker 0 is verbatim.
+        // Targeted rule: skip lines mentioning in-network aliases
+        // (ref-redis/ref-http/ref-dns/upstreamN — fixed ports inside the run
+        // network, identical for every worker). Rewrite only candidate-local
+        // references (localhost, 0.0.0.0, -p, bare port mentions) with word
+        // boundaries so coincidental digit runs never match.
+        let prompt_content = if config.worker == 0 {
+            prompt_content
+        } else {
+            template_ports_for_worker(&prompt_content, config.task.default_port(), config.worker)
+        };
 
         // 5. Run OMP Agent (unless eval_only)
         let mut agent_failed = false;
@@ -435,8 +488,10 @@ impl BenchmarkPipeline {
             logger.log("[VERIFY] Anti-cheat compliance passed.");
         }
 
-        // 7. Start candidate and run test suite
-        let port = config.task.default_port();
+        // 7. Start candidate and run test suite.
+        // Worker offset keeps parallel cells on disjoint ports
+        // (worker 0 = legacy ports, byte-identical to single mode).
+        let port = crate::web::server::worker_port(config.task.default_port(), config.worker);
         let has_runnable = sandbox
             .ensure_runnable_candidate(&config.workdir)
             .unwrap_or(false);
@@ -752,7 +807,7 @@ impl BenchmarkPipeline {
                         .map(|i| {
                             (
                                 sandbox.upstream_name(i),
-                                PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                                crate::web::server::worker_port(PROXY_UPSTREAM_PORTS[(i - 1) as usize], config.worker),
                             )
                         })
                         .collect();
@@ -859,7 +914,7 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(6380) {
+                            if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(crate::web::server::worker_port(6380, config.worker)) {
                                 logger.log(&format!(
                                     "  Official Reference Redis: {:.0} req/sec",
                                     ref_tp
@@ -878,7 +933,7 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(8081) {
+                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(crate::web::server::worker_port(8081, config.worker)) {
                                 logger.log(&format!(
                                     "  Official Reference Nginx: {:.0} req/sec",
                                     ref_tp
@@ -913,7 +968,7 @@ impl BenchmarkPipeline {
                             // Same nginx denominator as http: a proxy cannot
                             // beat direct. Live per-trial when no batch ref.
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(8081) {
+                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(crate::web::server::worker_port(8081, config.worker)) {
                                 logger.log(&format!(
                                     "  Official Reference Nginx: {:.0} req/sec",
                                     ref_tp
@@ -1280,6 +1335,27 @@ mod tests {
         fn log(&self, _msg: &str) {}
     }
 
+    #[test]
+    fn test_template_ports_for_worker() {
+        // Ref-alias lines untouched at any worker.
+        let redis_ref = "redis-cli -h ref-redis -p 6379 <cmd>";
+        assert_eq!(template_ports_for_worker(redis_ref, 6379, 2), redis_ref);
+        let dns_ref = "forward to `ref-dns`, port `53`";
+        assert_eq!(template_ports_for_worker(dns_ref, 5353, 1), dns_ref);
+        let ups = "dial upstream1:80, mirrors 127.0.0.1:8101";
+        assert_eq!(template_ports_for_worker(ups, 8091, 3), ups);
+        // Candidate-local lines rewritten with word boundaries.
+        let own = "listening on `0.0.0.0:6379`, test `curl localhost:6379`, `-p 6379`, port 6379";
+        let got = template_ports_for_worker(own, 6379, 1);
+        assert!(got.contains("6479"), "{got}");
+        assert!(!got.contains("6379"), "{got}");
+        // No coincidental digit-run corruption.
+        let tricky = "id 16379 and 63790 stay";
+        assert_eq!(template_ports_for_worker(tricky, 6379, 1), tricky);
+        // Worker 0 verbatim.
+        assert_eq!(template_ports_for_worker(own, 6379, 0), own);
+    }
+
     #[tokio::test]
     async fn test_pipeline_cancelled_early() {
         let cancel = Arc::new(AtomicBool::new(true));
@@ -1297,6 +1373,7 @@ mod tests {
             save_results: false,
             review_model: None,
             batch_reference: None,
+            worker: 0,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -1325,6 +1402,7 @@ mod tests {
             save_results: true,
             review_model: None,
             batch_reference: None,
+            worker: 0,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);
