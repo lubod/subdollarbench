@@ -29,6 +29,15 @@ pub const EGRESS_ALLOWLIST: &[&str] = &[
     "codeload.github.com",
 ];
 
+/// Process-wide mutex serializing Docker network create/prune.
+/// Parallel workers creating networks simultaneously trigger pool pressure;
+/// a sibling's prune can reap a just-created-but-still-empty network.
+static NETWORK_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn network_mutex() -> &'static std::sync::Mutex<()> {
+    NETWORK_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Egress sidecar: python:alpine + stdlib allowlist proxy script (no new image
 /// dependency; the `squid` image is absent from the registry mirror).
 pub const EGRESS_PROXY_IMAGE: &str = "docker.io/library/python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9";
@@ -164,14 +173,21 @@ impl SandboxManager {
     /// `ref-http`, `ref-dns`) and the OMP agent container is attached to it,
     /// so the agent can probe ground truth by hostname while remaining
     /// isolated from host-network services.
+/// Process-wide mutex serializing Docker network create/prune.
+/// Parallel workers creating networks simultaneously trigger pool pressure;
+/// a sibling's prune can reap a just-created-but-still-empty network (0
+/// containers attached yet looks stale). Setup is seconds-cheap; contention
+/// is harmless, ghost runs are not.
     pub fn ensure_network(&self) -> Result<()> {
         self.needs_cleanup.store(true, Ordering::SeqCst);
+        let _guard = network_mutex().lock().unwrap();
         let net = self.network_name();
         let out = Command::new("docker")
             .args(["network", "create", &net])
             .output()?;
         if out.status.success() {
             info!("Created run network {}", net);
+            Self::verify_network_exists(&net)?;
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -190,10 +206,27 @@ impl SandboxManager {
                 || String::from_utf8_lossy(&retry_out.stderr).contains("already exists")
             {
                 info!("Created run network {} after pruning stale networks", net);
+                Self::verify_network_exists(&net)?;
                 return Ok(());
             }
         }
         Err(anyhow!("docker network create failed: {}", stderr))
+    }
+
+    /// Confirm a just-created network is inspectable (retry ×5, 200ms).
+    /// Fail closed: a missing network means a concurrent prune raced us;
+    /// the caller logs a warning instead of launching into a ghost run.
+    fn verify_network_exists(net: &str) -> Result<()> {
+        for _ in 0..5 {
+            let out = Command::new("docker")
+                .args(["network", "inspect", net])
+                .output()?;
+            if out.status.success() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        Err(anyhow!("docker network {net} not inspectable after create"))
     }
 
 
