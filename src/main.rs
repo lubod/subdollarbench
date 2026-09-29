@@ -197,6 +197,7 @@ async fn run_trial_batch(
             save_results: true,
             review_model: p.review_model.clone(),
             batch_reference: batch_ref.as_ref().map(|b| b.reference()),
+            worker: 0,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await {
             Ok(output) => {
@@ -340,6 +341,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     save_results: !no_save,
                     review_model: review_model.clone(),
                     batch_reference: batch_ref.as_ref().map(|b| b.reference()),
+            worker: 0,
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;

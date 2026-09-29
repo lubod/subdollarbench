@@ -106,8 +106,19 @@ impl BatchRef {
     /// Start the batch ref, warm it up (one discarded window), and return the
     /// median-of-3 pre-batch value. `None` task support (DNS/PDF) yields `Ok(None)`.
     pub fn start(task: &TaskType, parent_run_id: &str, log: &dyn Fn(&str)) -> Result<Option<Self>> {
+        Self::start_on_worker(task, parent_run_id, log, 0)
+    }
+
+    /// Worker-aware start: batch port follows the worker offset so parallel
+    /// cells never share a batch-ref container.
+    pub fn start_on_worker(
+        task: &TaskType,
+        parent_run_id: &str,
+        log: &dyn Fn(&str),
+        worker: u8,
+    ) -> Result<Option<Self>> {
         let port = match batch_port(task) {
-            Some(p) => p,
+            Some(p) => crate::web::server::worker_port(p, worker),
             None => return Ok(None),
         };
         let sandbox = SandboxManager::with_id(&format!("{}_batchref", parent_run_id));

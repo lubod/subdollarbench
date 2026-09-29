@@ -1299,24 +1299,37 @@ async fn stop_run(State(state): State<AppState>) -> Response {
     send_status(
         &tx,
         &log_buf,
-        "[USER ACTION] Cancellation requested. Terminating sandbox containers...".to_string(),
+        "[USER ACTION] Cancellation requested. Terminating all worker sandboxes...".to_string(),
     );
 
-    let maybe_handle = state.task_handle.lock().unwrap().take();
-    if let Some(handle) = maybe_handle {
+    // Abort every worker handle + per-run cancel flags + sandboxes.
+    for (_w, handle) in state.worker_handles.lock().unwrap().drain() {
         handle.abort();
     }
-
-    let maybe_run = state.current_run.read().unwrap().clone();
-    if let Some(info) = maybe_run {
+    {
+        let flags = state.cancel_flags.lock().unwrap();
+        for flag in flags.values() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    for (_w, info) in state.worker_runs.read().unwrap().iter() {
         let sandbox = SandboxManager::with_id(&info.run_id);
         sandbox.cleanup_instance();
-    } else {
-        let sandbox = SandboxManager::new();
-        sandbox.cleanup_instance();
     }
-
+    // Legacy single handle/run (SDB_WORKERS=1 path + in-flight direct tasks).
+    if let Some(handle) = state.task_handle.lock().unwrap().take() {
+        handle.abort();
+    }
+    if state.current_run.read().unwrap().is_some() {
+        let maybe_run = state.current_run.read().unwrap().clone();
+        if let Some(info) = maybe_run {
+            let sandbox = SandboxManager::with_id(&info.run_id);
+            sandbox.cleanup_instance();
+        }
+    }
     *state.current_run.write().unwrap() = None;
+    state.worker_runs.write().unwrap().clear();
+    state.cancel_flags.lock().unwrap().clear();
     {
         let cancelled: Vec<String> = {
             let mut q = state.queue.lock().unwrap();
@@ -1340,7 +1353,12 @@ async fn stop_run(State(state): State<AppState>) -> Response {
             });
         }
     }
-    state.is_running.store(false, Ordering::SeqCst);
+    {
+        let mut slots = state.running_slots.lock().unwrap();
+        slots.clear();
+        state.is_running.store(false, Ordering::SeqCst);
+    }
+    state.worker_handles.lock().unwrap().clear();
     send_status(
         &tx,
         &log_buf,
@@ -1589,9 +1607,10 @@ async fn run_extension_batch(
     cancel: &Arc<AtomicBool>,
     batch_log: &(dyn Fn(&str) + Sync),
     spec: ExtBatchSpec,
+    worker: u8,
 ) -> ExtBatchOut {
     let ext_batch_ref = if spec.count > 1 {
-        match crate::bench::batch_ref::BatchRef::start(&spec.task, &spec.parent_run_id, batch_log) {
+        match crate::bench::batch_ref::BatchRef::start_on_worker(&spec.task, &spec.parent_run_id, batch_log, worker) {
             Ok(b) => b,
             Err(e) => {
                 send_status(
@@ -1661,6 +1680,7 @@ async fn run_extension_batch(
             save_results: spec.save_results,
             review_model: spec.review_model.clone(),
             batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
+            worker,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), Some(Arc::clone(cancel)))
             .await
@@ -1707,10 +1727,43 @@ async fn run_extension_batch(
 /// was spawned. Callers must own the runner slot (chain holder or kick CAS
 /// winner). Extends re-validate at dispatch: a parent stabilized by an
 /// earlier item in the same chain is marked Done with a log line, never run.
+/// Claim a free worker slot (0..worker_count). None when all busy.
+fn claim_slot(state: &AppState) -> Option<u8> {
+    let max = worker_count() as u8;
+    let mut slots = state.running_slots.lock().unwrap();
+    for w in 0..max {
+        if !slots.contains(&w) {
+            slots.insert(w);
+            state.is_running.store(true, Ordering::SeqCst);
+            return Some(w);
+        }
+    }
+    None
+}
+
+/// Release a worker slot; clears legacy is_running when all idle.
+fn release_slot(state: &AppState, worker: u8) {
+    let empty = {
+        let mut slots = state.running_slots.lock().unwrap();
+        slots.remove(&worker);
+        slots.is_empty()
+    };
+    state.worker_runs.write().unwrap().remove(&worker);
+    state.worker_handles.lock().unwrap().remove(&worker);
+    if empty {
+        state.is_running.store(false, Ordering::SeqCst);
+    }
+}
+
 fn pump_queue(state: &AppState) -> bool {
     if state.queue_paused.load(Ordering::SeqCst) {
         return false;
     }
+    // Work-stealing: claim a free slot first; no slot = all workers busy.
+    let worker = match claim_slot(state) {
+        Some(w) => w,
+        None => return false,
+    };
     let next = {
         let mut q = state.queue.lock().unwrap();
         q.iter_mut()
@@ -1735,33 +1788,36 @@ fn pump_queue(state: &AppState) -> bool {
             send_status(
                 &state.log_sender,
                 &state.log_buffer,
-                format!("[QUEUE] Starting queued run {id}..."),
+                format!("[QUEUE] Starting queued run {id} on worker {worker}..."),
             );
-            spawn_run_body(state, req, Some(id));
+            spawn_run_body(state, req, Some(id), worker);
             true
         }
         Some((QueueKind::Extend(ext), id)) => {
-            spawn_extend_body(state, ext, id);
+            spawn_extend_body(state, ext, id, worker);
             true
         }
-        None => false,
+        None => {
+            release_slot(state, worker);
+            false
+        }
     }
 }
 
 /// Spawn an extend with fresh dispatch-time validation. The runner slot is
 /// already held by the caller; this fn never releases it — the spawned task
 /// hands off via pump_queue or stores false when idle, like run bodies.
-fn spawn_extend_body(state: &AppState, ext: ExtendRequest, queue_id: String) {
+fn spawn_extend_body(state: &AppState, ext: ExtendRequest, queue_id: String, worker: u8) {
     let state_clone = state.clone();
-    let handle = tokio::spawn(execute_extend_body(state_clone, ext, queue_id));
-    *state.task_handle.lock().unwrap() = Some(handle);
+    let handle = tokio::spawn(execute_extend_body(state_clone, ext, queue_id, worker));
+    state.worker_handles.lock().unwrap().insert(worker, handle);
 }
 
 /// Queued-extend worker: re-read the parent under the held slot, skip when
 /// it no longer needs trials, else run the extension batch and re-merge.
 /// Trial numbering derives from the fresh subrun count, so chained extends
 /// on one parent never collide on trial dirs.
-async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: String) {
+async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: String, worker: u8) {
     let tx = state.log_sender.clone();
     let log_buf = state.log_buffer.clone();
     let finish_item = |state: &AppState, note: &str| {
@@ -1781,9 +1837,8 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
                 &state,
                 &format!("[EXTEND-QUEUE] {queue_id}: parent '{}' gone; skipping.", ext.parent_run_id),
             );
-            *state.task_handle.lock().unwrap() = None;
+            release_slot(&state, worker);
             if !pump_queue(&state) {
-                state.is_running.store(false, Ordering::SeqCst);
                 send_status(&tx, &log_buf, "[DONE]".to_string());
             }
             return;
@@ -1828,9 +1883,8 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
                 &state,
                 &format!("[EXTEND-QUEUE] {queue_id}: unknown task '{}'; skipping.", data.task),
             );
-            *state.task_handle.lock().unwrap() = None;
+            release_slot(&state, worker);
             if !pump_queue(&state) {
-                state.is_running.store(false, Ordering::SeqCst);
                 send_status(&tx, &log_buf, "[DONE]".to_string());
             }
             return;
@@ -1873,6 +1927,7 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
             send_status(&tx, &log_buf, m.to_string());
         },
         spec,
+        worker,
     )
     .await;
         if out.billing_tripped {
@@ -1908,24 +1963,23 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         );
     }
     mark_queue_done(&state, &queue_id);
-    *state.task_handle.lock().unwrap() = None;
+    release_slot(&state, worker);
     if !pump_queue(&state) {
-        state.is_running.store(false, Ordering::SeqCst);
         send_status(&tx, &log_buf, "[DONE]".to_string());
     }
 }
 
-fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>) {
+fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>, worker: u8) {
     // A previous `stop` must never poison the next run: the cancel flag is
     // per-run, cleared at dispatch. (Stale global flag once ate 15 queued
     // cells with 0-trial Dones.)
     state.cancel_requested.store(false, Ordering::SeqCst);
     let state_clone = state.clone();
-    let handle = tokio::spawn(execute_run_body(state_clone, req, queue_id));
-    *state.task_handle.lock().unwrap() = Some(handle);
+    let handle = tokio::spawn(execute_run_body(state_clone, req, queue_id, worker));
+    state.worker_handles.lock().unwrap().insert(worker, handle);
 }
 
-async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<String>) {
+async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<String>, worker: u8) {
     let tx = state.log_sender.clone();
     let run_log_buf = state.log_buffer.clone();
     let mut total_trials = req.trials.max(1);
@@ -1957,7 +2011,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
-        match crate::bench::batch_ref::BatchRef::start(&task_type_pre, &parent_run_id, &batch_log) {
+        match crate::bench::batch_ref::BatchRef::start_on_worker(&task_type_pre, &parent_run_id, &batch_log, worker) {
             Ok(b) => b,
             Err(e) => {
                 batch_log(&format!(
@@ -1986,7 +2040,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
 
         let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
 
-        *state.current_run.write().unwrap() = Some(ActiveRunInfo {
+        let live_info = ActiveRunInfo {
             run_id: run_id.clone(),
             model: req.model.clone(),
             task: req.task.clone(),
@@ -2006,7 +2060,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             extend_if_unstable: req.extend_if_unstable,
             max_trials: req.max_trials,
             review_model: req.review_model.clone(),
-        });
+        };
+        state.worker_runs.write().unwrap().insert(worker, live_info.clone());
+        // Legacy mirror (lowest worker wins in get_status; single worker = exact).
+        *state.current_run.write().unwrap() = Some(live_info);
         if trial_idx == 1 {
             state.log_buffer.write().unwrap().clear();
         }
@@ -2068,6 +2125,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             save_results: req.save_results.unwrap_or(true),
             review_model: req.review_model.clone(),
             batch_reference: batch_ref.as_ref().map(|b| b.reference()),
+            worker,
         };
 
         let pipe_res = BenchmarkPipeline::execute(
@@ -2194,6 +2252,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
                     count: add,
                     display_total: total_trials + add,
                 },
+                worker,
             )
             .await;
             if out.billing_tripped {
@@ -2261,20 +2320,20 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         );
     }
 
+    if let Some(info) = state.worker_runs.read().unwrap().get(&worker).cloned() {
+        *state.last_run.write().unwrap() = Some(info);
+    }
     if let Ok(mut cur_lock) = state.current_run.write() {
-        *state.last_run.write().unwrap() = cur_lock.clone();
         *cur_lock = None;
     }
-    *state.task_handle.lock().unwrap() = None;
+    release_slot(&state, worker);
     if let Some(qid) = queue_id {
         mark_queue_done(&state, &qid);
     }
-    // Runner-slot handoff: only the slot holder spawns the next run.
-    // is_running stays true across the handoff; stored false only when idle.
+    // Worker-slot handoff: freed slot + pump lets any free worker take next.
     if pump_queue(&state) {
         return;
     }
-    state.is_running.store(false, Ordering::SeqCst);
     send_status(&tx, &run_log_buf, "[DONE]".to_string());
 }
 
@@ -2451,6 +2510,17 @@ async fn extend_parent_run(
     state.cancel_requested.store(false, Ordering::SeqCst);
     let handle = tokio::spawn(async move {
         state_clone.cancel_requested.store(false, Ordering::SeqCst);
+        let ext_worker = match claim_slot(&state_clone) {
+            Some(w) => w,
+            None => {
+                send_status(
+                    &state_clone.log_sender,
+                    &state_clone.log_buffer,
+                    "[EXTEND] all workers busy; skipping direct extension.".to_string(),
+                );
+                return;
+            }
+        };
         let tx = state_clone.log_sender.clone();
         let ext_log_buf = state_clone.log_buffer.clone();
         send_status(
@@ -2467,6 +2537,7 @@ async fn extend_parent_run(
                 send_status(&tx, &ext_log_buf, m.to_string());
             },
             spec,
+            ext_worker,
         )
         .await;
         if out.billing_tripped {
@@ -2494,9 +2565,8 @@ async fn extend_parent_run(
                 ),
             );
         }
-        *state_clone.task_handle.lock().unwrap() = None;
+        release_slot(&state_clone, ext_worker);
         if !pump_queue(&state_clone) {
-            state_clone.is_running.store(false, Ordering::SeqCst);
             send_status(&tx, &ext_log_buf, "[DONE]".to_string());
         }
     });
@@ -2580,34 +2650,39 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
         return false;
     }
     for _ in 0..50 {
+        // Claim a free slot first (None = all workers busy).
+        let worker = match claim_slot(state) {
+            Some(w) => w,
+            None => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                continue;
+            }
+        };
         let head = {
             let mut q = state.queue.lock().unwrap();
             match q.iter().find(|i| i.id == want_id).map(|i| i.status) {
-                None => return true,
-                Some(s) if s != QueueStatus::Pending => return true,
+                None => {
+                    release_slot(state, worker);
+                    return true;
+                }
+                Some(s) if s != QueueStatus::Pending => {
+                    release_slot(state, worker);
+                    return true;
+                }
                 _ => {}
             }
-            if state.is_running.load(Ordering::SeqCst) {
-                None
-            } else if state
-                .is_running
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
-                None
-            } else {
-                let next = q
-                    .iter_mut()
-                    .find(|i| i.status == QueueStatus::Pending)
-                    .map(|item| {
-                        item.status = QueueStatus::Running;
-                        (item.kind.clone(), item.id.clone())
-                    });
-                if next.is_none() {
-                    state.is_running.store(false, Ordering::SeqCst);
-                }
-                next
+            let next = q
+                .iter_mut()
+                .find(|i| i.status == QueueStatus::Pending)
+                .map(|item| {
+                    item.status = QueueStatus::Running;
+                    (item.kind.clone(), item.id.clone())
+                });
+            if next.is_none() {
+                release_slot(state, worker);
+                return false;
             }
+            next
         };
         match head {
             Some((kind, id)) => {
@@ -2617,17 +2692,16 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
                     state.store.update_queue_status(&id, "Running", Some(&now), None),
                 );
                 match kind {
-                    QueueKind::Run(req) => spawn_run_body(state, req, Some(id)),
-                    QueueKind::Extend(ext) => spawn_extend_body(state, ext, id),
+                    QueueKind::Run(req) => spawn_run_body(state, req, Some(id), worker),
+                    QueueKind::Extend(ext) => spawn_extend_body(state, ext, id, worker),
                 }
                 return true;
             }
-            None => {}
+            None => {
+                release_slot(state, worker);
+                return false;
+            }
         }
-        if !state.is_running.load(Ordering::SeqCst) {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     false
 }
@@ -2835,23 +2909,22 @@ async fn start_run(
         if status.is_success() { return Ok(text); }
         return Err((status, text).into_response());
     }
-    if state
-        .is_running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            "Benchmark is already running",
-        )
-            .into_response());
-    }
+    let start_worker = match claim_slot(&state) {
+        Some(w) => w,
+        None => {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                "Benchmark is already running (all workers busy)",
+            )
+                .into_response());
+        }
+    };
 
     if !matches!(
         req.task.as_str(),
         "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
     ) {
-        state.is_running.store(false, Ordering::SeqCst);
+        release_slot(&state, start_worker);
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             format!(
@@ -2863,7 +2936,7 @@ async fn start_run(
     }
 
     state.cancel_requested.store(false, Ordering::SeqCst);
-    spawn_run_body(&state, req, None);
+    spawn_run_body(&state, req, None, start_worker);
 
     Ok("Benchmark started".to_string())
 }
@@ -2962,7 +3035,7 @@ mod tests {
             save_results: Some(false),
             review_model: None,
         };
-        spawn_run_body(&state, req, Some("q-test-cancel".to_string()));
+        spawn_run_body(&state, req, Some("q-test-cancel".to_string()), 0);
         assert!(!state.cancel_requested.load(Ordering::SeqCst));
     }
 
