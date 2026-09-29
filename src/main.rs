@@ -1413,8 +1413,18 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 _ => 9,
             });
             if enqueue {
+                if !extra.trim().is_empty() {
+                    eprintln!("matrix --enqueue: --extra is print-mode only and is ignored (cells use engine defaults: 100 turns, $1.00, 30min)");
+                }
                 let server = resolve_server_flag(&server);
-                // Pre-flight: refuse to launch into a dead/paused engine.
+                // Pre-flight: refuse to launch into a paused engine or dead credit.
+                // (Wave-launch script wraps this with tree+suite+spot-check gates.)
+                let st = remote::get_json(&server, "/api/status").await.ok();
+                if let Some(v) = st.as_ref().and_then(|x| x.get("queue_paused")).and_then(|x| x.as_bool()) {
+                    if v {
+                        anyhow::bail!("engine queue is paused (billing); resume before launching");
+                    }
+                }
                 let bal = remote::get_json(&server, "/api/balance/check").await.ok();
                 if let Some(b) = bal {
                     if b.get("ok").and_then(|v| v.as_bool()) == Some(false) && b.get("unknown").is_none() {

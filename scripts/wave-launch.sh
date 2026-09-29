@@ -21,18 +21,18 @@ FP="$(grep RULES_VERSION src/report/rules.rs | head -1) @ $(git rev-parse --shor
 echo "fingerprint: $FP"
 echo "$FP $(date -u +%FT%TZ)" >> wave-freezes.log
 
-# 5. Enqueue grid.
-GRID=${1:?usage: wave-launch.sh <grid-file>}
-n=0; ok=0
-while read -r m t e tr; do
-  case "$m" in ""|\#*) continue;; esac
-  n=$((n+1))
-  out=$(./target/release/subdollarbench enqueue --model "$m" --task "$t" --effort "${e:-high}" --trials "${tr:-3}" --extend-if-unstable --max-trials 9 2>&1 | tail -1)
-  echo "$out"
-  case "$out" in enqueued*) ok=$((ok+1));; esac
-  sleep 1
-done < "$GRID"
-echo "ENQUEUED $ok/$n"
+# 5. Enqueue grid via matrix --enqueue (single enqueuer path: paused/balance
+# gates + low-effort-first live there, not here).
+# Grid file: "model task effort trials" per line -> matrix flags.
+if [ ! -f "${1:?usage: wave-launch.sh <grid-file>}" ]; then
+  echo "LAUNCH ABORT: grid file $1 missing" >&2; exit 1
+fi
+MODELS=$(awk '!/^#/ && NF {print $1}' "$1" | sort -u | paste -sd, -)
+TASKS=$(awk '!/^#/ && NF {print $2}' "$1" | sort -u | paste -sd, -)
+EFFORTS=$(awk '!/^#/ && NF {print $3}' "$1" | sort -u | paste -sd, -)
+TRIALS=$(awk '!/^#/ && NF {print $4; exit}' "$1")
+./target/release/subdollarbench matrix --models "$MODELS" --tasks "$TASKS" --efforts "$EFFORTS" --trials "${TRIALS:-3}" --enqueue --extend-if-unstable --max-trials 9
+echo "ENQUEUED via matrix --enqueue"
 
 # 6. Spot check: first 3 cells must run REAL trials (turns>0, spend>0) within 15 min.
 echo "spot-checking first 3 cells (15 min window)..."

@@ -127,6 +127,9 @@ pub struct StatusResponse {
     /// older clients that omit the field.
     #[serde(default)]
     pub db_fallback: bool,
+    /// Billing circuit breaker: queue refuses new dispatch until resumed.
+    #[serde(default)]
+    pub queue_paused: bool,
 }
 
 /// Read-through from the engine in GUI-proxy mode.
@@ -183,6 +186,7 @@ async fn get_status(State(state): State<AppState>) -> Response {
         last_run,
         workers,
         db_fallback: state.db_fallback,
+        queue_paused: state.queue_paused.load(Ordering::SeqCst),
     })
     .into_response()
 }
