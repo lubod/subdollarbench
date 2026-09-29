@@ -865,6 +865,11 @@ impl SandboxManager {
     /// Background: an unconditional `ls -q | xargs docker network rm` raced
     /// pool-exhaustion retries against concurrently starting runs, deleting a
     /// just-created but not-yet-attached network (infra-failure race).
+    /// Networks younger than this are "not yet attached", never stale.
+    /// Parallel workers create-then-attach; a 0-container seconds-old network
+    /// must survive a sibling's prune.
+    pub const NETWORK_STALE_AGE_SECS: i64 = 300;
+
     pub fn prune_stale_networks() {
         let ls = Command::new("docker")
             .args(["network", "ls", "--filter", "name=subdollar-net-", "-q"])
@@ -875,13 +880,13 @@ impl SandboxManager {
         };
         for id in Self::parse_network_ids(&ids) {
             let inspect = Command::new("docker")
-                .args(["network", "inspect", id, "--format", "{{len .Containers}}"])
+                .args(["network", "inspect", id, "--format", "{{len .Containers}} {{.Created}}"])
                 .output();
             let count_out = match inspect {
                 Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
                 _ => continue, // Inspect failed: fail closed, skip the network.
             };
-            if !Self::network_is_detached(&count_out) {
+            if !Self::network_is_stale(&count_out) {
                 continue;
             }
             let _ = Command::new("docker").args(["network", "rm", id]).output();
@@ -893,11 +898,44 @@ impl SandboxManager {
         output.split_whitespace().collect()
     }
 
-    /// True only when `docker network inspect --format '{{len .Containers}}'`
-    /// output parses to exactly 0. Anything else (attached containers or
-    /// unparseable output) means "do not touch".
-    fn network_is_detached(count_output: &str) -> bool {
-        matches!(count_output.trim().parse::<u64>(), Ok(0))
+    /// True only when the inspect line shows 0 containers AND a Created
+    /// timestamp older than NETWORK_STALE_AGE_SECS. Anything else (attached,
+    /// young, or unparseable) means "do not touch".
+    fn network_is_stale(inspect_output: &str) -> bool {
+        let mut parts = inspect_output.split_whitespace();
+        let count: u64 = match parts.next().and_then(|t| t.parse().ok()) {
+            Some(c) => c,
+            None => return false,
+        };
+        if count != 0 {
+            return false;
+        }
+        // Remaining tokens form the Created timestamp ("2026-09-09 05:22:07.063 +0000 UTC").
+        let created = parts.collect::<Vec<_>>().join(" ");
+        // Parse leniently: compare lexicographically against (now - age) in the
+        // same layout. Unparseable -> fail closed (not stale).
+        let age_boundary = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(Self::NETWORK_STALE_AGE_SECS as u64))
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
+                    let secs = d.as_secs() as i64;
+                    // Format back via chrono if available, else compare raw.
+                    secs
+                })
+            });
+        // Simplest robust check: ask docker for Created seconds directly is an
+        // extra call; instead parse the leading date "YYYY-MM-DD HH:MM:SS".
+        let ts = match chrono::NaiveDateTime::parse_from_str(
+            created.get(..19).unwrap_or(""),
+            "%Y-%m-%d %H:%M:%S",
+        ) {
+            Ok(t) => t.and_utc().timestamp(),
+            Err(_) => return false,
+        };
+        match age_boundary {
+            Some(b) => ts < b,
+            None => false,
+        }
     }
 
     pub fn cleanup(&self) {
@@ -1129,15 +1167,23 @@ mod tests {
     }
     #[test]
     fn test_prune_skips_attached_networks_by_container_count() {
-        // The prune gate: only a zero-container network may be removed.
-        assert!(SandboxManager::network_is_detached("0"));
-        assert!(SandboxManager::network_is_detached("0\n"));
-        assert!(!SandboxManager::network_is_detached("1"));
-        assert!(!SandboxManager::network_is_detached("3\n"));
-        // Unparseable inspect output fails closed: skip, never delete.
-        assert!(!SandboxManager::network_is_detached(""));
-        assert!(!SandboxManager::network_is_detached("<no value>"));
-        assert!(!SandboxManager::network_is_detached("template parsing error"));
+        // Old gate retired by network_is_stale (count + age); coverage moved
+        // to test_prune_age_gate below. Kept as documentation of intent.
+    }
+
+    #[test]
+    fn test_prune_age_gate() {
+        // 0 containers + old timestamp = stale.
+        assert!(SandboxManager::network_is_stale("0 2020-01-01 00:00:00.000 +0000 UTC"));
+        // Attached containers never stale, however old.
+        assert!(!SandboxManager::network_is_stale("2 2020-01-01 00:00:00.000 +0000 UTC"));
+        // Young empty network = not yet attached (parallel workers), keep.
+        // Far-future timestamp is always young.
+        assert!(!SandboxManager::network_is_stale("0 2999-01-01 00:00:00.000 +0000 UTC"));
+        // Unparseable fails closed.
+        assert!(!SandboxManager::network_is_stale(""));
+        assert!(!SandboxManager::network_is_stale("<no value>"));
+        assert!(!SandboxManager::network_is_stale("0"));
     }
 
     #[test]
