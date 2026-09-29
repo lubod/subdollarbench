@@ -106,6 +106,7 @@ func main() {
         top_p: None,
         seed: None,
         prompt_sha: None,
+        omp_version: None,
     };
 
     let console_log = r#"[12:00:00] [INIT] Starting benchmark for google/gemini-2.5-flash on task 'redis'...

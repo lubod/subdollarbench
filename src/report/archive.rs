@@ -101,6 +101,10 @@ pub struct RunManifest {
     /// SHA-256 of tasks/<task>/prompt.md at run time (reproducibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_sha: Option<String>,
+    /// OMP harness version that ran this trial (digest-pinned Dockerfile;
+    /// unlocks every future comparison).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omp_version: Option<String>,
 }
 
 impl RunManifest {
@@ -426,6 +430,7 @@ mod tests {
             top_p: None,
             seed: None,
             prompt_sha: None,
+            omp_version: None,
             rules_version: None,
         };
 
@@ -549,6 +554,7 @@ mod tests {
             top_p: None,
             seed: None,
             prompt_sha: None,
+            omp_version: None,
             rules_version: None,
         };
         RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();

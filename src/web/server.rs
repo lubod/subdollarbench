@@ -1321,7 +1321,11 @@ async fn stop_run(
             .read()
             .unwrap()
             .iter()
-            .filter(|(_, info)| info.run_id.starts_with(&needle))
+            .filter(|(_, info)| {
+                info.run_id == needle
+                    || info.run_id.starts_with(&needle)
+                    || info.run_id.ends_with(&needle)
+            })
             .map(|(w, info)| (*w, info.run_id.clone()))
             .collect();
         let qhits: Vec<String> = state
@@ -1329,7 +1333,10 @@ async fn stop_run(
             .lock()
             .unwrap()
             .iter()
-            .filter(|i| i.status == QueueStatus::Running && (i.id == needle || i.id.starts_with(&needle)))
+            .filter(|i| {
+                i.status == QueueStatus::Running
+                    && (i.id == needle || i.id.starts_with(&needle) || i.id.ends_with(&needle))
+            })
             .map(|i| i.id.clone())
             .collect();
         if hits.is_empty() && qhits.is_empty() {
@@ -1345,13 +1352,18 @@ async fn stop_run(
             }
             let sandbox = SandboxManager::with_id(run_id);
             sandbox.cleanup_instance();
+            state.worker_runs.write().unwrap().remove(w);
             release_slot(&state, *w);
         }
         state.cancel_flags.lock().unwrap().retain(|k, _| !hits.iter().any(|(_, r)| r == k));
         {
             let mut ql = state.queue.lock().unwrap();
             for item in ql.iter_mut().filter(|i| i.status == QueueStatus::Running) {
-                if item.id == needle || item.id.starts_with(&needle) || hits.iter().any(|(_, r)| item.id == *r) {
+                if item.id == needle
+                    || item.id.starts_with(&needle)
+                    || item.id.ends_with(&needle)
+                    || hits.iter().any(|(_, r)| item.id == *r)
+                {
                     item.status = QueueStatus::Cancelled;
                 }
             }
@@ -3944,6 +3956,7 @@ mod tests {
             top_p: None,
             seed: None,
             prompt_sha: None,
+            omp_version: None,
             rules_version: None,
         };
         let manifest_b = RunManifest {
@@ -3992,6 +4005,7 @@ mod tests {
             top_p: None,
             seed: None,
             prompt_sha: None,
+            omp_version: None,
             rules_version: None,
         };
 

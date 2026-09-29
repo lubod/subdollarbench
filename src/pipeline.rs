@@ -1164,6 +1164,7 @@ impl BenchmarkPipeline {
                     format!("{:016x}", h.finish())
                 })
             },
+            omp_version: crate::sandbox::omp_updater::get_installed_sandbox_version(),
             total_trials: None,
             pass_at_1: None,
             pass_at_1_lo: None,

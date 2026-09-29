@@ -24,7 +24,7 @@ USER root
 RUN chown -R ubuntu:ubuntu /workspace
 
 # Install OMP (Oh My Pi agent harness)
-ARG OMP_VERSION=latest
+ARG OMP_VERSION=18.4.2
 RUN npm install -g @oh-my-pi/pi-coding-agent@${OMP_VERSION}
 
 USER ubuntu
