@@ -1785,9 +1785,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("{}", remote::delete_text(&server, "/api/queue").await?);
         }
 
-        Commands::Stop { server } => {
+        Commands::Stop { run, server } => {
             let server = resolve_server_flag(&server);
-            println!("{}", remote::post_empty(&server, "/api/run/stop").await?);
+            let path = if run.trim().is_empty() {
+                "/api/run/stop".to_string()
+            } else {
+                format!("/api/run/stop?run={}", run.trim())
+            };
+            println!("{}", remote::post_empty(&server, &path).await?);
         }
 
         Commands::Log {

@@ -1115,7 +1115,8 @@
               <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">● Current run</div>
               <button class="btn btn-danger" id="stopBtnConsole" onclick="stopRun()" style="padding: 4px 12px; font-size: 0.75rem; font-weight: 600;">🛑 Stop run</button>
             </div>
-            <div id="runningSetupBar" class="hint" style="margin-top: 6px; font-size: 0.78rem;"></div>
+            <div id="workerCards" style="display: none; gap: 8px; flex-wrap: wrap; margin-top: 6px;"></div>
+          <div id="runningSetupBar" class="hint" style="margin-top: 6px; font-size: 0.78rem;"></div>
           </div>
           <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
             <div style="display: flex; align-items: center; gap: 10px;">
@@ -2322,6 +2323,33 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+    }
+
+    function renderWorkerCards(workers) {
+      const box = document.getElementById('workerCards');
+      if (!box) return;
+      const ids = Object.keys(workers).sort();
+      if (!ids.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = 'flex';
+      box.innerHTML = ids.map(wid => {
+        const r = workers[wid];
+        const short = (r.run_id || '').slice(-14);
+        return `<div style="background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:0.75rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <b>W${escapeHtml(String(wid))}</b>
+          <span>${escapeHtml((r.model || '').split('/').pop() || '')} · ${escapeHtml(r.task || '')}</span>
+          <span style="color:var(--text-muted);">trial ${r.subrun ?? '-'}/${r.total_subruns ?? '-'}</span>
+          <span style="font-family:monospace;">${r.turns ?? 0}/${r.max_turns ?? '?'} turns</span>
+          <span style="font-family:monospace;">$${Number(r.cost_usd ?? 0).toFixed(3)}</span>
+          <button class="btn-secondary" style="padding:1px 8px;font-size:0.7rem;" onclick="stopWorker('${escapeHtml(short)}')" title="Stop only this cell">stop</button>
+        </div>`;
+      }).join('');
+    }
+
+    async function stopWorker(shortId) {
+      if (!confirm(`Stop cell ${shortId}? Other workers continue.`)) return;
+      const res = await fetch(`/api/run/stop?run=${encodeURIComponent(shortId)}`, { method: 'POST' });
+      if (!res.ok) alert('Stop failed');
+      checkActiveRun();
     }
 
     function renderRunningSetup(m) {
@@ -3910,6 +3938,14 @@ function copyRunId() {
           if (stopBtn) stopBtn.style.display = 'block';
           document.getElementById('statusDot').className = 'status-dot running';
           document.getElementById('statusText').textContent = 'Running';
+          // Multi-worker: data.workers is {stringId: run} (JSON keys are
+          // strings). Render one card per worker; legacy current_run first.
+          if (data.workers && Object.keys(data.workers).length > 1) {
+            renderWorkerCards(data.workers);
+          } else {
+            const wc = document.getElementById('workerCards');
+            if (wc) { wc.style.display = 'none'; wc.innerHTML = ''; }
+          }
           if (data.current_run) {
             const m = data.current_run;
             renderRunningSetup(m);

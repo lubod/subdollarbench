@@ -1280,8 +1280,24 @@ async fn get_env() -> Json<EnvironmentInfo> {
     Json(EnvironmentInfo::detect())
 }
 
-async fn stop_run(State(state): State<AppState>) -> Response {
-    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/run/stop", None).await {
+#[derive(Deserialize)]
+struct StopQuery {
+    #[serde(default)]
+    run: String,
+}
+
+async fn stop_run(
+    State(state): State<AppState>,
+    Query(q): Query<StopQuery>,
+) -> Response {
+    if let Some(proxied) = proxy_mutation(
+        &state,
+        "POST",
+        &format!("/api/run/stop{}", if q.run.is_empty() { String::new() } else { format!("?run={}", q.run) }),
+        None,
+    )
+    .await
+    {
         return proxied;
     }
     eprintln!("[AUDIT] POST /api/run/stop at {}", Utc::now().to_rfc3339());
@@ -1293,6 +1309,60 @@ async fn stop_run(State(state): State<AppState>) -> Response {
             .into_response();
     }
 
+    // Per-run stop (?run=id-or-prefix): kill only matching workers, release
+    // their slots, mark their queue items Cancelled. Other workers continue.
+    // Cleanup discipline: cancel_flags entries removed on run completion AND
+    // here, so the map never grows across waves.
+    if !q.run.trim().is_empty() {
+        let needle = q.run.trim().to_string();
+        // Find workers whose live run id or queue id matches (prefix ok).
+        let hits: Vec<(u8, String)> = state
+            .worker_runs
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, info)| info.run_id.starts_with(&needle))
+            .map(|(w, info)| (*w, info.run_id.clone()))
+            .collect();
+        let qhits: Vec<String> = state
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.status == QueueStatus::Running && (i.id == needle || i.id.starts_with(&needle)))
+            .map(|i| i.id.clone())
+            .collect();
+        if hits.is_empty() && qhits.is_empty() {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("no running cell matches '{needle}'"),
+            )
+                .into_response();
+        }
+        for (w, run_id) in &hits {
+            if let Some(h) = state.worker_handles.lock().unwrap().remove(w) {
+                h.abort();
+            }
+            let sandbox = SandboxManager::with_id(run_id);
+            sandbox.cleanup_instance();
+            release_slot(&state, *w);
+        }
+        state.cancel_flags.lock().unwrap().retain(|k, _| !hits.iter().any(|(_, r)| r == k));
+        {
+            let mut ql = state.queue.lock().unwrap();
+            for item in ql.iter_mut().filter(|i| i.status == QueueStatus::Running) {
+                if item.id == needle || item.id.starts_with(&needle) || hits.iter().any(|(_, r)| item.id == *r) {
+                    item.status = QueueStatus::Cancelled;
+                }
+            }
+        }
+        send_status(
+            &state.log_sender,
+            &state.log_buffer,
+            format!("[USER ACTION] Stopped {} cell(s) matching '{needle}'.", hits.len().max(qhits.len())),
+        );
+        return (axum::http::StatusCode::OK, format!("stopped {needle}")).into_response();
+    }
     state.cancel_requested.store(true, Ordering::SeqCst);
     let tx = state.log_sender.clone();
     let log_buf = state.log_buffer.clone();
@@ -1992,6 +2062,14 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         req.model.replace(['/', ':'], "_"),
         run_timestamp
     );
+    // Per-run cancel flag (cleanup discipline: removed at every exit below
+    // AND by stop-by-id, so the map never grows across waves).
+    let run_cancel = Arc::new(AtomicBool::new(false));
+    state
+        .cancel_flags
+        .lock()
+        .unwrap()
+        .insert(parent_run_id.clone(), run_cancel.clone());
 
     let log_buf_batch = state.log_buffer.clone();
     let batch_log = |m: &str| {
@@ -2026,7 +2104,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     };
 
     for trial_idx in 1..=total_trials {
-        if state.cancel_requested.load(Ordering::SeqCst) {
+        if run_cancel.load(Ordering::SeqCst) || state.cancel_requested.load(Ordering::SeqCst) {
             send_status(&tx, &run_log_buf, "[STOP] Run cancelled by user before next trial.".to_string());
             break;
         }
@@ -2326,6 +2404,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     if let Ok(mut cur_lock) = state.current_run.write() {
         *cur_lock = None;
     }
+    state.cancel_flags.lock().unwrap().remove(&parent_run_id);
     release_slot(&state, worker);
     if let Some(qid) = queue_id {
         mark_queue_done(&state, &qid);

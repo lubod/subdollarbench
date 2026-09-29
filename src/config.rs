@@ -610,8 +610,12 @@ pub enum Commands {
         server: Option<String>,
     },
 
-    /// [operate] Stop the live run: cancel flag + abort + sandbox cleanup (POST /api/run/stop)
+    /// [operate] Stop live run(s): cancel flag + abort + sandbox cleanup (POST /api/run/stop).
+    /// Optional run id (or queue id) stops one cell; empty stops all workers.
     Stop {
+        /// Run id or queue id to stop (empty = all workers).
+        #[arg(default_value = "")]
+        run: String,
         /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
         #[arg(long)]
         server: Option<String>,
