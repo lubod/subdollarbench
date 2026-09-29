@@ -138,6 +138,11 @@ impl SandboxManager {
                 EGRESS_PROXY_IMAGE, "python3", "/proxy.py", "3128",
             ])
             .output();
+        // Disarm Drop-cleanup: this handle is ephemeral (created just to
+        // start the sidecar). The sidecar's lifetime belongs to the run,
+        // reaped by the run owner's cleanup(). Without this, Drop murders
+        // the sidecar seconds after birth and the agent's proxy env dangles.
+        self.needs_cleanup.store(false, Ordering::SeqCst);
         match out {
             Ok(o) if o.status.success() => Some("http://egress-proxy:3128".to_string()),
             _ => None,
