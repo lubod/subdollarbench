@@ -183,6 +183,14 @@ async fn run_trial_batch(
                 .cyan()
         );
         let run_id = format!("{}_trial{}", p.parent_run_id, idx);
+        // Per-trial workdir under the shared root (never shared between
+        // concurrent trials: pipeline wipes workdir at trial start).
+        let trial_workdir = if p.workdir.is_absolute() {
+            p.workdir.join(&run_id)
+        } else {
+            p.workdir.clone()
+        };
+        let _ = std::fs::create_dir_all(&trial_workdir);
         let pipe_config = BenchmarkConfig {
             model: p.model.clone(),
             task: p.task,
@@ -191,7 +199,7 @@ async fn run_trial_batch(
             budget_usd: p.budget_usd,
             timeout_min: p.timeout_min,
             api_key: p.api_key.clone(),
-            workdir: p.workdir.clone(),
+            workdir: trial_workdir,
             eval_only: p.eval_only,
             run_id: Some(run_id.clone()),
             save_results: true,

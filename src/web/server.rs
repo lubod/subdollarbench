@@ -644,6 +644,16 @@ fn resolve_workspace_dir() -> PathBuf {
     ws
 }
 
+/// Per-trial workdir: `workspace/<run_id>`. Parallel workers must never
+/// share one bind mount: pipeline wipes workdir at trial start
+/// (remove_dir_all), so a shared dir lets a sibling delete a live mount
+/// (ENOENT) and cross-contaminates candidate code across tasks.
+pub fn workdir_for_run(run_id: &str) -> PathBuf {
+    let ws = crate::config::get_repo_root().join("workspace").join(run_id);
+    let _ = std::fs::create_dir_all(&ws);
+    ws
+}
+
 pub struct UiServer;
 
 impl UiServer {
@@ -1756,7 +1766,7 @@ async fn run_extension_batch(
             budget_usd: spec.budget_usd,
             timeout_min: spec.timeout_min,
             api_key: spec.api_key.clone(),
-            workdir: crate::config::get_repo_root().join("workspace"),
+            workdir: workdir_for_run(&run_id),
             eval_only: spec.eval_only,
             run_id: Some(run_id.clone()),
             save_results: spec.save_results,
@@ -2198,8 +2208,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             _ => TaskType::Redis,
         };
 
-        let repo_root = crate::config::get_repo_root();
-        let work_path = repo_root.join("workspace");
+        let work_path = workdir_for_run(&run_id);
 
         let pipe_config = BenchmarkConfig {
             model: req.model.clone(),
