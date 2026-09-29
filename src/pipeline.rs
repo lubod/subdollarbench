@@ -253,10 +253,18 @@ impl BenchmarkPipeline {
                 "[SETUP] Private run network '{}' ready (reference aliases: ref-redis / ref-http / ref-dns)",
                 sandbox.network_name()
             )),
-            Err(e) => logger.log(&format!(
-                "[SETUP] Warning: could not create run network: {}. Reference servers may be unavailable.",
-                e
-            )),
+            Err(e) => {
+                // Fail closed: no private network => agent attach is a
+                // guaranteed ghost run (exit 125 "network not found") that
+                // persists a 0-trial junk parent and poisons the merge.
+                // Surface as infra-error, never as a scored trial.
+                logger.log(&format!(
+                    "[SETUP] FATAL: could not create run network: {}. Aborting trial (infra-error, unscored).",
+                    e
+                ));
+                sandbox.cleanup();
+                return Err(anyhow!("infra-error: run network unavailable: {}", e));
+            }
         }
 
         if let Some(ref cf) = cancel_flag {
