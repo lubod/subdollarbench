@@ -31,7 +31,7 @@ pub const EGRESS_ALLOWLIST: &[&str] = &[
 
 /// Egress sidecar: python:alpine + stdlib allowlist proxy script (no new image
 /// dependency; the `squid` image is absent from the registry mirror).
-pub const EGRESS_PROXY_IMAGE: &str = "docker.io/library/python@sha256:df494c1f9b0e47385077c35d2c7f3edb3267a894c5ae2269ff4ef74aa20d4de";
+pub const EGRESS_PROXY_IMAGE: &str = "docker.io/library/python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9";
 pub const REF_NGINX_IMAGE: &str = "docker.io/library/nginx@sha256:17ad11d84df6c69e327c0894125f712ec1f1de627b5e5ed7e12ca2ed8cd5daf8";
 
 /// Host allowlist check (mirrors extensions/egress_proxy.py).

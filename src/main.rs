@@ -1376,6 +1376,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             trials,
             extra,
             per_effort_columns,
+            enqueue,
+            extend_if_unstable,
+            max_trials,
+            server,
         } => {
             let models: Vec<String> = models
                 .split(',')
@@ -1396,13 +1400,69 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 parse_task(t)?;
             }
             subdollarbench::report::validate_matrix_plan(&efforts, per_effort_columns)?;
+            // Low-effort-first ordering: cheap capability probe before
+            // expensive runs (enqueue mode; print mode keeps model-major order).
+            let mut efforts_sorted = efforts.clone();
+            efforts_sorted.sort_by_key(|e| match e.to_lowercase().as_str() {
+                "minimal" | "none" | "off" => 0,
+                "low" => 1,
+                "medium" => 2,
+                "high" => 3,
+                "xhigh" => 4,
+                "max" => 5,
+                _ => 9,
+            });
+            if enqueue {
+                let server = resolve_server_flag(&server);
+                // Pre-flight: refuse to launch into a dead/paused engine.
+                let bal = remote::get_json(&server, "/api/balance/check").await.ok();
+                if let Some(b) = bal {
+                    if b.get("ok").and_then(|v| v.as_bool()) == Some(false) && b.get("unknown").is_none() {
+                        anyhow::bail!("engine balance gate: credit exhausted; top up to launch");
+                    }
+                }
+                let mut ok = 0usize;
+                let total = models.len() * efforts_sorted.len() * tasks.len();
+                for e in &efforts_sorted {
+                    for m in &models {
+                        for t in &tasks {
+                            let body = remote::run_request(
+                                m,
+                                t,
+                                e,
+                                100,
+                                1.0,
+                                30,
+                                None,
+                                false,
+                                trials,
+                                extend_if_unstable,
+                                max_trials,
+                                false,
+                                None,
+                            );
+                            match remote::post_json(&server, "/api/queue", &body).await {
+                                Ok(resp) => {
+                                    let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                                    println!("enqueued {id}: {m} {t} {e} x{trials}");
+                                    ok += 1;
+                                }
+                                Err(err) => eprintln!("enqueue failed {m} {t} {e}: {err:#}"),
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+                println!("matrix enqueue: {ok}/{total} cells queued (low-effort-first)");
+                return Ok(());
+            }
             println!(
                 "# effort x model matrix: {} models x {} efforts x {} tasks x {} trials ({} runs)",
                 models.len(),
-                efforts.len(),
+                efforts_sorted.len(),
                 tasks.len(),
                 trials,
-                models.len() * efforts.len() * tasks.len()
+                models.len() * efforts_sorted.len() * tasks.len()
             );
             println!(
                 "# analysis after the wave: subdollarbench matrix-report --results-dir ./results"

@@ -317,6 +317,24 @@ pub enum Commands {
         /// this flag a matrix wave requires uniform effort.
         #[arg(long, default_value_t = false)]
         per_effort_columns: bool,
+
+        /// Enqueue cells on the running engine (POST /api/queue) instead of
+        /// printing `run` commands. Low-effort cells go first (cheap
+        /// capability probe before expensive runs).
+        #[arg(long, default_value_t = false)]
+        enqueue: bool,
+
+        /// Trials extension: keep adding trials while unstable (enqueue mode).
+        #[arg(long, default_value_t = false)]
+        extend_if_unstable: bool,
+
+        /// Trial cap for auto-extension (enqueue mode).
+        #[arg(long, default_value_t = 9)]
+        max_trials: u32,
+
+        /// `ui` engine base URL (enqueue mode only).
+        #[arg(long)]
+        server: Option<String>,
     },
 
     /// [operate] Run 3 more trials for an unstable parent and re-merge
@@ -1248,6 +1266,7 @@ mod tests {
                 trials,
                 extra,
                 per_effort_columns,
+                ..
             } => {
                 assert!(models.contains("muse-spark"));
                 assert_eq!(efforts, "minimal,max");
