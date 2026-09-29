@@ -107,20 +107,115 @@ fn resolve_thinking_level(effort: Option<&str>, effective_model: &str) -> (Strin
 /// wave instead of scoring a 0% model failure. Matches HTTP billing/auth/
 /// throttle statuses in session JSON or stderr text (402/401/429 + phrases).
 /// Returns a human reason when tripped, else None.
+/// Structured provider-error match. Bare `401`/`402`/`429` digit tokens
+/// appear routinely in free-form agent output (toolCallIds
+/// `...c3d429b`, line numbers `401:`, token counts `"output":429`), so
+/// they NEVER match here. A trip requires one of:
+/// - a JSON error envelope with a numeric `code`/`status` field 401/402/429,
+/// - an HTTP status line (`HTTP/1.1 402 ...`),
+/// - a provider phrase (payment required / insufficient credit / rate limit
+///   / unauthorized + key/token/auth).
+/// Callers: session-jsonl lines are parsed as JSON first (structured arm);
+/// raw stderr lines use the text arm (status-line + phrases only).
 pub fn classify_billing_error(text: &str) -> Option<String> {
     let low = text.to_lowercase();
-    // Bare status codes (word-boundary-ish: avoid matching e.g. 14029).
-    let has_code = |code: &str| {
-        low.split(|c: char| !c.is_ascii_digit())
-            .any(|tok| tok == code)
-    };
-    if has_code("402") || low.contains("payment required") || low.contains("insufficient credit") || low.contains("credit exhausted") || low.contains("out of credit") {
+    // Structured arm: JSON envelope with numeric error code.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+        let code = v
+            .pointer("/error/code")
+            .or_else(|| v.pointer("/error/status"))
+            .or_else(|| v.get("statusCode"))
+            .or_else(|| v.get("code"))
+            .and_then(|c| c.as_u64().or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok())));
+        if let Some(c) = code {
+            if c == 402 {
+                return Some("provider billing exhausted (HTTP 402)".to_string());
+            }
+            if c == 401 {
+                return Some("provider auth rejected (HTTP 401)".to_string());
+            }
+            if c == 429 {
+                return Some("provider rate-limited (HTTP 429)".to_string());
+            }
+        }
+        // Bare error slugs: {"error":"rate_limit_exceeded"} style.
+        if v.get("error").and_then(|e| e.as_str()).map(|e| {
+            let l = e.to_lowercase();
+            l.contains("rate_limit")
+                || l.contains("rate limit")
+                || l.contains("payment_required")
+                || l.contains("insufficient_credit")
+        }).unwrap_or(false) {
+            let l = v.get("error").and_then(|e| e.as_str()).unwrap().to_lowercase();
+            if l.contains("rate_limit") || l.contains("rate limit") {
+                return Some("provider rate-limited (HTTP 429)".to_string());
+            }
+            return Some("provider billing exhausted (HTTP 402)".to_string());
+        }
+        // Phrase match inside error message fields only (not free text).
+        let msg = v
+            .pointer("/error/message")
+            .or_else(|| v.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !msg.is_empty() {
+            if msg.contains("payment required")
+                || msg.contains("insufficient credit")
+                || msg.contains("credit exhausted")
+                || msg.contains("out of credit")
+            {
+                return Some("provider billing exhausted (HTTP 402)".to_string());
+            }
+            if msg.contains("rate limit")
+                || msg.contains("rate_limit")
+                || msg.contains("too many requests")
+            {
+                return Some("provider rate-limited (HTTP 429)".to_string());
+            }
+            if msg.contains("unauthorized")
+                && (msg.contains("key") || msg.contains("token") || msg.contains("auth"))
+            {
+                return Some("provider auth rejected (HTTP 401)".to_string());
+            }
+        }
+        return None;
+    }
+    // Text arm (stderr): HTTP status line or provider phrase. Never digits.
+    let status_line = low.contains("http/1.1 402")
+        || low.contains("http/1.0 402")
+        || low.contains("http/2 402")
+        || low.contains("status 402")
+        || low.contains("status: 402");
+    if status_line
+        || low.contains("payment required")
+        || low.contains("insufficient credit")
+        || low.contains("credit exhausted")
+        || low.contains("out of credit")
+    {
         return Some("provider billing exhausted (HTTP 402)".to_string());
     }
-    if has_code("401") || (low.contains("unauthorized") && (low.contains("key") || low.contains("token") || low.contains("auth"))) {
+    let auth_line = low.contains("http/1.1 401")
+        || low.contains("http/1.0 401")
+        || low.contains("http/2 401")
+        || low.contains("status 401")
+        || low.contains("status: 401");
+    if auth_line
+        || (low.contains("unauthorized")
+            && (low.contains("key") || low.contains("token") || low.contains("auth")))
+    {
         return Some("provider auth rejected (HTTP 401)".to_string());
     }
-    if has_code("429") || (low.contains("rate limit") || low.contains("rate_limit") || low.contains("too many requests")) {
+    let limit_line = low.contains("http/1.1 429")
+        || low.contains("http/1.0 429")
+        || low.contains("http/2 429")
+        || low.contains("status 429")
+        || low.contains("status: 429");
+    if limit_line
+        || low.contains("rate limit")
+        || low.contains("rate_limit")
+        || low.contains("too many requests")
+    {
         return Some("provider rate-limited (HTTP 429)".to_string());
     }
     None
@@ -177,6 +272,8 @@ pub struct OmpExecutionError {
 #[derive(Debug, Clone)]
 pub struct OmpBillingError {
     pub reason: String,
+    #[allow(dead_code)]
+    pub partial_stats: OmpSessionStats,
 }
 
 impl std::fmt::Display for OmpBillingError {
@@ -770,8 +867,19 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         let stopped_by_limit = limit_reached.load(Ordering::SeqCst);
         if billing_tripped.load(Ordering::SeqCst) {
+            // Stats survive the trip: extract before returning so the
+            // persisted trial keeps real turns/tokens (backfillable cost)
+            // instead of zeros. Pass rates are verifier output, unaffected.
+            let stats = active_file
+                .lock()
+                .ok()
+                .and_then(|l| l.clone())
+                .map(|p| Self::extract_latest_session_stats(Some(&p)).unwrap_or_default())
+                .unwrap_or_default();
+            let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
             return Err(anyhow::Error::new(OmpBillingError {
                 reason: "provider billing/auth/throttle tripped mid-session (see [BILLING] log)".to_string(),
+                partial_stats: stats,
             }));
         }
         let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
@@ -2381,12 +2489,17 @@ mod billing_tripwire_tests {
 
     #[test]
     fn tripwire_fires_on_billing_signals() {
-        assert!(classify_billing_error("HTTP 402 Payment Required").is_some());
+        // HTTP status lines (stderr shape).
+        assert!(classify_billing_error("HTTP/1.1 402 Payment Required").is_some());
+        assert!(classify_billing_error("HTTP/1.1 401 Unauthorized: invalid api key").is_some());
+        assert!(classify_billing_error("HTTP/1.1 429 Too Many Requests").is_some());
+        // Provider phrases (either arm).
         assert!(classify_billing_error("insufficient credit balance").is_some());
         assert!(classify_billing_error("credit exhausted, top up").is_some());
-        assert!(classify_billing_error("Provider returned 429").is_some());
         assert!(classify_billing_error("too many requests, slow down").is_some());
-        assert!(classify_billing_error("401 Unauthorized: invalid api key").is_some());
+        // JSON error envelopes (session-jsonl shape).
+        assert!(classify_billing_error("{\"error\":{\"code\":402,\"message\":\"payment required\"}}").is_some());
+        assert!(classify_billing_error("{\"error\":{\"code\":401,\"message\":\"unauthorized\"}}").is_some());
         assert!(classify_billing_error("{\"error\":\"rate_limit_exceeded\"}").is_some());
     }
 
@@ -2395,8 +2508,14 @@ mod billing_tripwire_tests {
         assert!(classify_billing_error("test failed: assertion left == right").is_none());
         assert!(classify_billing_error("Read timed out").is_none());
         assert!(classify_billing_error("exit code 1").is_none());
-        // Bare 14029 must not match 402.
+        // Bare digit tokens in free text never match: toolCallIds, line
+        // numbers, token counts (the wave-v2 false-positive class).
         assert!(classify_billing_error("port 14029 in use").is_none());
+        assert!(classify_billing_error("call_01a06b63cd207e008dc36f8fb57da56b|fc_tmp_wvrvxb058tr").is_none());
+        assert!(classify_billing_error("401: if err != nil {").is_none());
+        assert!(classify_billing_error("{\"usage\":{\"input\":5280,\"output\":429}}").is_none());
         assert!(classify_billing_error("[SUBRUN ERROR] Subrun 1/3 failed: OMP agent exited").is_none());
+        // Bare "Provider returned 429" without status-line/phrase shape.
+        assert!(classify_billing_error("Provider returned 429").is_none());
     }
 }
