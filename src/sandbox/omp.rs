@@ -376,7 +376,13 @@ impl OmpRunner {
         // traffic and ref probing must not route through the proxy).
         // Both upper- and lower-case variants: pip/npm/go honor either.
         let no_proxy = "ref-redis,ref-http,ref-dns,egress-proxy,localhost,127.0.0.1";
-        if let Some(proxy_url) = network
+        // Opt-in via SDB_EGRESS_FILTER=1 (default off): the sidecar blocks
+        // OMP's own first call until its host is allowlisted. Roadmap
+        // hardening, not wave-blocking.
+        let egress_on = std::env::var("SDB_EGRESS_FILTER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if let Some(proxy_url) = (if egress_on { network } else { None })
             .and_then(|net| {
                 // Derive instance id from network name subdollar-net-<id>.
                 net.strip_prefix("subdollar-net-").map(|id| {
