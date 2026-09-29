@@ -187,35 +187,91 @@ impl SandboxManager {
         self.needs_cleanup.store(true, Ordering::SeqCst);
         let _guard = network_mutex().lock().unwrap();
         let net = self.network_name();
-        let out = Command::new("docker")
-            .args(["network", "create", &net])
-            .output()?;
-        if out.status.success() {
-            info!("Created run network {}", net);
-            Self::verify_network_exists(&net)?;
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        if stderr.contains("already exists") {
-            return Ok(());
-        }
-        if stderr.contains("could not find an available, non-overlapping IPv4 address pool")
-            || stderr.contains("Pool overlaps with other one on this address space")
-        {
-            warn!("Network pool exhausted. Attempting to prune stale subdollar networks and retrying...");
-            Self::prune_stale_networks();
-            let retry_out = Command::new("docker")
-                .args(["network", "create", &net])
+        for attempt in 0..Self::NETWORK_CREATE_MAX_ATTEMPTS {
+            let subnet = Self::run_subnet_attempt(&net, attempt);
+            let out = Command::new("docker")
+                .args(["network", "create", "--subnet", &subnet, &net])
                 .output()?;
-            if retry_out.status.success()
-                || String::from_utf8_lossy(&retry_out.stderr).contains("already exists")
-            {
-                info!("Created run network {} after pruning stale networks", net);
+            if out.status.success() {
+                info!("Created run network {} ({})", net, subnet);
                 Self::verify_network_exists(&net)?;
                 return Ok(());
             }
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            if stderr.contains("already exists") {
+                return Ok(());
+            }
+            if Self::is_pool_exhausted(&stderr) {
+                warn!("Network pool exhausted creating {} ({}). Reaping own stale networks and retrying...", net, subnet);
+                // Reap our own finished networks (same run id or stale
+                // gated zombies); never foreign networks. Then retry with a
+                // fresh deterministic subnet and re-verify (fail closed).
+                self.cleanup_finished_networks();
+                Self::prune_stale_networks();
+                continue;
+            }
+            if stderr.contains("is already using subnet")
+                || stderr.contains("overlaps with")
+                || stderr.contains("Pool overlaps")
+            {
+                // Deterministic third-octet collision with a foreign
+                // network: bump the wheel and retry once per attempt slot.
+                continue;
+            }
+            return Err(anyhow!("docker network create failed: {}", stderr));
         }
-        Err(anyhow!("docker network create failed: {}", stderr))
+        Err(anyhow!(
+            "docker network create failed after {} attempts (pool pressure from stale own-networks?); aborting instead of ghost run",
+            Self::NETWORK_CREATE_MAX_ATTEMPTS
+        ))
+    }
+
+    /// Deterministic /24 inside our own 10.201/16 wheel, derived from the
+    /// network name hash. Same (net, attempt) => same subnet (attempt 0 is
+    /// stable, so idempotent retry hits "already exists"); the per-attempt
+    /// salt guarantees a subnet-collision retry actually moves to a fresh
+    /// /24 instead of re-hitting the identical lease. Distinct nets spread
+    /// across 200 third octets so parallel workers never fight over one
+    /// pool lease.
+    fn run_subnet(net: &str) -> String {
+        Self::run_subnet_attempt(net, 0)
+    }
+
+    fn run_subnet_attempt(net: &str, attempt: u32) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        net.hash(&mut h);
+        attempt.hash(&mut h);
+        let oct = ((h.finish() % (Self::RUN_SUBNET_WHEEL as u64)) + 1) as u8;
+        format!("{}.{}.0/{}", Self::RUN_SUBNET_BASE, oct, Self::RUN_SUBNET_BITS)
+    }
+
+    /// True for every known daemon wording of "no address space left",
+    /// across stock dockerd and distro/LXD builds (LXD's fork rewords the
+    /// stock "could not find an available, non-overlapping IPv4 address
+    /// pool" string). Case-insensitive; unknown stderr fails open to the
+    /// loud error path (never silently treated as pool pressure).
+    fn is_pool_exhausted(stderr: &str) -> bool {
+        let e = stderr.to_lowercase();
+        e.contains("non-overlapping ipv4 address pool")
+            || e.contains("available ipv4 address")
+            || e.contains("all predefined address pools")
+            || e.contains("fully subnetted")
+            || e.contains("no available network")
+            || e.contains("no free network")
+            || e.contains("address pool is exhausted")
+            || e.contains("could not allocate subnet")
+    }
+
+    /// Reap networks owned by THIS run id that hold no live containers
+    /// (finished trials' nets + batchref net). Sibling live trials keep
+    /// their networks: attached endpoints fail the rm, which we tolerate.
+    fn cleanup_finished_networks(&self) {
+        for suffix in ["", "_batchref"] {
+            let _ = Command::new("docker")
+                .args(["network", "rm", &format!("subdollar-net-{}{}", self.instance_id, suffix)])
+                .output();
+        }
     }
 
     /// Confirm a just-created network is inspectable (retry ×5, 200ms).
@@ -875,6 +931,18 @@ impl SandboxManager {
     /// must survive a sibling's prune.
     pub const NETWORK_STALE_AGE_SECS: i64 = 300;
 
+    /// Subnets for this run's own networks. `docker network create` without
+    /// `--subnet` draws from the daemon's default pools; stale gated
+    /// subdollar zombie networks hold leases there, so pool exhaustion is
+    /// only fixable by reaping OUR OWN old networks (never foreign ones).
+    pub const RUN_SUBNET_BASE: &str = "10.201";
+    pub const RUN_SUBNET_BITS: u8 = 24;
+    /// Max networks per /24 before the third-octet wheel wraps.
+    pub const RUN_SUBNET_WHEEL: u64 = 200;
+    /// Cap on consecutive failed-create-then-abort cycles before the caller
+    /// fails loudly instead of launching a ghost run without a network.
+    pub const NETWORK_CREATE_MAX_ATTEMPTS: u32 = 3;
+
     /// True when the network has attached containers or is younger than the
     /// staleness threshold (or inspect fails). Cleanup skips such networks.
     /// Takes &str so Drop/cleanup paths share the prune gate logic.
@@ -1010,14 +1078,17 @@ impl SandboxManager {
         // creating-then-attaching (parallel ghost-run race). remove_network
         // refuses attached endpoints anyway; the age check covers the
         // not-yet-attached window.
-        if Self::network_in_use_or_young(&net) {
-            return;
-        }
-        Self::remove_network_retrying(&net);
+        // File cleanup is unconditional: the gated network rm above must
+        // never swallow these (a kept live/young network still leaves
+        // stale coredns/upstream files otherwise).
         let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
         for idx in 1..=8u8 {
             let _ = fs::remove_file(self.upstream_marker_path(idx));
         }
+        if Self::network_in_use_or_young(&net) {
+            return;
+        }
+        Self::remove_network_retrying(&net);
     }
 }
 
@@ -1211,6 +1282,47 @@ mod tests {
         assert!(!SandboxManager::network_is_stale(""));
         assert!(!SandboxManager::network_is_stale("<no value>"));
         assert!(!SandboxManager::network_is_stale("0"));
+    }
+
+    #[test]
+    fn test_pool_exhaustion_wordings() {
+        // Stock dockerd + distro/LXD rewordings all match; unknown fails open.
+        assert!(SandboxManager::is_pool_exhausted(
+            "Error response from daemon: could not find an available, non-overlapping IPv4 address pool among the defaults to assign to the network"
+        ));
+        assert!(SandboxManager::is_pool_exhausted(
+            "Error response from daemon: all predefined address pools have been fully subnetted"
+        ));
+        assert!(SandboxManager::is_pool_exhausted("no available network"));
+        // Subnet collision is a different retry path (wheel bump), not exhaustion.
+        assert!(!SandboxManager::is_pool_exhausted("Pool overlaps with other one on this address space"));
+        assert!(!SandboxManager::is_pool_exhausted("Error response from daemon: network not found"));
+        assert!(!SandboxManager::is_pool_exhausted(""));
+    }
+
+    #[test]
+    fn test_run_subnet_deterministic_and_spread() {
+        // Same net => same subnet (idempotent retry collides into "already exists").
+        assert_eq!(
+            SandboxManager::run_subnet("subdollar-net-abc"),
+            SandboxManager::run_subnet("subdollar-net-abc")
+        );
+        // Distinct nets spread (no mass collision onto one /24).
+        let mut set = std::collections::HashSet::new();
+        for i in 0..50 {
+            set.insert(SandboxManager::run_subnet(&format!("subdollar-net-run{i}")));
+        }
+        assert!(set.len() > 25, "subnets collapse: {}", set.len());
+        // Attempt salt moves the subnet (collision retry is real).
+        assert_ne!(
+            SandboxManager::run_subnet_attempt("subdollar-net-abc", 0),
+            SandboxManager::run_subnet_attempt("subdollar-net-abc", 1)
+        );
+        // All inside our own wheel.
+        for sn in &set {
+            assert!(sn.starts_with("10.201."), "foreign subnet: {sn}");
+            assert!(sn.ends_with("/24"), "bad mask: {sn}");
+        }
     }
 
     #[test]
