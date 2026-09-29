@@ -3214,6 +3214,10 @@ mod tests {
     #[tokio::test]
     async fn test_queue_enqueue_while_busy_stays_pending() {
         let state = create_test_state();
+        // Busy = all worker slots claimed (legacy flag alone no longer blocks).
+        for w in 0..worker_count() as u8 {
+            state.running_slots.lock().unwrap().insert(w);
+        }
         state.is_running.store(true, Ordering::SeqCst);
         let res = enqueue_run(State(state.clone()), Json(queue_test_req())).await;
         assert!(res.is_ok());
@@ -3320,6 +3324,9 @@ mod tests {
     #[tokio::test]
     async fn test_queue_remove_and_clear() {
         let state = create_test_state();
+        for w in 0..worker_count() as u8 {
+            state.running_slots.lock().unwrap().insert(w);
+        }
         state.is_running.store(true, Ordering::SeqCst);
         let a = enqueue_run(State(state.clone()), Json(queue_test_req()))
             .await
@@ -3694,6 +3701,9 @@ mod tests {
         assert_eq!(res.status(), 404);
 
         // 15. POST /api/run conflict test
+        for w in 0..worker_count() as u8 {
+            state.running_slots.lock().unwrap().insert(w);
+        }
         state.is_running.store(true, Ordering::SeqCst);
         let run_req = RunRequest {
             model: "test_model".to_string(),
