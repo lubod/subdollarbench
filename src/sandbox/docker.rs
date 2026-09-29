@@ -17,6 +17,7 @@ pub const REF_REDIS_IMAGE: &str = "docker.io/library/redis@sha256:becdda6c7f4b3f
 /// (documented residual); the API key in-container is protected by channel
 /// blocking, not by secrecy.
 pub const EGRESS_ALLOWLIST: &[&str] = &[
+    "openrouter.ai",
     "api.openrouter.ai",
     "crates.io",
     "static.crates.io",
@@ -1105,7 +1106,7 @@ mod tests {
     #[test]
     fn test_egress_proxy_allowlist_blocks_exfil() {
         use super::egress_allowed;
-        for h in ["api.openrouter.ai", "x.proxy.golang.org", "github.com", "a.b.github.com"] {
+        for h in ["openrouter.ai", "api.openrouter.ai", "x.proxy.golang.org", "github.com", "a.b.github.com"] {
             assert!(egress_allowed(h), "{}", h);
         }
         for h in ["evil.com", "1.2.3.4", "openrouter.ai.evil.com", "notgithub.com", ""] {

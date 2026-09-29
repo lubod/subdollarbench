@@ -12,7 +12,7 @@ ALLOW = set(
     os.environ
     .get(
         "ALLOWLIST",
-        "api.openrouter.ai,crates.io,static.crates.io,proxy.golang.org,"
+        "openrouter.ai,api.openrouter.ai,crates.io,static.crates.io,proxy.golang.org,"
         "registry.npmjs.org,pypi.org,files.pythonhosted.org,github.com,"
         "objects.githubusercontent.com,codeload.github.com",
     )
