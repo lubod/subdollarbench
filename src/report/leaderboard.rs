@@ -1126,13 +1126,32 @@ impl LeaderboardManager {
     }
 
     pub fn print_table(results: &[BenchmarkRunResult]) {
-        Self::print_table_with_title("Benchmark Leaderboard", results);
+        Self::print_table_with_title("Benchmark Leaderboard", results, None);
     }
 
-    pub fn print_table_with_title(title: &str, results: &[BenchmarkRunResult]) {
+    /// `withdrawn` carries a retirement reason when the rows shown belong to a
+    /// task that has been pulled from scoring. The rows are still printed - the
+    /// archive keeps them - but they lose their ordinals, because a table that
+    /// medals a task every model passes is asserting a ranking that does not
+    /// exist.
+    pub fn print_table_with_title(
+        title: &str,
+        results: &[BenchmarkRunResult],
+        withdrawn: Option<&str>,
+    ) {
         if results.is_empty() {
             println!("\n=== {} ===\nNo results to display.\n", title);
             return;
+        }
+
+        if let Some(reason) = withdrawn {
+            println!("\n  ⛔ {} — WITHDRAWN FROM SCORING", title);
+            for line in reason.split(". ").filter(|l| !l.trim().is_empty()) {
+                println!("     {}", line.trim_end_matches('.'));
+                println!();
+            }
+            println!("     No rank is shown: this task does not separate models.");
+            println!("     Rows below are the archived record, retained for provenance.");
         }
 
         println!("\n=== {} ===", title);
@@ -1160,11 +1179,14 @@ impl LeaderboardManager {
             ]);
 
         for (idx, r) in results.iter().enumerate() {
-            let rank_str = match idx {
-                0 => "🥇 1".to_string(),
-                1 => "🥈 2".to_string(),
-                2 => "🥉 3".to_string(),
-                _ => format!("{}", idx + 1),
+            let rank_str = match withdrawn {
+                Some(_) => "--".to_string(),
+                None => match idx {
+                    0 => "🥇 1".to_string(),
+                    1 => "🥈 2".to_string(),
+                    2 => "🥉 3".to_string(),
+                    _ => format!("{}", idx + 1),
+                },
             };
 
             // Throughput is language-relative: the reference is one
@@ -1274,7 +1296,7 @@ impl LeaderboardManager {
         // have to know to look at.
         let regimes: std::collections::BTreeSet<String> =
             results.iter().map(BenchmarkRunResult::rules_of).collect();
-        if regimes.len() > 1 {
+        if regimes.len() > 1 && withdrawn.is_none() {
             let list = regimes.iter().cloned().collect::<Vec<_>>().join(", ");
             println!(
                 "\n  ⚠️  This table ranks {} scoring regimes together ({list}).",
@@ -1364,7 +1386,9 @@ impl LeaderboardManager {
                     "dns" => "📡 Task: DNS Server Leaderboard",
                     _ => &format!("Task: {} Leaderboard", task),
                 };
-                Self::print_table_with_title(title, &task_results);
+                let withdrawn = crate::config::TaskType::from_name(task)
+                    .and_then(|t| t.retired().map(String::from));
+                Self::print_table_with_title(title, &task_results, withdrawn.as_deref());
             }
 
             // Quarantined tasks rank within-task only, never on the global board.
@@ -1389,7 +1413,11 @@ impl LeaderboardManager {
                     skipped.join(", ")
                 );
             }
-            Self::print_table_with_title("🏆 Consolidated Global Leaderboard (All Tasks)", &global);
+            Self::print_table_with_title(
+                "🏆 Consolidated Global Leaderboard (All Tasks)",
+                &global,
+                None,
+            );
         } else {
             let task_results: Vec<BenchmarkRunResult> = results
                 .iter()
@@ -1406,7 +1434,9 @@ impl LeaderboardManager {
                     "dns" => "📡 Task: DNS Server Leaderboard",
                     _ => &format!("Task: {} Leaderboard", trimmed),
                 };
-                Self::print_table_with_title(title, &task_results);
+                let withdrawn = crate::config::TaskType::from_name(trimmed)
+                    .and_then(|t| t.retired().map(|r| r.to_string()));
+                Self::print_table_with_title(title, &task_results, withdrawn.as_deref());
             }
         }
     }

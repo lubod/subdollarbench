@@ -944,14 +944,14 @@ impl TaskType {
         self.retired().is_some()
     }
 
-    /// Single entry point for turning a task name into a `TaskType`.
+    /// Name-to-task mapping with no retirement gate.
     ///
-    /// Both the CLI and the queue engine resolve task names, and they used to
-    /// carry separate `match` blocks — so any gate applied to one was bypassed
-    /// by the other, and the engine is the path a wave actually takes. The
-    /// retirement check lives here so neither can run a withdrawn task.
-    pub fn parse(s: &str) -> anyhow::Result<Self> {
-        let task = match s.to_lowercase().as_str() {
+    /// `parse` deliberately rejects withdrawn tasks so nothing can run one.
+    /// Display needs the opposite: a retired task still has archived rows that
+    /// must render as withdrawn rather than disappear, so it needs the variant
+    /// without the check. Unknown names are `None` here.
+    pub fn from_name(s: &str) -> Option<Self> {
+        Some(match s.to_lowercase().as_str() {
             "redis" => Self::Redis,
             "http" => Self::Http,
             "dns" => Self::Dns,
@@ -960,8 +960,19 @@ impl TaskType {
             "proxy" => Self::Proxy,
             "pubsub" => Self::Pubsub,
             "binproto" => Self::Binproto,
-            other => anyhow::bail!("unknown task '{other}'"),
-        };
+            _ => return None,
+        })
+    }
+
+    /// Single entry point for turning a task name into a `TaskType`.
+    ///
+    /// Both the CLI and the queue engine resolve task names, and they used to
+    /// carry separate `match` blocks — so any gate applied to one was bypassed
+    /// by the other, and the engine is the path a wave actually takes. The
+    /// retirement check lives here so neither can run a withdrawn task.
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let task = Self::from_name(s)
+            .ok_or_else(|| anyhow::anyhow!("unknown task '{}'", s.to_lowercase()))?;
         if let Some(why) = task.retired() {
             anyhow::bail!("task '{task}' is retired. {why}");
         }
