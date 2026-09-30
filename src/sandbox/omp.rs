@@ -480,17 +480,33 @@ impl OmpRunner {
             cmd.arg("--network=bridge");
         }
 
-        // Egress filtering: per-run allowlist proxy sidecar. The API key IS
-        // in-container (OPENROUTER_API_KEY); the allowlist blocks exfil
-        // *channels* to non-allowlisted hosts. Best-effort: sidecar failure
-        // only logs (agent runs unfiltered), never fails the run.
+        // Egress: per-run allowlist proxy sidecar. OFF by default
+        // (SDB_EGRESS_FILTER=1 to enable), and it is NOT an enforcement
+        // boundary.
+        //
+        // What it is: an HTTP(S)_PROXY env var plus a stdlib proxy that
+        // filters by hostname. That only binds code which chooses to honour
+        // those variables. The run network is created with `docker network
+        // create --subnet ...` and no `--internal`, and there is no iptables or
+        // DOCKER-USER rule anywhere in the tree, so the network NATs to the
+        // internet and a raw socket to any address bypasses this entirely.
+        //
+        // Do not read a run as integrity-checked because this sidecar ran.
+        // Two holes make it decorative even when honoured: the allowlist
+        // includes `codeload.github.com` and `pypi.org`, so the intended
+        // configuration permits fetching a real Redis source; and `ref-redis`
+        // is in NO_PROXY on the candidate's own network, so
+        // `socat TCP-LISTEN:6379,fork TCP:ref-redis:6379` passes every
+        // functional test with no egress at all.
+        //
+        // Real enforcement needs a network-level rule - DOCKER-USER iptables
+        // scoped to the agent container, permitting only the proxy and the
+        // OpenRouter API - not configuration. Issue 6, still open.
+        //
         // NO_PROXY keeps run-network aliases + localhost direct (verifier
         // traffic and ref probing must not route through the proxy).
         // Both upper- and lower-case variants: pip/npm/go honor either.
         let no_proxy = "ref-redis,ref-http,ref-dns,egress-proxy,localhost,127.0.0.1";
-        // Opt-in via SDB_EGRESS_FILTER=1 (default off): the sidecar blocks
-        // OMP's own first call until its host is allowlisted. Roadmap
-        // hardening, not wave-blocking.
         let egress_on = std::env::var("SDB_EGRESS_FILTER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
