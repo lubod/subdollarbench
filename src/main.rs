@@ -397,6 +397,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             if extend_if_unstable {
                 if total_trials < 2 {
                     println!("[EXTEND] single-trial run: nothing to assess; use --trials 2+ for auto-extend.");
+                } else if total_trials <= 3
+                    && subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count() <= 1
+                {
+                    // Dead-cell early stop (wave-v2: 0-1/3 never recovered).
+                    println!(
+                        "[EXTEND] dead cell ({}/{} passing at {}); stopping, no extend.",
+                        subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count(),
+                        subrun_results.len(),
+                        total_trials
+                    );
                 } else {
                     let max_total = max_trials.max(total_trials);
                     while total_trials < max_total {

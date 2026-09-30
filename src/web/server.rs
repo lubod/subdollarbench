@@ -195,8 +195,11 @@ fn default_trials() -> u32 {
     9
 }
 
+/// Auto-extend cap. Wave-v2 evidence: no verdict changed between 7
+/// and 9 trials on 5/5 extended cells (flap stayed flap) — 7 keeps the
+/// evidence, saves ~20% of extend spend.
 fn default_max_trials() -> u32 {
-    9
+    7
 }
 
 fn default_max_turns() -> u32 {
@@ -2299,7 +2302,24 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         None
     };
 
-    if req.extend_if_unstable && total_trials >= 2 {
+    // Dead-cell early stop: 0-1 passing at 3 trials never recovered in
+    // wave-v2 (proxy/muse-spark 0/3 -> 2/9). Save the extend spend by
+    // skipping the extend loop entirely.
+    let dead_cell = total_trials <= 3
+        && subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count() <= 1;
+    if dead_cell {
+        send_status(
+            &tx,
+            &run_log_buf,
+            format!(
+                "[EXTEND] dead cell ({}/{} passing at {}); stopping, no extend.",
+                subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count(),
+                subrun_results.len(),
+                total_trials
+            ),
+        );
+    }
+    if req.extend_if_unstable && total_trials >= 2 && !dead_cell {
         let max_total = req.max_trials.max(total_trials);
         let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
         let task_type_ext = match req.task.as_str() {

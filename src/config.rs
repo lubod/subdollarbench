@@ -77,8 +77,9 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         extend_if_unstable: bool,
 
-        /// Trial cap for auto-extension (total, including the initial batch)
-        #[arg(long, default_value_t = 9)]
+        /// Trial cap for auto-extension (total, including the initial batch).
+        /// Seven: wave-v2 showed no verdict change 7v9 on 5/5 extended cells.
+        #[arg(long, default_value_t = 7)]
         max_trials: u32,
     },
 
@@ -328,8 +329,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         extend_if_unstable: bool,
 
-        /// Trial cap for auto-extension (enqueue mode).
-        #[arg(long, default_value_t = 9)]
+        /// Trial cap for auto-extension (enqueue mode; 7 per wave-v2 evidence).
+        #[arg(long, default_value_t = 7)]
         max_trials: u32,
 
         /// `ui` engine base URL (enqueue mode only).
@@ -541,8 +542,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         extend_if_unstable: bool,
 
-        /// Trial cap for auto-extension
-        #[arg(long, default_value_t = 9)]
+        /// Trial cap for auto-extension (7 per wave-v2 evidence).
+        #[arg(long, default_value_t = 7)]
         max_trials: u32,
 
         /// Do not save results or archive run artifacts to disk
@@ -1469,7 +1470,7 @@ mod tests {
                 trials, max_trials, ..
             } => {
                 assert_eq!(trials, 9);
-                assert_eq!(max_trials, 9);
+                assert_eq!(max_trials, 7);
             }
             _ => panic!("Expected Run command"),
         }
