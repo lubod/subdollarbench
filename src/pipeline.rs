@@ -1137,8 +1137,15 @@ impl BenchmarkPipeline {
             reference_throughput_req_sec: reference_throughput,
             baseline_source: baseline_source.clone(),
             ref_drift: None,
-            ref_image: crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
-                .map(|s| s.to_string()),
+            // Anchored rows only: an unanchored row must stay "legacy" even
+            // after its task gains a reference image; otherwise regime_of
+            // implies comparable ratios where throughput_score is None.
+            ref_image: if reference_throughput.is_some() {
+                crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            },
             tokens: RunTokenUsage {
                 prompt_tokens,
                 cached_tokens,
@@ -1196,8 +1203,14 @@ impl BenchmarkPipeline {
             reference_throughput_req_sec: reference_throughput,
             baseline_source: baseline_source.clone(),
             ref_drift: None,
-            ref_image: crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
-                .map(|s| s.to_string()),
+            // Same anchored-only gate as the manifest above: regime_of must
+            // never show a digest on a row with no anchored denominator.
+            ref_image: if reference_throughput.is_some() {
+                crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            },
             prompt_tokens,
             cached_tokens,
             completion_tokens,
