@@ -25,6 +25,22 @@ pub fn is_hidden(runs_dir: &Path, run_id: &str) -> bool {
     }
 }
 
+/// Pill class for a run's archived status.
+///
+/// Only a real model verdict may render red. `infra_error` is a harness fault
+/// and `agent_*` means the agent died or was killed; neither is a statement
+/// about the model's code, so both get the neutral pill. Rendering them as
+/// `fail` published an infrastructure fault on the portal as though the model
+/// had failed - the same confusion the `infra_error` status exists to prevent,
+/// surviving in the display layer.
+pub fn status_pill_class(status: &str) -> &'static str {
+    match status {
+        "completed" => "pass",
+        "failed_tests" | "disqualified_cheat" => "fail",
+        _ => "info",
+    }
+}
+
 pub fn set_hidden(runs_dir: &Path, run_id: &str, hidden: bool) -> anyhow::Result<bool> {
     let clean = clean_id(run_id).ok_or_else(|| anyhow::anyhow!("invalid run id"))?;
     let dir = runs_dir.join(&clean);
@@ -2086,7 +2102,7 @@ impl PortalExporter {
             model = Self::esc(&m.model),
             task = Self::esc(&m.task),
             status = Self::esc(&m.status),
-            scls = if m.status == "completed" { "pass" } else { "fail" },
+            scls = status_pill_class(&m.status),
             pcls = if passed_all { "pass" } else { "fail" },
             pass = m.pass_rate,
             passed = m.passed_stages,
@@ -2210,6 +2226,26 @@ impl PortalExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a real model verdict may render red. An `infra_error` run is a
+    /// harness fault; publishing it as a failure is the exact confusion the
+    /// status exists to prevent. Same for a dead or killed agent.
+    #[test]
+    fn test_status_pill_distinguishes_verdicts_from_harness_faults() {
+        assert_eq!(status_pill_class("completed"), "pass");
+        assert_eq!(status_pill_class("failed_tests"), "fail");
+        assert_eq!(status_pill_class("disqualified_cheat"), "fail");
+
+        assert_eq!(
+            status_pill_class("infra_error"),
+            "info",
+            "a harness fault must not be published as a model failure"
+        );
+        assert_eq!(status_pill_class("agent_failed"), "info");
+        assert_eq!(status_pill_class("agent_killed"), "info");
+        // Unknown statuses are neutral, never red by default.
+        assert_eq!(status_pill_class("something_new"), "info");
+    }
 
     #[test]
     fn test_portal_redaction_strips_secrets() {
