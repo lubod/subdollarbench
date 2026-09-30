@@ -2140,6 +2140,19 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
                     );
                     batch_log(&msg);
                     send_status(&tx, &run_log_buf, msg);
+                    // Mirror the normal exit (DONE block below): no parent
+                    // row is produced, so the drain gate WILL fail on count
+                    // until the cell is re-run. That is the loudness: never
+                    // "fix" the gate instead of the ref.
+                    if let Ok(mut cur_lock) = state.current_run.write() {
+                        *cur_lock = None;
+                    }
+                    state.cancel_flags.lock().unwrap().remove(&parent_run_id);
+                    release_slot(&state, worker);
+                    if let Some(qid) = queue_id.clone() {
+                        mark_queue_done(&state, &qid);
+                    }
+                    pump_queue(&state);
                     return;
                 }
                 batch_log(&format!(
