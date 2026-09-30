@@ -688,9 +688,9 @@ const PORTAL_JS: &str = r#"
     return runs.map((r, idx) => {
       const curRank = idx + 1;
       let rankBadge = `<span style="font-weight: 700; color: var(--mut);">#${curRank}</span>`;
-      if (curRank === 1) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: var(--gold);">🥇 #1</span>${deltaBadge}`;
-      else if (curRank === 2) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #c0c0c0;">🥈 #2</span>${deltaBadge}`;
-      else if (curRank === 3) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #cd7f32;">🥉 #3</span>${deltaBadge}`;
+      if (curRank === 1) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: var(--gold);">🥇 #1</span>`;
+      else if (curRank === 2) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #c0c0c0;">🥈 #2</span>`;
+      else if (curRank === 3) rankBadge = `<span style="font-weight: 800; font-size: 1rem; color: #cd7f32;">🥉 #3</span>`;
 
       const taskBadge = showTaskCol
         ? `<span class="badge" style="background: rgba(88, 166, 255, 0.15); color: var(--acc); font-weight: 600;">${(r.task || 'http').toUpperCase()}</span>`
