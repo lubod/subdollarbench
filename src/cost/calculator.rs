@@ -188,15 +188,14 @@ impl ModelPricing {
 
     pub fn for_model(model_name: &str) -> Self {
         let m = model_name.to_lowercase();
-        if m.contains("muse-spark") {
-            // Free tier: no per-token charge, so cache reads are free too.
-            // This is the offline fallback only - `for_model_async` queries the
-            // live OpenRouter catalog first and this table is consulted when
-            // that fails, so a stale entry cannot mask a real price in normal
-            // operation. Test fixtures use this model so a test that ever does
-            // reach the API cannot bill anything.
-            ModelPricing::from_rates(0.0, 0.0)
-        } else if m.contains("gemini-3.8-flash") {
+        // NOTE: no muse-spark entry on purpose. It is a real (if cheap) paid
+        // model, and one recorded run is 12073 prompt / 109689 cached / 5467
+        // completion for $0.00504 - not enough to separate the prompt,
+        // completion and cache-read rates. `for_model_async` resolves this
+        // from the live OpenRouter catalog first; this table is only the
+        // offline fallback, and a wrong entry here would silently mis-price
+        // a real run whenever that query fails. Add the real rates once known.
+        if m.contains("gemini-3.8-flash") {
             ModelPricing {
                 prompt_per_million: 0.75,
                 completion_per_million: 3.75,
@@ -349,20 +348,27 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// The free-tier model used by every test fixture must actually price at
-    /// zero. Without this, a fixture that reaches the API could still bill,
-    /// and `is_test_artifact` would be matching a name whose runs are not
-    /// actually free.
+    /// The offline fallback must never price a real model at zero. muse-spark
+    /// is a cheap paid model with no table entry, so a regression that let an
+    /// unpriced model fall through to zero would silently record real runs as
+    /// free and flatter every score that divides by cost.
     #[test]
-    fn test_free_model_prices_at_zero() {
+    fn test_unpriced_model_falls_back_to_a_positive_rate() {
         let p = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor");
-        assert_eq!(p.prompt_per_million, 0.0);
-        assert_eq!(p.completion_per_million, 0.0);
-        assert_eq!(p.cache_read_per_million, 0.0);
+        assert!(
+            p.prompt_per_million > 0.0,
+            "fallback prompt rate must be positive"
+        );
+        assert!(
+            p.completion_per_million > 0.0,
+            "fallback completion rate must be positive"
+        );
         let b = p.compute_cost_with_cache(1_000_000, 1_000_000, 1_000_000);
-        assert_eq!(b.total_cost_usd, 0.0);
+        assert!(
+            b.total_cost_usd > 0.0,
+            "a priced model must not compute to zero"
+        );
     }
-
     #[test]
     fn test_pricing_for_known_models() {
         let gemini = ModelPricing::for_model("google/gemini-2.5-flash");
