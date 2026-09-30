@@ -25,14 +25,23 @@ pub fn is_hidden(runs_dir: &Path, run_id: &str) -> bool {
     }
 }
 
+/// True when a run's status is a *non-result* rather than a model verdict.
+///
+/// `infra_error` is a harness fault and `agent_*` means the agent died or was
+/// killed. Neither is a statement about the model's code, so neither may be
+/// rendered as a failure - not by the status pill, and not by the pass-rate
+/// pill either, since the stages of a degraded run were never meaningfully
+/// measured.
+pub fn is_non_result(status: &str) -> bool {
+    !matches!(status, "completed" | "failed_tests" | "disqualified_cheat")
+}
+
 /// Pill class for a run's archived status.
 ///
-/// Only a real model verdict may render red. `infra_error` is a harness fault
-/// and `agent_*` means the agent died or was killed; neither is a statement
-/// about the model's code, so both get the neutral pill. Rendering them as
-/// `fail` published an infrastructure fault on the portal as though the model
-/// had failed - the same confusion the `infra_error` status exists to prevent,
-/// surviving in the display layer.
+/// Only a real model verdict may render red. Rendering a harness fault as
+/// `fail` published an infrastructure outage on the portal as though the model
+/// had failed - the exact confusion the `infra_error` status exists to
+/// prevent, surviving in the display layer.
 pub fn status_pill_class(status: &str) -> &'static str {
     match status {
         "completed" => "pass",
@@ -2103,7 +2112,18 @@ impl PortalExporter {
             task = Self::esc(&m.task),
             status = Self::esc(&m.status),
             scls = status_pill_class(&m.status),
-            pcls = if passed_all { "pass" } else { "fail" },
+            // The pass-rate pill was left binary by 09d63ff, so a degraded run
+            // still rendered a red "0.0% (0/6)" next to the neutral status
+            // pill - publishing the same harness fault by the back door. A
+            // non-result's stages were never meaningfully measured, so it gets
+            // the neutral pill here too.
+            pcls = if is_non_result(&m.status) {
+                "info"
+            } else if passed_all {
+                "pass"
+            } else {
+                "fail"
+            },
             pass = m.pass_rate,
             passed = m.passed_stages,
             total = m.total_stages,
@@ -2245,6 +2265,26 @@ mod tests {
         assert_eq!(status_pill_class("agent_killed"), "info");
         // Unknown statuses are neutral, never red by default.
         assert_eq!(status_pill_class("something_new"), "info");
+    }
+
+    /// Both pills on a run row must agree. 09d63ff fixed the status pill and
+    /// left the pass-rate pill binary, so a degraded run still published a red
+    /// "0.0% (0/6)" next to the neutral status pill.
+    #[test]
+    fn test_non_result_runs_are_not_rendered_as_failures() {
+        assert!(!is_non_result("completed"));
+        assert!(!is_non_result("failed_tests"));
+        assert!(!is_non_result("disqualified_cheat"));
+
+        for s in [
+            "infra_error",
+            "agent_failed",
+            "agent_killed",
+            "future_status",
+        ] {
+            assert!(is_non_result(s), "{s} must be treated as a non-result");
+            assert_eq!(status_pill_class(s), "info", "{s} pill must be neutral");
+        }
     }
 
     #[test]
