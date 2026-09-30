@@ -62,12 +62,13 @@ pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03ef
 /// construction (regime_of keys on this string). Record the ID + source hash
 /// in wave-freezes.log at each rebuild (REF_INTRO_PDF_* lines).
 pub const REF_PDF_IMAGE: &str = "pdf-ref@sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
-/// Local tag that actually runs (bootstrap builds it if missing).
-/// Split because a local digest reference is unresolvable without a
-/// registry: the tag runs, the digest const labels (regime_of). A
-/// behavior-changing rebuild MUST update REF_PDF_IMAGE to the new image ID.
+/// Bare image ID that actually runs (verified: `pdf-ref@sha256:<id>`
+/// attempts a registry pull and fails locally; bare `sha256:<id>` runs).
+/// Rebuild the tag, then `docker inspect pdf-ref:local --format {{.Id}}`.
+/// A behavior-changing rebuild MUST update BOTH consts to the new ID
+/// (label keeps name@digest shape for regime_of; run keeps bare ID).
 /// Verified: identical source rebuilds yield the same ID twice.
-pub const REF_PDF_RUN_IMAGE: &str = "pdf-ref:local";
+pub const REF_PDF_RUN_IMAGE: &str = "sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
 /// Benchmark *client* images are pinned too: the client binary is half the
 /// measurement apparatus.
 pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
@@ -614,19 +615,24 @@ impl SandboxManager {
         let out = Command::new("docker").args(&run_args).output()?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            // Fresh-checkout bootstrap: missing local image -> build from
-            // the in-repo source (extensions/pdf_reference.py), retry once.
-            // A build failure fails LOUDLY (no silent unscored fallback).
+            // Fresh-checkout bootstrap: image missing -> build from the
+            // in-repo source, then FAIL LOUDLY (no retry with the pinned
+            // digest: fresh builds get new config timestamps -> new ID, so
+            // the retry could never succeed). The operator updates both
+            // REF_PDF_* consts to the reported ID and rebuilds.
+            // Fails LOUDLY: batch_ref propagates pdf errors (no silent
+            // unscored fallback; see start_on_worker pdf arm).
             if stderr.contains("No such image") || stderr.contains("not found") {
                 Self::build_pdf_reference_image()?;
-                let retry = Command::new("docker").args(&run_args).output()?;
-                if !retry.status.success() {
-                    return Err(anyhow!(
-                        "pdf reference start failed after rebuild: {}",
-                        String::from_utf8_lossy(&retry.stderr)
-                    ));
-                }
-                return Ok(());
+                let id = Command::new("docker")
+                    .args(["inspect", "pdf-ref:local", "--format", "{{.Id}}"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                return Err(anyhow!(
+                    "pdf reference image missing; rebuilt pdf-ref:local as {} — update REF_PDF_IMAGE/REF_PDF_RUN_IMAGE consts to this ID and rebuild the binary",
+                    id
+                ));
             }
             return Err(anyhow!("pdf reference start failed: {}", stderr));
         }

@@ -1708,6 +1708,20 @@ async fn run_extension_batch(
         match crate::bench::batch_ref::BatchRef::start_on_worker(&spec.task, &spec.parent_run_id, batch_log, worker) {
             Ok(b) => b,
             Err(e) => {
+                // Pdf has no live-ref fallback: FATAL (loud) instead of
+                // warn-and-None (which would silently return pdf to unscored).
+                // Other tasks keep the live-ref fallback.
+                if spec.task == TaskType::Pdf {
+                    let msg = format!("[BATCH-REF] FATAL pdf batch ref: {}; failing batch.", e);
+                    send_status(tx, log_buf, msg.clone());
+                    batch_log(&msg);
+                    return ExtBatchOut {
+                        results: vec![],
+                        passing: 0,
+                        drift: None,
+                        billing_tripped: false,
+                    };
+                }
                 send_status(
                     tx,
                     log_buf,
@@ -2117,6 +2131,17 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         match crate::bench::batch_ref::BatchRef::start_on_worker(&task_type_pre, &parent_run_id, &batch_log, worker) {
             Ok(b) => b,
             Err(e) => {
+                // Pdf has no live-ref fallback: FATAL (loud). Other tasks
+                // keep warn-and-None with live per-trial refs.
+                if task_type_pre == TaskType::Pdf {
+                    let msg = format!(
+                        "[BATCH-REF] FATAL pdf batch ref: {}; failing cell (no silent unscored fallback).",
+                        e
+                    );
+                    batch_log(&msg);
+                    send_status(&tx, &run_log_buf, msg);
+                    return;
+                }
                 batch_log(&format!(
                     "[BATCH-REF] setup failed ({}); trials use live refs.",
                     e

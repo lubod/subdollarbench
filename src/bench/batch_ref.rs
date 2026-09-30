@@ -245,6 +245,12 @@ impl BatchRef {
             _ => return Ok(None),
         };
         if let Err(e) = start_res {
+            // Pdf has no per-trial refs: a broken pdf ref must fail the
+            // batch loudly, never warn-and-fall-back to unscored.
+            if *task == TaskType::Pdf {
+                sandbox.cleanup();
+                return Err(anyhow!("pdf batch reference unavailable: {}", e));
+            }
             log(&format!("[BATCH-REF] Warning: batch reference unavailable: {}. Trials fall back to live per-trial refs.", e));
             return Ok(None);
         }
@@ -256,6 +262,11 @@ impl BatchRef {
             _ => false,
         };
         if !ready {
+            // Same loud rule for pdf (no per-trial fallback exists).
+            if *task == TaskType::Pdf {
+                sandbox.cleanup();
+                return Err(anyhow!("pdf batch reference never became ready on port {port}"));
+            }
             log("[BATCH-REF] Warning: batch reference never became ready. Trials fall back to live per-trial refs.");
             sandbox.cleanup();
             return Ok(None);
@@ -279,6 +290,11 @@ impl BatchRef {
                 }))
             }
             Err(e) => {
+                // Same loud rule for pdf.
+                if *task == TaskType::Pdf {
+                    sandbox.cleanup();
+                    return Err(anyhow!("pdf batch calibration failed: {}", e));
+                }
                 log(&format!("[BATCH-REF] Warning: batch calibration failed: {}. Trials fall back to live per-trial refs.", e));
                 sandbox.cleanup();
                 Ok(None)
