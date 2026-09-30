@@ -530,9 +530,15 @@ impl BenchmarkPipeline {
         // Worker offset keeps parallel cells on disjoint ports
         // (worker 0 = legacy ports, byte-identical to single mode).
         let port = crate::web::server::worker_port(config.task.default_port(), config.worker);
-        let has_runnable = sandbox
-            .ensure_runnable_candidate(&config.workdir)
-            .unwrap_or(false);
+        // An Err here is an I/O or Docker fault, not a statement about the
+        // candidate. Collapsing it to `false` made the run log "no runnable
+        // start.sh or Dockerfile found" - a fabricated cause that reads as a
+        // model failure - and then score it 0%.
+        let (has_runnable, candidate_check_error) =
+            match sandbox.ensure_runnable_candidate(&config.workdir) {
+                Ok(v) => (v, None),
+                Err(e) => (false, Some(e.to_string())),
+            };
 
         let mut throughput = None;
         let mut reference_throughput = None;
@@ -550,7 +556,14 @@ impl BenchmarkPipeline {
             }];
             (0.0, 0, config.task.total_stages(), stages)
         } else if !has_runnable {
-            if agent_failed {
+            if let Some(e) = &candidate_check_error {
+                // Report the real fault. This is infrastructure, not a model
+                // that failed to produce code.
+                logger.log(&format!(
+                    "[INFRA] Could not inspect the candidate workspace ({e}). \
+                     This is a harness fault, not a model result."
+                ));
+            } else if agent_failed {
                 logger
                     .log("[SETUP] Candidate did not produce runnable code. Skipping verification.");
             } else {
@@ -558,7 +571,15 @@ impl BenchmarkPipeline {
             }
             (0.0, 0, config.task.total_stages(), Vec::new())
         } else {
-            let _ = sandbox.start_candidate_in_docker(&config.workdir, port);
+            // A candidate that will not start is an infrastructure fault, not
+            // a model that scored zero: the error used to be discarded, and
+            // every verifier then failed on transport.
+            if let Err(e) = sandbox.start_candidate_in_docker(&config.workdir, port) {
+                logger.log(&format!(
+                    "[INFRA] Candidate container failed to start ({e}); \
+                     verifiers would fail on transport, not on the candidate."
+                ));
+            }
 
             // Proxy needs its upstream pool; DNS needs ref-dns. Both live
             // on the private run network, which the candidate only joins here

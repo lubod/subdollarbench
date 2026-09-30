@@ -1762,6 +1762,31 @@ mod tests {
         assert!((p1 - 0.3333).abs() < 0.01);
     }
 
+    /// The pass@k denominator must be the number of trials that produced a
+    /// verdict. When infra failures counted as failures, a 3-trial cell with
+    /// one real pass and two Docker outages reported 33% pass@1 instead of
+    /// 50%, and the model was ranked as if it had failed twice.
+    #[test]
+    fn test_infra_failures_are_excluded_from_the_denominator() {
+        let requested: u32 = 3;
+        let infra: u32 = 1;
+        let scored = requested - infra;
+        let passing = 1usize;
+        let p1 = compute_pass_at_k(scored as usize, passing, 1);
+        assert!(
+            (p1 - 0.5).abs() < 1e-9,
+            "expected 50% over 2 scored trials, got {p1}"
+        );
+        // The old behaviour, for contrast: same data, 3 in the denominator.
+        let wrong = compute_pass_at_k(requested as usize, passing, 1);
+        assert!(wrong < p1, "counting infra failures must understate pass@1");
+
+        // Underflow safety: more infra failures than trials must not wrap.
+        let over = 5u32.saturating_sub(9);
+        assert_eq!(over, 0);
+        assert_eq!(compute_pass_at_k(over as usize, 0, 1), 0.0);
+    }
+
     #[test]
     fn test_language_detection() {
         let temp = std::env::temp_dir().join(format!("test_lang_{}", std::process::id()));

@@ -294,6 +294,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             let mut total_trials = trials.max(1);
+            // Trials that failed for infrastructure reasons, not model reasons.
+            // Excluded from the pass@k denominator: counting them as failures
+            // is how a flaky host turns into a published model score.
+            let mut infra_failed: u32 = 0;
             let mut passing_trials = 0;
             let logger = Arc::new(CliPipelineLogger);
 
@@ -384,10 +388,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         subrun_results.push(output.benchmark_result);
                     }
                     Err(e) => {
+                        // An infrastructure failure is not evidence about the
+                        // model. It used to be logged and dropped while
+                        // `total_trials` stayed the pass@k denominator, so a
+                        // Docker outage or an expired key scored as a model
+                        // that failed. Counted apart and excluded below.
                         eprintln!(
-                            "  [ERROR] Subrun {}/{} execution failed: {}",
+                            "  [ERROR] Subrun {}/{} INFRASTRUCTURE failure (not a model result): {}",
                             trial_idx, total_trials, e
                         );
+                        infra_failed += 1;
                     }
                 }
             }
@@ -480,19 +490,35 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
             }
 
-            if total_trials > 1 {
-                let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
-                let pass_at_k =
-                    compute_pass_at_k(total_trials as usize, passing_trials, total_trials as usize)
-                        * 100.0;
+            // The denominator counts only trials that produced a verdict.
+            let scored_trials = total_trials.saturating_sub(infra_failed);
+            if infra_failed > 0 {
+                eprintln!(
+                    "  [INFRA] {infra_failed} of {total_trials} trial(s) failed for \
+                     infrastructure reasons and are excluded from pass@k; \
+                     {scored_trials} scored."
+                );
+            }
+            if scored_trials > 1 {
+                let pass_at_1 =
+                    compute_pass_at_k(scored_trials as usize, passing_trials, 1) * 100.0;
+                let pass_at_k = compute_pass_at_k(
+                    scored_trials as usize,
+                    passing_trials,
+                    scored_trials as usize,
+                ) * 100.0;
                 println!(
                     "\n{}",
                     "=== Multi-Trial Pass@k Summary ===".bold().magenta()
                 );
-                println!("  Total Trials:   {}", total_trials);
+                println!("  Total Trials:   {total_trials}");
                 println!("  Passing Trials: {}", passing_trials);
+                if infra_failed > 0 {
+                    println!("  Infra Failures: {infra_failed} (excluded)");
+                }
+                println!("  Scored Trials:  {scored_trials}");
                 println!("  Pass@1:         {:.1}%", pass_at_1);
-                println!("  Pass@{}:         {:.1}%", total_trials, pass_at_k);
+                println!("  Pass@{scored_trials}:      {:.1}%", pass_at_k);
                 println!("{}", "=================================".bold().magenta());
             }
 
