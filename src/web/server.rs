@@ -3737,6 +3737,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A refused run must unwind like every other early return in the engine.
+    ///
+    /// 514cb0b's predecessor (c7981ad) marked the queue item cancelled and
+    /// returned without `release_slot`, so each refusal leaked a worker slot.
+    /// On the default 4-slot grid four refused cells wedged the wave -
+    /// `pump_queue` can never reclaim a slot nobody released - and
+    /// `is_running` stayed true, so `/api/status` reported a phantom run
+    /// forever. `test_queue_item` already builds a `task: "dns"` request, which
+    /// is the refused shape.
+    #[tokio::test]
+    async fn test_refused_run_releases_its_slot() {
+        let state = create_test_state();
+        // One more item than slots, so the accumulation case is reachable: with
+        // the leak, iteration 4 holds the last slot and iteration 5's
+        // `claim_slot` returns None. The per-iteration assert catches the leak
+        // a whole iteration earlier, with a clearer message than a panic from
+        // `expect`.
+        for i in 0..(worker_count() + 1) {
+            let id = format!("q_dns_refuse_{i}");
+            let item = test_queue_item(&id);
+            let req = item.run_request().expect("fixture is a Run").clone();
+            state.queue.lock().unwrap().push_back(item);
+
+            // Dispatch exactly the way the queue does.
+            let worker = claim_slot(&state).expect("a slot should be free");
+            spawn_run_body(&state, req, Some(id.clone()), worker);
+
+            // Snapshot before asserting. Locking `running_slots` twice in one
+            // statement deadlocks the moment the predicate is false - the
+            // format arg is only evaluated on failure, so the hang would
+            // appear exactly when the bug regresses and the message is wanted.
+            let held: Vec<u8> = state
+                .running_slots
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect();
+            assert!(
+                held.is_empty(),
+                "refused run {i} leaked worker slot {worker}; still held: {held:?}"
+            );
+        }
+        // Accumulation: every slot released, so the grid is not wedged.
+        let left: Vec<u8> = state
+            .running_slots
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert!(
+            left.is_empty(),
+            "slots still held after {n} refusals: {left:?} - the grid would wedge",
+            n = worker_count() + 1
+        );
+        assert!(
+            !state.is_running.load(Ordering::SeqCst),
+            "is_running must clear once the last slot frees"
+        );
+        let logged = state
+            .log_buffer
+            .read()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("refusing run") && l.contains("retired"));
+        assert!(
+            logged,
+            "the refusal reason must reach the console, not just stderr"
+        );
+    }
+
     #[tokio::test]
     async fn test_queue_remove_and_clear() {
         let state = create_test_state();
