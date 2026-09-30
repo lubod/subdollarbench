@@ -2121,24 +2121,41 @@ mod tests {
         )
     }
 
-    /// Delete only the entries that appeared since `before` was taken.
+    /// True for the names these tests could possibly have produced.
     ///
-    /// The previous cleanup in these tests removed any `runs/` or `results/`
-    /// entry whose name contained `gemini-2.5-flash` or started with `test_`.
-    /// That is a property of the tree, not of the test: it raced every other
-    /// test running in parallel (deleting their archives mid-flight) and it
+    /// The old cleanup deleted any `runs/` or `results/` entry matching this
+    /// predicate, which describes the tree rather than the test: it raced every
+    /// other test running in parallel (deleting their archives mid-flight) and
     /// destroyed real run archives and published results whenever a live run
-    /// happened to match. Diffing against a pre-test snapshot removes exactly
-    /// what this test added and nothing that predates it.
+    /// happened to match. A bare snapshot diff fixes the race but not that:
+    /// a real wave run landing in the tree during a test's window is also
+    /// "new", so the diff must be intersected with the name check. Runs for
+    /// every other model then become untouchable.
+    ///
+    /// Residual, accepted: a genuine `gemini-2.5-flash` run that completes
+    /// inside a test's window and is absent from the snapshot is still
+    /// deletable. These tests pass `no_save: true` and write no results, so
+    /// the sweep is defensive; the alternative is no cleanup at all.
+    fn is_test_artifact(name: &str) -> bool {
+        name.contains("gemini-2.5-flash") || name.starts_with("test_")
+    }
+
+    /// Delete entries that both appeared since `before` was taken *and* look
+    /// like test artifacts. Entries that predate the snapshot are never
+    /// touched.
     fn cleanup_new_shared_data(before: &SharedSnapshot) {
         let (runs_now, results_now) = shared_data_snapshot();
         let runs_dir = RunArchiver::resolve_runs_dir();
         let results_dir = std::path::Path::new("./results");
         for name in runs_now.difference(&before.0) {
-            let _ = fs::remove_dir_all(runs_dir.join(name));
+            if is_test_artifact(name) {
+                let _ = fs::remove_dir_all(runs_dir.join(name));
+            }
         }
         for name in results_now.difference(&before.1) {
-            let _ = fs::remove_file(results_dir.join(name));
+            if is_test_artifact(name) {
+                let _ = fs::remove_file(results_dir.join(name));
+            }
         }
     }
 
