@@ -197,6 +197,20 @@ impl BenchmarkRunResult {
         }
     }
 
+    /// The grading ruleset a result was produced under, as the short form of
+    /// `rules_version` (the stamp is `{RULES_VERSION}+{fingerprint}`).
+    ///
+    /// Distinct from `regime_of`, which reports the reference *image*. A table
+    /// can share one image and still span two scoring regimes - the cost floor
+    /// changed under `2026-09-30.1` - and a rank across those is not a rank.
+    /// `legacy` marks results too old to carry a stamp.
+    pub fn rules_of(r: &BenchmarkRunResult) -> String {
+        match r.rules_version.as_deref() {
+            Some(v) => v.split('+').next().unwrap_or(v).to_string(),
+            None => "legacy".to_string(),
+        }
+    }
+
     /// Merges multiple subruns into a single consolidated BenchmarkRunResult
     /// with averaged metrics, while preserving the individual subrun records.
     pub fn merge_subruns(
@@ -1138,6 +1152,7 @@ impl LeaderboardManager {
                 "Throughput",
                 "Frontier",
                 "Regime",
+                "Rules",
                 "API cost ($)",
                 "Effective cost ($)",
                 "Cache Savings",
@@ -1241,6 +1256,7 @@ impl LeaderboardManager {
                     None => "--".to_string(),
                 }),
                 Cell::new(BenchmarkRunResult::regime_of(r)),
+                Cell::new(BenchmarkRunResult::rules_of(r)),
                 Cell::new(format!("${:.4}", r.total_cost_usd)).fg(Color::Magenta),
                 Cell::new(format!("${:.4}", r.effective_cost())).fg(Color::Magenta),
                 Cell::new(savings_str).fg(Color::Green),
@@ -1251,6 +1267,22 @@ impl LeaderboardManager {
                 })
                 .fg(Color::Cyan),
             ]));
+        }
+
+        // A rank is only meaningful inside one scoring regime. Say so when the
+        // table is not, rather than leaving the reader to notice a column they
+        // have to know to look at.
+        let regimes: std::collections::BTreeSet<String> =
+            results.iter().map(BenchmarkRunResult::rules_of).collect();
+        if regimes.len() > 1 {
+            let list = regimes.iter().cloned().collect::<Vec<_>>().join(", ");
+            println!(
+                "\n  ⚠️  This table ranks {} scoring regimes together ({list}).",
+                regimes.len()
+            );
+            println!(
+                "     Ranks are not comparable across them; only rows sharing a Rules value are."
+            );
         }
 
         println!("\n{}", table);
