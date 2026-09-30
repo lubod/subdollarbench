@@ -97,7 +97,8 @@ pub struct AppState {
     /// Per-worker live run info (worker -> ActiveRunInfo).
     pub worker_runs: Arc<RwLock<std::collections::HashMap<u8, ActiveRunInfo>>>,
     /// Per-worker task handles (worker -> JoinHandle).
-    pub worker_handles: Arc<std::sync::Mutex<std::collections::HashMap<u8, tokio::task::JoinHandle<()>>>>,
+    pub worker_handles:
+        Arc<std::sync::Mutex<std::collections::HashMap<u8, tokio::task::JoinHandle<()>>>>,
     /// Per-run cancel flags (run_id -> flag). Replaces global-flag poisoning.
     pub cancel_flags: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
     pub queue: Arc<std::sync::Mutex<VecDeque<QueuedRun>>>,
@@ -138,7 +139,12 @@ async fn proxy_read(state: &AppState, path: &str, query: &str) -> Option<Respons
     if state.engine_url.is_empty() {
         return None;
     }
-    let url = format!("{}{}{}", state.engine_url.trim_end_matches('/'), path, query);
+    let url = format!(
+        "{}{}{}",
+        state.engine_url.trim_end_matches('/'),
+        path,
+        query
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -652,7 +658,9 @@ fn resolve_workspace_dir() -> PathBuf {
 /// (remove_dir_all), so a shared dir lets a sibling delete a live mount
 /// (ENOENT) and cross-contaminates candidate code across tasks.
 pub fn workdir_for_run(run_id: &str) -> PathBuf {
-    let ws = crate::config::get_repo_root().join("workspace").join(run_id);
+    let ws = crate::config::get_repo_root()
+        .join("workspace")
+        .join(run_id);
     let _ = std::fs::create_dir_all(&ws);
     ws
 }
@@ -714,8 +722,12 @@ impl UiServer {
                     "bench.db open {} failed ({e:#}); falling back to temp-dir DB — queue history NOT durable",
                     db_path.display()
                 );
-                eprintln!("[QUEUE-DB] open {} failed ({e:#}); falling back to temp-dir DB", db_path.display());
-                let fallback = std::env::temp_dir().join(format!("sdb-queue-fallback-{}.db", std::process::id()));
+                eprintln!(
+                    "[QUEUE-DB] open {} failed ({e:#}); falling back to temp-dir DB",
+                    db_path.display()
+                );
+                let fallback = std::env::temp_dir()
+                    .join(format!("sdb-queue-fallback-{}.db", std::process::id()));
                 match Store::open(&fallback) {
                     Ok(store) => {
                         tracing::warn!(
@@ -753,7 +765,10 @@ impl UiServer {
             }
         }
         if !replayed.is_empty() {
-            println!("[QUEUE-DB] replayed {} pending item(s) from bench.db", replayed.len());
+            println!(
+                "[QUEUE-DB] replayed {} pending item(s) from bench.db",
+                replayed.len()
+            );
         }
         // Boot integrity audit (warn-only; `migrate-check` exits 1 for CI).
         {
@@ -1185,7 +1200,9 @@ async fn set_run_portal_visibility(
 async fn rebuild_portal() -> Response {
     // Public portal is models-summary-only (rollup + prune stale per-run pages).
     refresh_portal();
-    let idx = crate::config::get_repo_root().join("portal").join("index.html");
+    let idx = crate::config::get_repo_root()
+        .join("portal")
+        .join("index.html");
     if idx.exists() {
         Json(serde_json::json!({"ok": true, "rollup": true})).into_response()
     } else {
@@ -1269,7 +1286,11 @@ async fn get_active_console(
     request: axum::extract::Request,
 ) -> Response {
     if !state.engine_url.is_empty() {
-        let qs = request.uri().query().map(|x| format!("?{x}")).unwrap_or_default();
+        let qs = request
+            .uri()
+            .query()
+            .map(|x| format!("?{x}"))
+            .unwrap_or_default();
         if let Some(proxied) = proxy_read(&state, "/api/console", &qs).await {
             return proxied;
         }
@@ -1299,14 +1320,18 @@ struct StopQuery {
     run: String,
 }
 
-async fn stop_run(
-    State(state): State<AppState>,
-    Query(q): Query<StopQuery>,
-) -> Response {
+async fn stop_run(State(state): State<AppState>, Query(q): Query<StopQuery>) -> Response {
     if let Some(proxied) = proxy_mutation(
         &state,
         "POST",
-        &format!("/api/run/stop{}", if q.run.is_empty() { String::new() } else { format!("?run={}", q.run) }),
+        &format!(
+            "/api/run/stop{}",
+            if q.run.is_empty() {
+                String::new()
+            } else {
+                format!("?run={}", q.run)
+            }
+        ),
         None,
     )
     .await
@@ -1368,7 +1393,11 @@ async fn stop_run(
             state.worker_runs.write().unwrap().remove(w);
             release_slot(&state, *w);
         }
-        state.cancel_flags.lock().unwrap().retain(|k, _| !hits.iter().any(|(_, r)| r == k));
+        state
+            .cancel_flags
+            .lock()
+            .unwrap()
+            .retain(|k, _| !hits.iter().any(|(_, r)| r == k));
         {
             let mut ql = state.queue.lock().unwrap();
             for item in ql.iter_mut().filter(|i| i.status == QueueStatus::Running) {
@@ -1384,7 +1413,10 @@ async fn stop_run(
         send_status(
             &state.log_sender,
             &state.log_buffer,
-            format!("[USER ACTION] Stopped {} cell(s) matching '{needle}'.", hits.len().max(qhits.len())),
+            format!(
+                "[USER ACTION] Stopped {} cell(s) matching '{needle}'.",
+                hits.len().max(qhits.len())
+            ),
         );
         return (axum::http::StatusCode::OK, format!("stopped {needle}")).into_response();
     }
@@ -1705,7 +1737,12 @@ async fn run_extension_batch(
     worker: u8,
 ) -> ExtBatchOut {
     let ext_batch_ref = if spec.count > 1 {
-        match crate::bench::batch_ref::BatchRef::start_on_worker(&spec.task, &spec.parent_run_id, batch_log, worker) {
+        match crate::bench::batch_ref::BatchRef::start_on_worker(
+            &spec.task,
+            &spec.parent_run_id,
+            batch_log,
+            worker,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 // Pdf has no live-ref fallback: FATAL (loud) instead of
@@ -1738,7 +1775,11 @@ async fn run_extension_batch(
     let mut billing_tripped = false;
     for i in 0..spec.count {
         if cancel.load(Ordering::SeqCst) {
-            send_status(tx, log_buf, "[STOP] Extension cancelled by user.".to_string());
+            send_status(
+                tx,
+                log_buf,
+                "[STOP] Extension cancelled by user.".to_string(),
+            );
             break;
         }
         let trial_idx = spec.start_idx + i;
@@ -1807,7 +1848,8 @@ async fn run_extension_batch(
                 }
                 let msg = format!("{e:#}");
                 if msg.to_lowercase().contains("billing:")
-                    || crate::sandbox::omp::classify_billing_error(&msg).is_some() {
+                    || crate::sandbox::omp::classify_billing_error(&msg).is_some()
+                {
                     logger.log(&format!(
                         "[BILLING] Extension subrun {} hit provider billing error: {}; trial discarded.",
                         trial_idx, msg
@@ -1944,7 +1986,10 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         None => {
             finish_item(
                 &state,
-                &format!("[EXTEND-QUEUE] {queue_id}: parent '{}' gone; skipping.", ext.parent_run_id),
+                &format!(
+                    "[EXTEND-QUEUE] {queue_id}: parent '{}' gone; skipping.",
+                    ext.parent_run_id
+                ),
             );
             release_slot(&state, worker);
             if !pump_queue(&state) {
@@ -1956,7 +2001,10 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
     if data.subruns.len() < 2 {
         finish_item(
             &state,
-            &format!("[EXTEND-QUEUE] {queue_id}: '{}' is not multi-trial; skipping.", ext.parent_run_id),
+            &format!(
+                "[EXTEND-QUEUE] {queue_id}: '{}' is not multi-trial; skipping.",
+                ext.parent_run_id
+            ),
         );
         *state.task_handle.lock().unwrap() = None;
         if !pump_queue(&state) {
@@ -1969,7 +2017,10 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
     if stab == Stability::Stable {
         finish_item(
             &state,
-            &format!("[EXTEND-QUEUE] {queue_id}: '{}' already stable ({reason}); skipping.", ext.parent_run_id),
+            &format!(
+                "[EXTEND-QUEUE] {queue_id}: '{}' already stable ({reason}); skipping.",
+                ext.parent_run_id
+            ),
         );
         *state.task_handle.lock().unwrap() = None;
         if !pump_queue(&state) {
@@ -1990,7 +2041,10 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         _ => {
             finish_item(
                 &state,
-                &format!("[EXTEND-QUEUE] {queue_id}: unknown task '{}'; skipping.", data.task),
+                &format!(
+                    "[EXTEND-QUEUE] {queue_id}: unknown task '{}'; skipping.",
+                    data.task
+                ),
             );
             release_slot(&state, worker);
             if !pump_queue(&state) {
@@ -2039,11 +2093,11 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         worker,
     )
     .await;
-        if out.billing_tripped {
-            pause_queue(&state, "provider billing error in extension batch");
-        }
-        if !out.results.is_empty() {
-            let mut combined = data.subruns.clone();
+    if out.billing_tripped {
+        pause_queue(&state, "provider billing error in extension batch");
+    }
+    if !out.results.is_empty() {
+        let mut combined = data.subruns.clone();
         combined.extend(out.results);
         let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
         let merged = LeaderboardManager::consolidate_multi_trial_run(
@@ -2125,10 +2179,15 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
             "pubsub" => TaskType::Pubsub,
-        "binproto" => TaskType::Binproto,
+            "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
-        match crate::bench::batch_ref::BatchRef::start_on_worker(&task_type_pre, &parent_run_id, &batch_log, worker) {
+        match crate::bench::batch_ref::BatchRef::start_on_worker(
+            &task_type_pre,
+            &parent_run_id,
+            &batch_log,
+            worker,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 // Pdf has no live-ref fallback: FATAL (loud). Other tasks
@@ -2168,7 +2227,11 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
 
     for trial_idx in 1..=total_trials {
         if run_cancel.load(Ordering::SeqCst) || state.cancel_requested.load(Ordering::SeqCst) {
-            send_status(&tx, &run_log_buf, "[STOP] Run cancelled by user before next trial.".to_string());
+            send_status(
+                &tx,
+                &run_log_buf,
+                "[STOP] Run cancelled by user before next trial.".to_string(),
+            );
             break;
         }
 
@@ -2202,7 +2265,11 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             max_trials: req.max_trials,
             review_model: req.review_model.clone(),
         };
-        state.worker_runs.write().unwrap().insert(worker, live_info.clone());
+        state
+            .worker_runs
+            .write()
+            .unwrap()
+            .insert(worker, live_info.clone());
         // Legacy mirror (lowest worker wins in get_status; single worker = exact).
         *state.current_run.write().unwrap() = Some(live_info);
         if trial_idx == 1 {
@@ -2245,7 +2312,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
             "pubsub" => TaskType::Pubsub,
-        "binproto" => TaskType::Binproto,
+            "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
 
@@ -2315,7 +2382,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
                         "[BILLING] Subrun {}/{} hit provider billing error: {}; pausing queue, trial discarded.",
                         trial_idx, total_trials, msg
                     ));
-                    pause_queue(&state, &format!("provider billing error in trial {trial_idx} ({msg})"));
+                    pause_queue(
+                        &state,
+                        &format!("provider billing error in trial {trial_idx} ({msg})"),
+                    );
                     break;
                 }
                 logger.log(&format!(
@@ -2344,14 +2414,21 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     // wave-v2 (proxy/muse-spark 0/3 -> 2/9). Save the extend spend by
     // skipping the extend loop entirely.
     let dead_cell = total_trials <= 3
-        && subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count() <= 1;
+        && subrun_results
+            .iter()
+            .filter(|r| r.pass_rate >= 100.0)
+            .count()
+            <= 1;
     if dead_cell {
         send_status(
             &tx,
             &run_log_buf,
             format!(
                 "[EXTEND] dead cell ({}/{} passing at {}); stopping, no extend.",
-                subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count(),
+                subrun_results
+                    .iter()
+                    .filter(|r| r.pass_rate >= 100.0)
+                    .count(),
                 subrun_results.len(),
                 total_trials
             ),
@@ -2368,7 +2445,7 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
             "pubsub" => TaskType::Pubsub,
-        "binproto" => TaskType::Binproto,
+            "binproto" => TaskType::Binproto,
             _ => TaskType::Redis,
         };
         while total_trials < max_total {
@@ -2378,14 +2455,21 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             };
             let (stab, reason) = assess_stability(&merged.subruns);
             if stab == Stability::Stable {
-                send_status(&tx, &run_log_buf, format!("[EXTEND] stable: {}; done.", reason));
+                send_status(
+                    &tx,
+                    &run_log_buf,
+                    format!("[EXTEND] stable: {}; done.", reason),
+                );
                 break;
             }
             let add = (max_total - total_trials).min(3);
             send_status(
                 &tx,
                 &run_log_buf,
-                format!("[EXTEND] unstable ({}); running {} more trial(s)...", reason, add),
+                format!(
+                    "[EXTEND] unstable ({}); running {} more trial(s)...",
+                    reason, add
+                ),
             );
             let out = run_extension_batch(
                 &tx,
@@ -2445,7 +2529,8 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         send_status(
             &tx,
             &run_log_buf,
-            "[STATUS] No trials completed (cancelled or all errored); nothing persisted.".to_string(),
+            "[STATUS] No trials completed (cancelled or all errored); nothing persisted."
+                .to_string(),
         );
     } else if total_trials > 1 {
         let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;
@@ -2462,12 +2547,19 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     }
 
     if passing_trials == total_trials as usize && total_trials > 0 {
-        send_status(&tx, &run_log_buf, "[STATUS] All trials passed (100% pass rate).".to_string());
+        send_status(
+            &tx,
+            &run_log_buf,
+            "[STATUS] All trials passed (100% pass rate).".to_string(),
+        );
     } else if passing_trials > 0 {
         send_status(
             &tx,
             &run_log_buf,
-            format!("[STATUS] Partial pass: {}/{} trials passed.", passing_trials, total_trials),
+            format!(
+                "[STATUS] Partial pass: {}/{} trials passed.",
+                passing_trials, total_trials
+            ),
         );
     } else {
         send_status(
@@ -2522,10 +2614,19 @@ async fn extend_parent_run(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<ExtendBody>,
 ) -> Result<Json<serde_json::Value>, Response> {
-    if let Some(proxied) = proxy_mutation(&state, "POST", &format!("/api/runs/{id}/extend"), Some(serde_json::to_value(&body).unwrap_or_default())).await {
+    if let Some(proxied) = proxy_mutation(
+        &state,
+        "POST",
+        &format!("/api/runs/{id}/extend"),
+        Some(serde_json::to_value(&body).unwrap_or_default()),
+    )
+    .await
+    {
         let status = proxied.status();
         if status.is_success() {
-            let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+            let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+                .await
+                .unwrap_or_default();
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
             return Ok(Json(v));
         }
@@ -2756,7 +2857,9 @@ pub fn resume_queue(state: &AppState) {
 
 async fn pause_queue_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     if let Some(proxied) = proxy_mutation(&state, "POST", "/api/queue/pause", None).await {
-        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return Json(serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({"ok": false})));
     }
     pause_queue(&state, "paused by operator");
@@ -2765,11 +2868,19 @@ async fn pause_queue_handler(State(state): State<AppState>) -> Json<serde_json::
 
 async fn resume_queue_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     if let Some(proxied) = proxy_mutation(&state, "POST", "/api/queue/resume", None).await {
-        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return Json(serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({"ok": false})));
     }
     resume_queue(&state);
-    let first = state.queue.lock().unwrap().iter().find(|i| i.status == QueueStatus::Pending).map(|i| i.id.clone());
+    let first = state
+        .queue
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|i| i.status == QueueStatus::Pending)
+        .map(|i| i.id.clone());
     if let Some(id) = first {
         kick_runner(&state, &id).await;
     }
@@ -2787,7 +2898,9 @@ async fn balance_check_handler(State(_state): State<AppState>) -> Json<serde_jso
         Some(b) => {
             let remaining = b.remaining();
             let ok = remaining.map(|r| r >= 1.0).unwrap_or(true);
-            Json(serde_json::json!({"ok": ok, "usage": b.usage, "limit": b.limit, "remaining": remaining}))
+            Json(
+                serde_json::json!({"ok": ok, "usage": b.usage, "limit": b.limit, "remaining": remaining}),
+            )
         }
         None => Json(serde_json::json!({"ok": true, "unknown": true})),
     }
@@ -2847,7 +2960,9 @@ async fn kick_runner(state: &AppState, want_id: &str) -> bool {
                 let now = now_rfc3339();
                 db_try(
                     &format!("mark {id} Running"),
-                    state.store.update_queue_status(&id, "Running", Some(&now), None),
+                    state
+                        .store
+                        .update_queue_status(&id, "Running", Some(&now), None),
                 );
                 match kind {
                     QueueKind::Run(req) => spawn_run_body(state, req, Some(id), worker),
@@ -2890,7 +3005,14 @@ fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
         dropped
     };
     // Durability mirror: memory stays source of truth; DB failures only log.
-    if let Some(item) = state.queue.lock().unwrap().iter().find(|i| i.id == id).cloned() {
+    if let Some(item) = state
+        .queue
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|i| i.id == id)
+        .cloned()
+    {
         let sid = id.clone();
         db_mirror(state, "enqueue", move |store| {
             db_try(&format!("enqueue {sid}"), store.enqueue_run(&item));
@@ -2949,9 +3071,18 @@ async fn enqueue_run(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<serde_json::Value>, Response> {
-    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/queue", Some(serde_json::to_value(&req).unwrap_or_default())).await {
+    if let Some(proxied) = proxy_mutation(
+        &state,
+        "POST",
+        "/api/queue",
+        Some(serde_json::to_value(&req).unwrap_or_default()),
+    )
+    .await
+    {
         let status = proxied.status();
-        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).to_string();
         if status.is_success() {
             let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
@@ -2993,11 +3124,16 @@ async fn remove_queued_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<String, Response> {
-    if let Some(proxied) = proxy_mutation(&state, "DELETE", &format!("/api/queue/{id}"), None).await {
+    if let Some(proxied) = proxy_mutation(&state, "DELETE", &format!("/api/queue/{id}"), None).await
+    {
         let status = proxied.status();
-        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).to_string();
-        if status.is_success() { return Ok(text); }
+        if status.is_success() {
+            return Ok(text);
+        }
         return Err((status, text).into_response());
     }
     let removed = {
@@ -3040,7 +3176,9 @@ async fn remove_queued_run(
 
 async fn clear_queue(State(state): State<AppState>) -> String {
     if let Some(proxied) = proxy_mutation(&state, "DELETE", "/api/queue", None).await {
-        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return String::from_utf8_lossy(&bytes).to_string();
     }
     // Drops finished history only; pending work is never discarded here.
@@ -3060,11 +3198,22 @@ async fn start_run(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
 ) -> Result<String, Response> {
-    if let Some(proxied) = proxy_mutation(&state, "POST", "/api/run", Some(serde_json::to_value(&req).unwrap_or_default())).await {
+    if let Some(proxied) = proxy_mutation(
+        &state,
+        "POST",
+        "/api/run",
+        Some(serde_json::to_value(&req).unwrap_or_default()),
+    )
+    .await
+    {
         let status = proxied.status();
-        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).to_string();
-        if status.is_success() { return Ok(text); }
+        if status.is_success() {
+            return Ok(text);
+        }
         return Err((status, text).into_response());
     }
     let start_worker = match claim_slot(&state) {
@@ -3105,14 +3254,30 @@ async fn stream_logs(
     if !state.engine_url.is_empty() {
         // Proxy mode: one-shot snapshot of the engine console tail as SSE
         // events (the GUI also polls /api/console every 2s = the live path).
-        let url = format!("{}/api/console?tail=200", state.engine_url.trim_end_matches('/'));
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
+        let url = format!(
+            "{}/api/console?tail=200",
+            state.engine_url.trim_end_matches('/')
+        );
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
         let text = match client.get(&url).send().await {
-            Ok(resp) => resp.text().await.unwrap_or_else(|_| "[STREAM NOTICE] engine console unreadable".to_string()),
+            Ok(resp) => resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "[STREAM NOTICE] engine console unreadable".to_string()),
             Err(_) => "[STREAM NOTICE] engine console down".to_string(),
         };
-        let evts: Vec<Result<Event, Infallible>> = text.lines().map(|l| Ok(Event::default().data(l.to_string()))).collect();
-        return Sse::new(Box::pin(tokio_stream::iter(evts)) as std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>>).keep_alive(KeepAlive::default());
+        let evts: Vec<Result<Event, Infallible>> = text
+            .lines()
+            .map(|l| Ok(Event::default().data(l.to_string())))
+            .collect();
+        return Sse::new(Box::pin(tokio_stream::iter(evts))
+            as std::pin::Pin<
+                Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>,
+            >)
+        .keep_alive(KeepAlive::default());
     }
     let rx = state.log_sender.subscribe();
 
@@ -3142,7 +3307,11 @@ async fn stream_logs(
     });
 
     let combined = initial_stream.chain(live_stream);
-    Sse::new(Box::pin(combined) as std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>>).keep_alive(KeepAlive::default())
+    Sse::new(Box::pin(combined)
+        as std::pin::Pin<
+            Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>,
+        >)
+    .keep_alive(KeepAlive::default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -3218,7 +3387,9 @@ mod tests {
 
     async fn test_queue_of(state: &AppState) -> Vec<QueuedRun> {
         let resp = get_queue(State(state.clone())).await;
-        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -3253,14 +3424,18 @@ mod tests {
         assert!(!state.db_fallback);
         let resp = get_status(State(state.clone())).await;
         {
-            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v.get("db_fallback"), Some(&serde_json::Value::Bool(false)));
         }
         state.db_fallback = true;
         let resp = get_status(State(state)).await;
         {
-            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v.get("db_fallback"), Some(&serde_json::Value::Bool(true)));
         }
@@ -3275,7 +3450,9 @@ mod tests {
         store
             .update_queue_status("q7", "Running", Some("2026-09-25T00:00:01Z"), None)
             .expect("mark running");
-        store.enqueue_run(&crate::web::server::test_queue_item("q8")).expect("enqueue");
+        store
+            .enqueue_run(&crate::web::server::test_queue_item("q8"))
+            .expect("enqueue");
         let replayed = replay_queue(&store);
         assert_eq!(replayed.len(), 2);
         assert!(replayed.iter().all(|i| i.status == QueueStatus::Pending));
@@ -3454,7 +3631,8 @@ mod tests {
                 "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
                 "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
                 "timestamp": "2026-09-12T08:00:00Z", "subruns": subs,
-            })).unwrap(),
+            }))
+            .unwrap(),
         )
         .unwrap();
         let state = create_test_state();
@@ -3472,9 +3650,11 @@ mod tests {
         assert_eq!(q.len(), 1);
         assert!(matches!(q[0].kind, QueueKind::Extend(_)));
         // Pending extends are removable like runs.
-        assert!(remove_queued_run(State(state.clone()), AxumPath(q[0].id.clone()))
-            .await
-            .is_ok());
+        assert!(
+            remove_queued_run(State(state.clone()), AxumPath(q[0].id.clone()))
+                .await
+                .is_ok()
+        );
         let _ = std::fs::remove_file(real.join("qp_qtest_unstable.json"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3610,7 +3790,11 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let buf = Arc::new(RwLock::new(Vec::new()));
         send_status(&tx, &buf, "[DONE]".to_string());
-        send_status(&tx, &buf, "[STATUS] All trials passed (100% pass rate).".to_string());
+        send_status(
+            &tx,
+            &buf,
+            "[STATUS] All trials passed (100% pass rate).".to_string(),
+        );
         send_status(&tx, &buf, "[STOP] Run cancelled by user.".to_string());
         {
             let snap = buf.read().unwrap();

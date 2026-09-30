@@ -153,7 +153,10 @@ mod tests {
         let err = validate_matrix_plan(&efforts(&["minimal", "max"]), false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("mixed-effort"), "unexpected message: {msg}");
-        assert!(msg.contains("--per-effort-columns"), "unexpected message: {msg}");
+        assert!(
+            msg.contains("--per-effort-columns"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]
@@ -175,8 +178,20 @@ mod tests {
     #[test]
     fn test_wave_uniform_ok() {
         let rows = vec![
-            wave_run("a1", "model-a", Some("high"), Some("2026-09-24.2+x"), "2026-09-25T00:00:00Z"),
-            wave_run("b1", "model-b", Some("high"), Some("2026-09-24.2+x"), "2026-09-25T00:00:00Z"),
+            wave_run(
+                "a1",
+                "model-a",
+                Some("high"),
+                Some("2026-09-24.2+x"),
+                "2026-09-25T00:00:00Z",
+            ),
+            wave_run(
+                "b1",
+                "model-b",
+                Some("high"),
+                Some("2026-09-24.2+x"),
+                "2026-09-25T00:00:00Z",
+            ),
         ];
         assert!(validate_comparison_wave(&rows).is_ok());
     }
@@ -185,10 +200,34 @@ mod tests {
     fn test_wave_identical_multi_effort_sets_ok() {
         // Explicit per-effort-columns shape: every model ran both efforts.
         let rows = vec![
-            wave_run("a1", "model-a", Some("minimal"), Some("r1"), "2026-09-25T00:00:00Z"),
-            wave_run("a2", "model-a", Some("max"), Some("r1"), "2026-09-25T00:00:00Z"),
-            wave_run("b1", "model-b", Some("minimal"), Some("r1"), "2026-09-25T00:00:00Z"),
-            wave_run("b2", "model-b", Some("max"), Some("r1"), "2026-09-25T00:00:00Z"),
+            wave_run(
+                "a1",
+                "model-a",
+                Some("minimal"),
+                Some("r1"),
+                "2026-09-25T00:00:00Z",
+            ),
+            wave_run(
+                "a2",
+                "model-a",
+                Some("max"),
+                Some("r1"),
+                "2026-09-25T00:00:00Z",
+            ),
+            wave_run(
+                "b1",
+                "model-b",
+                Some("minimal"),
+                Some("r1"),
+                "2026-09-25T00:00:00Z",
+            ),
+            wave_run(
+                "b2",
+                "model-b",
+                Some("max"),
+                Some("r1"),
+                "2026-09-25T00:00:00Z",
+            ),
         ];
         assert!(validate_comparison_wave(&rows).is_ok());
     }
@@ -196,13 +235,28 @@ mod tests {
     #[test]
     fn test_wave_mixed_regimes_refused() {
         let rows = vec![
-            wave_run("a1", "model-a", Some("high"), Some("regime-1"), "2026-09-25T00:00:00Z"),
-            wave_run("b1", "model-b", Some("high"), Some("regime-2"), "2026-09-25T00:00:00Z"),
+            wave_run(
+                "a1",
+                "model-a",
+                Some("high"),
+                Some("regime-1"),
+                "2026-09-25T00:00:00Z",
+            ),
+            wave_run(
+                "b1",
+                "model-b",
+                Some("high"),
+                Some("regime-2"),
+                "2026-09-25T00:00:00Z",
+            ),
         ];
         let err = validate_comparison_wave(&rows).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("rules_version"), "unexpected message: {msg}");
-        assert!(msg.contains("regime-1") && msg.contains("regime-2"), "message: {msg}");
+        assert!(
+            msg.contains("regime-1") && msg.contains("regime-2"),
+            "message: {msg}"
+        );
     }
 
     #[test]
@@ -219,13 +273,28 @@ mod tests {
     #[test]
     fn test_wave_mismatched_effort_sets_refused() {
         let rows = vec![
-            wave_run("a1", "model-a", Some("high"), Some("r1"), "2026-09-25T00:00:00Z"),
-            wave_run("b1", "model-b", Some("low"), Some("r1"), "2026-09-25T00:00:00Z"),
+            wave_run(
+                "a1",
+                "model-a",
+                Some("high"),
+                Some("r1"),
+                "2026-09-25T00:00:00Z",
+            ),
+            wave_run(
+                "b1",
+                "model-b",
+                Some("low"),
+                Some("r1"),
+                "2026-09-25T00:00:00Z",
+            ),
         ];
         let err = validate_comparison_wave(&rows).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("effort"), "unexpected message: {msg}");
-        assert!(msg.contains("model-a") && msg.contains("model-b"), "message: {msg}");
+        assert!(
+            msg.contains("model-a") && msg.contains("model-b"),
+            "message: {msg}"
+        );
     }
 
     #[test]

@@ -36,7 +36,6 @@ impl KeyBalance {
     }
 }
 
-
 pub async fn query_openrouter_key_usage_at(api_key: &str, url: &str) -> Option<f64> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))

@@ -153,7 +153,9 @@ fn wait_dns_ready(port: u16) -> bool {
         if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
             // Minimal A-query for example.com (header + 1 question).
-            let mut q = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            let mut q = vec![
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
             for l in "example.com".split('.') {
                 q.push(l.len() as u8);
                 q.extend_from_slice(l.as_bytes());
@@ -212,7 +214,9 @@ fn measure_dns_queries_per_sec(port: u16) -> Result<f64> {
     sock.set_read_timeout(Some(Duration::from_millis(500)))?;
     sock.connect(format!("127.0.0.1:{port}"))?;
     let iters = 200u32;
-    let mut q = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let mut q = vec![
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
     for l in "example.com".split('.') {
         q.push(l.len() as u8);
         q.extend_from_slice(l.as_bytes());
@@ -332,7 +336,9 @@ impl BatchRef {
             // Same loud rule for pdf (no per-trial fallback exists).
             if *task == TaskType::Pdf {
                 sandbox.cleanup();
-                return Err(anyhow!("pdf batch reference never became ready on port {port}"));
+                return Err(anyhow!(
+                    "pdf batch reference never became ready on port {port}"
+                ));
             }
             log("[BATCH-REF] Warning: batch reference never became ready. Trials fall back to live per-trial refs.");
             sandbox.cleanup();

@@ -70,7 +70,7 @@ pub struct ModelRollupRow {
 const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (DNS) are judged on pass spread alone; single-trial runs default to <em>stable</em>.</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens), falling back to API-only spend when compute metering is absent; avg cost/run is total divided by runs.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS scope:</strong> the verifier scores six MUST stages (header handshake, example.com A, localhost A, test TXT, NXDOMAIN-or-empty for unknown names, 800-query burst with at least 760 ID-matched); TTL values are parsed but never asserted, and forwarding/caching are SHOULD-have judge scope only.</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li><li><strong>Publish freeze:</strong> only runs graded at or after the 2026-09-26 anti-cheat fix are published (timestamp &ge; 2026-09-26T15:34:10Z); earlier rows were graded under a stricter rule that has since changed. Fingerprint allowlists alone are insufficient because graded content changed without a version bump.</li><li><strong>Integrity limits:</strong> egress/static anti-cheat blocklists are self-admitted; a DNS candidate forwarding to the reference is indistinguishable from a real resolver by design; binproto STREAM, proxy X-Forwarded-For, and pubsub 1,000-subscriber requirements are published as specified but verified at reduced scale; the LLM judge may review its own model family rows; the API key travels in the agent container env.</li></ul></section>"#;
 
 /// Rollup page appends the coverage-floor note to the shared methodology.
-const ROLLUP_FLOOR_NOTE_HTML: &str =  r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 8 tasks and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
+const ROLLUP_FLOOR_NOTE_HTML: &str = r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 8 tasks and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
 
 /// Publish floor for the public rollup: one row per model only with >= 6 of
 /// 8 tasks AND >= 18 total trials (avg 3/task). Thin-coverage rows (e.g. a
@@ -1214,7 +1214,6 @@ impl PortalExporter {
         })
     }
 
-
     /// Model-rollup-only export for the public portal: one row per model
     /// across ALL tasks. No per-run detail, no run ids or links, no
     /// console/workspace content. Writes ONLY `index.html` and leaves any
@@ -1424,7 +1423,8 @@ impl PortalExporter {
                 Some("unstable") => ("stab-bad", "unstable"),
                 _ => ("stab-na", "-"),
             };
-            let stab = format!("<span class=\"stab\"><i class=\"{stab_dot}\"></i>{stab_txt}</span>");
+            let stab =
+                format!("<span class=\"stab\"><i class=\"{stab_dot}\"></i>{stab_txt}</span>");
             // CI bar: pooled P@1 with lo-hi whiskers on a 0-100 track.
             let ci_bar = format!(
                 "<span class=\"cibar\" title=\"P@1 {p1:.0}% (95% CI {lo:.0}-{hi:.0})\"><span class=\"cifill\" style=\"left:{lo:.0}%;width:{w:.0}%\"></span><span class=\"cipoint\" style=\"left:{p1:.0}%\"></span></span>",
@@ -1432,7 +1432,9 @@ impl PortalExporter {
                 w = (r.p1_hi - r.p1_lo).max(2.0),
             );
             // Task dots: 8 possible tasks, filled = covered.
-            let all_tasks = ["binproto", "dns", "http", "pdf", "proxy", "pubsub", "redis", "wal"];
+            let all_tasks = [
+                "binproto", "dns", "http", "pdf", "proxy", "pubsub", "redis", "wal",
+            ];
             let mut dots = String::new();
             for t in all_tasks {
                 let on = r.tasks.iter().any(|x| x == t);
@@ -2408,10 +2410,37 @@ mod tests {
     #[test]
     fn test_rollup_groups_by_model_across_tasks() {
         let parents = vec![
-            rollup_parent("roll_a1", "model-a", "http", 100.0, 0.10, Some(0.10), 3, Some("stable")),
+            rollup_parent(
+                "roll_a1",
+                "model-a",
+                "http",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
             // effective cost absent -> falls back to total_cost_usd.
-            rollup_parent("roll_a2", "model-a", "redis", 50.0, 0.20, None, 3, Some("watch")),
-            rollup_parent("roll_b1", "model-b", "http", 100.0, 0.05, Some(0.05), 1, None),
+            rollup_parent(
+                "roll_a2",
+                "model-a",
+                "redis",
+                50.0,
+                0.20,
+                None,
+                3,
+                Some("watch"),
+            ),
+            rollup_parent(
+                "roll_b1",
+                "model-b",
+                "http",
+                100.0,
+                0.05,
+                Some(0.05),
+                1,
+                None,
+            ),
         ];
         let rows = PortalExporter::rollup_models(&parents);
         assert_eq!(rows.len(), 2);
@@ -2463,12 +2492,66 @@ mod tests {
         fs::create_dir_all(&results_dir).unwrap();
         // Fixture meets the rollup coverage floor: 6 tasks x 3 trials = 18.
         let parents = vec![
-            rollup_parent("roll_c1", "model-c", "http", 100.0, 0.10, Some(0.10), 3, Some("stable")),
-            rollup_parent("roll_c2", "model-c", "wal", 100.0, 0.10, Some(0.10), 3, Some("stable")),
-            rollup_parent("roll_c3", "model-c", "redis", 100.0, 0.10, Some(0.10), 3, Some("stable")),
-            rollup_parent("roll_c4", "model-c", "dns", 100.0, 0.10, Some(0.10), 3, Some("stable")),
-            rollup_parent("roll_c5", "model-c", "pdf", 100.0, 0.10, Some(0.10), 3, Some("stable")),
-            rollup_parent("roll_c6", "model-c", "proxy", 100.0, 0.10, Some(0.10), 3, Some("stable")),
+            rollup_parent(
+                "roll_c1",
+                "model-c",
+                "http",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
+            rollup_parent(
+                "roll_c2",
+                "model-c",
+                "wal",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
+            rollup_parent(
+                "roll_c3",
+                "model-c",
+                "redis",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
+            rollup_parent(
+                "roll_c4",
+                "model-c",
+                "dns",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
+            rollup_parent(
+                "roll_c5",
+                "model-c",
+                "pdf",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
+            rollup_parent(
+                "roll_c6",
+                "model-c",
+                "proxy",
+                100.0,
+                0.10,
+                Some(0.10),
+                3,
+                Some("stable"),
+            ),
         ];
         for p in &parents {
             fs::write(
@@ -2503,10 +2586,22 @@ mod tests {
     #[test]
     fn test_rollup_floor_excludes_thin_coverage() {
         // Thin model: 1 task, 8 trials (like a single-task probe).
-        let thin = rollup_parent("thin_1", "thin-model", "dns", 100.0, 0.05, Some(0.05), 8, None);
+        let thin = rollup_parent(
+            "thin_1",
+            "thin-model",
+            "dns",
+            100.0,
+            0.05,
+            Some(0.05),
+            8,
+            None,
+        );
         // Covered model: 6 tasks x 3 trials = 18 trials.
         let mut parents = vec![thin];
-        for (i, task) in ["http", "redis", "dns", "pdf", "wal", "proxy"].iter().enumerate() {
+        for (i, task) in ["http", "redis", "dns", "pdf", "wal", "proxy"]
+            .iter()
+            .enumerate()
+        {
             parents.push(rollup_parent(
                 &format!("wide_{i}"),
                 "wide-model",
@@ -2527,7 +2622,16 @@ mod tests {
 
     #[test]
     fn test_rollup_skips_test_ids() {
-        let probe = rollup_parent("test_probe_9", "probe-model", "http", 100.0, 0.01, None, 3, None);
+        let probe = rollup_parent(
+            "test_probe_9",
+            "probe-model",
+            "http",
+            100.0,
+            0.01,
+            None,
+            3,
+            None,
+        );
         let real = rollup_parent("real_9", "probe-model", "http", 100.0, 0.01, None, 3, None);
         let rows = PortalExporter::rollup_models(&[probe, real]);
         assert_eq!(rows.len(), 1);
@@ -2549,7 +2653,10 @@ mod tests {
         old.timestamp = "2026-09-16T14:54:59".to_string();
         let mut new = rollup_parent("new_1", "m", "http", 0.0, 0.01, None, 9, None);
         new.timestamp = "2026-09-26T19:45:16.109579".to_string();
-        let fresh: Vec<_> = vec![old, new].into_iter().filter(|r| publishable(&r.timestamp)).collect();
+        let fresh: Vec<_> = vec![old, new]
+            .into_iter()
+            .filter(|r| publishable(&r.timestamp))
+            .collect();
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].id, "new_1");
     }

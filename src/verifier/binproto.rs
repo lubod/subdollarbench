@@ -170,7 +170,10 @@ impl Conn {
                 .map_err(|_| anyhow!("read timed out waiting for frame"))?
                 .map_err(|e| anyhow!("read failed: {e}"))?;
             if n == 0 {
-                return Err(anyhow!("server closed connection (have {} of {want})", out.len()));
+                return Err(anyhow!(
+                    "server closed connection (have {} of {want})",
+                    out.len()
+                ));
             }
             self.read_buf.extend_from_slice(&tmp[..n]);
         }
@@ -293,7 +296,9 @@ impl BinprotoVerifier {
         let mut tmp = [0u8; 64];
         match tokio::time::timeout(READ_TIMEOUT, c2.stream.read(&mut tmp)).await {
             Ok(Ok(0)) => Ok(()),
-            Ok(Ok(n)) => Err(anyhow!("bad magic drew {n} response bytes, want close/silence")),
+            Ok(Ok(n)) => Err(anyhow!(
+                "bad magic drew {n} response bytes, want close/silence"
+            )),
             Ok(Err(e)) => Err(anyhow!("read after bad magic failed: {e}")),
             // Silence: no bytes within 3 s. The peer stays half-open but
             // answered nothing, which is the observable requirement.
@@ -386,7 +391,9 @@ impl BinprotoVerifier {
                 r.status
             ));
         }
-        let r = c.roundtrip(32, OP_GET, format!("binproto_{tag}_absent").as_bytes()).await?;
+        let r = c
+            .roundtrip(32, OP_GET, format!("binproto_{tag}_absent").as_bytes())
+            .await?;
         if r.opcode != OP_GET || r.status != ST_UNKNOWN_OP || r.seq != 32 {
             return Err(anyhow!("missing-key reply wrong: {r:?}"));
         }
@@ -417,7 +424,12 @@ impl BinprotoVerifier {
         seqs.sort_unstable();
         let want: Vec<u16> = (0..PIPELINE_FRAMES as u16).map(|i| 1000 + i).collect();
         if seqs != want {
-            return Err(anyhow!("pipeline IDs unmatched ({}/{} in {:?})", frames.len(), PIPELINE_FRAMES, elapsed));
+            return Err(anyhow!(
+                "pipeline IDs unmatched ({}/{} in {:?})",
+                frames.len(),
+                PIPELINE_FRAMES,
+                elapsed
+            ));
         }
         for f in &frames {
             let want_payload = format!("pipe{:03}", f.seq - 1000);

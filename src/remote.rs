@@ -71,7 +71,11 @@ pub async fn get_text(server: &str, path: &str) -> Result<String> {
 }
 
 /// POST a JSON body, parse the JSON reply.
-pub async fn post_json(server: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+pub async fn post_json(
+    server: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value> {
     let url = endpoint(server, path);
     let resp = client()
         .post(&url)
@@ -128,7 +132,11 @@ pub async fn delete_text(server: &str, path: &str) -> Result<String> {
 
 /// Live console tail. Returns `(total_pushed_lines, new_body)`: pass the
 /// previous total back as `since` to poll incrementally.
-pub async fn get_console(server: &str, tail: usize, since: Option<usize>) -> Result<(usize, String)> {
+pub async fn get_console(
+    server: &str,
+    tail: usize,
+    since: Option<usize>,
+) -> Result<(usize, String)> {
     let mut url = format!("{}?tail={}", endpoint(server, "/api/console"), tail);
     if let Some(s) = since {
         url.push_str(&format!("&since={s}"));
@@ -267,7 +275,10 @@ pub fn queue_summary(kind: &serde_json::Value) -> String {
 }
 
 fn fmt_run_info(prefix: &str, c: &serde_json::Value) -> String {
-    let trial = match (c.get("subrun").and_then(|n| n.as_u64()), c.get("total_subruns").and_then(|n| n.as_u64())) {
+    let trial = match (
+        c.get("subrun").and_then(|n| n.as_u64()),
+        c.get("total_subruns").and_then(|n| n.as_u64()),
+    ) {
         (Some(s), Some(t)) => format!(" trial {s}/{t}"),
         _ => String::new(),
     };
@@ -287,8 +298,14 @@ fn fmt_run_info(prefix: &str, c: &serde_json::Value) -> String {
 /// Human rendering of `GET /api/status`.
 pub fn format_status(v: &serde_json::Value) -> String {
     let mut out = String::new();
-    let running = v.get("is_running").and_then(|b| b.as_bool()).unwrap_or(false);
-    out.push_str(&format!("engine: {}\n", if running { "RUNNING" } else { "idle" }));
+    let running = v
+        .get("is_running")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    out.push_str(&format!(
+        "engine: {}\n",
+        if running { "RUNNING" } else { "idle" }
+    ));
     match v.get("current_run") {
         Some(c) if !c.is_null() => out.push_str(&fmt_run_info("current", c)),
         _ => out.push_str("current: -\n"),
@@ -306,7 +323,10 @@ pub fn format_queue(v: &serde_json::Value) -> String {
     if items.is_empty() {
         return "queue: empty\n".to_string();
     }
-    let mut out = format!("{:<5} {:<9} {:<20} {}\n", "id", "status", "enqueued", "what");
+    let mut out = format!(
+        "{:<5} {:<9} {:<20} {}\n",
+        "id", "status", "enqueued", "what"
+    );
     for q in &items {
         out.push_str(&format!(
             "{:<5} {:<9} {:<20} {}\n",
@@ -376,7 +396,11 @@ pub fn format_ps(
         .filter(|q| matches!(js(q, "status"), "Running" | "Pending"))
         .collect();
     let done = items.len() - live.len();
-    out.push_str(&format!("queue: {} live ({} finished history)\n", live.len(), done));
+    out.push_str(&format!(
+        "queue: {} live ({} finished history)\n",
+        live.len(),
+        done
+    ));
     for q in &live {
         out.push_str(&format!(
             "  {:<5} {:<9} {}\n",
@@ -403,7 +427,9 @@ pub fn format_ps(
         out.push_str(&format!(
             "{:<64} {:<22} {:<7} {:<8} {:<16} {:>5.1}%\n",
             js(m, "run_id"),
-            short_model(js(m, "model")).get(..22.min(short_model(js(m, "model")).len())).unwrap_or("-"),
+            short_model(js(m, "model"))
+                .get(..22.min(short_model(js(m, "model")).len()))
+                .unwrap_or("-"),
             m.get("effort").and_then(|e| e.as_str()).unwrap_or("-"),
             js(m, "task"),
             js(m, "status"),
@@ -425,9 +451,16 @@ fn model_row(m: &serde_json::Value) -> String {
                 .join("/")
         })
         .unwrap_or_default();
-    let brain = if m.get("is_reasoning").and_then(|b| b.as_bool()).unwrap_or(false) {
+    let brain = if m
+        .get("is_reasoning")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+    {
         if efforts.is_empty() {
-            if m.get("supports_max_tokens").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if m.get("supports_max_tokens")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
                 " [tokens]"
             } else {
                 " [reasoning]"
@@ -455,7 +488,10 @@ fn model_row(m: &serde_json::Value) -> String {
         js(m, "id"),
         jf(m, "prompt_price_per_m"),
         jf(m, "completion_price_per_m"),
-        m.get("context_length").and_then(|n| n.as_u64()).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+        m.get("context_length")
+            .and_then(|n| n.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".into()),
         date,
         if efforts.is_empty() { "-" } else { &efforts },
         dflt,
@@ -475,7 +511,10 @@ fn match_family(m: &serde_json::Value, family: &str) -> bool {
         return id.contains("claude") || id.contains("anthropic") || name.contains("claude");
     }
     if f == "glm" {
-        return id.contains("glm") || id.contains("zhipu") || id.contains("thudm") || name.contains("glm");
+        return id.contains("glm")
+            || id.contains("zhipu")
+            || id.contains("thudm")
+            || name.contains("glm");
     }
     id.contains(&f) || name.contains(&f)
 }
@@ -495,19 +534,27 @@ pub fn format_models_filtered(
     }
     if let Some(q) = search {
         let q = q.to_lowercase();
-        items.retain(|m| js(m, "id").to_lowercase().contains(&q) || js(m, "name").to_lowercase().contains(&q));
+        items.retain(|m| {
+            js(m, "id").to_lowercase().contains(&q) || js(m, "name").to_lowercase().contains(&q)
+        });
     }
     match sort {
         "newest" => items.sort_by(|a, b| {
-            b.get("created").and_then(|n| n.as_i64()).unwrap_or(0)
+            b.get("created")
+                .and_then(|n| n.as_i64())
+                .unwrap_or(0)
                 .cmp(&a.get("created").and_then(|n| n.as_i64()).unwrap_or(0))
         }),
         "expensive" => items.sort_by(|a, b| {
-            jf(b, "prompt_price_per_m").partial_cmp(&jf(a, "prompt_price_per_m")).unwrap_or(std::cmp::Ordering::Equal)
+            jf(b, "prompt_price_per_m")
+                .partial_cmp(&jf(a, "prompt_price_per_m"))
+                .unwrap_or(std::cmp::Ordering::Equal)
         }),
         "name" => items.sort_by(|a, b| js(a, "id").cmp(js(b, "id"))),
         _ => items.sort_by(|a, b| {
-            jf(a, "prompt_price_per_m").partial_cmp(&jf(b, "prompt_price_per_m")).unwrap_or(std::cmp::Ordering::Equal)
+            jf(a, "prompt_price_per_m")
+                .partial_cmp(&jf(b, "prompt_price_per_m"))
+                .unwrap_or(std::cmp::Ordering::Equal)
         }),
     }
     let mut out = format!(
@@ -551,13 +598,21 @@ pub fn format_detail(v: &serde_json::Value) -> String {
             out.push_str(&format!("trials:  {t} merged\n"));
         }
     }
-    if v.get("portal_hidden").and_then(|b| b.as_bool()).unwrap_or(false) {
+    if v.get("portal_hidden")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+    {
         out.push_str("portal:  hidden\n");
     }
     out.push_str(&format!(
         "turns:   {}  spent: {:.1}s  cost: ${:.4}\n",
-        v.get("turns").and_then(|n| n.as_u64()).map(|t| t.to_string()).unwrap_or_else(|| "-".into()),
-        v.get("duration_seconds").and_then(|n| n.as_f64()).unwrap_or(0.0),
+        v.get("turns")
+            .and_then(|n| n.as_u64())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "-".into()),
+        v.get("duration_seconds")
+            .and_then(|n| n.as_f64())
+            .unwrap_or(0.0),
         jf(v, "cost_usd"),
     ));
     out
@@ -578,13 +633,21 @@ pub fn format_compare(v: &serde_json::Value) -> String {
     if let Some(d) = v.get("metric_diff") {
         out.push_str(&format!(
             "delta: pass {:+.1}%  cost {:+.4}  tokens {:+}  duration {:+.1}s\n",
-            d.get("pass_rate_delta").and_then(|n| n.as_f64()).unwrap_or(0.0),
+            d.get("pass_rate_delta")
+                .and_then(|n| n.as_f64())
+                .unwrap_or(0.0),
             d.get("cost_delta").and_then(|n| n.as_f64()).unwrap_or(0.0),
             d.get("tokens_delta").and_then(|n| n.as_i64()).unwrap_or(0),
-            d.get("duration_delta").and_then(|n| n.as_f64()).unwrap_or(0.0),
+            d.get("duration_delta")
+                .and_then(|n| n.as_f64())
+                .unwrap_or(0.0),
         ));
     }
-    let files = v.get("file_diffs").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    let files = v
+        .get("file_diffs")
+        .and_then(|f| f.as_array())
+        .cloned()
+        .unwrap_or_default();
     out.push_str(&format!("files: {} diffed\n", files.len()));
     for f in files.iter().take(30) {
         out.push_str(&format!("  [{}] {}\n", js(f, "status"), js(f, "path")));
@@ -599,8 +662,7 @@ pub fn render_log(body: &str, tail: usize, stages_only: bool) -> String {
     lines[start..]
         .iter()
         .filter(|l| {
-            !stages_only
-                || (l.contains("Stage") || l.contains("PASS") || l.contains("FAIL"))
+            !stages_only || (l.contains("Stage") || l.contains("PASS") || l.contains("FAIL"))
         })
         .cloned()
         .collect::<Vec<_>>()
@@ -611,8 +673,7 @@ pub fn render_log(body: &str, tail: usize, stages_only: bool) -> String {
 /// `std::env` is process-global: parallel tests that set/remove
 /// `SDB_SERVER` race each other, so every env-touching test must hold this.
 #[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> =
-    std::sync::Mutex::new(());
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Hold the env lock AND snapshot `SDB_SERVER`; on drop the lock releases
 /// and the previous value (or absence) is restored, even on panic.
@@ -654,18 +715,49 @@ mod tests {
 
     #[test]
     fn test_endpoint_join() {
-        assert_eq!(endpoint("http://h:3000/", "/api/status"), "http://h:3000/api/status");
+        assert_eq!(
+            endpoint("http://h:3000/", "/api/status"),
+            "http://h:3000/api/status"
+        );
     }
 
     #[test]
     fn test_run_request_payload() {
-        let v = run_request("openrouter/m", "redis", "high", 100, 1.0, 30, None, false, 9, false, 9, false, None);
+        let v = run_request(
+            "openrouter/m",
+            "redis",
+            "high",
+            100,
+            1.0,
+            30,
+            None,
+            false,
+            9,
+            false,
+            9,
+            false,
+            None,
+        );
         assert_eq!(v["model"], "openrouter/m");
         assert_eq!(v["task"], "redis");
         assert_eq!(v["trials"], 9);
         assert_eq!(v["save_results"], true);
         assert!(v["api_key"].is_null());
-        let v2 = run_request("m", "dns", "low", 10, 0.2, 5, Some("k"), true, 0, true, 3, true, Some("r"));
+        let v2 = run_request(
+            "m",
+            "dns",
+            "low",
+            10,
+            0.2,
+            5,
+            Some("k"),
+            true,
+            0,
+            true,
+            3,
+            true,
+            Some("r"),
+        );
         assert_eq!(v2["trials"], 1);
         assert_eq!(v2["save_results"], false);
         assert_eq!(v2["review_model"], "r");
@@ -734,7 +826,13 @@ mod tests {
             "effort": "max", "status": "failed_tests"});
         assert!(match_manifest(&m, Some("openrouter"), None, None, None));
         assert!(!match_manifest(&m, Some("glm"), None, None, None));
-        assert!(match_manifest(&m, None, Some("REDIS"), Some("max"), Some("failed_tests")));
+        assert!(match_manifest(
+            &m,
+            None,
+            Some("REDIS"),
+            Some("max"),
+            Some("failed_tests")
+        ));
         assert!(!match_manifest(&m, None, None, None, Some("completed")));
         let no_effort = serde_json::json!({"model": "m", "task": "t", "status": "s"});
         assert!(!match_manifest(&no_effort, None, None, Some("max"), None));

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use subdollarbench::config::{Cli, Commands, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
+use subdollarbench::remote;
 use subdollarbench::report::{
     assess_stability, BenchmarkRunResult, LeaderboardManager, PortalExporter, RunJudge,
     RunManifest, Stability,
@@ -15,7 +16,6 @@ use subdollarbench::verifier::{
     BinprotoVerifier, DnsVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier,
     RedisVerifier, WalVerifier,
 };
-use subdollarbench::remote;
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
 
@@ -233,7 +233,10 @@ fn resolve_server_flag(server: &Option<String>) -> String {
 }
 
 pub async fn run_cli(cli: Cli) -> Result<()> {
-    tracing::info!("repo root: {}", subdollarbench::config::get_repo_root().display());
+    tracing::info!(
+        "repo root: {}",
+        subdollarbench::config::get_repo_root().display()
+    );
     match cli.command {
         Commands::Run {
             model,
@@ -274,10 +277,18 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 );
                 let resp = remote::post_json(&server, "/api/queue", &body).await?;
                 let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                if resp.get("started").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if resp
+                    .get("started")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     println!("enqueued {id}: engine idle, started immediately");
                 } else {
-                    let pos = resp.get("position").and_then(|v| v.as_u64()).map(|p| p.to_string()).unwrap_or("-".into());
+                    let pos = resp
+                        .get("position")
+                        .and_then(|v| v.as_u64())
+                        .map(|p| p.to_string())
+                        .unwrap_or("-".into());
                     println!("enqueued {id} at position {pos}");
                 }
                 return Ok(());
@@ -349,7 +360,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     save_results: !no_save,
                     review_model: review_model.clone(),
                     batch_reference: batch_ref.as_ref().map(|b| b.reference()),
-            worker: 0,
+                    worker: 0,
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;
@@ -398,12 +409,19 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 if total_trials < 2 {
                     println!("[EXTEND] single-trial run: nothing to assess; use --trials 2+ for auto-extend.");
                 } else if total_trials <= 3
-                    && subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count() <= 1
+                    && subrun_results
+                        .iter()
+                        .filter(|r| r.pass_rate >= 100.0)
+                        .count()
+                        <= 1
                 {
                     // Dead-cell early stop (wave-v2: 0-1/3 never recovered).
                     println!(
                         "[EXTEND] dead cell ({}/{} passing at {}); stopping, no extend.",
-                        subrun_results.iter().filter(|r| r.pass_rate >= 100.0).count(),
+                        subrun_results
+                            .iter()
+                            .filter(|r| r.pass_rate >= 100.0)
+                            .count(),
                         subrun_results.len(),
                         total_trials
                     );
@@ -624,9 +642,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     // Proportional rescore (2026-09-24.1): stored subruns
                     // predate the cliff removal; recompute their scores from
                     // pass_rate + effective cost so trial rows match parents.
-                    let eff_cost = sub
-                        .effective_cost_usd
-                        .unwrap_or(sub.total_cost_usd);
+                    let eff_cost = sub.effective_cost_usd.unwrap_or(sub.total_cost_usd);
                     sub.efficiency_score =
                         subdollarbench::cost::calculator::ModelPricing::calculate_efficiency_score(
                             sub.pass_rate,
@@ -653,12 +669,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 // stored trial rows match the new rule-set.
                 let mut out = merged;
                 out.ref_drift = run.ref_drift;
-                out.subruns = out.subruns.into_iter().map(|m| {
-                    match subs.iter().find(|r| r.id == m.id) {
+                out.subruns = out
+                    .subruns
+                    .into_iter()
+                    .map(|m| match subs.iter().find(|r| r.id == m.id) {
                         Some(r) => r.clone(),
                         None => m,
-                    }
-                }).collect();
+                    })
+                    .collect();
                 if out.rules_version.is_none() {
                     out.rules_version = stamp.clone();
                 }
@@ -697,11 +715,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             // Best-effort DB mirror (same gating as consolidate); never fatal.
                             if let Some(store) = LeaderboardManager::open_store_if_exists() {
                                 if let Err(e) = store.upsert_parent(&out) {
-                                    tracing::warn!(
-                                        "backfill DB upsert {} failed: {:#}",
-                                        out.id,
-                                        e
-                                    );
+                                    tracing::warn!("backfill DB upsert {} failed: {:#}", out.id, e);
                                 }
                             }
                             // Mirror the stamp into the parent manifest.
@@ -887,21 +901,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             if let Ok(entries) = std::fs::read_dir(&runs_dir) {
                 for entry in entries.flatten() {
                     // Never import staging leftovers from a crashed archive.
-                    if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .ends_with(".tmp")
-                    {
+                    if entry.file_name().to_string_lossy().ends_with(".tmp") {
                         continue;
                     }
                     let manifest_file = entry.path().join("manifest.json");
                     if !manifest_file.exists() {
                         continue;
                     }
-                    match std::fs::read_to_string(&manifest_file)
-                        .ok()
-                        .and_then(|t| serde_json::from_str::<subdollarbench::report::RunManifest>(&t).ok())
-                    {
+                    match std::fs::read_to_string(&manifest_file).ok().and_then(|t| {
+                        serde_json::from_str::<subdollarbench::report::RunManifest>(&t).ok()
+                    }) {
                         Some(m) => {
                             if store.upsert_run_manifest(&m).is_ok() {
                                 run_imported += 1;
@@ -914,7 +923,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
             }
             let run_count = store.run_manifest_count();
-            println!("migrate: runs {run_imported} imported, {run_skipped} skipped, total {run_count}");
+            println!(
+                "migrate: runs {run_imported} imported, {run_skipped} skipped, total {run_count}"
+            );
         }
 
         Commands::MigrateCheck => {
@@ -933,9 +944,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 println!("check: {junk} junk parent row(s) (test_/0-trial)");
                 bad += junk;
             }
-            let (db_parents, files) = store.parent_file_drift(
-                &subdollarbench::config::get_repo_root().join("results"),
-            );
+            let (db_parents, files) =
+                store.parent_file_drift(&subdollarbench::config::get_repo_root().join("results"));
             if db_parents != files {
                 println!("check: row-file drift (db parents {db_parents} vs files {files})");
                 bad += 1;
@@ -1037,7 +1047,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!(
                 "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} {}",
                 summary.run_count,
-                if rollup_only { "models (rollup-only)" } else { "runs" },
+                if rollup_only {
+                    "models (rollup-only)"
+                } else {
+                    "runs"
+                },
             );
         }
         Commands::Portal {
@@ -1447,14 +1461,20 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 // Pre-flight: refuse to launch into a paused engine or dead credit.
                 // (Wave-launch script wraps this with tree+suite+spot-check gates.)
                 let st = remote::get_json(&server, "/api/status").await.ok();
-                if let Some(v) = st.as_ref().and_then(|x| x.get("queue_paused")).and_then(|x| x.as_bool()) {
+                if let Some(v) = st
+                    .as_ref()
+                    .and_then(|x| x.get("queue_paused"))
+                    .and_then(|x| x.as_bool())
+                {
                     if v {
                         anyhow::bail!("engine queue is paused (billing); resume before launching");
                     }
                 }
                 let bal = remote::get_json(&server, "/api/balance/check").await.ok();
                 if let Some(b) = bal {
-                    if b.get("ok").and_then(|v| v.as_bool()) == Some(false) && b.get("unknown").is_none() {
+                    if b.get("ok").and_then(|v| v.as_bool()) == Some(false)
+                        && b.get("unknown").is_none()
+                    {
                         anyhow::bail!("engine balance gate: credit exhausted; top up to launch");
                     }
                 }
@@ -1752,7 +1772,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             );
             let resp = remote::post_json(&server, "/api/queue", &body).await?;
             let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-            if resp.get("started").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if resp
+                .get("started")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 println!("enqueued {id}: engine idle, started immediately");
             } else {
                 let pos = resp
@@ -1784,7 +1808,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 eval_only.then_some(true),
             );
             // Server path-encodes cleanly (clean_run_id rejects slashes).
-            let resp = remote::post_json(&server, &format!("/api/runs/{pid}/extend"), &body).await?;
+            let resp =
+                remote::post_json(&server, &format!("/api/runs/{pid}/extend"), &body).await?;
             if let Some(qid) = resp.get("queued").and_then(|v| v.as_str()) {
                 let pos = resp
                     .get("position")
@@ -1801,7 +1826,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
         Commands::Dequeue { id, server } => {
             let server = resolve_server_flag(&server);
-            println!("{}", remote::delete_text(&server, &format!("/api/queue/{id}")).await?);
+            println!(
+                "{}",
+                remote::delete_text(&server, &format!("/api/queue/{id}")).await?
+            );
         }
 
         Commands::QueueClear { server } => {
@@ -1851,7 +1879,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     show(line);
                 }
                 let status = remote::get_json(&server, "/api/status").await?;
-                let idle = !status.get("is_running").and_then(|b| b.as_bool()).unwrap_or(false);
+                let idle = !status
+                    .get("is_running")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
                 since = Some(total);
                 if !follow || idle {
                     if follow && idle {
@@ -1879,15 +1910,25 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Sdiff { a, b, runs_dir, server } => {
+        Commands::Sdiff {
+            a,
+            b,
+            runs_dir,
+            server,
+        } => {
             let server = resolve_server_flag(&server);
             let ida = resolve_run_id(&runs_dir, &a)?;
             let idb = resolve_run_id(&runs_dir, &b)?;
-            let v = remote::get_json(&server, &format!("/api/compare?run_a={ida}&run_b={idb}")).await?;
+            let v =
+                remote::get_json(&server, &format!("/api/compare?run_a={ida}&run_b={idb}")).await?;
             print!("{}", remote::format_compare(&v));
         }
 
-        Commands::Ls { run, runs_dir, server } => {
+        Commands::Ls {
+            run,
+            runs_dir,
+            server,
+        } => {
             let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             let v = remote::get_json(&server, &format!("/api/runs/{id}/files")).await?;
@@ -1910,7 +1951,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             print!("{}", remote::get_file_text(&server, &id, &file).await?);
         }
 
-        Commands::Review { run, runs_dir, server } => {
+        Commands::Review {
+            run,
+            runs_dir,
+            server,
+        } => {
             let server = resolve_server_flag(&server);
             let id = resolve_run_id(&runs_dir, &run)?;
             let v = remote::get_json(&server, &format!("/api/runs/{id}/review")).await?;
@@ -1939,9 +1984,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             if save {
                 let mut body = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)?;
-                println!("{}", remote::post_text(&server, &format!("/api/prompt/{task}"), body).await?);
+                println!(
+                    "{}",
+                    remote::post_text(&server, &format!("/api/prompt/{task}"), body).await?
+                );
             } else {
-                print!("{}", remote::get_text(&server, &format!("/api/prompt/{task}")).await?);
+                print!(
+                    "{}",
+                    remote::get_text(&server, &format!("/api/prompt/{task}")).await?
+                );
             }
         }
 
@@ -1992,7 +2043,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
         Commands::PortalRebuild { server } => {
             let server = resolve_server_flag(&server);
-            println!("{}", remote::post_empty(&server, "/api/portal/rebuild").await?);
+            println!(
+                "{}",
+                remote::post_empty(&server, "/api/portal/rebuild").await?
+            );
         }
 
         Commands::Hide {
@@ -2019,7 +2073,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             if !yes {
                 anyhow::bail!("refusing to delete {id} without --yes");
             }
-            println!("{}", remote::delete_text(&server, &format!("/api/runs/{id}")).await?);
+            println!(
+                "{}",
+                remote::delete_text(&server, &format!("/api/runs/{id}")).await?
+            );
         }
 
         Commands::Ui {
@@ -2029,7 +2086,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         } => {
             web::UiServer::start(&host, port, &engine_url).await?;
         }
-
     }
 
     Ok(())

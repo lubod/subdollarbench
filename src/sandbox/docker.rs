@@ -51,7 +51,9 @@ pub fn egress_allowed(host: &str) -> bool {
     if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
         return false;
     }
-    EGRESS_ALLOWLIST.iter().any(|a| h == *a || h.ends_with(&format!(".{a}")))
+    EGRESS_ALLOWLIST
+        .iter()
+        .any(|a| h == *a || h.ends_with(&format!(".{a}")))
 }
 pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
 /// PDF reference: canonical extractor (extensions/pdf_reference.py).
@@ -61,14 +63,16 @@ pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03ef
 /// A rebuild that changes behavior yields a new ID -> new regime label by
 /// construction (regime_of keys on this string). Record the ID + source hash
 /// in wave-freezes.log at each rebuild (REF_INTRO_PDF_* lines).
-pub const REF_PDF_IMAGE: &str = "pdf-ref@sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
+pub const REF_PDF_IMAGE: &str =
+    "pdf-ref@sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
 /// Bare image ID that actually runs (verified: `pdf-ref@sha256:<id>`
 /// attempts a registry pull and fails locally; bare `sha256:<id>` runs).
 /// Rebuild the tag, then `docker inspect pdf-ref:local --format {{.Id}}`.
 /// A behavior-changing rebuild MUST update BOTH consts to the new ID
 /// (label keeps name@digest shape for regime_of; run keeps bare ID).
 /// Verified: identical source rebuilds yield the same ID twice.
-pub const REF_PDF_RUN_IMAGE: &str = "sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
+pub const REF_PDF_RUN_IMAGE: &str =
+    "sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
 /// Benchmark *client* images are pinned too: the client binary is half the
 /// measurement apparatus.
 pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
@@ -147,12 +151,26 @@ impl SandboxManager {
         let allow = EGRESS_ALLOWLIST.join(",");
         let out = std::process::Command::new("docker")
             .args([
-                "run", "-d", "--rm", "--name", &name,
-                "--network", &net, "--network-alias", "egress-proxy",
-                "--memory=128m", "--cpus=0.25", "--pids-limit=64",
-                "-v", &format!("{}:/proxy.py:ro", script.display()),
-                "-e", &format!("ALLOWLIST={allow}"),
-                EGRESS_PROXY_IMAGE, "python3", "/proxy.py", "3128",
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &name,
+                "--network",
+                &net,
+                "--network-alias",
+                "egress-proxy",
+                "--memory=128m",
+                "--cpus=0.25",
+                "--pids-limit=64",
+                "-v",
+                &format!("{}:/proxy.py:ro", script.display()),
+                "-e",
+                &format!("ALLOWLIST={allow}"),
+                EGRESS_PROXY_IMAGE,
+                "python3",
+                "/proxy.py",
+                "3128",
             ])
             .output();
         // Disarm Drop-cleanup: this handle is ephemeral (created just to
@@ -199,11 +217,11 @@ impl SandboxManager {
     /// `ref-http`, `ref-dns`) and the OMP agent container is attached to it,
     /// so the agent can probe ground truth by hostname while remaining
     /// isolated from host-network services.
-/// Process-wide mutex serializing Docker network create/prune.
-/// Parallel workers creating networks simultaneously trigger pool pressure;
-/// a sibling's prune can reap a just-created-but-still-empty network (0
-/// containers attached yet looks stale). Setup is seconds-cheap; contention
-/// is harmless, ghost runs are not.
+    /// Process-wide mutex serializing Docker network create/prune.
+    /// Parallel workers creating networks simultaneously trigger pool pressure;
+    /// a sibling's prune can reap a just-created-but-still-empty network (0
+    /// containers attached yet looks stale). Setup is seconds-cheap; contention
+    /// is harmless, ghost runs are not.
     pub fn ensure_network(&self) -> Result<()> {
         self.needs_cleanup.store(true, Ordering::SeqCst);
         let _guard = network_mutex().lock().unwrap();
@@ -264,7 +282,12 @@ impl SandboxManager {
         net.hash(&mut h);
         attempt.hash(&mut h);
         let oct = ((h.finish() % (Self::RUN_SUBNET_WHEEL as u64)) + 1) as u8;
-        format!("{}.{}.0/{}", Self::RUN_SUBNET_BASE, oct, Self::RUN_SUBNET_BITS)
+        format!(
+            "{}.{}.0/{}",
+            Self::RUN_SUBNET_BASE,
+            oct,
+            Self::RUN_SUBNET_BITS
+        )
     }
 
     /// True for every known daemon wording of "no address space left",
@@ -290,7 +313,11 @@ impl SandboxManager {
     fn cleanup_finished_networks(&self) {
         for suffix in ["", "_batchref"] {
             let _ = Command::new("docker")
-                .args(["network", "rm", &format!("subdollar-net-{}{}", self.instance_id, suffix)])
+                .args([
+                    "network",
+                    "rm",
+                    &format!("subdollar-net-{}{}", self.instance_id, suffix),
+                ])
                 .output();
         }
     }
@@ -310,7 +337,6 @@ impl SandboxManager {
         }
         Err(anyhow!("docker network {net} not inspectable after create"))
     }
-
 
     pub fn start_reference_redis(&self, port: u16) -> Result<()> {
         let name = self.ref_redis_name();
@@ -1050,7 +1076,13 @@ impl SandboxManager {
     /// Takes &str so Drop/cleanup paths share the prune gate logic.
     pub fn network_in_use_or_young(net: &str) -> bool {
         let out = std::process::Command::new("docker")
-            .args(["network", "inspect", net, "--format", "{{len .Containers}} {{.Created}}"])
+            .args([
+                "network",
+                "inspect",
+                net,
+                "--format",
+                "{{len .Containers}} {{.Created}}",
+            ])
             .output();
         let text = match out {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -1069,7 +1101,13 @@ impl SandboxManager {
         };
         for id in Self::parse_network_ids(&ids) {
             let inspect = Command::new("docker")
-                .args(["network", "inspect", id, "--format", "{{len .Containers}} {{.Created}}"])
+                .args([
+                    "network",
+                    "inspect",
+                    id,
+                    "--format",
+                    "{{len .Containers}} {{.Created}}",
+                ])
                 .output();
             let count_out = match inspect {
                 Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -1104,7 +1142,9 @@ impl SandboxManager {
         // Parse leniently: compare lexicographically against (now - age) in the
         // same layout. Unparseable -> fail closed (not stale).
         let age_boundary = std::time::SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(Self::NETWORK_STALE_AGE_SECS as u64))
+            .checked_sub(std::time::Duration::from_secs(
+                Self::NETWORK_STALE_AGE_SECS as u64,
+            ))
             .and_then(|t| {
                 t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
                     let secs = d.as_secs() as i64;
@@ -1207,10 +1247,22 @@ mod tests {
     #[test]
     fn test_egress_proxy_allowlist_blocks_exfil() {
         use super::egress_allowed;
-        for h in ["openrouter.ai", "api.openrouter.ai", "x.proxy.golang.org", "github.com", "a.b.github.com"] {
+        for h in [
+            "openrouter.ai",
+            "api.openrouter.ai",
+            "x.proxy.golang.org",
+            "github.com",
+            "a.b.github.com",
+        ] {
             assert!(egress_allowed(h), "{}", h);
         }
-        for h in ["evil.com", "1.2.3.4", "openrouter.ai.evil.com", "notgithub.com", ""] {
+        for h in [
+            "evil.com",
+            "1.2.3.4",
+            "openrouter.ai.evil.com",
+            "notgithub.com",
+            "",
+        ] {
             assert!(!egress_allowed(h), "{}", h);
         }
     }
@@ -1374,12 +1426,18 @@ mod tests {
     #[test]
     fn test_prune_age_gate() {
         // 0 containers + old timestamp = stale.
-        assert!(SandboxManager::network_is_stale("0 2020-01-01 00:00:00.000 +0000 UTC"));
+        assert!(SandboxManager::network_is_stale(
+            "0 2020-01-01 00:00:00.000 +0000 UTC"
+        ));
         // Attached containers never stale, however old.
-        assert!(!SandboxManager::network_is_stale("2 2020-01-01 00:00:00.000 +0000 UTC"));
+        assert!(!SandboxManager::network_is_stale(
+            "2 2020-01-01 00:00:00.000 +0000 UTC"
+        ));
         // Young empty network = not yet attached (parallel workers), keep.
         // Far-future timestamp is always young.
-        assert!(!SandboxManager::network_is_stale("0 2999-01-01 00:00:00.000 +0000 UTC"));
+        assert!(!SandboxManager::network_is_stale(
+            "0 2999-01-01 00:00:00.000 +0000 UTC"
+        ));
         // Unparseable fails closed.
         assert!(!SandboxManager::network_is_stale(""));
         assert!(!SandboxManager::network_is_stale("<no value>"));
@@ -1397,8 +1455,12 @@ mod tests {
         ));
         assert!(SandboxManager::is_pool_exhausted("no available network"));
         // Subnet collision is a different retry path (wheel bump), not exhaustion.
-        assert!(!SandboxManager::is_pool_exhausted("Pool overlaps with other one on this address space"));
-        assert!(!SandboxManager::is_pool_exhausted("Error response from daemon: network not found"));
+        assert!(!SandboxManager::is_pool_exhausted(
+            "Pool overlaps with other one on this address space"
+        ));
+        assert!(!SandboxManager::is_pool_exhausted(
+            "Error response from daemon: network not found"
+        ));
         assert!(!SandboxManager::is_pool_exhausted(""));
     }
 

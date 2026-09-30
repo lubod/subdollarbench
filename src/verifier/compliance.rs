@@ -570,9 +570,9 @@ impl ComplianceChecker {
         let mut overlap_len = 4;
         let mut total_read = 4;
         const MAX_SCAN_BYTES: usize = 32 * 1024 * 1024; // Limit scan to first 32MB
-        // Latched across chunks: Go markers may appear anywhere in the file, and
-        // an apache2/ hit in one chunk must not be forgotten when a later chunk
-        // proves (or fails to prove) a Go build.
+                                                        // Latched across chunks: Go markers may appear anywhere in the file, and
+                                                        // an apache2/ hit in one chunk must not be forgotten when a later chunk
+                                                        // proves (or fails to prove) a Go build.
         let mut go_seen = false;
         let mut apache_seen = false;
         let mut apache_nonmime_seen = false;
@@ -1438,7 +1438,8 @@ RUN apk add redis
         let _ = fs::create_dir_all(&temp_dir);
 
         let mut go_elf = b"\x7fELFfakeheader".to_vec();
-        go_elf.extend_from_slice(b"runtime/gopclntab invalid URI for request/etc/apache2/mime.types");
+        go_elf
+            .extend_from_slice(b"runtime/gopclntab invalid URI for request/etc/apache2/mime.types");
         fs::write(temp_dir.join("wsbroker"), go_elf).unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
         let _ = fs::remove_file(temp_dir.join("wsbroker"));

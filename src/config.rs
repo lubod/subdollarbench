@@ -1353,13 +1353,8 @@ mod tests {
             _ => panic!("Expected Status command"),
         }
         // The explicit flag also wins while the env var is set.
-        let cli = Cli::try_parse_from([
-            "subdollarbench",
-            "status",
-            "--server",
-            "http://flag:5000",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["subdollarbench", "status", "--server", "http://flag:5000"])
+            .unwrap();
         match cli.command {
             Commands::Status { server, .. } => {
                 assert_eq!(server, Some("http://flag:5000".to_string()));
@@ -1376,7 +1371,8 @@ mod tests {
             Commands::Queue { json, .. } => assert!(json),
             _ => panic!("Expected Queue command"),
         }
-        let cli = Cli::try_parse_from(["subdollarbench", "ps", "--model", "muse", "--limit", "5"]).unwrap();
+        let cli = Cli::try_parse_from(["subdollarbench", "ps", "--model", "muse", "--limit", "5"])
+            .unwrap();
         match cli.command {
             Commands::Ps { model, limit, .. } => {
                 assert_eq!(model, Some("muse".to_string()));
@@ -1385,7 +1381,14 @@ mod tests {
             _ => panic!("Expected Ps command"),
         }
         let cli = Cli::try_parse_from([
-            "subdollarbench", "enqueue", "--model", "m", "--task", "redis", "--effort", "max",
+            "subdollarbench",
+            "enqueue",
+            "--model",
+            "m",
+            "--task",
+            "redis",
+            "--effort",
+            "max",
         ])
         .unwrap();
         match cli.command {
@@ -1395,7 +1398,9 @@ mod tests {
             }
             _ => panic!("Expected Enqueue command"),
         }
-        let cli = Cli::try_parse_from(["subdollarbench", "queue-extend", "wal_m_1", "--trials", "6"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["subdollarbench", "queue-extend", "wal_m_1", "--trials", "6"])
+                .unwrap();
         match cli.command {
             Commands::QueueExtend { parent, trials, .. } => {
                 assert_eq!(parent, "wal_m_1");
@@ -1408,20 +1413,40 @@ mod tests {
             Commands::Dequeue { id, .. } => assert_eq!(id, "q4"),
             _ => panic!("Expected Dequeue command"),
         }
-        for name in ["stop", "queue-clear", "env", "omp", "portal-rebuild", "models"] {
+        for name in [
+            "stop",
+            "queue-clear",
+            "env",
+            "omp",
+            "portal-rebuild",
+            "models",
+        ] {
             let cli = Cli::try_parse_from(["subdollarbench", name]).unwrap();
             match cli.command {
-                Commands::Stop { .. } | Commands::QueueClear { .. } | Commands::Env { .. }
-                | Commands::Omp { .. } | Commands::PortalRebuild { .. } | Commands::Models { .. } => {}
+                Commands::Stop { .. }
+                | Commands::QueueClear { .. }
+                | Commands::Env { .. }
+                | Commands::Omp { .. }
+                | Commands::PortalRebuild { .. }
+                | Commands::Models { .. } => {}
                 _ => panic!("Expected {name} command"),
             }
         }
-        let cli = Cli::try_parse_from(["subdollarbench", "run", "--model", "m", "--queue"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["subdollarbench", "run", "--model", "m", "--queue"]).unwrap();
         match cli.command {
             Commands::Run { queue, .. } => assert!(queue),
             _ => panic!("Expected Run command"),
         }
-        let cli = Cli::try_parse_from(["subdollarbench", "runs", "--model", "glm", "--status", "completed"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "runs",
+            "--model",
+            "glm",
+            "--status",
+            "completed",
+        ])
+        .unwrap();
         match cli.command {
             Commands::Runs { model, status, .. } => {
                 assert_eq!(model, Some("glm".to_string()));
@@ -1429,7 +1454,15 @@ mod tests {
             }
             _ => panic!("Expected Runs command"),
         }
-        let cli = Cli::try_parse_from(["subdollarbench", "models", "--family", "glm", "--sort", "newest"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "models",
+            "--family",
+            "glm",
+            "--sort",
+            "newest",
+        ])
+        .unwrap();
         match cli.command {
             Commands::Models { family, sort, .. } => {
                 assert_eq!(family, Some("glm".to_string()));

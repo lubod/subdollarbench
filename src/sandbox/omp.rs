@@ -126,7 +126,10 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             .or_else(|| v.pointer("/error/status"))
             .or_else(|| v.get("statusCode"))
             .or_else(|| v.get("code"))
-            .and_then(|c| c.as_u64().or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok())));
+            .and_then(|c| {
+                c.as_u64()
+                    .or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok()))
+            });
         if let Some(c) = code {
             if c == 402 {
                 return Some("provider billing exhausted (HTTP 402)".to_string());
@@ -139,14 +142,22 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             }
         }
         // Bare error slugs: {"error":"rate_limit_exceeded"} style.
-        if v.get("error").and_then(|e| e.as_str()).map(|e| {
-            let l = e.to_lowercase();
-            l.contains("rate_limit")
-                || l.contains("rate limit")
-                || l.contains("payment_required")
-                || l.contains("insufficient_credit")
-        }).unwrap_or(false) {
-            let l = v.get("error").and_then(|e| e.as_str()).unwrap().to_lowercase();
+        if v.get("error")
+            .and_then(|e| e.as_str())
+            .map(|e| {
+                let l = e.to_lowercase();
+                l.contains("rate_limit")
+                    || l.contains("rate limit")
+                    || l.contains("payment_required")
+                    || l.contains("insufficient_credit")
+            })
+            .unwrap_or(false)
+        {
+            let l = v
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap()
+                .to_lowercase();
             if l.contains("rate_limit") || l.contains("rate limit") {
                 return Some("provider rate-limited (HTTP 429)".to_string());
             }
@@ -878,7 +889,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 .unwrap_or_default();
             let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
             return Err(anyhow::Error::new(OmpBillingError {
-                reason: "provider billing/auth/throttle tripped mid-session (see [BILLING] log)".to_string(),
+                reason: "provider billing/auth/throttle tripped mid-session (see [BILLING] log)"
+                    .to_string(),
                 partial_stats: stats,
             }));
         }
@@ -1029,7 +1041,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                     if line_buf.ends_with('\n') {
                         // Billing tripwire: provider 402/401/429 must pause the
                         // wave, never score a 0% model failure.
-                        if let Some(reason) = crate::sandbox::omp::classify_billing_error(&line_buf) {
+                        if let Some(reason) = crate::sandbox::omp::classify_billing_error(&line_buf)
+                        {
                             ctx.billing_tripped.store(true, Ordering::SeqCst);
                             let _ = ctx.tx.send(format!("[BILLING] {reason}; pausing queue."));
                         }
@@ -1056,7 +1069,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                             // `usage.cost.total` is absent, estimate from token counts x
                             // per-model rates so max_budget_usd still trips mid-session.
                             let mut cost_updated = false;
-                            let usage_node = val.pointer("/message/usage").or_else(|| val.get("usage"));
+                            let usage_node =
+                                val.pointer("/message/usage").or_else(|| val.get("usage"));
                             let delta_cost: Option<f64> = val
                                 .pointer("/message/usage/cost/total")
                                 .and_then(|c| c.as_f64())
@@ -2498,8 +2512,14 @@ mod billing_tripwire_tests {
         assert!(classify_billing_error("credit exhausted, top up").is_some());
         assert!(classify_billing_error("too many requests, slow down").is_some());
         // JSON error envelopes (session-jsonl shape).
-        assert!(classify_billing_error("{\"error\":{\"code\":402,\"message\":\"payment required\"}}").is_some());
-        assert!(classify_billing_error("{\"error\":{\"code\":401,\"message\":\"unauthorized\"}}").is_some());
+        assert!(classify_billing_error(
+            "{\"error\":{\"code\":402,\"message\":\"payment required\"}}"
+        )
+        .is_some());
+        assert!(
+            classify_billing_error("{\"error\":{\"code\":401,\"message\":\"unauthorized\"}}")
+                .is_some()
+        );
         assert!(classify_billing_error("{\"error\":\"rate_limit_exceeded\"}").is_some());
     }
 
@@ -2511,10 +2531,15 @@ mod billing_tripwire_tests {
         // Bare digit tokens in free text never match: toolCallIds, line
         // numbers, token counts (the wave-v2 false-positive class).
         assert!(classify_billing_error("port 14029 in use").is_none());
-        assert!(classify_billing_error("call_01a06b63cd207e008dc36f8fb57da56b|fc_tmp_wvrvxb058tr").is_none());
+        assert!(
+            classify_billing_error("call_01a06b63cd207e008dc36f8fb57da56b|fc_tmp_wvrvxb058tr")
+                .is_none()
+        );
         assert!(classify_billing_error("401: if err != nil {").is_none());
         assert!(classify_billing_error("{\"usage\":{\"input\":5280,\"output\":429}}").is_none());
-        assert!(classify_billing_error("[SUBRUN ERROR] Subrun 1/3 failed: OMP agent exited").is_none());
+        assert!(
+            classify_billing_error("[SUBRUN ERROR] Subrun 1/3 failed: OMP agent exited").is_none()
+        );
         // Bare "Provider returned 429" without status-line/phrase shape.
         assert!(classify_billing_error("Provider returned 429").is_none());
     }

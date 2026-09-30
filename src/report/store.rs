@@ -1,8 +1,8 @@
 use anyhow::Result;
 use parking_lot::Mutex;
-use tracing::warn;
 use rusqlite::{params, Connection};
 use std::path::Path;
+use tracing::warn;
 
 use super::archive::RunManifest;
 use super::leaderboard::BenchmarkRunResult;
@@ -158,7 +158,10 @@ impl Store {
                 doc,
             ],
         )?;
-        tx.execute("DELETE FROM trials WHERE parent_id = ?1", params![result.id])?;
+        tx.execute(
+            "DELETE FROM trials WHERE parent_id = ?1",
+            params![result.id],
+        )?;
         for (i, sub) in result.subruns.iter().enumerate() {
             let sub_doc = serde_json::to_string(sub)?;
             tx.execute(
@@ -206,8 +209,7 @@ impl Store {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
-        rows
-            .filter_map(|row| row.ok())
+        rows.filter_map(|row| row.ok())
             .filter_map(|(id, doc)| match serde_json::from_str(&doc) {
                 Ok(r) => Some(r),
                 Err(e) => {
@@ -243,9 +245,11 @@ impl Store {
     pub fn junk_parent_count(&self) -> usize {
         let conn = self.conn.lock();
         let test_rows: i64 = conn
-            .query_row(r"SELECT COUNT(*) FROM parents WHERE id LIKE 'test\_%' ESCAPE '\'", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                r"SELECT COUNT(*) FROM parents WHERE id LIKE 'test\_%' ESCAPE '\'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap_or(0);
         // 0-trial rows: no subruns evidence. Doc scan (small table, rare op).
         let mut zero_trial = 0i64;
@@ -254,7 +258,10 @@ impl Store {
                 for row in rows.flatten() {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&row) {
                         let n = v.get("total_trials").and_then(|x| x.as_u64()).unwrap_or(
-                            v.get("subruns").and_then(|x| x.as_array()).map(|a| a.len() as u64).unwrap_or(0),
+                            v.get("subruns")
+                                .and_then(|x| x.as_array())
+                                .map(|a| a.len() as u64)
+                                .unwrap_or(0),
                         );
                         if n == 0 {
                             zero_trial += 1;
@@ -284,8 +291,10 @@ impl Store {
     /// True when a parent row with this id exists (migrate delta check).
     pub fn parent_exists(&self, id: &str) -> bool {
         let conn = self.conn.lock();
-        conn.query_row("SELECT 1 FROM parents WHERE id = ?1", params![id], |_| Ok(()))
-            .is_ok()
+        conn.query_row("SELECT 1 FROM parents WHERE id = ?1", params![id], |_| {
+            Ok(())
+        })
+        .is_ok()
     }
 
     /// Mirror a freshly enqueued item; dispatch-time fields start NULL.
@@ -339,8 +348,7 @@ impl Store {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
-        rows
-            .filter_map(|row| row.ok())
+        rows.filter_map(|row| row.ok())
             .filter_map(|doc| serde_json::from_str(&doc).ok())
             .collect()
     }
@@ -397,7 +405,8 @@ impl Store {
     /// `completed_at`; bad rows are skipped. Empty until `migrate` runs.
     pub fn load_run_manifests(&self) -> Vec<RunManifest> {
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare("SELECT run_id, doc FROM runs ORDER BY completed_at DESC") {
+        let mut stmt = match conn.prepare("SELECT run_id, doc FROM runs ORDER BY completed_at DESC")
+        {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
         };
@@ -407,8 +416,7 @@ impl Store {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
-        rows
-            .filter_map(|row| row.ok())
+        rows.filter_map(|row| row.ok())
             .filter_map(|(id, doc)| match serde_json::from_str(&doc) {
                 Ok(r) => Some(r),
                 Err(e) => {
@@ -434,10 +442,8 @@ impl Store {
 
     pub fn run_manifest_count(&self) -> usize {
         let conn = self.conn.lock();
-        conn.query_row("SELECT COUNT(*) FROM runs", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as usize
+        conn.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0) as usize
     }
 
     /// Delete one indexed run manifest row; missing rows are a no-op.
@@ -554,11 +560,7 @@ mod tests {
         let mut parent = sample_result("parent-1");
         let mut failing = sample_result("trial-2");
         failing.pass_rate = 50.0;
-        parent.subruns = vec![
-            sample_result("trial-1"),
-            failing,
-            sample_result("trial-3"),
-        ];
+        parent.subruns = vec![sample_result("trial-1"), failing, sample_result("trial-3")];
         parent.total_trials = Some(3);
         parent.avg_pass_rate = Some(100.0);
         parent.pass_at_1 = Some(100.0);
@@ -614,8 +616,12 @@ mod tests {
         let store = Store::open(&db).expect("open");
         assert!(store.load_queue(false).is_empty());
 
-        store.enqueue_run(&sample_queue_item("q1")).expect("enqueue q1");
-        store.enqueue_run(&sample_queue_item("q2")).expect("enqueue q2");
+        store
+            .enqueue_run(&sample_queue_item("q1"))
+            .expect("enqueue q1");
+        store
+            .enqueue_run(&sample_queue_item("q2"))
+            .expect("enqueue q2");
         let pending = store.load_queue(false);
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].id, "q1");
@@ -660,7 +666,9 @@ mod tests {
         store.delete_run_manifest("run-1").expect("delete run-1");
         assert_eq!(store.run_manifest_count(), 0);
         assert!(store.get_run_manifest("run-1").is_none());
-        store.delete_run_manifest("no-such-run").expect("delete missing ok");
+        store
+            .delete_run_manifest("no-such-run")
+            .expect("delete missing ok");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -669,12 +677,19 @@ mod tests {
         let db = std::env::temp_dir().join(format!("store-corrupt-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let store = Store::open(&db).expect("open");
-        store.upsert_parent(&sample_result("good-1")).expect("upsert");
-        store.upsert_parent(&sample_result("good-2")).expect("upsert");
+        store
+            .upsert_parent(&sample_result("good-1"))
+            .expect("upsert");
+        store
+            .upsert_parent(&sample_result("good-2"))
+            .expect("upsert");
         store
             .conn
             .lock()
-            .execute("INSERT INTO parents (id, doc) VALUES ('bad-1', '{not json')", [])
+            .execute(
+                "INSERT INTO parents (id, doc) VALUES ('bad-1', '{not json')",
+                [],
+            )
             .expect("inject bad parent");
         assert!(store.parent_exists("good-1"));
         assert!(!store.parent_exists("nope"));
@@ -689,7 +704,10 @@ mod tests {
         store
             .conn
             .lock()
-            .execute("INSERT INTO runs (run_id, doc) VALUES ('run-bad', 'zzz')", [])
+            .execute(
+                "INSERT INTO runs (run_id, doc) VALUES ('run-bad', 'zzz')",
+                [],
+            )
             .expect("inject bad run");
         let runs = store.load_run_manifests();
         assert_eq!(runs.len(), 1);
@@ -704,7 +722,9 @@ mod tests {
         let db = std::env::temp_dir().join(format!("store-delta-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let store = Store::open(&db).expect("open");
-        store.upsert_parent(&sample_result("pre-existing")).expect("upsert");
+        store
+            .upsert_parent(&sample_result("pre-existing"))
+            .expect("upsert");
         let before = store.parent_count();
 
         let file_runs = vec![sample_result("pre-existing"), sample_result("new-1")];

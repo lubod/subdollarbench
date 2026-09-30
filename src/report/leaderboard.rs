@@ -450,9 +450,7 @@ impl BenchmarkRunResult {
                 _ => continue,
             };
             let key = (r.task.clone(), r.rules_version.clone().unwrap_or_default());
-            best.entry(key)
-                .and_modify(|b| *b = b.max(tp))
-                .or_insert(tp);
+            best.entry(key).and_modify(|b| *b = b.max(tp)).or_insert(tp);
         }
         for r in results.iter_mut() {
             let tp = match (r.throughput_req_sec, r.reference_throughput_req_sec) {
@@ -613,8 +611,7 @@ impl LeaderboardManager {
             // touching the export copy. A DB failure aborts here — the
             // export copy and trial cleanup below are skipped — so the
             // merged parent can never exist on FS without its DB row.
-            if let Err(e) =
-                Self::save_result(results_dir.to_str().unwrap_or("./results"), &merged)
+            if let Err(e) = Self::save_result(results_dir.to_str().unwrap_or("./results"), &merged)
             {
                 eprintln!("[LEADERBOARD] consolidate {parent_run_id}: DB-first save failed: {e:#}");
                 return None;
@@ -852,10 +849,16 @@ impl LeaderboardManager {
         if Self::use_db(results_dir) {
             let db_path = Self::db_path();
             let store = crate::report::Store::open(&db_path).map_err(|e| {
-                anyhow::anyhow!("DB upsert {} failed; export copy not written: {e:#}", result.id)
+                anyhow::anyhow!(
+                    "DB upsert {} failed; export copy not written: {e:#}",
+                    result.id
+                )
             })?;
             store.upsert_parent(result).map_err(|e| {
-                anyhow::anyhow!("DB upsert {} failed; export copy not written: {e:#}", result.id)
+                anyhow::anyhow!(
+                    "DB upsert {} failed; export copy not written: {e:#}",
+                    result.id
+                )
             })?;
         }
 
@@ -978,8 +981,7 @@ impl LeaderboardManager {
         }
         for res in &mut list {
             if res.total_tokens == 0 {
-                res.total_tokens =
-                    res.prompt_tokens + res.cached_tokens + res.completion_tokens;
+                res.total_tokens = res.prompt_tokens + res.cached_tokens + res.completion_tokens;
             }
         }
 
@@ -2156,7 +2158,9 @@ mod tests {
         assert_eq!(rows[1].frontier_fraction, Some(0.5));
         assert_eq!(rows[2].frontier_fraction, None);
         // Loose trial rows (no subruns) never join the denominator set.
-        assert!(rows.iter().all(|r| !r.id.contains("_trial") || r.frontier_fraction.is_none()));
+        assert!(rows
+            .iter()
+            .all(|r| !r.id.contains("_trial") || r.frontier_fraction.is_none()));
     }
 
     #[test]
@@ -2209,9 +2213,15 @@ mod tests {
         let one = BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None).unwrap();
         assert!(one.pass_at_1_lo.unwrap() > 0.0);
         let (olo, ohi) = (one.pass_at_1_lo.unwrap(), one.pass_at_1_hi.unwrap());
-        assert!((olo - lo1).abs() < 1e-9, "merged 1/1 lo {olo} != wilson {lo1}");
+        assert!(
+            (olo - lo1).abs() < 1e-9,
+            "merged 1/1 lo {olo} != wilson {lo1}"
+        );
         assert!((ohi - hi1).abs() < 1e-9);
-        assert!(olo < lo9, "single-trial lo {olo} should rank below 9/9 lo {lo9}");
+        assert!(
+            olo < lo9,
+            "single-trial lo {olo} should rank below 9/9 lo {lo9}"
+        );
         // A lone failure pins lo at 0 with a wide upper bound.
         let zero = BenchmarkRunResult::merge_subruns("zero", vec![mk("z", 0.0)], None).unwrap();
         assert!((zero.pass_at_1_lo.unwrap() - 0.0).abs() < 1e-9);
@@ -2226,8 +2236,7 @@ mod tests {
         assert!(LeaderboardManager::use_db(canon_str));
         // Without an override, temp dirs must stay on the JSON exports.
         if std::env::var("SDB_BENCH_DB").is_err() {
-            let temp =
-                std::env::temp_dir().join(format!("test_gate_{}", std::process::id()));
+            let temp = std::env::temp_dir().join(format!("test_gate_{}", std::process::id()));
             assert!(!LeaderboardManager::is_canonical_results_dir(
                 temp.to_str().unwrap()
             ));

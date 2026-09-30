@@ -25,12 +25,12 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
     ]
 }
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
+use crate::verifier::binproto::BinprotoVerifier;
 use crate::verifier::compliance::ComplianceChecker;
 use crate::verifier::dns::DnsVerifier;
 use crate::verifier::http::HttpVerifier;
 use crate::verifier::pdf::PdfVerifier;
 use crate::verifier::proxy::ProxyVerifier;
-use crate::verifier::binproto::BinprotoVerifier;
 use crate::verifier::pubsub::PubsubVerifier;
 use crate::verifier::redis::RedisVerifier;
 use crate::verifier::wal::WalVerifier;
@@ -100,7 +100,11 @@ pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> S
         .lines()
         .map(|line| {
             let low = line.to_lowercase();
-            if low.contains("ref-redis") || low.contains("ref-http") || low.contains("ref-dns") || low.contains("upstream") {
+            if low.contains("ref-redis")
+                || low.contains("ref-http")
+                || low.contains("ref-dns")
+                || low.contains("upstream")
+            {
                 return line.to_string();
             }
             word_pat.replace_all(line, off.as_str()).to_string()
@@ -166,17 +170,31 @@ async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
     let mut acks = 0usize;
     for i in 0..2000usize {
         if std::time::Instant::now() >= deadline {
-            tracing::warn!("WAL probe hit 60s overall deadline; keeping {} partial acks", acks);
+            tracing::warn!(
+                "WAL probe hit 60s overall deadline; keeping {} partial acks",
+                acks
+            );
             break;
         }
-        if let Err(e) = wh.write_all(format!("PUB recovery_probe msg-{}\n", i).as_bytes()).await {
-            tracing::warn!("WAL probe write failed; keeping {} partial acks: {:#}", acks, e);
+        if let Err(e) = wh
+            .write_all(format!("PUB recovery_probe msg-{}\n", i).as_bytes())
+            .await
+        {
+            tracing::warn!(
+                "WAL probe write failed; keeping {} partial acks: {:#}",
+                acks,
+                e
+            );
             break;
         }
         // Flush per write so a buffered but unsent prefix is never mistaken
         // for candidate side fsync loss after SIGKILL.
         if let Err(e) = wh.flush().await {
-            tracing::warn!("WAL probe flush failed; keeping {} partial acks: {:#}", acks, e);
+            tracing::warn!(
+                "WAL probe flush failed; keeping {} partial acks: {:#}",
+                acks,
+                e
+            );
             break;
         }
         let per_read = deadline
@@ -191,7 +209,11 @@ async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
             Ok(Ok(_)) if line.starts_with("+OK") => acks += 1,
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::warn!("WAL probe read failed; keeping {} partial acks: {:#}", acks, e);
+                tracing::warn!(
+                    "WAL probe read failed; keeping {} partial acks: {:#}",
+                    acks,
+                    e
+                );
                 break;
             }
             Err(_) => {
@@ -298,7 +320,9 @@ impl BenchmarkPipeline {
         logger.log("[SETUP] Starting official reference server in Docker...");
         match config.task {
             TaskType::Redis => {
-                if let Err(e) = sandbox.start_reference_redis(crate::web::server::worker_port(6380, config.worker)) {
+                if let Err(e) = sandbox
+                    .start_reference_redis(crate::web::server::worker_port(6380, config.worker))
+                {
                     logger.log(&format!(
                         "[SETUP] Warning: reference Redis unavailable: {}",
                         e
@@ -306,7 +330,9 @@ impl BenchmarkPipeline {
                 }
             }
             TaskType::Http => {
-                if let Err(e) = sandbox.start_reference_http(crate::web::server::worker_port(8081, config.worker)) {
+                if let Err(e) = sandbox
+                    .start_reference_http(crate::web::server::worker_port(8081, config.worker))
+                {
                     logger.log(&format!(
                         "[SETUP] Warning: reference HTTP unavailable: {}",
                         e
@@ -314,7 +340,9 @@ impl BenchmarkPipeline {
                 }
             }
             TaskType::Dns => {
-                if let Err(e) = sandbox.start_reference_dns(crate::web::server::worker_port(5354, config.worker)) {
+                if let Err(e) = sandbox
+                    .start_reference_dns(crate::web::server::worker_port(5354, config.worker))
+                {
                     logger.log(&format!(
                         "[SETUP] Warning: reference DNS unavailable: {}",
                         e
@@ -326,13 +354,15 @@ impl BenchmarkPipeline {
                     "[SETUP] PDF task uses verifier-generated fixtures; no reference container.",
                 );
             }
-            TaskType::Proxy => match sandbox.start_upstream_pool(&worker_upstream_ports(config.worker)) {
-                Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
-                Err(e) => logger.log(&format!(
-                    "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
-                    e
-                )),
-            },
+            TaskType::Proxy => {
+                match sandbox.start_upstream_pool(&worker_upstream_ports(config.worker)) {
+                    Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
+                    Err(e) => logger.log(&format!(
+                        "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
+                        e
+                    )),
+                }
+            }
             TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
                 logger.log("[SETUP] No reference container for this task (verifier-timed).");
             }
@@ -815,7 +845,10 @@ impl BenchmarkPipeline {
                         .map(|i| {
                             (
                                 sandbox.upstream_name(i),
-                                crate::web::server::worker_port(PROXY_UPSTREAM_PORTS[(i - 1) as usize], config.worker),
+                                crate::web::server::worker_port(
+                                    PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                                    config.worker,
+                                ),
                             )
                         })
                         .collect();
@@ -922,7 +955,9 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(crate::web::server::worker_port(6380, config.worker)) {
+                            if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(
+                                crate::web::server::worker_port(6380, config.worker),
+                            ) {
                                 logger.log(&format!(
                                     "  Official Reference Redis: {:.0} req/sec",
                                     ref_tp
@@ -941,7 +976,9 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(crate::web::server::worker_port(8081, config.worker)) {
+                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(
+                                crate::web::server::worker_port(8081, config.worker),
+                            ) {
                                 logger.log(&format!(
                                     "  Official Reference Nginx: {:.0} req/sec",
                                     ref_tp
@@ -976,7 +1013,9 @@ impl BenchmarkPipeline {
                             // Same nginx denominator as http: a proxy cannot
                             // beat direct. Live per-trial when no batch ref.
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(crate::web::server::worker_port(8081, config.worker)) {
+                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(
+                                crate::web::server::worker_port(8081, config.worker),
+                            ) {
                                 logger.log(&format!(
                                     "  Official Reference Nginx: {:.0} req/sec",
                                     ref_tp
@@ -1252,7 +1291,9 @@ impl BenchmarkPipeline {
             // Publish hygiene: test/CI probe runs never reach the shared store
             // (mirrors the save_result `test_` guard, which covers parents + JSON).
             if !manifest.run_id.starts_with("test_") {
-                if let Ok(store) = crate::report::Store::open(&crate::report::Store::resolve_db_path()) {
+                if let Ok(store) =
+                    crate::report::Store::open(&crate::report::Store::resolve_db_path())
+                {
                     let _ = store.upsert_run_manifest(&manifest);
                 }
             }
@@ -1485,7 +1526,9 @@ mod tests {
             }
         });
         // The mock closes after 3 acks; the probe must return 3, not an error.
-        let n = publish_wal_probe(port).await.expect("probe keeps partial acks on EOF");
+        let n = publish_wal_probe(port)
+            .await
+            .expect("probe keeps partial acks on EOF");
         assert_eq!(n, 3);
     }
 }
