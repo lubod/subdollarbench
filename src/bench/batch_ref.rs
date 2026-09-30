@@ -31,14 +31,81 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
         // DNS batch ref: pinned CoreDNS + forwarding Corefile (same oracle
         // as trial refs); offset from the per-trial ref port 5354.
         TaskType::Dns => Some(5359),
-        // PDF batch ref: canonical extractor (REF_PDF_IMAGE). 8289 keeps
-        // worker_port(+100) clear: w0 8289 / w1 8389 collide with no
-        // candidate (xx90-xx92 bands), upstream (8101-8103+100w), or other
-        // batch ports (6389/8089/5359 +100w).
-        TaskType::Pdf => Some(8289),
+        // PDF batch ref: canonical extractor (REF_PDF_IMAGE). 8409, not 8289:
+        // every other batch base ends in 89, so an 89-based port collides with
+        // `8089 + 100*w` at w=2 — i.e. pdf@w0 and http/proxy@w2 both bind
+        // 8289, which the default 4-worker grid reaches. 8409 differs from
+        // 6389/8089/5359 by a non-multiple of 100, so no cross-worker overlap
+        // is possible. `batch_ports_are_disjoint` below proves the whole map.
+        TaskType::Pdf => Some(8409),
         TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
     }
 }
+
+/// Every port that can be bound concurrently, for workers `0..WORKER_SLOTS`,
+/// as `(role, worker, port)`. Two *distinct* roles on *different* workers
+/// landing on the same number means one container steals another's bind, and
+/// the loser silently changes scoring class (batch ref -> live per-trial ref)
+/// or aborts the cell.
+///
+/// Keyed on the port *base*, not the task: `http` and `proxy` deliberately
+/// share batch base 8089, and since one cell runs per worker slot they can
+/// never be live on the same worker, so they are one role, not two.
+pub fn reserved_ports() -> Vec<(String, u8, u16)> {
+    use crate::web::server::worker_port;
+    let mut bases: Vec<(String, String, u16)> = Vec::new();
+    for task in [
+        TaskType::Redis,
+        TaskType::Http,
+        TaskType::Dns,
+        TaskType::Pdf,
+        TaskType::Wal,
+        TaskType::Proxy,
+        TaskType::Pubsub,
+        TaskType::Binproto,
+    ] {
+        for (role, base) in [
+            ("candidate", Some(task.default_port())),
+            ("batch", batch_port(&task)),
+        ] {
+            if let Some(b) = base {
+                let name = format!("{task}/{role}");
+                match bases.iter_mut().find(|(_, _, existing)| *existing == b) {
+                    Some((owner, owner_role, _)) => {
+                        // Sharing a base is only legitimate within one role:
+                        // http/batch and proxy/batch both use 8089 and can never
+                        // be live on the same worker. A candidate/batch overlap
+                        // would be a real collision.
+                        assert_eq!(
+                            owner_role, role,
+                            "base {b} shared by {owner} and {name} across different roles"
+                        );
+                    }
+                    None => bases.push((name, role.to_string(), b)),
+                }
+            }
+        }
+    }
+    // Per-trial reference containers are host-published next to their
+    // candidate, and the proxy task dials a three-port upstream pool.
+    for base in [6380u16, 8081, 5354] {
+        bases.push((format!("ref/{base}"), "ref".to_string(), base));
+    }
+    for up in 8101u16..=8103 {
+        bases.push((format!("upstream/{up}"), "upstream".to_string(), up));
+    }
+    let mut out = Vec::new();
+    for (name, _role, base) in bases {
+        for w in 0..WORKER_SLOTS {
+            out.push((name.clone(), w, worker_port(base, w)));
+        }
+    }
+    out
+}
+
+/// Upper bound on concurrently dispatching workers; `worker_count()` clamps
+/// to this. Port arithmetic is only proven safe across the whole range.
+pub const WORKER_SLOTS: u8 = 8;
 
 fn ref_image(task: &TaskType) -> &'static str {
     match task {
@@ -319,14 +386,14 @@ impl BatchRef {
                 None
             }
         };
+        // `post: None` means the reference could not be re-measured at all, so
+        // the bracket is unverified — that is drift, not a clean result. Same
+        // for a zero/NaN reading on either side. Single source of truth:
+        // `crate::bench::ref_drifted_with_tol`.
+        let tol = drift_threshold(&self.task);
         let drift = match post {
             Some(p) => {
-                let tol = drift_threshold(&self.task);
-                let d = if self.pre <= 0.0 || p <= 0.0 {
-                    false
-                } else {
-                    ((p - self.pre) / self.pre).abs() > tol
-                };
+                let d = crate::bench::ref_drifted_with_tol(self.pre, p, tol);
                 log(&format!(
                     "[BATCH-REF] Post-batch reference: {:.0} req/sec (pre {:.0}, drift {} >{:.0}%)",
                     p,
@@ -336,7 +403,13 @@ impl BatchRef {
                 ));
                 d
             }
-            None => false,
+            None => {
+                log(&format!(
+                    "[BATCH-REF] Post-batch re-measure unavailable; bracket UNVERIFIED (drift FLAGGED >{:.0}%)",
+                    tol * 100.0
+                ));
+                true
+            }
         };
         append_history(&self.task, self.pre, post, drift);
         self.sandbox.cleanup();
@@ -384,10 +457,60 @@ mod tests {
         assert_eq!(batch_port(&TaskType::Dns), Some(5359));
         // Offset from per-trial ref port 5354: no collision with trial churn.
         assert_ne!(batch_port(&TaskType::Dns), Some(5354));
-        assert_eq!(batch_port(&TaskType::Pdf), Some(8289));
+        assert_eq!(batch_port(&TaskType::Pdf), Some(8409));
+        // Regression: every batch base used to end in 89, so pdf@w0 (8289) and
+        // http/proxy@w2 (8089 + 200) bound the same port on the default 4-worker
+        // grid. Two bases can only ever collide if they are congruent mod 100
+        // *and* their difference / 100 fits inside the worker range — sharing a
+        // low-order pair alone is harmless if the gap is wider than the fleet.
+        let bases = [
+            TaskType::Redis,
+            TaskType::Http,
+            TaskType::Dns,
+            TaskType::Pdf,
+        ]
+        .iter()
+        .filter_map(batch_port)
+        .collect::<Vec<_>>();
+        for (i, a) in bases.iter().enumerate() {
+            for b in &bases[i + 1..] {
+                let gap = a.abs_diff(*b);
+                assert!(
+                    gap % 100 != 0 || gap / 100 > WORKER_SLOTS as u16,
+                    "batch bases {a} and {b} overlap: a worker offset of {} lands on the \
+                     same port, within the {WORKER_SLOTS}-slot range",
+                    gap / 100
+                );
+            }
+        }
         assert_ne!(batch_port(&TaskType::Pdf), Some(8090));
         // Offset from per-trial ref ports: no collision with trial churn.
         assert_ne!(batch_port(&TaskType::Redis), Some(6380));
         assert_ne!(batch_port(&TaskType::Http), Some(8081));
+    }
+
+    /// The real guard: no two distinct roles may bind the same port at any
+    /// worker combination. This is exactly what the 8289 bug violated —
+    /// pdf/batch@w0 and http/batch@w2 both resolved to 8289.
+    #[test]
+    fn batch_ports_are_disjoint() {
+        let reserved = reserved_ports();
+        let mut seen: std::collections::HashMap<u16, (String, u8)> =
+            std::collections::HashMap::new();
+        for (role, worker, port) in &reserved {
+            if let Some((prev_role, prev_worker)) = seen.insert(*port, (role.clone(), *worker)) {
+                panic!(
+                    "port {port} is claimed by both {prev_role}@w{prev_worker} and \
+                     {role}@w{worker} within workers 0..{WORKER_SLOTS}"
+                );
+            }
+        }
+        // Sanity: the map is non-trivial, so a broken `reserved_ports` cannot
+        // make this test vacuously true.
+        assert!(
+            reserved.len() > 100,
+            "expected a full port map, got {}",
+            reserved.len()
+        );
     }
 }

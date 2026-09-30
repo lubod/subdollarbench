@@ -63,13 +63,21 @@ pub fn median(mut xs: Vec<f64>) -> f64 {
 /// Kills single-shot outliers (the 137k-type reading) at ~seconds of cost.
 pub const BENCH_REPS: usize = 3;
 
-/// True when `pre`/`post` batch references disagree beyond host jitter.
-/// A drifted batch is scored but flagged, never silently trusted.
-pub fn ref_drifted(pre: f64, post: f64) -> bool {
-    if pre <= 0.0 || post <= 0.0 {
-        return false;
+/// True when the `pre`/`post` batch reference brackets are not mutually
+/// trustworthy. A zero, negative, or non-finite reading on either side means
+/// the reference itself failed (container gone, port lost, probe returned
+/// nothing) — that is the *strongest* reason to distrust it, not a reason to
+/// report "no drift". `finish()` quarantines any batch this returns true for.
+pub fn ref_drifted_with_tol(pre: f64, post: f64, tol: f64) -> bool {
+    if !(pre.is_finite() && post.is_finite()) || pre <= 0.0 || post <= 0.0 {
+        return true;
     }
-    ((post - pre) / pre).abs() > 0.10
+    ((post - pre) / pre).abs() > tol
+}
+
+/// Default-tolerance wrapper around [`ref_drifted_with_tol`].
+pub fn ref_drifted(pre: f64, post: f64) -> bool {
+    ref_drifted_with_tol(pre, post, 0.10)
 }
 
 /// RAII guard for the host-global benchmark lock. Only one load-test window
@@ -297,8 +305,26 @@ mod tests {
     fn test_ref_drifted() {
         assert!(!ref_drifted(70000.0, 73500.0));
         assert!(ref_drifted(70000.0, 80000.0));
-        assert!(!ref_drifted(0.0, 70000.0));
-        assert!(!ref_drifted(70000.0, 0.0));
+        // A dead reference is drift, not a clean bill of health: the bracket
+        // cannot be trusted, so the batch must be quarantined.
+        assert!(ref_drifted(0.0, 70000.0));
+        assert!(ref_drifted(70000.0, 0.0));
+        assert!(ref_drifted(0.0, 0.0));
+        assert!(ref_drifted(f64::NAN, 70000.0));
+        assert!(ref_drifted(70000.0, f64::INFINITY));
+    }
+
+    #[test]
+    fn test_ref_drifted_tolerance_is_per_task() {
+        // DNS carries a wider band (its denominator is RTT-bound, not
+        // work-bound). 70000 -> 80000 is +14.3%: clean at 0.25, drift at 0.10.
+        assert!(!ref_drifted_with_tol(70000.0, 80000.0, 0.25));
+        assert!(ref_drifted_with_tol(70000.0, 80000.0, 0.10));
+        // +5% is inside the default band and must stay clean, or every wave
+        // gets quarantined on ordinary host jitter.
+        assert!(!ref_drifted_with_tol(70000.0, 73500.0, 0.10));
+        // The boundary is strict: exactly at tolerance is not drift.
+        assert!(!ref_drifted_with_tol(100.0, 110.0, 0.10));
     }
 
     #[test]

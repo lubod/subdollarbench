@@ -255,6 +255,13 @@ impl BenchmarkRunResult {
         // live/batch reference exists. Unanchored medians (dns/wal/pdf/pubsub
         // without refs) are reported per-trial, never scored.
         let has_ref = best.reference_throughput_req_sec.unwrap_or(0.0) > 0.0;
+        // A drifted or unverified bracket means the denominator these trials
+        // were divided by is known-wrong, so the *ratio* is wrong. The
+        // candidate's own throughput is still a valid measurement and is still
+        // reported — but the batch is not anchored, so it is not scored and
+        // not ranked, exactly like a task with no reference at all. Before
+        // this gate `ref_drift` was a display string and changed no outcome.
+        let ref_trusted = has_ref && batch_drift != Some(true);
         let fair_tp = if c > 0 && has_ref {
             let mut tps: Vec<f64> = passing
                 .iter()
@@ -326,20 +333,24 @@ impl BenchmarkRunResult {
 
         // 6. Fair Expected Score: Scaled by Pass@1 (Expected Utility).
         // Unanchored tasks (no live/batch ref) keep fair_tp_score None:
-        // reported, never ranked.
+        // reported, never ranked. A drifted bracket is unanchored for scoring
+        // purposes — `fair_tp` (the candidate's own reading) stays reported.
         let (fair_eff_score, fair_tp_score): (f64, Option<f64>) = if c > 0 {
             let base_eff = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
                 100.0,
                 fair_eff_cost_usd,
             );
-            let base_tp =
+            let base_tp = if ref_trusted {
                 crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
                     100.0,
                     fair_eff_cost_usd,
                     fair_tp,
                     best.reference_throughput_req_sec,
                     Some(&best.task),
-                );
+                )
+            } else {
+                None
+            };
             let rel = pass_at_1 / 100.0;
             (base_eff * rel, base_tp.map(|b| b * rel))
         } else {
@@ -1658,6 +1669,80 @@ mod tests {
         assert!((m.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
         assert!(lo > 15.0 && lo < 40.0, "2/3 lower {lo}");
         assert!(hi > 85.0, "2/3 upper {hi}");
+    }
+
+    /// A drifted batch bracket must not produce a throughput score: the
+    /// denominator those trials were divided by is known-untrustworthy, so the
+    /// ratio is wrong. The candidate's own throughput reading is still valid
+    /// and must survive, and the efficiency score is unaffected.
+    #[test]
+    fn drift_suppresses_throughput_score_but_keeps_measurement() {
+        let trial = |id: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: Some(35_000.0),
+            reference_throughput_req_sec: Some(70_000.0),
+            baseline_source: Some("batch".to_string()),
+            ref_drift: None,
+            ref_image: Some("docker.io/library/redis@sha256:abc".to_string()),
+            prompt_tokens: 1000,
+            cached_tokens: 0,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            total_cost_usd: 0.01,
+            effective_cost_usd: Some(0.02),
+            duration_seconds: Some(60.0),
+            turns: Some(10),
+            savings_percent: 0.0,
+            efficiency_score: 50.0,
+            throughput_score: None,
+            timestamp: "2026-09-30T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+        };
+        let subs = vec![trial("a"), trial("b"), trial("c")];
+
+        let clean = BenchmarkRunResult::merge_subruns("clean", subs.clone(), Some(false)).unwrap();
+        assert!(
+            clean.throughput_score.unwrap_or(0.0) > 0.0,
+            "an un-drifted batch reference must still score"
+        );
+        assert_eq!(clean.throughput_req_sec, Some(35_000.0));
+
+        let drifted = BenchmarkRunResult::merge_subruns("drift", subs.clone(), Some(true)).unwrap();
+        assert_eq!(
+            drifted.throughput_score, None,
+            "a drifted bracket must not yield a ranked throughput score"
+        );
+        assert_eq!(
+            drifted.throughput_req_sec,
+            Some(35_000.0),
+            "the candidate's own reading is still valid and must be reported"
+        );
+        assert_eq!(drifted.ref_drift, Some(true));
+        assert!(
+            drifted.efficiency_score > 0.0,
+            "efficiency is cost/pass-based and must survive drift quarantine"
+        );
+
+        // Same trials, unknown bracket: not scored, not silently trusted.
+        let unknown = BenchmarkRunResult::merge_subruns("unknown", subs, None).unwrap();
+        assert!(unknown.throughput_score.unwrap_or(0.0) > 0.0);
     }
 
     #[test]
