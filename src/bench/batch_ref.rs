@@ -31,9 +31,11 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
         // DNS batch ref: pinned CoreDNS + forwarding Corefile (same oracle
         // as trial refs); offset from the per-trial ref port 5354.
         TaskType::Dns => Some(5359),
-        // PDF batch ref: canonical extractor (REF_PDF_IMAGE); offset from
-        // the per-trial ref port once trial refs exist (8090 today).
-        TaskType::Pdf => Some(8099),
+        // PDF batch ref: canonical extractor (REF_PDF_IMAGE). 8289 keeps
+        // worker_port(+100) clear: w0 8289 / w1 8389 collide with no
+        // candidate (xx90-xx92 bands), upstream (8101-8103+100w), or other
+        // batch ports (6389/8089/5359 +100w).
+        TaskType::Pdf => Some(8289),
         TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
     }
 }
@@ -366,7 +368,7 @@ mod tests {
         assert_eq!(batch_port(&TaskType::Dns), Some(5359));
         // Offset from per-trial ref port 5354: no collision with trial churn.
         assert_ne!(batch_port(&TaskType::Dns), Some(5354));
-        assert_eq!(batch_port(&TaskType::Pdf), Some(8099));
+        assert_eq!(batch_port(&TaskType::Pdf), Some(8289));
         assert_ne!(batch_port(&TaskType::Pdf), Some(8090));
         // Offset from per-trial ref ports: no collision with trial churn.
         assert_ne!(batch_port(&TaskType::Redis), Some(6380));

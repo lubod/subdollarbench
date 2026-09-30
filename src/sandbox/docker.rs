@@ -54,11 +54,20 @@ pub fn egress_allowed(host: &str) -> bool {
     EGRESS_ALLOWLIST.iter().any(|a| h == *a || h.ends_with(&format!(".{a}")))
 }
 pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
-/// PDF reference: canonical extractor (extensions/pdf_reference.py) built
-/// into a local image (`docker build -t pdf-ref:local extensions/` after
-/// copying server in; see extensions/pdf_reference.py header). Local tag
-/// until registry push; re-pin by digest at publish time.
-pub const REF_PDF_IMAGE: &str = "pdf-ref:local";
+/// PDF reference: canonical extractor (extensions/pdf_reference.py).
+/// Pinned by image-ID digest (content-addressed; no registry needed):
+/// rebuild with `docker build -t pdf-ref:local .` in a dir containing the
+/// Dockerfile + server.py, then `docker inspect pdf-ref:local --format {{.Id}}`.
+/// A rebuild that changes behavior yields a new ID -> new regime label by
+/// construction (regime_of keys on this string). Record the ID + source hash
+/// in wave-freezes.log at each rebuild (REF_INTRO_PDF_* lines).
+pub const REF_PDF_IMAGE: &str = "pdf-ref@sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
+/// Local tag that actually runs (bootstrap builds it if missing).
+/// Split because a local digest reference is unresolvable without a
+/// registry: the tag runs, the digest const labels (regime_of). A
+/// behavior-changing rebuild MUST update REF_PDF_IMAGE to the new image ID.
+/// Verified: identical source rebuilds yield the same ID twice.
+pub const REF_PDF_RUN_IMAGE: &str = "pdf-ref:local";
 /// Benchmark *client* images are pinned too: the client binary is half the
 /// measurement apparatus.
 pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
@@ -544,6 +553,31 @@ impl SandboxManager {
         Ok(())
     }
 
+    /// Build the PDF reference image from the in-repo canonical source.
+    /// Tag `pdf-ref:local` first (stable name for debugging), the digest
+    /// const governs what actually runs. Fails loudly on build errors.
+    fn build_pdf_reference_image() -> Result<()> {
+        let script = crate::config::get_repo_root().join("extensions/pdf_reference.py");
+        let dir = std::env::temp_dir().join("subdollar-pdfref-build");
+        let _ = fs::create_dir_all(&dir);
+        fs::copy(&script, dir.join("server.py"))?;
+        fs::write(
+            dir.join("Dockerfile"),
+            "FROM docker.io/library/python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS base\nWORKDIR /srv\nCOPY server.py /srv/server.py\nEXPOSE 8090\nCMD [\"python3\", \"/srv/server.py\"]\n",
+        )?;
+        let out = Command::new("docker")
+            .args(["build", "-t", "pdf-ref:local"])
+            .arg(&dir)
+            .output()?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "pdf reference image build failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(())
+    }
+
     fn coredns_corefile_path(instance_id: &str) -> PathBuf {
         std::env::temp_dir().join(format!("subdollar-coredns-{}.corefile", instance_id))
     }
@@ -561,29 +595,40 @@ impl SandboxManager {
             port, name, net
         );
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-        let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &name,
-                "--network",
-                &net,
-                "--network-alias",
-                "ref-pdf",
-                "--memory=512m",
-                "--cpus=1.0",
-                "-p",
-                &format!("127.0.0.1:{port}:8090"),
-                REF_PDF_IMAGE,
-            ])
-            .output()?;
+        let run_args = [
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            &name,
+            "--network",
+            &net,
+            "--network-alias",
+            "ref-pdf",
+            "--memory=512m",
+            "--cpus=1.0",
+            "-p",
+            &format!("127.0.0.1:{port}:8090"),
+            REF_PDF_RUN_IMAGE,
+        ];
+        let out = Command::new("docker").args(&run_args).output()?;
         if !out.status.success() {
-            return Err(anyhow!(
-                "pdf reference start failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            // Fresh-checkout bootstrap: missing local image -> build from
+            // the in-repo source (extensions/pdf_reference.py), retry once.
+            // A build failure fails LOUDLY (no silent unscored fallback).
+            if stderr.contains("No such image") || stderr.contains("not found") {
+                Self::build_pdf_reference_image()?;
+                let retry = Command::new("docker").args(&run_args).output()?;
+                if !retry.status.success() {
+                    return Err(anyhow!(
+                        "pdf reference start failed after rebuild: {}",
+                        String::from_utf8_lossy(&retry.stderr)
+                    ));
+                }
+                return Ok(());
+            }
+            return Err(anyhow!("pdf reference start failed: {}", stderr));
         }
         Ok(())
     }
