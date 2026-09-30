@@ -192,14 +192,27 @@ pub async fn update_sandbox_image(target_version: Option<&str>) -> Result<OmpVer
     Ok(status)
 }
 
+/// Ensure the pinned sandbox image is usable, then optionally track latest.
+///
+/// Two distinct concerns, deliberately not gated together:
+///
+/// - **Bootstrap** (always on): if the image is absent, build it. A fresh
+///   checkout has no image and cannot run anything without this.
+/// - **Auto-update** (OFF unless `SUBDOLLAR_AUTO_UPDATE_OMP` opts in): pulling
+///   npm `latest` on every run silently changes the agent between runs, so two
+///   runs a week apart are produced by different binaries while sharing one
+///   `rules_version` comparability key. That is a reproducibility hole, and
+///   `Dockerfile.sandbox`'s `ARG OMP_VERSION` pin is overridden by the rebuild,
+///   so the pin in the file was not actually holding.
+///
+/// Set `SUBDOLLAR_AUTO_UPDATE_OMP=true` to restore the old drift-on-every-run
+/// behaviour; the manifest records `omp_version` either way, so the drift is
+/// at least visible after the fact.
 pub async fn auto_update_if_needed() -> Result<()> {
     let auto_update_env = std::env::var("SUBDOLLAR_AUTO_UPDATE_OMP")
-        .unwrap_or_else(|_| "true".to_string())
+        .unwrap_or_else(|_| "false".to_string())
         .to_lowercase();
-
-    if auto_update_env == "false" || auto_update_env == "0" || auto_update_env == "off" {
-        return Ok(());
-    }
+    let auto_update = !matches!(auto_update_env.as_str(), "false" | "0" | "off" | "");
 
     let status = check_status(false).await;
 
@@ -207,6 +220,10 @@ pub async fn auto_update_if_needed() -> Result<()> {
         println!("[OMP Automation] subdollar-sandbox image not found. Building automatically...");
         update_sandbox_image(None).await?;
         println!("[OMP Automation] subdollar-sandbox built successfully.");
+        return Ok(());
+    }
+
+    if !auto_update {
         return Ok(());
     }
 

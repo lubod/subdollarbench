@@ -280,6 +280,21 @@ impl QueuedRun {
             QueueKind::Extend(_) => None,
         }
     }
+
+    /// Copy for serving over HTTP with the caller's API key removed.
+    ///
+    /// The in-memory entry keeps its key for dispatch; the listing must not
+    /// hand it back. `GET /api/run/queue` is unauthenticated like every other
+    /// route here, so serializing `QueuedRun` directly returned any key a
+    /// caller had POSTed, in plaintext, to whoever asked.
+    pub fn redacted(&self) -> QueuedRun {
+        let mut copy = self.clone();
+        match &mut copy.kind {
+            QueueKind::Run(r) => r.api_key = None,
+            QueueKind::Extend(e) => e.api_key = None,
+        }
+        copy
+    }
 }
 
 /// Last-resort in-memory Store when even the temp fallback cannot open
@@ -1257,8 +1272,15 @@ async fn get_run_log(AxumPath(run_id): AxumPath<String>) -> Response {
 async fn get_run_files(
     AxumPath(run_id): AxumPath<String>,
 ) -> Result<Json<Vec<FileInfo>>, Response> {
-    let r_dir = RunArchiver::resolve_runs_dir();
-    let ws_dir = r_dir.join(&run_id).join("workspace");
+    // Same guard the sibling run handlers use; this one was joining a raw
+    // `:id` straight onto the runs dir, so a percent-encoded `..%2F` walked out.
+    let clean = match clean_run_id(&run_id) {
+        Some(c) => c,
+        None => return Err((StatusCode::BAD_REQUEST, "invalid run id").into_response()),
+    };
+    let ws_dir = RunArchiver::resolve_runs_dir()
+        .join(clean)
+        .join("workspace");
     if ws_dir.exists() {
         Ok(Json(RunArchiver::scan_workspace_files(&ws_dir)))
     } else {
@@ -1359,17 +1381,27 @@ async fn stop_run(State(state): State<AppState>, Query(q): Query<StopQuery>) -> 
     // here, so the map never grows across waves.
     if !q.run.trim().is_empty() {
         let needle = q.run.trim().to_string();
-        // Find workers whose live run id or queue id matches (prefix ok).
+        // The worker cards send `run_id.slice(-14)`, so a suffix match has to
+        // keep working - but an unbounded substring match means an
+        // unauthenticated `POST /api/run/stop?run=e` ends-matches most live
+        // runs. Require a substantial fragment, then require the fragment to
+        // identify exactly one run: a 14-char suffix cannot collide in practice
+        // (ids end in a timestamp), whereas a short one matches many.
+        const MIN_STOP_FRAGMENT: usize = 8;
+        if needle.len() < MIN_STOP_FRAGMENT {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("run fragment must be at least {MIN_STOP_FRAGMENT} characters"),
+            )
+                .into_response();
+        }
+        let matches = |id: &str| id == needle || id.starts_with(&needle) || id.ends_with(&needle);
         let hits: Vec<(u8, String)> = state
             .worker_runs
             .read()
             .unwrap()
             .iter()
-            .filter(|(_, info)| {
-                info.run_id == needle
-                    || info.run_id.starts_with(&needle)
-                    || info.run_id.ends_with(&needle)
-            })
+            .filter(|(_, info)| matches(&info.run_id))
             .map(|(w, info)| (*w, info.run_id.clone()))
             .collect();
         let qhits: Vec<String> = state
@@ -1377,16 +1409,30 @@ async fn stop_run(State(state): State<AppState>, Query(q): Query<StopQuery>) -> 
             .lock()
             .unwrap()
             .iter()
-            .filter(|i| {
-                i.status == QueueStatus::Running
-                    && (i.id == needle || i.id.starts_with(&needle) || i.id.ends_with(&needle))
-            })
+            .filter(|i| i.status == QueueStatus::Running && matches(&i.id))
             .map(|i| i.id.clone())
             .collect();
         if hits.is_empty() && qhits.is_empty() {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 format!("no running cell matches '{needle}'"),
+            )
+                .into_response();
+        }
+        if hits.len() + qhits.len() > 1 {
+            let mut candidates: Vec<&str> = hits
+                .iter()
+                .map(|(_, id)| id.as_str())
+                .chain(qhits.iter().map(|s| s.as_str()))
+                .collect();
+            candidates.sort_unstable();
+            return (
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "'{needle}' matches {} running cells; pass a longer fragment: {:?}",
+                    candidates.len(),
+                    candidates
+                ),
             )
                 .into_response();
         }
@@ -2916,7 +2962,16 @@ async fn get_queue(State(state): State<AppState>) -> Response {
     if let Some(proxied) = proxy_read(&state, "/api/queue", "").await {
         return proxied;
     }
-    Json::<Vec<QueuedRun>>(state.queue.lock().unwrap().iter().cloned().collect()).into_response()
+    Json::<Vec<QueuedRun>>(
+        state
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.redacted())
+            .collect(),
+    )
+    .into_response()
 }
 
 /// Try to start the head of the queue. Returns true when a run was spawned
@@ -3818,6 +3873,147 @@ mod tests {
             push_console_line(&small, format!("line {i}"));
         }
         assert_eq!(small.read().unwrap().len(), MAX_CONSOLE_LINES);
+    }
+
+    /// `GET /api/run/queue` must not echo a caller's API key back. The route
+    /// is unauthenticated, so serializing `QueuedRun` directly handed any
+    /// POSTed key to whoever asked.
+    #[test]
+    fn test_queue_listing_redacts_api_key() {
+        let mut q = test_queue_item("q_secret");
+        match &mut q.kind {
+            QueueKind::Run(r) => r.api_key = Some("sk-or-v1-SUPERSECRET123".to_string()),
+            QueueKind::Extend(_) => panic!("fixture is a Run"),
+        }
+        let json = serde_json::to_string(&q.redacted()).unwrap();
+        assert!(
+            !json.contains("SUPERSECRET123"),
+            "queue listing leaked an API key: {json}"
+        );
+        // The key must still be on the in-memory entry, or dispatch loses it.
+        match &q.kind {
+            QueueKind::Run(r) => assert_eq!(r.api_key.as_deref(), Some("sk-or-v1-SUPERSECRET123")),
+            QueueKind::Extend(_) => unreachable!(),
+        }
+    }
+
+    /// Extend entries carry a key too, and go through the same redaction.
+    #[test]
+    fn test_queue_listing_redacts_extend_api_key() {
+        let q = QueuedRun {
+            id: "e1".to_string(),
+            enqueued_at: "2026-09-25T00:00:00Z".to_string(),
+            status: QueueStatus::Pending,
+            kind: QueueKind::Extend(ExtendRequest {
+                parent_run_id: "p1".to_string(),
+                trials: 1,
+                max_turns: None,
+                budget_usd: None,
+                timeout_min: None,
+                eval_only: None,
+                api_key: Some("sk-or-v1-EXTENDSECRET".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&q.redacted()).unwrap();
+        assert!(!json.contains("EXTENDSECRET"), "extend key leaked: {json}");
+    }
+
+    /// The stop endpoint is unauthenticated, so a short fragment must not be
+    /// able to end-match every live run, and a fragment that names more than
+    /// one run must be refused rather than killing all of them.
+    #[tokio::test]
+    async fn test_stop_rejects_short_and_ambiguous_fragments() {
+        fn active(run_id: &str) -> ActiveRunInfo {
+            ActiveRunInfo {
+                run_id: run_id.to_string(),
+                model: "m".to_string(),
+                task: "redis".to_string(),
+                effort: "high".to_string(),
+                started_at: "2026-09-30T01:01:01Z".to_string(),
+                turns: 0,
+                max_turns: 100,
+                cost_usd: 0.0,
+                tokens: 0,
+                duration_secs: None,
+                subrun: None,
+                total_subruns: None,
+                budget_usd: 0.1,
+                timeout_min: 1,
+                trials: 1,
+                eval_only: false,
+                extend_if_unstable: false,
+                max_trials: 7,
+                review_model: None,
+            }
+        }
+        let state = create_test_state();
+        // Both ids share `_openrouter_` (12 chars) so an ambiguous-but-long
+        // fragment exists, and differ in their 15-char timestamp tails.
+        for (w, run) in [
+            (0u8, "redis_openrouter_aaa_20260930_010101"),
+            (1u8, "redis_openrouter_bbb_20260930_020202"),
+        ] {
+            state.worker_runs.write().unwrap().insert(w, active(run));
+        }
+        let app = UiServer::build_app(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let stop = |needle: &'static str| {
+            let url = format!("http://127.0.0.1:{port}/api/run/stop?run={needle}");
+            let client = client.clone();
+            async move { client.post(url).send().await.unwrap() }
+        };
+
+        // Before anything: two live workers.
+        // stop_run refuses everything with 400 when nothing is running, so the
+        // fragment guards below are unreachable unless a run is in flight.
+        state
+            .is_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(state.worker_runs.read().unwrap().len(), 2);
+
+        // 1 char: the wildcard-kill primitive. Rejected, nothing touched.
+        assert_eq!(
+            stop("e").await.status(),
+            400,
+            "1-char fragment must be rejected"
+        );
+        assert_eq!(
+            state.worker_runs.read().unwrap().len(),
+            2,
+            "1-char stop killed a run"
+        );
+
+        // The predicate is equal / prefix / suffix, not substring, so the
+        // ambiguous case must be a shared *prefix* (16 chars) and the unique
+        // case a distinct *suffix* (15 chars).
+        let res = stop("redis_openrouter_").await;
+        assert_eq!(res.status(), 409, "an ambiguous prefix must be refused");
+        assert_eq!(
+            state.worker_runs.read().unwrap().len(),
+            2,
+            "an ambiguous fragment must not kill every matching run"
+        );
+
+        // 15 chars, unique: accepted, and stops exactly one.
+        let res = stop("20260930_020202").await;
+        assert_ne!(
+            res.status(),
+            409,
+            "a unique fragment must not be called ambiguous"
+        );
+        assert_ne!(
+            res.status(),
+            404,
+            "a unique fragment must resolve to its run"
+        );
+        assert_eq!(
+            state.worker_runs.read().unwrap().len(),
+            1,
+            "exactly one worker should have been stopped"
+        );
     }
 
     #[tokio::test]

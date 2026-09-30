@@ -1,0 +1,35 @@
+# The sandbox image is built with the repo root as context
+# (`docker build -f Dockerfile.sandbox <repo root>`), so without this the
+# build context carries the API key, the scored database, and every archived
+# run to the daemon - and any layer that copies them.
+
+# Secrets
+.env
+*.env
+.env.*
+!.env.example
+
+# Scored data and archives
+bench.db
+bench.db-shm
+bench.db-wal
+runs/
+results/
+portal/
+workspace/
+fullgrid.txt
+
+# Build output
+target/
+**/*.rs.bk
+
+# VCS and editor noise
+.git/
+.github/
+.gitignore
+.gitattributes
+*.swp
+.DS_Store
+
+# Logs
+*.log

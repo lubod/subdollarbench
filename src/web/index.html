@@ -2340,9 +2340,30 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <span style="color:var(--text-muted);">trial ${r.subrun ?? '-'}/${r.total_subruns ?? '-'}</span>
           <span style="font-family:monospace;">${r.turns ?? 0}/${r.max_turns ?? '?'} turns</span>
           <span style="font-family:monospace;">$${Number(r.cost_usd ?? 0).toFixed(3)}</span>
-          <button class="btn-secondary" style="padding:1px 8px;font-size:0.7rem;" onclick="stopWorker('${escapeHtml(short)}')" title="Stop only this cell">stop</button>
+          <button class="btn-secondary" style="padding:1px 8px;font-size:0.7rem;" data-stop-run="${escapeHtml(short)}" title="Stop only this cell">stop</button>
         </div>`;
       }).join('');
+      wireWorkerCardStops();
+    }
+
+    // Delegated, not inline. `onclick="stopWorker('${...}')"` puts a run id
+    // into a JavaScript source position, and `escapeHtml` cannot make that
+    // safe: the HTML parser decodes entities in an attribute value *before*
+    // the JS engine sees it, so `&#039;` turns back into a live quote and
+    // breaks out of the string literal. A data attribute is read through
+    // `dataset`, which decodes it back to the original value with no code
+    // interpretation at all. Wired on the container, so it survives the
+    // innerHTML rewrite above.
+    function wireWorkerCardStops() {
+      const box = document.getElementById('workerCards');
+      if (!box || box.dataset.stopWired === '1') return;
+      box.dataset.stopWired = '1';
+      box.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-stop-run]');
+        if (!btn) return;
+        ev.preventDefault();
+        stopWorker(btn.dataset.stopRun || '');
+      });
     }
 
     async function stopWorker(shortId) {
