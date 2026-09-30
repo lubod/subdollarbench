@@ -484,27 +484,40 @@ impl OmpRunner {
         // (SDB_EGRESS_FILTER=1 to enable), and it is NOT an enforcement
         // boundary.
         //
-        // What it is: an HTTP(S)_PROXY env var plus a stdlib proxy that
-        // filters by hostname. That only binds code which chooses to honour
-        // those variables. The run network is created with `docker network
-        // create --subnet ...` and no `--internal`, and there is no iptables or
-        // DOCKER-USER rule anywhere in the tree, so the network NATs to the
-        // internet and a raw socket to any address bypasses this entirely.
+        // What it is: an HTTP(S)_PROXY env var plus a stdlib proxy filtering by
+        // hostname, which only binds code that chooses to honour those vars.
+        // The run network is `docker network create --subnet ...` with no
+        // `--internal` and no iptables or DOCKER-USER rule, so it NATs to the
+        // internet and a raw socket bypasses the proxy entirely.
         //
-        // Do not read a run as integrity-checked because this sidecar ran.
-        // Two holes make it decorative even when honoured: the allowlist
-        // includes `codeload.github.com` and `pypi.org`, so the intended
-        // configuration permits fetching a real Redis source; and `ref-redis`
-        // is in NO_PROXY on the candidate's own network, so
-        // `socat TCP-LISTEN:6379,fork TCP:ref-redis:6379` passes every
-        // functional test with no egress at all.
+        // MEASURED, 2026-09-30, from inside a bridge-network container with a
+        // reference attached to a live run network:
+        //   - `getent ref-redis`                      -> resolution fails
+        //   - TCP to 172.17.0.1:<host-published ref>  -> connection refused
+        //     (the host publishes those on 127.0.0.1, not the bridge gateway)
+        //   - scan of all 256 of 10.201.0.0/24 :6379   -> zero reachable
+        // Candidates launch on the default bridge with no --network flag
+        // (see `connect_candidate_to_network`), so for redis/http/pdf/binproto/
+        // wal/pubsub the reference is unreachable: relaying to it is not
+        // possible, and an earlier claim here that a socat forwarder would work
+        // was wrong. Only dns and proxy candidates join the run network, and
+        // there the reference is a functional input - forwarding is the task.
         //
-        // Real enforcement needs a network-level rule - DOCKER-USER iptables
-        // scoped to the agent container, permitting only the proxy and the
-        // OpenRouter API - not configuration. Issue 6, still open.
+        // The remaining hole is substitution, not relay: this *agent* container
+        // is on the run network by design (black-box probing) and has internet,
+        // so it can fetch or build a real server and bake it into a
+        // self-contained candidate that then passes hermetically. A
+        // retrospective scan of 349 archived workspaces found no
+        // package-manager installs and no server base images, which is
+        // suggestive but not proof - a fetched binary leaves no text marker.
         //
-        // NO_PROXY keeps run-network aliases + localhost direct (verifier
-        // traffic and ref probing must not route through the proxy).
+        // Closing it needs a network-level rule - DOCKER-USER iptables scoped
+        // to the agent container, permitting only OpenRouter and the toolchain
+        // registries - not configuration. Issue 6, still open.
+        //
+        // NO_PROXY keeps run-network aliases + localhost direct so the agent's
+        // own ref probing bypasses the proxy. Harmless for the candidate, which
+        // cannot resolve these names in the first place.
         // Both upper- and lower-case variants: pip/npm/go honor either.
         let no_proxy = "ref-redis,ref-http,ref-dns,egress-proxy,localhost,127.0.0.1";
         let egress_on = std::env::var("SDB_EGRESS_FILTER")
