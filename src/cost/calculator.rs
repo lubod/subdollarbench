@@ -21,6 +21,19 @@ pub const COMPUTE_COST_PER_SECOND: f64 = 0.00003;
 /// Baseline token volume processing rate in USD per token ($0.05 per 1M tokens).
 pub const COMPUTE_COST_PER_TOKEN: f64 = 0.00000005;
 
+/// Fraction of the baseline charged for a cache-read token.
+///
+/// The compute floor is a proxy for the work of moving the context, and a
+/// cache read is explicitly cheaper than a fresh token everywhere else in this
+/// file: `ModelPricing::cache_read_per_million` is 75-90% below
+/// `prompt_per_million` for every model in the table, and the API-cost path
+/// applies that discount. Charging cached tokens the full baseline here made
+/// the *effective* cost - the denominator of the headline efficiency score -
+/// ignore the very discount the adjacent "Cache Savings" column reports, so
+/// context-heavy runs were billed twice for tokens the provider already
+/// discounted. One recorded run carried 109689 cached tokens of 127229 total.
+pub const COMPUTE_COST_CACHED_FRACTION: f64 = 0.25;
+
 /// Key balance snapshot: cumulative usage + optional credit ceiling.
 /// `limit` is None for uncapped keys (fall back to caller threshold).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,19 +104,28 @@ impl ModelPricing {
         let limit = limit.or_else(|| remaining.map(|r| r + usage));
         Some(KeyBalance { usage, limit })
     }
-    /// Calculates the equivalent compute cost from execution duration and total token volume.
-    pub fn compute_cost(duration_seconds: f64, total_tokens: u64) -> f64 {
+    /// Calculates the equivalent compute cost from execution duration and
+    /// token volume, charging cache-read tokens at the discounted baseline.
+    pub fn compute_cost(duration_seconds: f64, total_tokens: u64, cached_tokens: u64) -> f64 {
+        let cached = cached_tokens.min(total_tokens);
+        let fresh = total_tokens - cached;
         (duration_seconds * COMPUTE_COST_PER_SECOND)
-            + (total_tokens as f64 * COMPUTE_COST_PER_TOKEN)
+            + (fresh as f64 * COMPUTE_COST_PER_TOKEN)
+            + (cached as f64 * COMPUTE_COST_PER_TOKEN * COMPUTE_COST_CACHED_FRACTION)
     }
 
     /// Calculates effective total cost: API spend + compute runtime floor.
+    ///
+    /// `total_tokens` is the whole context (fresh + cached + completion) and
+    /// `cached_tokens` is the discounted portion of it; cached must not exceed
+    /// total, and is clamped rather than trusted.
     pub fn calculate_effective_cost(
         api_cost_usd: f64,
         duration_seconds: f64,
         total_tokens: u64,
+        cached_tokens: u64,
     ) -> f64 {
-        api_cost_usd + Self::compute_cost(duration_seconds, total_tokens)
+        api_cost_usd + Self::compute_cost(duration_seconds, total_tokens, cached_tokens)
     }
 
     /// Calculates Engineering Efficiency Score (pts/¢): Pass Rate (%) / (Effective Cost in Cents)
@@ -564,10 +586,10 @@ mod tests {
 
     #[test]
     fn test_compute_cost_and_efficiency_score() {
-        let comp = ModelPricing::compute_cost(100.0, 200_000);
+        let comp = ModelPricing::compute_cost(100.0, 200_000, 0);
         assert!((comp - 0.013).abs() < 1e-9);
 
-        let eff = ModelPricing::calculate_effective_cost(0.0, 100.0, 200_000);
+        let eff = ModelPricing::calculate_effective_cost(0.0, 100.0, 200_000, 0);
         assert!((eff - 0.013).abs() < 1e-9);
 
         let score = ModelPricing::calculate_efficiency_score(100.0, eff);
@@ -615,5 +637,50 @@ mod tests {
         let tp_double =
             ModelPricing::calculate_throughput_score(100.0, eff, Some(60_000.0), Some(30_000.0));
         assert!((tp_double.unwrap() - (score * 10.0)).abs() < 1e-3);
+    }
+
+    /// The regression this fixes: the compute floor is the denominator of the
+    /// headline efficiency score, and it used to charge cache-read tokens the
+    /// full baseline rate while the API-cost path discounted them 75-90% and
+    /// the adjacent "Cache Savings" column reported that discount. A
+    /// context-heavy run was therefore billed twice for tokens the provider
+    /// had already discounted, and the models this benchmark targets - cheap
+    /// ones with long contexts - were the ones hurt.
+    #[test]
+    fn test_cached_tokens_are_not_double_charged() {
+        let duration = 100.0;
+        let total = 200_000u64;
+        let all_fresh = ModelPricing::calculate_effective_cost(0.0, duration, total, 0);
+        let all_cached = ModelPricing::calculate_effective_cost(0.0, duration, total, total);
+
+        assert!(
+            all_cached < all_fresh,
+            "a fully cache-read context must cost less than a fresh one"
+        );
+        // Time term is identical in both, so the difference is exactly the
+        // token discount: (1 - 0.25) * 200k * $0.05/M.
+        let expected_delta =
+            total as f64 * COMPUTE_COST_PER_TOKEN * (1.0 - COMPUTE_COST_CACHED_FRACTION);
+        assert!(
+            ((all_fresh - all_cached) - expected_delta).abs() < 1e-12,
+            "expected a {} discount, got {}",
+            expected_delta,
+            all_fresh - all_cached
+        );
+
+        // A cached count larger than the total is clamped, not trusted.
+        let clamped = ModelPricing::calculate_effective_cost(0.0, duration, total, total * 10);
+        assert!(
+            (clamped - all_cached).abs() < 1e-12,
+            "cached must clamp to total"
+        );
+
+        // And the discount must actually move the headline score.
+        let cheap = ModelPricing::calculate_efficiency_score(100.0, all_cached);
+        let dear = ModelPricing::calculate_efficiency_score(100.0, all_fresh);
+        assert!(
+            cheap > dear,
+            "a cached run must score better than an identical fresh one"
+        );
     }
 }

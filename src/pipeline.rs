@@ -1125,8 +1125,12 @@ impl BenchmarkPipeline {
         }
 
         let cost_usd = live_spend_delta.unwrap_or(breakdown.total_cost_usd);
-        let effective_cost_usd =
-            ModelPricing::calculate_effective_cost(cost_usd, duration_seconds, total_run_tokens);
+        let effective_cost_usd = ModelPricing::calculate_effective_cost(
+            cost_usd,
+            duration_seconds,
+            total_run_tokens,
+            cached_tokens,
+        );
         let efficiency_score =
             ModelPricing::calculate_efficiency_score(pass_rate, effective_cost_usd);
         let throughput_score = ModelPricing::calculate_throughput_score_for_task(

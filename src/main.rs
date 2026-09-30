@@ -611,6 +611,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 .collect();
             entries.sort();
             let (mut rewritten, mut stamped, mut skipped) = (0, 0, 0);
+            // Runs graded under a different ruleset must NOT be re-scored here.
+            // Backfill recomputes efficiency/throughput with *current* maths;
+            // doing that to a run stamped `2026-09-28.1` and leaving its stamp
+            // alone changes the published numbers while keeping the label that
+            // says they are comparable. Counted and reported instead.
+            let mut foreign_ruleset = 0usize;
+            let current_rules = subdollarbench::report::rules::RULES_VERSION.to_string();
             for name in &entries {
                 let fp = path.join(name);
                 let Ok(text) = std::fs::read_to_string(&fp) else {
@@ -625,6 +632,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 };
                 if run.subruns.is_empty() {
                     continue;
+                }
+                // Foreign ruleset: leave it entirely alone.
+                if let Some(existing) = &run.rules_version {
+                    if !existing.starts_with(&current_rules) {
+                        foreign_ruleset += 1;
+                        continue;
+                    }
                 }
                 // Legacy stamp when the run predates fingerprinting.
                 let want_stamp = run.rules_version.is_none();
@@ -833,10 +847,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 rewritten += usize::from(!yes);
             }
             if yes {
-                println!("backfill: rewrote {rewritten}, stamped {stamped}, skipped {skipped}");
+                println!(
+                    "backfill: rewrote {rewritten}, stamped {stamped}, skipped {skipped}, \
+                     left alone (other ruleset) {foreign_ruleset}"
+                );
             } else {
                 println!(
-                    "backfill plan: {rewritten} to rewrite, {stamped} stamp-only, {skipped} unchanged (re-run with --yes)"
+                    "backfill plan: {rewritten} to rewrite, {stamped} stamp-only, {skipped} unchanged, \
+                     {foreign_ruleset} blocked on a different ruleset (re-run with --yes)"
                 );
             }
         }

@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-09-30.1`: effective cost charges cache-read tokens at
+///   `COMPUTE_COST_CACHED_FRACTION` of the baseline instead of the full
+///   `COMPUTE_COST_PER_TOKEN`, so cached context is no longer billed twice
+///   (the API path already discounted it 75-90% and the Cache Savings column
+///   reported that discount). Every efficiency score shifts: runs with heavy
+///   context caching get *cheaper*, so scores rise. Results stamped
+///   `2026-09-28.1` or earlier are not comparable with these.
+///   GRADED_FILES also gained `src/cost/calculator.rs` and
+///   `src/report/leaderboard.rs`, so the stamp now covers the scoring path
+///   and not just the verifiers.
 /// - `2026-09-28.1`: binproto throughput probe; repro fields
 ///   (temperature/top_p/seed/prompt_sha) on manifests; runs-table
 ///   probe columns. New publish baseline.
@@ -18,9 +28,13 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
-pub const RULES_VERSION: &str = "2026-09-28.1";
+pub const RULES_VERSION: &str = "2026-09-30.1";
 
-/// Files whose content defines grading. Relative to repo root.
+/// Files whose content defines the published numbers: the prompts the model
+/// saw, the verifiers that judged it, *and* the code that turns a result into
+/// a score. `leaderboard.rs` treats `rules_version` as the comparability key,
+/// so anything that can change a score has to be in here - otherwise two runs
+/// scored by different maths carry the same stamp.
 const GRADED_FILES: &[&str] = &[
     "tasks/binproto/prompt.md",
     "tasks/dns/prompt.md",
@@ -39,6 +53,9 @@ const GRADED_FILES: &[&str] = &[
     "src/verifier/pubsub.rs",
     "src/verifier/redis.rs",
     "src/verifier/wal.rs",
+    // The scoring and ranking path, not just the judging.
+    "src/cost/calculator.rs",
+    "src/report/leaderboard.rs",
 ];
 
 /// Hash of the graded inputs, as `"{RULES_VERSION}+{hex8}"`.
@@ -47,7 +64,12 @@ pub fn fingerprint() -> String {
     let mut h = DefaultHasher::new();
     RULES_VERSION.hash(&mut h);
     for f in GRADED_FILES {
-        let content = std::fs::read_to_string(root.join(f)).unwrap_or_default();
+        // A missing graded file must not hash as empty content: that would
+        // leave the stamp unchanged when a verifier is deleted or renamed, and
+        // results graded by a different code would compare as equal.
+        let content = std::fs::read_to_string(root.join(f)).unwrap_or_else(|e| {
+            panic!("graded file {f} is unreadable: {e}");
+        });
         f.hash(&mut h);
         content.hash(&mut h);
     }
