@@ -2096,68 +2096,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::Duration;
-    use subdollarbench::report::{BenchmarkRunResult, RunArchiver, RunManifest, RunTokenUsage};
-
-    /// Ids currently present in the shared repo-root `runs/` and `results/`
-    /// trees, which `Commands::Run` archives into regardless of `--workdir`.
-    type SharedSnapshot = (
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
-    );
-
-    fn shared_data_snapshot() -> SharedSnapshot {
-        let names = |dir: &std::path::Path| -> std::collections::HashSet<String> {
-            fs::read_dir(dir)
-                .map(|rd| {
-                    rd.flatten()
-                        .map(|e| e.file_name().to_string_lossy().to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        (
-            names(&RunArchiver::resolve_runs_dir()),
-            names(std::path::Path::new("./results")),
-        )
-    }
-
-    /// True for the names these tests could possibly have produced.
-    ///
-    /// The old cleanup deleted any `runs/` or `results/` entry matching this
-    /// predicate, which describes the tree rather than the test: it raced every
-    /// other test running in parallel (deleting their archives mid-flight) and
-    /// destroyed real run archives and published results whenever a live run
-    /// happened to match. A bare snapshot diff fixes the race but not that:
-    /// a real wave run landing in the tree during a test's window is also
-    /// "new", so the diff must be intersected with the name check. Runs for
-    /// every other model then become untouchable.
-    ///
-    /// Residual, accepted: a genuine `gemini-2.5-flash` run that completes
-    /// inside a test's window and is absent from the snapshot is still
-    /// deletable. These tests pass `no_save: true` and write no results, so
-    /// the sweep is defensive; the alternative is no cleanup at all.
-    fn is_test_artifact(name: &str) -> bool {
-        name.contains("gemini-2.5-flash") || name.starts_with("test_")
-    }
-
-    /// Delete entries that both appeared since `before` was taken *and* look
-    /// like test artifacts. Entries that predate the snapshot are never
-    /// touched.
-    fn cleanup_new_shared_data(before: &SharedSnapshot) {
-        let (runs_now, results_now) = shared_data_snapshot();
-        let runs_dir = RunArchiver::resolve_runs_dir();
-        let results_dir = std::path::Path::new("./results");
-        for name in runs_now.difference(&before.0) {
-            if is_test_artifact(name) {
-                let _ = fs::remove_dir_all(runs_dir.join(name));
-            }
-        }
-        for name in results_now.difference(&before.1) {
-            if is_test_artifact(name) {
-                let _ = fs::remove_file(results_dir.join(name));
-            }
-        }
-    }
+    use subdollarbench::report::{BenchmarkRunResult, RunManifest, RunTokenUsage};
 
     #[tokio::test]
     async fn test_main_cli_leaderboard() {
@@ -2362,11 +2301,10 @@ mod tests {
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_redis_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);
-        let before = shared_data_snapshot();
 
         let cli_run = Cli {
             command: Commands::Run {
-                model: "google/gemini-2.5-flash".to_string(),
+                model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
                 task: TaskType::Redis,
                 effort: "low".to_string(),
                 max_turns: 1,
@@ -2387,7 +2325,6 @@ mod tests {
         assert!(run_cli(cli_run).await.is_ok());
 
         let _ = fs::remove_dir_all(&temp_workdir);
-        cleanup_new_shared_data(&before);
     }
 
     #[tokio::test]
@@ -2395,7 +2332,6 @@ mod tests {
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_http_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);
-        let before = shared_data_snapshot();
         let start_sh = temp_workdir.join("start.sh");
         fs::write(&start_sh, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -2406,7 +2342,7 @@ mod tests {
 
         let cli_run = Cli {
             command: Commands::Run {
-                model: "google/gemini-2.5-flash".to_string(),
+                model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
                 task: TaskType::Http,
                 effort: "low".to_string(),
                 max_turns: 1,
@@ -2427,7 +2363,6 @@ mod tests {
         assert!(run_cli(cli_run).await.is_ok());
 
         let _ = fs::remove_dir_all(&temp_workdir);
-        cleanup_new_shared_data(&before);
     }
 
     #[tokio::test]
@@ -2435,13 +2370,12 @@ mod tests {
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_cheat_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);
-        let before = shared_data_snapshot();
         let start_sh = temp_workdir.join("start.sh");
         fs::write(&start_sh, "#!/bin/sh\nredis-server --port 6379\n").unwrap();
 
         let cli_run = Cli {
             command: Commands::Run {
-                model: "google/gemini-2.5-flash".to_string(),
+                model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
                 task: TaskType::Redis,
                 effort: "low".to_string(),
                 max_turns: 1,
@@ -2462,7 +2396,6 @@ mod tests {
         assert!(run_cli(cli_run).await.is_ok());
 
         let _ = fs::remove_dir_all(&temp_workdir);
-        cleanup_new_shared_data(&before);
     }
 
     #[tokio::test]

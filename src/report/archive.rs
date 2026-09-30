@@ -381,7 +381,7 @@ mod tests {
 
         let manifest = RunManifest {
             run_id: "test_run_123".to_string(),
-            model: "google/gemini-2.5-flash".to_string(),
+            model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
             task: "redis".to_string(),
             status: "completed".to_string(),
             language: "Go".to_string(),
@@ -447,7 +447,7 @@ mod tests {
 
         // Verify get_run
         let loaded = RunArchiver::get_run(&runs_dir, "test_run_123").unwrap();
-        assert_eq!(loaded.model, "google/gemini-2.5-flash");
+        assert_eq!(loaded.model, "openrouter/meta/muse-spark-1.3-contributor");
         assert_eq!(loaded.pass_rate, 100.0);
         assert!(loaded.env.is_some());
 

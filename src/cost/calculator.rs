@@ -188,7 +188,15 @@ impl ModelPricing {
 
     pub fn for_model(model_name: &str) -> Self {
         let m = model_name.to_lowercase();
-        if m.contains("gemini-3.8-flash") {
+        if m.contains("muse-spark") {
+            // Free tier: no per-token charge, so cache reads are free too.
+            // This is the offline fallback only - `for_model_async` queries the
+            // live OpenRouter catalog first and this table is consulted when
+            // that fails, so a stale entry cannot mask a real price in normal
+            // operation. Test fixtures use this model so a test that ever does
+            // reach the API cannot bill anything.
+            ModelPricing::from_rates(0.0, 0.0)
+        } else if m.contains("gemini-3.8-flash") {
             ModelPricing {
                 prompt_per_million: 0.75,
                 completion_per_million: 3.75,
@@ -340,6 +348,20 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// The free-tier model used by every test fixture must actually price at
+    /// zero. Without this, a fixture that reaches the API could still bill,
+    /// and `is_test_artifact` would be matching a name whose runs are not
+    /// actually free.
+    #[test]
+    fn test_free_model_prices_at_zero() {
+        let p = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor");
+        assert_eq!(p.prompt_per_million, 0.0);
+        assert_eq!(p.completion_per_million, 0.0);
+        assert_eq!(p.cache_read_per_million, 0.0);
+        let b = p.compute_cost_with_cache(1_000_000, 1_000_000, 1_000_000);
+        assert_eq!(b.total_cost_usd, 0.0);
+    }
 
     #[test]
     fn test_pricing_for_known_models() {

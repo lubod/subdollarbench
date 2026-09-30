@@ -4093,7 +4093,7 @@ mod tests {
 
         // 18. POST /api/run eval_only mode with multi-trials
         let eval_req = RunRequest {
-            model: "google/gemini-2.5-flash".to_string(),
+            model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
             task: "redis".to_string(),
             api_key: None,
             budget_usd: 0.10,
@@ -4384,7 +4384,7 @@ mod tests {
         }
 
         let run_dns_req = RunRequest {
-            model: "google/gemini-2.5-flash".to_string(),
+            model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
             task: "dns".to_string(),
             api_key: None,
             budget_usd: 0.10,
