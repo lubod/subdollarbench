@@ -782,9 +782,9 @@ impl LeaderboardManager {
         Some(merged)
     }
 
-    // Not collapsible into a let-chain: `open_store_if_exists` has a side
-    // effect (it can fall back to creating a temp-dir Store), so it must not
-    // run when `use_db` is false.
+    // Not collapsible: the let-chain form (`if cond && let Some(x) = ...`)
+    // requires edition 2024, and this crate is edition 2021. `open_store_if_exists`
+    // is side-effect free, so the nesting is purely a language-version limit.
     #[allow(clippy::collapsible_if)]
     pub fn reconsolidate_saved_results(results_dir: &str) -> Result<usize> {
         // DB primary (canonical dir only): iterate stored parents when bench.db exists.
