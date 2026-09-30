@@ -2185,19 +2185,22 @@ fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>, w
     match TaskType::parse(&req.task) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("[INFRA] refusing run: {e}");
+            // Must unwind exactly like every other early return here:
+            // log, finish the queue item, release the slot, pump. Skipping
+            // release_slot leaks the worker slot - with a 4-slot grid, four
+            // refused cells wedge the wave, and is_running stays true because
+            // only release_slot clears it when the last slot frees.
+            let msg = format!("[QUEUE] refusing run: {e}");
+            eprintln!("{msg}");
+            push_console_line(&state.log_buffer, msg);
             if let Some(id) = &queue_id {
-                let _ = state
-                    .queue
-                    .lock()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|i| i.id == *id)
-                    .map(|i| {
-                        i.status = QueueStatus::Cancelled;
-                    });
+                mark_queue_done(state, id);
             }
-            state.queue_paused.store(false, Ordering::SeqCst);
+            release_slot(state, worker);
+            pump_queue(state);
+            // Deliberately NOT touching queue_paused: a concurrent 402 sets it
+            // as a breaker, and clearing it here would silently unpause a queue
+            // that ran out of credit.
             return;
         }
     }
