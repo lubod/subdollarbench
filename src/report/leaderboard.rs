@@ -782,6 +782,10 @@ impl LeaderboardManager {
         Some(merged)
     }
 
+    // Not collapsible into a let-chain: `open_store_if_exists` has a side
+    // effect (it can fall back to creating a temp-dir Store), so it must not
+    // run when `use_db` is false.
+    #[allow(clippy::collapsible_if)]
     pub fn reconsolidate_saved_results(results_dir: &str) -> Result<usize> {
         // DB primary (canonical dir only): iterate stored parents when bench.db exists.
         if Self::use_db(results_dir) {
@@ -2073,7 +2077,7 @@ mod tests {
     fn test_frontier_fractions() {
         // Best anchored tp per (task, rules) = 1.0; others fractioned.
         // Unanchored rows (no ref) keep None; losers fraction below 1.
-        let mut mk = |id: &str, tp: Option<f64>, rt: Option<f64>| BenchmarkRunResult {
+        let mk = |id: &str, tp: Option<f64>, rt: Option<f64>| BenchmarkRunResult {
             id: id.to_string(),
             model: "m".to_string(),
             task: "redis".to_string(),

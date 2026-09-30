@@ -152,16 +152,11 @@ impl Conn {
                 ));
             }
             // Drain buffered frames first.
-            loop {
-                match decode_frame(&self.read_buf)? {
-                    Some((f, used)) => {
-                        self.read_buf.drain(..used);
-                        out.push(f);
-                        if out.len() >= want {
-                            return Ok(out);
-                        }
-                    }
-                    None => break,
+            while let Some((f, used)) = decode_frame(&self.read_buf)? {
+                self.read_buf.drain(..used);
+                out.push(f);
+                if out.len() >= want {
+                    return Ok(out);
                 }
             }
             let remain = deadline.saturating_sub(start.elapsed());

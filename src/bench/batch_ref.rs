@@ -357,7 +357,7 @@ impl BatchRef {
                 ));
                 Ok(Some(BatchRef {
                     sandbox,
-                    task: task.clone(),
+                    task: *task,
                     port,
                     pre,
                 }))

@@ -7,13 +7,15 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-static STATUS_CACHE: LazyLock<Arc<RwLock<Option<(OmpVersionStatus, std::time::Instant)>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(None)));
+/// Cached `(status, when it was cached)` for the installed-vs-latest check.
+type StatusCache = Arc<RwLock<Option<(OmpVersionStatus, std::time::Instant)>>>;
+
+static STATUS_CACHE: LazyLock<StatusCache> = LazyLock::new(|| Arc::new(RwLock::new(None)));
 static IS_UPDATING: AtomicBool = AtomicBool::new(false);
 
 const CACHE_TTL_SECS: u64 = 600; // 10 minutes
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OmpVersionStatus {
     pub installed_version: Option<String>,
     pub latest_version: Option<String>,
@@ -21,19 +23,6 @@ pub struct OmpVersionStatus {
     pub image_exists: bool,
     pub is_updating: bool,
     pub last_error: Option<String>,
-}
-
-impl Default for OmpVersionStatus {
-    fn default() -> Self {
-        Self {
-            installed_version: None,
-            latest_version: None,
-            up_to_date: false,
-            image_exists: false,
-            is_updating: false,
-            last_error: None,
-        }
-    }
 }
 
 #[derive(Deserialize)]

@@ -272,16 +272,16 @@ impl SandboxManager {
     /// /24 instead of re-hitting the identical lease. Distinct nets spread
     /// across 200 third octets so parallel workers never fight over one
     /// pool lease.
-    fn run_subnet(net: &str) -> String {
-        Self::run_subnet_attempt(net, 0)
-    }
-
+    ///
+    /// There is deliberately no attempt-0-only wrapper: `ensure_network`
+    /// always calls this with an explicit attempt, so a second entry point
+    /// would be an indirection with no caller.
     fn run_subnet_attempt(net: &str, attempt: u32) -> String {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         net.hash(&mut h);
         attempt.hash(&mut h);
-        let oct = ((h.finish() % (Self::RUN_SUBNET_WHEEL as u64)) + 1) as u8;
+        let oct = ((h.finish() % Self::RUN_SUBNET_WHEEL) + 1) as u8;
         format!(
             "{}.{}.0/{}",
             Self::RUN_SUBNET_BASE,
@@ -638,7 +638,7 @@ impl SandboxManager {
             &format!("127.0.0.1:{port}:8090"),
             REF_PDF_RUN_IMAGE,
         ];
-        let out = Command::new("docker").args(&run_args).output()?;
+        let out = Command::new("docker").args(run_args).output()?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             // Fresh-checkout bootstrap: image missing -> build from the
@@ -1466,15 +1466,13 @@ mod tests {
 
     #[test]
     fn test_run_subnet_deterministic_and_spread() {
-        // Same net => same subnet (idempotent retry collides into "already exists").
-        assert_eq!(
-            SandboxManager::run_subnet("subdollar-net-abc"),
-            SandboxManager::run_subnet("subdollar-net-abc")
-        );
         // Distinct nets spread (no mass collision onto one /24).
         let mut set = std::collections::HashSet::new();
         for i in 0..50 {
-            set.insert(SandboxManager::run_subnet(&format!("subdollar-net-run{i}")));
+            set.insert(SandboxManager::run_subnet_attempt(
+                &format!("subdollar-net-run{i}"),
+                0,
+            ));
         }
         assert!(set.len() > 25, "subnets collapse: {}", set.len());
         // Attempt salt moves the subnet (collision retry is real).

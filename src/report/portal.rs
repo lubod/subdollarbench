@@ -2357,6 +2357,9 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    // Test fixture builder: 15 call sites read better as flat positional args
+    // than as a struct literal, and the params are all trivially typed.
+    #[allow(clippy::too_many_arguments)]
     fn rollup_parent(
         id: &str,
         model: &str,

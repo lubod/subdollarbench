@@ -113,8 +113,12 @@ fn resolve_thinking_level(effort: Option<&str>, effective_model: &str) -> (Strin
 /// they NEVER match here. A trip requires one of:
 /// - a JSON error envelope with a numeric `code`/`status` field 401/402/429,
 /// - an HTTP status line (`HTTP/1.1 402 ...`),
-/// - a provider phrase (payment required / insufficient credit / rate limit
-///   / unauthorized + key/token/auth).
+/// - a provider phrase (payment required / insufficient credit / rate limit /
+///   unauthorized + key/token/auth).
+///
+/// A blank line ends the list; the caller note below is ordinary prose, not a
+/// continuation item.
+///
 /// Callers: session-jsonl lines are parsed as JSON first (structured arm);
 /// raw stderr lines use the text arm (status-line + phrases only).
 pub fn classify_billing_error(text: &str) -> Option<String> {

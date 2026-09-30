@@ -115,7 +115,7 @@ impl ModelPricing {
             0.0
         } else {
             let cost_cents = (effective_cost_usd * 100.0).max(0.0001);
-            pass_rate.max(0.0).min(100.0) / cost_cents
+            pass_rate.clamp(0.0, 100.0) / cost_cents
         }
     }
 
@@ -450,6 +450,7 @@ mod tests {
         assert_eq!(b.remaining(), Some(2.0));
     }
 
+    #[tokio::test]
     async fn test_query_openrouter_key_usage_mock() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

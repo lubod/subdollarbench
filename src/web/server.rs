@@ -1,3 +1,9 @@
+// Every handler here returns `Result<_, Response>`; `Response` is a large
+// axum type by design, so `result_large_err` fires on all of them. Boxing
+// the error would change every handler signature and add an allocation on
+// the error path to save a `Result` niche that axum never uses.
+#![allow(clippy::result_large_err)]
+
 use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
@@ -1439,7 +1445,7 @@ async fn stop_run(State(state): State<AppState>, Query(q): Query<StopQuery>) -> 
             flag.store(true, Ordering::SeqCst);
         }
     }
-    for (_w, info) in state.worker_runs.read().unwrap().iter() {
+    for info in state.worker_runs.read().unwrap().values() {
         let sandbox = SandboxManager::with_id(&info.run_id);
         sandbox.cleanup_instance();
     }
@@ -3269,10 +3275,8 @@ async fn stream_logs(
                 .unwrap_or_else(|_| "[STREAM NOTICE] engine console unreadable".to_string()),
             Err(_) => "[STREAM NOTICE] engine console down".to_string(),
         };
-        let evts: Vec<Result<Event, Infallible>> = text
-            .lines()
-            .map(|l| Ok(Event::default().data(l.to_string())))
-            .collect();
+        let evts: Vec<Result<Event, Infallible>> =
+            text.lines().map(|l| Ok(Event::default().data(l))).collect();
         return Sse::new(Box::pin(tokio_stream::iter(evts))
             as std::pin::Pin<
                 Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send>,

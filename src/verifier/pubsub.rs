@@ -60,6 +60,10 @@ pub fn sha1(message: &[u8]) -> [u8; 20] {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        // Indexing `w[i]` is required, not incidental: SHA-1's message schedule
+        // reads already-expanded entries while writing the current one, so an
+        // `iter_mut` rewrite would need a simultaneous &mut and & borrow.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..80 {
             let (f, k) = match i {
                 0..=19 => ((b & c) | (!b & d), 0x5A827999u32),
@@ -93,7 +97,7 @@ pub fn sha1(message: &[u8]) -> [u8; 20] {
 /// Minimal base64 encoder (RFC 4648, padded).
 pub fn base64_encode(input: &[u8]) -> String {
     const ALPH: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut s = String::with_capacity(input.len().div_ceil(3) * 4);
     for c in input.chunks(3) {
         let n = ((c[0] as u32) << 16)
             | ((if c.len() > 1 { c[1] as u32 } else { 0 }) << 8)

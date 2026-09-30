@@ -2239,7 +2239,6 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
-            frontier_fraction: None,
             trial_pass_rates: Vec::new(),
             is_published: None,
             method_version: Some("0.1.0".to_string()),
@@ -2266,7 +2265,10 @@ mod tests {
             "total_cost_usd": 0.01, "effective_cost_usd": 0.015,
             "duration_seconds": 60.0, "turns": 3, "savings_percent": 10.0,
             "efficiency_score": 66.6, "throughput_score": 66.6,
-            "timestamp": "2026-09-04T12:01:00Z", "method_version": "0.1.0"
+            // Must be >= portal::PUBLISH_FREEZE_TS or the exporter drops the row
+            // by design and the index assertion below cannot pass. Naive ISO,
+            // matching the row format the freeze is stored in.
+            "timestamp": "2026-09-28T12:01:00", "method_version": "0.1.0"
         });
         fs::write(
             results_dir.join(format!("{}.json", run_id)),
