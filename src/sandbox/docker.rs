@@ -42,6 +42,16 @@ fn network_mutex() -> &'static std::sync::Mutex<()> {
 /// Egress sidecar: python:alpine + stdlib allowlist proxy script (no new image
 /// dependency; the `squid` image is absent from the registry mirror).
 pub const EGRESS_PROXY_IMAGE: &str = "docker.io/library/python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9";
+
+/// Whether this run's egress filter is enabled. `ensure_network` (which owns
+/// the run network) and the agent container (which sets the proxy env) both
+/// consult this, so the network's isolation and the container's proxy
+/// settings can never disagree about whether the run is meant to be closed.
+pub fn egress_filter_enabled() -> bool {
+    std::env::var("SDB_EGRESS_FILTER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 pub const REF_NGINX_IMAGE: &str = "docker.io/library/nginx@sha256:17ad11d84df6c69e327c0894125f712ec1f1de627b5e5ed7e12ca2ed8cd5daf8";
 
 /// Host allowlist check (mirrors extensions/egress_proxy.py).
@@ -156,10 +166,11 @@ impl SandboxManager {
                 "--rm",
                 "--name",
                 &name,
+                // Start on the default bridge: the sidecar is the one thing
+                // that needs real egress. It joins the run network below,
+                // which is created --internal and so has no route out.
                 "--network",
-                &net,
-                "--network-alias",
-                "egress-proxy",
+                "bridge",
                 "--memory=128m",
                 "--cpus=0.25",
                 "--pids-limit=64",
@@ -179,7 +190,33 @@ impl SandboxManager {
         // the sidecar seconds after birth and the agent's proxy env dangles.
         self.needs_cleanup.store(false, Ordering::SeqCst);
         match out {
-            Ok(o) if o.status.success() => Some("http://egress-proxy:3128".to_string()),
+            Ok(o) if o.status.success() => {
+                // Save the resolver the bridge gave us. Joining an --internal
+                // network rewrites /etc/resolv.conf to an empty file (an
+                // internal network's embedded resolver has no upstream), and
+                // without a resolver the sidecar cannot match hostnames
+                // against the allowlist. Docker permits editing the file.
+                let _ = std::process::Command::new("docker")
+                    .args(["exec", &name, "sh", "-c", "cp /etc/resolv.conf /tmp/rc.ok"])
+                    .output();
+                // Now join the run network under the alias the agent resolves.
+                let attached = std::process::Command::new("docker")
+                    .args(["network", "connect", "--alias", "egress-proxy", &net, &name])
+                    .output();
+                match attached {
+                    Ok(a) if a.status.success() => {}
+                    _ => {
+                        // Without the alias the agent cannot reach the proxy.
+                        // Tear it down instead of leaving it unreachable.
+                        self.stop_egress_proxy();
+                        return None;
+                    }
+                }
+                let _ = std::process::Command::new("docker")
+                    .args(["exec", &name, "sh", "-c", "cp /tmp/rc.ok /etc/resolv.conf"])
+                    .output();
+                Some("http://egress-proxy:3128".to_string())
+            }
             _ => None,
         }
     }
@@ -228,8 +265,15 @@ impl SandboxManager {
         let net = self.network_name();
         for attempt in 0..Self::NETWORK_CREATE_MAX_ATTEMPTS {
             let subnet = Self::run_subnet_attempt(&net, attempt);
+            // When the filter is on, this network is the enforcement boundary:
+            // the agent has no route off it, so the allowlist proxy sidecar is
+            // its only path out. Reference containers keep working - they only
+            // ever talk to the agent. With the filter off the network stays
+            // NAT'd, because the model API itself needs a route.
             let out = Command::new("docker")
-                .args(["network", "create", "--subnet", &subnet, &net])
+                .args(["network", "create", "--subnet", &subnet])
+                .args(egress_filter_enabled().then_some("--internal"))
+                .arg(&net)
                 .output()?;
             if out.status.success() {
                 info!("Created run network {} ({})", net, subnet);

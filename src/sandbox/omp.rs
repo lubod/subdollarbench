@@ -503,26 +503,20 @@ impl OmpRunner {
         // was wrong. Only dns and proxy candidates join the run network, and
         // there the reference is a functional input - forwarding is the task.
         //
-        // The remaining hole is substitution, not relay: this *agent* container
-        // is on the run network by design (black-box probing) and has internet,
-        // so it can fetch or build a real server and bake it into a
-        // self-contained candidate that then passes hermetically. A
-        // retrospective scan of 349 archived workspaces found no
-        // package-manager installs and no server base images, which is
-        // suggestive but not proof - a fetched binary leaves no text marker.
-        //
-        // Closing it needs a network-level rule - DOCKER-USER iptables scoped
-        // to the agent container, permitting only OpenRouter and the toolchain
-        // registries - not configuration. Issue 6, still open.
+        // Closing it needs a network-level rule, not configuration: the run
+        // network is created --internal while the filter is on (see
+        // `ensure_network`), so this agent container has no route off its own
+        // network and the allowlist proxy sidecar is its only path out. A
+        // fetched or pip-installed server can no longer reach the image.
+        // If the sidecar cannot be started the run aborts rather than coming
+        // up unfiltered - see the bail below.
         //
         // NO_PROXY keeps run-network aliases + localhost direct so the agent's
         // own ref probing bypasses the proxy. Harmless for the candidate, which
         // cannot resolve these names in the first place.
         // Both upper- and lower-case variants: pip/npm/go honor either.
         let no_proxy = "ref-redis,ref-http,ref-dns,egress-proxy,localhost,127.0.0.1";
-        let egress_on = std::env::var("SDB_EGRESS_FILTER")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let egress_on = crate::sandbox::docker::egress_filter_enabled();
         if let Some(proxy_url) = (if egress_on { network } else { None })
             .and_then(|net| {
                 // Derive instance id from network name subdollar-net-<id>.
@@ -539,10 +533,20 @@ impl OmpRunner {
                 cmd.arg("-e").arg(format!("{var}={no_proxy}"));
             }
         } else {
-            // Sidecar unavailable: still export NO_PROXY so a stale proxy env
-            // never breaks ref/localhost traffic.
             for var in ["NO_PROXY", "no_proxy"] {
                 cmd.arg("-e").arg(format!("{var}={no_proxy}"));
+            }
+            // Fail closed. With the filter on, the run network is --internal,
+            // so a proxy-less agent has no route to the model API and this run
+            // is dead anyway. The reason to bail rather than let it run is the
+            // other case: a sidecar that died against a network left NAT'd by
+            // an earlier unfiltered run would otherwise start this agent with
+            // unrestricted egress and quietly grade an unfiltered run.
+            if egress_on {
+                anyhow::bail!(
+                    "egress filter is enabled but the allowlist proxy sidecar failed to start; \
+                     refusing to run the agent unfiltered"
+                );
             }
         }
 
