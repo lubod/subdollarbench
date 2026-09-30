@@ -2325,6 +2325,7 @@ mod tests {
             baseline_source: None,
             ref_drift: None,
             ref_image: None,
+            egress_enforced: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 100,
                 cached_tokens: 50,

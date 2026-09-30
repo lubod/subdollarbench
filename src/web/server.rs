@@ -4472,6 +4472,7 @@ mod tests {
             baseline_source: None,
             ref_drift: None,
             ref_image: None,
+            egress_enforced: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1000,
                 cached_tokens: 500,
@@ -4521,6 +4522,7 @@ mod tests {
             baseline_source: None,
             ref_drift: None,
             ref_image: None,
+            egress_enforced: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1500,
                 cached_tokens: 600,

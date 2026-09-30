@@ -1234,6 +1234,10 @@ impl BenchmarkPipeline {
             } else {
                 None
             },
+            // Recorded so a reader can tell an enforced run from an open one
+            // without trusting the archive tooling. A run with egress_enforced
+            // false (or absent, from before this field) made no isolation claim.
+            egress_enforced: Some(crate::sandbox::docker::egress_filter_enabled()),
             tokens: RunTokenUsage {
                 prompt_tokens,
                 cached_tokens,

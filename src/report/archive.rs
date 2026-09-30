@@ -52,6 +52,13 @@ pub struct RunManifest {
     /// run from before digest pinning; such runs form their own regime.
     #[serde(default)]
     pub ref_image: Option<String>,
+    /// Whether this run's agent container was network-isolated with the
+    /// allowlist proxy as its only egress. `Some(true)` means the run network
+    /// was created --internal and the sidecar was up; `Some(false)` means the
+    /// filter was off and the agent had unrestricted egress. None = archived
+    /// before this field existed, when enforcement was never recorded.
+    #[serde(default)]
+    pub egress_enforced: Option<bool>,
     pub tokens: RunTokenUsage,
     pub cost_usd: f64,
     #[serde(default)]
@@ -404,6 +411,7 @@ mod tests {
             baseline_source: None,
             ref_drift: None,
             ref_image: None,
+            egress_enforced: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 10000,
                 cached_tokens: 8000,
@@ -528,6 +536,7 @@ mod tests {
             baseline_source: None,
             ref_drift: None,
             ref_image: None,
+            egress_enforced: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1,
                 cached_tokens: 0,
