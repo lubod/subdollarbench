@@ -2098,6 +2098,50 @@ mod tests {
     use std::time::Duration;
     use subdollarbench::report::{BenchmarkRunResult, RunArchiver, RunManifest, RunTokenUsage};
 
+    /// Ids currently present in the shared repo-root `runs/` and `results/`
+    /// trees, which `Commands::Run` archives into regardless of `--workdir`.
+    type SharedSnapshot = (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    );
+
+    fn shared_data_snapshot() -> SharedSnapshot {
+        let names = |dir: &std::path::Path| -> std::collections::HashSet<String> {
+            fs::read_dir(dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        (
+            names(&RunArchiver::resolve_runs_dir()),
+            names(std::path::Path::new("./results")),
+        )
+    }
+
+    /// Delete only the entries that appeared since `before` was taken.
+    ///
+    /// The previous cleanup in these tests removed any `runs/` or `results/`
+    /// entry whose name contained `gemini-2.5-flash` or started with `test_`.
+    /// That is a property of the tree, not of the test: it raced every other
+    /// test running in parallel (deleting their archives mid-flight) and it
+    /// destroyed real run archives and published results whenever a live run
+    /// happened to match. Diffing against a pre-test snapshot removes exactly
+    /// what this test added and nothing that predates it.
+    fn cleanup_new_shared_data(before: &SharedSnapshot) {
+        let (runs_now, results_now) = shared_data_snapshot();
+        let runs_dir = RunArchiver::resolve_runs_dir();
+        let results_dir = std::path::Path::new("./results");
+        for name in runs_now.difference(&before.0) {
+            let _ = fs::remove_dir_all(runs_dir.join(name));
+        }
+        for name in results_now.difference(&before.1) {
+            let _ = fs::remove_file(results_dir.join(name));
+        }
+    }
+
     #[tokio::test]
     async fn test_main_cli_leaderboard() {
         let temp_dir = std::env::temp_dir().join(format!("test_main_lb_{}", std::process::id()));
@@ -2301,6 +2345,7 @@ mod tests {
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_redis_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);
+        let before = shared_data_snapshot();
 
         let cli_run = Cli {
             command: Commands::Run {
@@ -2325,24 +2370,7 @@ mod tests {
         assert!(run_cli(cli_run).await.is_ok());
 
         let _ = fs::remove_dir_all(&temp_workdir);
-
-        let runs_dir = RunArchiver::resolve_runs_dir();
-        if let Ok(entries) = fs::read_dir(&runs_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_dir_all(entry.path());
-                }
-            }
-        }
-        if let Ok(entries) = fs::read_dir("./results") {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
+        cleanup_new_shared_data(&before);
     }
 
     #[tokio::test]
@@ -2350,6 +2378,7 @@ mod tests {
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_http_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);
+        let before = shared_data_snapshot();
         let start_sh = temp_workdir.join("start.sh");
         fs::write(&start_sh, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -2381,25 +2410,7 @@ mod tests {
         assert!(run_cli(cli_run).await.is_ok());
 
         let _ = fs::remove_dir_all(&temp_workdir);
-
-        let runs_dir = RunArchiver::resolve_runs_dir();
-        if let Ok(entries) = fs::read_dir(&runs_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_dir_all(entry.path());
-                }
-            }
-        }
-        let res_dir = subdollarbench::config::get_repo_root().join("results");
-        if let Ok(entries) = fs::read_dir(&res_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
+        cleanup_new_shared_data(&before);
     }
 
     #[tokio::test]
@@ -2407,6 +2418,7 @@ mod tests {
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_cheat_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);
+        let before = shared_data_snapshot();
         let start_sh = temp_workdir.join("start.sh");
         fs::write(&start_sh, "#!/bin/sh\nredis-server --port 6379\n").unwrap();
 
@@ -2433,25 +2445,7 @@ mod tests {
         assert!(run_cli(cli_run).await.is_ok());
 
         let _ = fs::remove_dir_all(&temp_workdir);
-
-        let runs_dir = RunArchiver::resolve_runs_dir();
-        if let Ok(entries) = fs::read_dir(&runs_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_dir_all(entry.path());
-                }
-            }
-        }
-        let res_dir = subdollarbench::config::get_repo_root().join("results");
-        if let Ok(entries) = fs::read_dir(&res_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
+        cleanup_new_shared_data(&before);
     }
 
     #[tokio::test]

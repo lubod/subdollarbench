@@ -4420,23 +4420,13 @@ mod tests {
         let _ = fs::remove_dir_all("tasks/test_task");
         let _ = fs::remove_dir_all(crate::config::get_repo_root().join("tasks/test_task"));
 
-        // Clean any gemini/test artifacts from runs/ and results/
-        if let Ok(entries) = fs::read_dir(&runs_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_dir_all(entry.path());
-                }
-            }
-        }
-        let r_dir = resolve_results_dir();
-        if let Ok(entries) = fs::read_dir(&r_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("gemini-2.5-flash") || name.starts_with("test_") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
+        // Remove only the two archives this test created. The previous sweep
+        // deleted any `runs/` entry starting with `test_` or containing
+        // `gemini-2.5-flash`, which raced every other test running in parallel
+        // and destroyed real run archives whenever a live run matched.
+        for id in [run_a_id, run_b_id] {
+            let _ = fs::remove_dir_all(runs_dir.join(id));
+            let _ = fs::remove_file(resolve_results_dir().join(format!("{id}.json")));
         }
     }
 
