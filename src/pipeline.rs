@@ -1220,6 +1220,7 @@ impl BenchmarkPipeline {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
 
         logger.log(&format!(

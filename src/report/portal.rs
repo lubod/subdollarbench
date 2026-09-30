@@ -1017,6 +1017,11 @@ const PORTAL_JS: &str = r#"
       const refRatio = (r.reference_throughput_req_sec && r.throughput_req_sec)
         ? `<div style="font-size: 0.72rem; color: var(--grn); font-weight: 600;">${Math.round((r.throughput_req_sec / r.reference_throughput_req_sec) * 100)}% of Ref · <span title="Measurement regime: same task + same regime = comparable">${regimeOf(r)}</span></div>`
         : '';
+      // Frontier fraction: share of the best anchored same-task throughput
+      // in this comparison set. Secondary to the external reference above.
+      const frontierLine = (r.frontier_fraction !== undefined && r.frontier_fraction !== null)
+        ? `<div style="font-size: 0.72rem; color: var(--acc); font-weight: 600;" title="Frontier: this run vs the fastest anchored same-task run in this result set (secondary to the external reference)">🏁 ${Math.round(r.frontier_fraction * 100)}% of best</div>`
+        : '';
       
       const effCost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.total_cost_usd;
       const apiCost = r.total_cost_usd;
@@ -1072,6 +1077,7 @@ const PORTAL_JS: &str = r#"
         <td>
           <span style="font-weight: 600;">${tpStr}</span>
           ${refRatio}
+          ${frontierLine}
         </td>
         <td>
           <div style="display: flex; flex-direction: column; gap: 2px;">
@@ -2803,6 +2809,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: stab.map(|s| s.to_string()),
+            frontier_fraction: None,
         }
     }
 

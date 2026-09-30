@@ -490,6 +490,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         }
     }
 

@@ -69,6 +69,13 @@ pub struct BenchmarkRunResult {
     /// Trial-stability verdict written by merge_subruns: stable | watch | unstable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stability: Option<String>,
+    /// Frontier fraction: this parent's fair throughput / best fair
+    /// throughput among same-task parents in the comparison set
+    /// (post-pass recompute, same rules_version). Secondary denominator:
+    /// the external reference stays primary for cross-wave stability.
+    /// None when this row or the best row has no anchored throughput.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier_fraction: Option<f64>,
 }
 
 pub fn format_duration(secs: f64) -> String {
@@ -408,7 +415,51 @@ impl BenchmarkRunResult {
             pass_at_1_lo: Some(w_lo),
             pass_at_1_hi: Some(w_hi),
             stability: Some(stab_str),
+            // Filled by recompute_frontier_fractions over the comparison
+            // set (needs same-task peers); unknown at merge time.
+            frontier_fraction: None,
         })
+    }
+
+    /// Secondary denominator (post-pass over a comparison set): for each
+    /// task, divide every parent's fair throughput by the best fair
+    /// throughput among same-task, same-rules_version parents that have an
+    /// anchored reference. Rows without anchored throughput (or tasks with
+    /// no anchored row) keep None. External ref stays primary; this column
+    /// answers "who is fastest" without moving the denominator across waves.
+    pub fn recompute_frontier_fractions(results: &mut [BenchmarkRunResult]) {
+        use std::collections::HashMap;
+        let mut best: HashMap<(String, String), f64> = HashMap::new();
+        for r in results.iter() {
+            if r.subruns.is_empty() {
+                continue;
+            }
+            let tp = match (r.throughput_req_sec, r.reference_throughput_req_sec) {
+                (Some(t), Some(rt)) if t > 0.0 && rt > 0.0 => t,
+                _ => continue,
+            };
+            let key = (r.task.clone(), r.rules_version.clone().unwrap_or_default());
+            best.entry(key)
+                .and_modify(|b| *b = b.max(tp))
+                .or_insert(tp);
+        }
+        for r in results.iter_mut() {
+            let tp = match (r.throughput_req_sec, r.reference_throughput_req_sec) {
+                (Some(t), Some(rt)) if t > 0.0 && rt > 0.0 => t,
+                _ => {
+                    r.frontier_fraction = None;
+                    continue;
+                }
+            };
+            let key = (r.task.clone(), r.rules_version.clone().unwrap_or_default());
+            r.frontier_fraction = best.get(&key).map(|b| {
+                if *b > 0.0 {
+                    (tp / b).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            });
+        }
     }
 }
 
@@ -956,6 +1007,10 @@ impl LeaderboardManager {
         }
 
         list = consolidated;
+        // Secondary denominator: per-task frontier fractions over this
+        // comparison set (same rules_version grouping inside). Runs before
+        // the rank sort; unanchored rows keep None.
+        BenchmarkRunResult::recompute_frontier_fractions(&mut list);
         // Rank by P@1 lower bound (honest under thin trials), then P@1
         // point, then score. Legacy rows without Wilson fields rank by
         // headline pass rate so old results still order sensibly.
@@ -1064,6 +1119,7 @@ impl LeaderboardManager {
                 "Duration",
                 "Turns",
                 "Throughput",
+                "Frontier",
                 "Regime",
                 "API cost ($)",
                 "Effective cost ($)",
@@ -1163,6 +1219,10 @@ impl LeaderboardManager {
                 Cell::new(dur_str).fg(Color::White),
                 Cell::new(turns_str).fg(Color::Cyan),
                 Cell::new(tp),
+                Cell::new(match r.frontier_fraction {
+                    Some(f) => format!("{:.0}%", f * 100.0),
+                    None => "--".to_string(),
+                }),
                 Cell::new(BenchmarkRunResult::regime_of(r)),
                 Cell::new(format!("${:.4}", r.total_cost_usd)).fg(Color::Magenta),
                 Cell::new(format!("${:.4}", r.effective_cost())).fg(Color::Magenta),
@@ -1217,7 +1277,10 @@ impl LeaderboardManager {
                         .map(|r| {
                             let lo = r.pass_at_1_lo.unwrap_or(r.pass_at_1.unwrap_or(r.pass_rate));
                             let n = r.total_trials.unwrap_or(r.subruns.len() as u32);
-                            format!("{lo:.0} (n={n})")
+                            match r.frontier_fraction {
+                                Some(f) => format!("{lo:.0} (n={n}, F{:.0}%)", f * 100.0),
+                                None => format!("{lo:.0} (n={n})"),
+                            }
                         })
                         .unwrap_or_else(|| "-".to_string());
                     line.push_str(&format!(" | {:>16}", cell));
@@ -1358,6 +1421,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
         let mut pinned = base;
@@ -1407,6 +1471,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         }
     }
 
@@ -1494,6 +1559,7 @@ mod tests {
                 pass_at_1_lo: None,
                 pass_at_1_hi: None,
                 stability: None,
+                frontier_fraction: None,
             };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
@@ -1580,6 +1646,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
         let m = BenchmarkRunResult::merge_subruns(
             "w",
@@ -1708,6 +1775,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -1761,6 +1829,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         }
     }
 
@@ -1806,6 +1875,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -1845,6 +1915,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();
@@ -1912,6 +1983,98 @@ mod tests {
     }
 
     #[test]
+    fn test_frontier_fractions() {
+        // Best anchored tp per (task, rules) = 1.0; others fractioned.
+        // Unanchored rows (no ref) keep None; losers fraction below 1.
+        let mut mk = |id: &str, tp: Option<f64>, rt: Option<f64>| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: tp,
+            reference_throughput_req_sec: rt,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 1.0,
+            throughput_score: None,
+            timestamp: String::new(),
+            method_version: None,
+            rules_version: Some("v1".to_string()),
+            subruns: vec![BenchmarkRunResult {
+                id: format!("{id}_trial1"),
+                model: "m".to_string(),
+                task: "redis".to_string(),
+                language: "Go".to_string(),
+                effort: None,
+                pass_rate: 100.0,
+                passed_stages: 4,
+                total_stages: 4,
+                throughput_req_sec: tp,
+                reference_throughput_req_sec: rt,
+                baseline_source: None,
+                ref_drift: None,
+                ref_image: None,
+                prompt_tokens: 0,
+                cached_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                total_cost_usd: 0.01,
+                effective_cost_usd: None,
+                duration_seconds: None,
+                turns: None,
+                savings_percent: 0.0,
+                efficiency_score: 1.0,
+                throughput_score: None,
+                timestamp: String::new(),
+                method_version: None,
+                rules_version: Some("v1".to_string()),
+                subruns: vec![],
+                total_trials: None,
+                pass_at_1: None,
+                pass_at_k: None,
+                avg_pass_rate: None,
+                pass_at_1_lo: None,
+                pass_at_1_hi: None,
+                stability: None,
+                frontier_fraction: None,
+            }],
+            total_trials: Some(1),
+            pass_at_1: Some(100.0),
+            pass_at_k: Some(100.0),
+            avg_pass_rate: Some(100.0),
+            pass_at_1_lo: Some(20.0),
+            pass_at_1_hi: Some(100.0),
+            stability: Some("stable".to_string()),
+            frontier_fraction: None,
+        };
+        let mut rows = vec![
+            mk("fast", Some(40000.0), Some(70000.0)),
+            mk("slow", Some(20000.0), Some(70000.0)),
+            mk("unanchored", Some(99999.0), None),
+        ];
+        BenchmarkRunResult::recompute_frontier_fractions(&mut rows);
+        assert_eq!(rows[0].frontier_fraction, Some(1.0));
+        assert_eq!(rows[1].frontier_fraction, Some(0.5));
+        assert_eq!(rows[2].frontier_fraction, None);
+        // Loose trial rows (no subruns) never join the denominator set.
+        assert!(rows.iter().all(|r| !r.id.contains("_trial") || r.frontier_fraction.is_none()));
+    }
+
+    #[test]
     fn test_single_trial_wilson_orders_below_nine() {
         // A lone 1/1 must not outrank a 9/9: n=1 Wilson lo (~20.7)
         // sits well below n=9 9/9 lo (~70.0).
@@ -1956,6 +2119,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
         let one = BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None).unwrap();
         assert!(one.pass_at_1_lo.unwrap() > 0.0);
@@ -2046,6 +2210,7 @@ mod tests {
             pass_at_1_lo: None,
             pass_at_1_hi: None,
             stability: None,
+            frontier_fraction: None,
         };
         // test_ ids are refused: Ok, but nothing written.
         LeaderboardManager::save_result(temp.to_str().unwrap(), &mk("test_probe_1")).unwrap();
