@@ -151,6 +151,13 @@ pub struct PipelineOutput {
     pub benchmark_result: BenchmarkRunResult,
     pub agent_failed: bool,
     pub disqualified: bool,
+    /// A harness fault degraded this run: the candidate workspace could not be
+    /// inspected, or the candidate container would not start. The run still
+    /// returns `Ok` because the agent and the verifier both completed, so
+    /// without this flag it is indistinguishable from a model that genuinely
+    /// produced nothing runnable - it is recorded as a 0% trial and counted in
+    /// the pass@k denominator. Callers must treat it as a non-result.
+    pub infra_error: bool,
 }
 
 /// Publish the WAL crash-recovery probe: 2000 MSGs on `recovery_probe`,
@@ -545,6 +552,10 @@ impl BenchmarkPipeline {
         // Verifier-measured rate (wal/proxy/pubsub soak); step 8 prefers it.
         let mut extra_throughput: Option<f64> = None;
         let mut baseline_source: Option<String> = None;
+        // Latched by whichever setup path hits a harness fault. Declared out
+        // here because the two sites live in different arms of the expression
+        // below and therefore do not share a scope.
+        let mut infra_error = false;
         let (pass_rate, passed_stages, total_stages, stage_results) = if disqualified {
             let reason = disqualification_reason
                 .unwrap_or_else(|| "Anti-cheat compliance violation".to_string());
@@ -556,6 +567,10 @@ impl BenchmarkPipeline {
             }];
             (0.0, 0, config.task.total_stages(), stages)
         } else if !has_runnable {
+            // A workspace-inspection Err is a harness fault, not a model that
+            // produced nothing. Latched so the run is reported as a non-result
+            // rather than a 0% trial.
+            infra_error = candidate_check_error.is_some();
             if let Some(e) = &candidate_check_error {
                 // Report the real fault. This is infrastructure, not a model
                 // that failed to produce code.
@@ -579,6 +594,9 @@ impl BenchmarkPipeline {
                     "[INFRA] Candidate container failed to start ({e}); \
                      verifiers would fail on transport, not on the candidate."
                 ));
+                // Latched below via `infra_error`; declared here so both paths
+                // converge on one flag.
+                infra_error = true;
             }
 
             // Proxy needs its upstream pool; DNS needs ref-dns. Both live
@@ -1174,7 +1192,13 @@ impl BenchmarkPipeline {
             run_id: run_id.clone(),
             model: config.model.clone(),
             task: config.task.to_string(),
-            status: if disqualified {
+            // `infra_error` first: a harness fault that also scored 0% must
+            // not be archived as `failed_tests`, which is a model verdict.
+            // Ordering matters - a disqualified run is a model-side result and
+            // keeps its own status even if setup also faulted.
+            status: if infra_error && !disqualified {
+                "infra_error".to_string()
+            } else if disqualified {
                 "disqualified_cheat".to_string()
             } else if pass_rate == 100.0 {
                 if agent_failed {
@@ -1399,6 +1423,7 @@ impl BenchmarkPipeline {
             benchmark_result,
             agent_failed,
             disqualified,
+            infra_error,
         })
     }
 }

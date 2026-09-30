@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use subdollarbench::config::{Cli, Commands, TaskType};
-use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
+use subdollarbench::pipeline::{
+    BenchmarkConfig, BenchmarkPipeline, PipelineLogger, PipelineOutput,
+};
 use subdollarbench::remote;
 use subdollarbench::report::{
     assess_stability, BenchmarkRunResult, LeaderboardManager, PortalExporter, RunJudge,
@@ -80,6 +82,23 @@ fn verdict_code(m: &RunManifest) -> i32 {
         "completed" => 0,
         "failed_tests" | "disqualified_cheat" => 1,
         _ => 2,
+    }
+}
+
+/// How a finished trial counts toward pass@k, as
+/// `(is_infrastructure_fault, counts_as_passing)`.
+///
+/// A harness fault is a non-result in *both* directions: it must not inflate
+/// the denominator, and it must not be able to contribute a passing trial
+/// either. The second half is the subtle one — a run that returned `Ok` with
+/// `infra_error` set can still carry `pass_rate == 100.0` if an earlier stage
+/// happened to pass, and counting that as a model success credits the model for
+/// a run the harness corrupted.
+fn trial_accounting(output: &PipelineOutput) -> (bool, bool) {
+    if output.infra_error {
+        (true, false)
+    } else {
+        (false, output.benchmark_result.pass_rate == 100.0)
     }
 }
 
@@ -209,6 +228,16 @@ async fn run_trial_batch(
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await {
             Ok(output) => {
+                // Same rule as the foreground loop: a harness fault is a
+                // non-result and must not become a scored extension trial.
+                if output.infra_error {
+                    eprintln!(
+                        "  [INFRA] Extension subrun {idx} degraded by a harness fault \
+                         (status: {}); excluded",
+                        output.manifest.status
+                    );
+                    continue;
+                }
                 if output.benchmark_result.pass_rate == 100.0 {
                     passing += 1;
                 }
@@ -371,7 +400,24 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
                 match pipe_res {
                     Ok(output) => {
-                        if output.benchmark_result.pass_rate == 100.0 {
+                        let (infra, passing) = trial_accounting(&output);
+                        if infra {
+                            // The run completed but a harness fault degraded
+                            // it - the workspace could not be inspected, or the
+                            // candidate container would not start. It still
+                            // returns Ok, so without this it lands in
+                            // `subrun_results` as a 0% trial and is counted in
+                            // the pass@k denominator: the same defect as the
+                            // Err arm below.
+                            eprintln!(
+                                "  [INFRA] Subrun {}/{} degraded by a harness fault; \
+                                 excluded from pass@k (status: {})",
+                                trial_idx, total_trials, output.manifest.status
+                            );
+                            infra_failed += 1;
+                            continue;
+                        }
+                        if passing {
                             passing_trials += 1;
                         }
                         if total_trials > 1 {
@@ -2489,6 +2535,59 @@ mod tests {
         assert_eq!(verdict_code(&test_manifest_with_status("agent_failed")), 2);
         assert_eq!(verdict_code(&test_manifest_with_status("agent_killed")), 2);
         assert_eq!(verdict_code(&test_manifest_with_status("mystery")), 2);
+    }
+
+    fn test_result_with_pass_rate(pass: f64) -> subdollarbench::report::BenchmarkRunResult {
+        serde_json::from_value(serde_json::json!({
+            "id": "t", "model": "m", "task": "redis", "language": "Go",
+            "effort": null, "pass_rate": pass, "passed_stages": 1, "total_stages": 1,
+            "throughput_req_sec": null, "reference_throughput_req_sec": null,
+            "baseline_source": null, "ref_drift": null, "ref_image": null,
+            "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0, "total_cost_usd": 0.0, "effective_cost_usd": null,
+            "duration_seconds": null, "turns": null, "savings_percent": 0.0,
+            "efficiency_score": 0.0, "throughput_score": null,
+            "timestamp": "2026-09-30T00:00:00Z", "method_version": null,
+            "rules_version": null, "subruns": [], "total_trials": null,
+            "pass_at_1": null, "pass_at_k": null, "avg_pass_rate": null,
+            "pass_at_1_lo": null, "pass_at_1_hi": null, "stability": null,
+            "frontier_fraction": null
+        }))
+        .unwrap()
+    }
+
+    /// A harness fault is a non-result in both directions. This fails if the
+    /// `infra_error` arm is dropped from `trial_accounting` - the case that
+    /// motivated it is a run returning `Ok` with a harness fault logged, which
+    /// used to be scored as a 0% trial inside the pass@k denominator.
+    #[test]
+    fn test_infra_fault_is_a_non_result_in_both_directions() {
+        let mk = |pass: f64, infra: bool| PipelineOutput {
+            manifest: test_manifest_with_status(if infra { "infra_error" } else { "completed" }),
+            benchmark_result: test_result_with_pass_rate(pass),
+            agent_failed: false,
+            disqualified: false,
+            infra_error: infra,
+        };
+
+        assert_eq!(trial_accounting(&mk(100.0, false)), (false, true));
+        assert_eq!(trial_accounting(&mk(0.0, false)), (false, false));
+
+        // A harness fault is never passing, whatever pass_rate it carries.
+        assert_eq!(trial_accounting(&mk(0.0, true)), (true, false));
+        assert_eq!(
+            trial_accounting(&mk(100.0, true)),
+            (true, false),
+            "an infra fault must not be able to contribute a passing trial"
+        );
+    }
+
+    /// The archived status must distinguish a harness fault from a model
+    /// verdict, or a stored 0% is indistinguishable from a real failure.
+    #[test]
+    fn test_infra_error_status_maps_to_infra_exit_code() {
+        assert_eq!(verdict_code(&test_manifest_with_status("infra_error")), 2);
+        assert_eq!(verdict_code(&test_manifest_with_status("failed_tests")), 1);
     }
 
     #[test]
