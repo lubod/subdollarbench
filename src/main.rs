@@ -103,17 +103,9 @@ fn trial_accounting(output: &PipelineOutput) -> (bool, bool) {
 }
 
 fn parse_task(s: &str) -> Result<TaskType> {
-    match s.to_lowercase().as_str() {
-        "redis" => Ok(TaskType::Redis),
-        "http" => Ok(TaskType::Http),
-        "dns" => Ok(TaskType::Dns),
-        "pdf" => Ok(TaskType::Pdf),
-        "wal" => Ok(TaskType::Wal),
-        "proxy" => Ok(TaskType::Proxy),
-        "pubsub" => Ok(TaskType::Pubsub),
-        "binproto" => Ok(TaskType::Binproto),
-        _ => anyhow::bail!("unknown task '{s}'"),
-    }
+    // Single source of truth: the queue engine resolves task names too, and
+    // when the two had separate match blocks any gate here was bypassed there.
+    TaskType::parse(s)
 }
 
 fn resolve_parent_id(results_dir: &str, prefix: &str) -> Result<String> {
@@ -285,6 +277,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             extend_if_unstable,
             max_trials,
         } => {
+            // `task` is already a `TaskType` because the arg is a clap
+            // `value_enum`: clap deserialized `--task dns` before this match,
+            // so `TaskType::parse` never sees it. Gate at the point of use, or
+            // a retired task still spins up a batch reference and bills.
+            if let Some(why) = task.retired() {
+                anyhow::bail!("task '{task}' is retired. {why}");
+            }
             if queue {
                 let server = resolve_server_flag(&server);
                 // Engine path: identical payload to `enqueue`, so matrix
@@ -575,6 +574,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Eval { task, port } => {
+            // Same reason as the `run` arm: `task` is a `value_enum` field, so
+            // the retirement check has to happen here.
+            if let Some(why) = task.retired() {
+                anyhow::bail!("task '{task}' is retired. {why}");
+            }
             let p = port.unwrap_or(match task {
                 TaskType::Redis => 6379,
                 TaskType::Http => 8080,
@@ -1844,6 +1848,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             review_model,
             server,
         } => {
+            // `value_enum` again, so gate before the request goes out rather
+            // than relying on the engine cancelling the queue item.
+            if let Some(why) = task.retired() {
+                anyhow::bail!("task '{task}' is retired. {why}");
+            }
             let server = resolve_server_flag(&server);
             let body = remote::run_request(
                 &model,
@@ -2270,13 +2279,19 @@ mod tests {
         };
         assert!(run_cli(cli_http).await.is_ok());
 
+        // dns is retired, so `eval` must now refuse it. This used to assert
+        // `is_ok()` - the test was pinning the behaviour retirement removed.
         let cli_dns = Cli {
             command: Commands::Eval {
                 task: TaskType::Dns,
                 port: Some(59999),
             },
         };
-        assert!(run_cli(cli_dns).await.is_ok());
+        let err = run_cli(cli_dns).await.unwrap_err().to_string();
+        assert!(
+            err.contains("retired"),
+            "expected a retirement error, got: {err}"
+        );
     }
 
     #[tokio::test]

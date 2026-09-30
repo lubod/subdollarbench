@@ -911,6 +911,62 @@ impl TaskType {
     pub fn is_udp(&self) -> bool {
         matches!(self, TaskType::Dns)
     }
+
+    /// Tasks withdrawn from scoring, with the reason.
+    ///
+    /// The variant, its serde name and `tasks/<task>/prompt.md` all stay:
+    /// archived results carry `"task": "dns"` and must keep parsing, and the
+    /// ruleset fingerprint hashes the prompt, so deleting either would break
+    /// `fingerprint()` (which panics on a missing graded file). Retirement is a
+    /// gate on *running* a task, not a deletion.
+    pub fn retired(&self) -> Option<&'static str> {
+        match self {
+            // 5/5 runs at 100% pass rate, spread 0 across four models - it
+            // separates nobody. The cause is the verifier, not the prompt: its
+            // six stages (handshake, A, A, TXT, NXDOMAIN, 800-query
+            // concurrency) are all satisfied by a hardcoded lookup table with
+            // correct 12-byte framing, so nothing rewards real DNS. Rewriting
+            // the prompt cannot fix that; it needs new stages or nothing.
+            TaskType::Dns => Some(
+                "retired 2026-09-30: saturated (5/5 at 100%, spread 0). \
+                 The spec also over-specifies every answer, and the forwarding \
+                 stage is unprovable - the only unknown name given is under the \
+                 .invalid TLD, which can never resolve, so 'forward and cache' \
+                 is indistinguishable from an instant NXDOMAIN. Needs new \
+                 verifier stages (CNAME, AAAA, compression pointers, TCP \
+                 truncation) before it earns trial budget again.",
+            ),
+            _ => None,
+        }
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.retired().is_some()
+    }
+
+    /// Single entry point for turning a task name into a `TaskType`.
+    ///
+    /// Both the CLI and the queue engine resolve task names, and they used to
+    /// carry separate `match` blocks — so any gate applied to one was bypassed
+    /// by the other, and the engine is the path a wave actually takes. The
+    /// retirement check lives here so neither can run a withdrawn task.
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let task = match s.to_lowercase().as_str() {
+            "redis" => Self::Redis,
+            "http" => Self::Http,
+            "dns" => Self::Dns,
+            "pdf" => Self::Pdf,
+            "wal" => Self::Wal,
+            "proxy" => Self::Proxy,
+            "pubsub" => Self::Pubsub,
+            "binproto" => Self::Binproto,
+            other => anyhow::bail!("unknown task '{other}'"),
+        };
+        if let Some(why) = task.retired() {
+            anyhow::bail!("task '{task}' is retired. {why}");
+        }
+        Ok(task)
+    }
 }
 
 impl std::fmt::Display for TaskType {
@@ -972,6 +1028,85 @@ pub fn get_repo_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dns is retired: 5/5 at 100% pass rate, spread 0 across four models.
+    /// It must not be runnable, and the refusal must say why.
+    #[test]
+    fn test_retired_task_is_gated() {
+        assert!(TaskType::Dns.is_retired());
+        let err = TaskType::parse("dns").unwrap_err().to_string();
+        assert!(
+            err.contains("retired"),
+            "expected a retirement error, got: {err}"
+        );
+        assert!(err.contains("saturated"), "error should say why: {err}");
+
+        for t in ["redis", "http", "pdf", "wal", "proxy", "pubsub", "binproto"] {
+            assert!(
+                !TaskType::parse(t).unwrap().is_retired(),
+                "{t} should be runnable"
+            );
+        }
+        assert!(TaskType::parse("nope").is_err());
+    }
+
+    /// Retirement is a gate on running, not a deletion. Archived manifests and
+    /// results carry `"task": "dns"` and must keep loading, and
+    /// GRADED_FILES still hashes `tasks/dns/prompt.md`, so the variant and its
+    /// serde name have to survive.
+    #[test]
+    fn test_retired_task_still_round_trips_as_data() {
+        let json = serde_json::to_string(&TaskType::Dns).unwrap();
+        assert_eq!(json, "\"dns\"");
+        let back: TaskType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TaskType::Dns);
+        assert!(back.is_retired());
+        assert_eq!(format!("{back}"), "dns");
+    }
+
+    /// The CLI arg is a clap `value_enum`, so clap deserializes `--task dns`
+    /// into a `TaskType` before any of our code runs. `TaskType::parse` alone
+    /// therefore cannot stop `run --task dns`; the gates live in the command
+    /// arms. This asserts the property those arms depend on, and is what would
+    /// catch a retired task being added without a `retired()` entry.
+    #[test]
+    fn test_every_task_is_either_retired_or_runnable() {
+        for t in [
+            TaskType::Redis,
+            TaskType::Http,
+            TaskType::Dns,
+            TaskType::Pdf,
+            TaskType::Wal,
+            TaskType::Proxy,
+            TaskType::Pubsub,
+            TaskType::Binproto,
+        ] {
+            let name = t.to_string();
+            if t.is_retired() {
+                let err = TaskType::parse(&name).unwrap_err().to_string();
+                assert!(err.contains("retired"), "{name}: {err}");
+                assert!(err.len() > 40, "{name}: retirement reason must explain why");
+            } else {
+                assert!(TaskType::parse(&name).is_ok(), "{name} should be runnable");
+            }
+        }
+        // Exactly one task retired today; bump this when that changes so a
+        // silent addition has to be deliberate.
+        let retired: Vec<TaskType> = [
+            TaskType::Redis,
+            TaskType::Http,
+            TaskType::Dns,
+            TaskType::Pdf,
+            TaskType::Wal,
+            TaskType::Proxy,
+            TaskType::Pubsub,
+            TaskType::Binproto,
+        ]
+        .into_iter()
+        .filter(|t| t.is_retired())
+        .collect();
+        assert_eq!(retired, vec![TaskType::Dns]);
+    }
 
     #[test]
     fn test_task_type_display_and_serde() {

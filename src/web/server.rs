@@ -2081,22 +2081,14 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         }
         return;
     }
-    let task_type = match data.task.as_str() {
-        "redis" => TaskType::Redis,
-        "http" => TaskType::Http,
-        "dns" => TaskType::Dns,
-        "pdf" => TaskType::Pdf,
-        "wal" => TaskType::Wal,
-        "proxy" => TaskType::Proxy,
-        "pubsub" => TaskType::Pubsub,
-        "binproto" => TaskType::Binproto,
-        _ => {
+    let task_type = match TaskType::parse(&data.task) {
+        Ok(t) => t,
+        Err(e) => {
+            // Covers unknown *and* retired tasks, so a grid file still listing
+            // `dns` cannot spend money on it through the engine.
             finish_item(
                 &state,
-                &format!(
-                    "[EXTEND-QUEUE] {queue_id}: unknown task '{}'; skipping.",
-                    data.task
-                ),
+                &format!("[EXTEND-QUEUE] {queue_id}: {e}; skipping."),
             );
             release_slot(&state, worker);
             if !pump_queue(&state) {
@@ -2185,6 +2177,30 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
 }
 
 fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>, worker: u8) {
+    // Every engine run funnels through here, so this is the one place that has
+    // to refuse a retired task: `RunRequest.task` is a String resolved by four
+    // separate match blocks further down (each defaulting an unknown task to
+    // Redis), none of which consult the retirement list. This is the path a
+    // wave actually takes, and the one that spends.
+    match TaskType::parse(&req.task) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[INFRA] refusing run: {e}");
+            if let Some(id) = &queue_id {
+                let _ = state
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|i| i.id == *id)
+                    .map(|i| {
+                        i.status = QueueStatus::Cancelled;
+                    });
+            }
+            state.queue_paused.store(false, Ordering::SeqCst);
+            return;
+        }
+    }
     // A previous `stop` must never poison the next run: the cancel flag is
     // per-run, cleared at dispatch. (Stale global flag once ate 15 queued
     // cells with 0-trial Dones.)
