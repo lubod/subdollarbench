@@ -31,7 +31,7 @@ MODELS=$(awk '!/^#/ && NF {print $1}' "$1" | sort -u | paste -sd, -)
 TASKS=$(awk '!/^#/ && NF {print $2}' "$1" | sort -u | paste -sd, -)
 EFFORTS=$(awk '!/^#/ && NF {print $3}' "$1" | sort -u | paste -sd, -)
 TRIALS=$(awk '!/^#/ && NF {print $4; exit}' "$1")
-./target/release/subdollarbench matrix --models "$MODELS" --tasks "$TASKS" --efforts "$EFFORTS" --trials "${TRIALS:-3}" --enqueue --extend-if-unstable --max-trials 9
+./target/release/subdollarbench matrix --models "$MODELS" --tasks "$TASKS" --efforts "$EFFORTS" --trials "${TRIALS:-3}" --enqueue --extend-if-unstable --max-trials 7
 echo "ENQUEUED via matrix --enqueue"
 
 # 6. Spot check: first 3 cells must run REAL trials (turns>0, spend>0) within 15 min.
