@@ -54,6 +54,11 @@ pub fn egress_allowed(host: &str) -> bool {
     EGRESS_ALLOWLIST.iter().any(|a| h == *a || h.ends_with(&format!(".{a}")))
 }
 pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
+/// PDF reference: canonical extractor (extensions/pdf_reference.py) built
+/// into a local image (`docker build -t pdf-ref:local extensions/` after
+/// copying server in; see extensions/pdf_reference.py header). Local tag
+/// until registry push; re-pin by digest at publish time.
+pub const REF_PDF_IMAGE: &str = "pdf-ref:local";
 /// Benchmark *client* images are pinned too: the client binary is half the
 /// measurement apparatus.
 pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
@@ -61,12 +66,13 @@ pub const BENCH_WRK_IMAGE: &str = "docker.io/williamyeh/wrk@sha256:78adc0d9d51a9
 /// Fixed upstream ports for the proxy task (also baked into tasks/proxy/prompt.md).
 pub const PROXY_UPSTREAM_PORTS: [u16; 3] = [8101, 8102, 8103];
 
-/// Reference image for a task name ("redis"/"http"/"dns"), if it has one.
+/// Reference image for a task name ("redis"/"http"/"dns"/"pdf"), if it has one.
 pub fn ref_image_for_task(task: &str) -> Option<&'static str> {
     match task {
         "redis" => Some(REF_REDIS_IMAGE),
         "http" => Some(REF_NGINX_IMAGE),
         "dns" => Some(REF_DNS_IMAGE),
+        "pdf" => Some(REF_PDF_IMAGE),
         _ => None,
     }
 }
@@ -167,6 +173,10 @@ impl SandboxManager {
 
     pub fn ref_dns_name(&self) -> String {
         format!("subdollar-ref-dns-{}", self.instance_id)
+    }
+
+    pub fn ref_pdf_name(&self) -> String {
+        format!("subdollar-ref-pdf-{}", self.instance_id)
     }
 
     pub fn network_name(&self) -> String {
@@ -536,6 +546,46 @@ impl SandboxManager {
 
     fn coredns_corefile_path(instance_id: &str) -> PathBuf {
         std::env::temp_dir().join(format!("subdollar-coredns-{}.corefile", instance_id))
+    }
+
+    /// Start the canonical PDF extractor reference (REF_PDF_IMAGE) on the
+    /// run network under alias `ref-pdf`, host-published for measurement.
+    /// The agent keeps its black-box oracle; batch calibration measures the
+    /// same container via the host port.
+    pub fn start_reference_pdf(&self, port: u16) -> Result<()> {
+        let name = self.ref_pdf_name();
+        let net = self.network_name();
+        self.ensure_network()?;
+        info!(
+            "Starting reference PDF extractor in Docker on port {} ({}, alias ref-pdf on {})",
+            port, name, net
+        );
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &name,
+                "--network",
+                &net,
+                "--network-alias",
+                "ref-pdf",
+                "--memory=512m",
+                "--cpus=1.0",
+                "-p",
+                &format!("127.0.0.1:{port}:8090"),
+                REF_PDF_IMAGE,
+            ])
+            .output()?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "pdf reference start failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(())
     }
 
     fn find_go_main_recursive(dir: &Path) -> Option<PathBuf> {

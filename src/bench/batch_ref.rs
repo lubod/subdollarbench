@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use crate::bench::BenchmarkRunner;
 use crate::config::{get_repo_root, TaskType};
 use crate::sandbox::docker::{
-    SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE,
+    SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE, REF_PDF_IMAGE,
+    REF_REDIS_IMAGE,
 };
 
 /// Batch-port assignments. Deliberately offset from the per-trial ref ports
@@ -30,7 +31,10 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
         // DNS batch ref: pinned CoreDNS + forwarding Corefile (same oracle
         // as trial refs); offset from the per-trial ref port 5354.
         TaskType::Dns => Some(5359),
-        TaskType::Pdf | TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
+        // PDF batch ref: canonical extractor (REF_PDF_IMAGE); offset from
+        // the per-trial ref port once trial refs exist (8090 today).
+        TaskType::Pdf => Some(8099),
+        TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
     }
 }
 
@@ -39,6 +43,7 @@ fn ref_image(task: &TaskType) -> &'static str {
         TaskType::Redis => REF_REDIS_IMAGE,
         TaskType::Http | TaskType::Proxy => REF_NGINX_IMAGE,
         TaskType::Dns => REF_DNS_IMAGE,
+        TaskType::Pdf => REF_PDF_IMAGE,
         _ => "none",
     }
 }
@@ -96,6 +101,39 @@ fn wait_dns_ready(port: u16) -> bool {
         std::thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+fn wait_pdf_ready(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            use std::io::Write;
+            let _ = s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+            let mut buf = [0u8; 64];
+            use std::io::Read;
+            if s.read(&mut buf).is_ok() && buf.starts_with(b"HTTP/1.1 200") {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+fn measure_pdf_pages_per_sec(port: u16) -> Result<f64> {
+    // Sync wrapper over the async verifier soak (stage-4 multipage path).
+    // A throwaway single-thread runtime keeps batch_ref sync like DNS.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let v = crate::verifier::PdfVerifier::new(port, Some("batchref"));
+        v.measure_throughput()
+            .await
+            .ok_or_else(|| anyhow!("pdf batch ref: verifier soak returned None on port {port}"))
+    })
 }
 
 fn measure_dns_queries_per_sec(port: u16) -> Result<f64> {
@@ -158,6 +196,7 @@ fn measure(task: &TaskType, port: u16) -> Result<f64> {
         TaskType::Redis => BenchmarkRunner::run_redis_benchmark(port),
         TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark(port),
         TaskType::Dns => measure_dns_queries_per_sec(port),
+        TaskType::Pdf => measure_pdf_pages_per_sec(port),
         _ => Err(anyhow!("no external reference for {:?}", task)),
     }
 }
@@ -177,7 +216,7 @@ pub struct BatchRefReport {
 
 impl BatchRef {
     /// Start the batch ref, warm it up (one discarded window), and return the
-    /// median-of-3 pre-batch value. `None` task support (PDF/WAL/...) yields `Ok(None)`.
+    /// median-of-3 pre-batch value. `None` task support (WAL/...) yields `Ok(None)`.
     pub fn start(task: &TaskType, parent_run_id: &str, log: &dyn Fn(&str)) -> Result<Option<Self>> {
         Self::start_on_worker(task, parent_run_id, log, 0)
     }
@@ -200,6 +239,7 @@ impl BatchRef {
             TaskType::Redis => sandbox.start_reference_redis(port),
             TaskType::Http | TaskType::Proxy => sandbox.start_reference_http(port),
             TaskType::Dns => sandbox.start_reference_dns(port),
+            TaskType::Pdf => sandbox.start_reference_pdf(port),
             _ => return Ok(None),
         };
         if let Err(e) = start_res {
@@ -210,6 +250,7 @@ impl BatchRef {
             TaskType::Redis => wait_redis_ready(port),
             TaskType::Http | TaskType::Proxy => wait_http_ready(port),
             TaskType::Dns => wait_dns_ready(port),
+            TaskType::Pdf => wait_pdf_ready(port),
             _ => false,
         };
         if !ready {
@@ -325,7 +366,8 @@ mod tests {
         assert_eq!(batch_port(&TaskType::Dns), Some(5359));
         // Offset from per-trial ref port 5354: no collision with trial churn.
         assert_ne!(batch_port(&TaskType::Dns), Some(5354));
-        assert_eq!(batch_port(&TaskType::Pdf), None);
+        assert_eq!(batch_port(&TaskType::Pdf), Some(8099));
+        assert_ne!(batch_port(&TaskType::Pdf), Some(8090));
         // Offset from per-trial ref ports: no collision with trial churn.
         assert_ne!(batch_port(&TaskType::Redis), Some(6380));
         assert_ne!(batch_port(&TaskType::Http), Some(8081));
