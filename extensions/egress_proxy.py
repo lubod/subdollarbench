@@ -115,7 +115,12 @@ def handle(client):
                     chunked = True
             try:
                 if chunked:
-                    # Read chunk stream until terminal 0-chunk.
+                    # Read the whole chunk stream, then de-chunk it. `body`
+                    # was seeded with `buffered` above for the content-length
+                    # and unframed paths; start clean here, or the buffered
+                    # prefix is counted twice and the de-chunk pass below
+                    # re-parses it as a size line.
+                    body = b""
                     raw = buffered
                     while True:
                         while b"\r\n" not in raw:
@@ -137,12 +142,14 @@ def handle(client):
                             if not chunk:
                                 break
                             raw += chunk
-                        body = raw[:need] if len(raw) >= need else raw
+                        # Accumulate every frame. Assigning here overwrote the
+                        # frames already collected, so only the last survived --
+                        # and when the last frame is the terminal 0-chunk, the
+                        # client got a 200 with an empty body.
+                        body += raw[:need]
                         if size == 0:
                             break
                         raw = raw[need:]
-                        if size == 0:
-                            break
                     # Re-emit de-chunked as content-length for simplicity.
                     payload = b""
                     raw = body
