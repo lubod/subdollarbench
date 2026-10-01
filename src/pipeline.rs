@@ -994,14 +994,25 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_redis_benchmark(
+                            match BenchmarkRunner::run_redis_benchmark(
                                 crate::web::server::worker_port(6380, config.worker),
                             ) {
-                                logger.log(&format!(
-                                    "  Official Reference Redis: {:.0} req/sec",
-                                    ref_tp
-                                ));
-                                reference_throughput = Some(ref_tp);
+                                Ok(ref_tp) => {
+                                    logger.log(&format!(
+                                        "  Official Reference Redis: {:.0} req/sec",
+                                        ref_tp
+                                    ));
+                                    reference_throughput = Some(ref_tp);
+                                }
+                                // Never silent. A reference that fails to
+                                // measure leaves throughput_req_sec populated
+                                // with nothing to divide by, and the row looks
+                                // merely unanchored - indistinguishable from a
+                                // task that has no reference by design.
+                                Err(e) => logger.log(&format!(
+                                    "  [BENCH] live Redis reference FAILED: {e:#}. \
+                                     Throughput will be reported but NOT ranked."
+                                )),
                             }
                         }
                     }
@@ -1015,14 +1026,22 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(
+                            match BenchmarkRunner::run_wrk_benchmark(
                                 crate::web::server::worker_port(8081, config.worker),
                             ) {
-                                logger.log(&format!(
-                                    "  Official Reference Nginx: {:.0} req/sec",
-                                    ref_tp
-                                ));
-                                reference_throughput = Some(ref_tp);
+                                Ok(ref_tp) => {
+                                    logger.log(&format!(
+                                        "  Official Reference Nginx: {:.0} req/sec",
+                                        ref_tp
+                                    ));
+                                    reference_throughput = Some(ref_tp);
+                                }
+                                // See the Redis arm: a swallowed failure here
+                                // is indistinguishable from having no reference.
+                                Err(e) => logger.log(&format!(
+                                    "  [BENCH] live Nginx reference FAILED: {e:#}. \
+                                     Throughput will be reported but NOT ranked."
+                                )),
                             }
                         }
                     }
@@ -1052,14 +1071,22 @@ impl BenchmarkPipeline {
                             // Same nginx denominator as http: a proxy cannot
                             // beat direct. Live per-trial when no batch ref.
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            if let Ok(ref_tp) = BenchmarkRunner::run_wrk_benchmark(
+                            match BenchmarkRunner::run_wrk_benchmark(
                                 crate::web::server::worker_port(8081, config.worker),
                             ) {
-                                logger.log(&format!(
-                                    "  Official Reference Nginx: {:.0} req/sec",
-                                    ref_tp
-                                ));
-                                reference_throughput = Some(ref_tp);
+                                Ok(ref_tp) => {
+                                    logger.log(&format!(
+                                        "  Official Reference Nginx: {:.0} req/sec",
+                                        ref_tp
+                                    ));
+                                    reference_throughput = Some(ref_tp);
+                                }
+                                // See the Redis arm: a swallowed failure here
+                                // is indistinguishable from having no reference.
+                                Err(e) => logger.log(&format!(
+                                    "  [BENCH] live Nginx reference FAILED: {e:#}. \
+                                     Throughput will be reported but NOT ranked."
+                                )),
                             }
                         }
                     }
