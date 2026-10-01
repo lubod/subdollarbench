@@ -674,6 +674,21 @@ impl SandboxManager {
             port, name, net
         );
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        // Dual-attached, and the order matters.
+        //
+        // Primary network is the default bridge, so the `-p` mapping is created
+        // and works: the PDF client is the in-process `PdfVerifier`, which
+        // dials 127.0.0.1 from the harness process on the host. It cannot
+        // resolve a container-internal alias at all, so unlike redis/http
+        // there is no run-network route that would serve it.
+        //
+        // Then attach the run network under the `ref-pdf` alias, which is how
+        // the agent reaches its black-box oracle.
+        //
+        // Starting on the run network instead would fail outright under egress
+        // enforcement: docker silently drops `-p` on an `--internal` network
+        // (`docker inspect` reports {"8090/tcp":null}), and attaching a second
+        // network afterwards cannot resurrect an already-null port binding.
         let run_args = [
             "run",
             "-d",
@@ -681,9 +696,7 @@ impl SandboxManager {
             "--name",
             &name,
             "--network",
-            &net,
-            "--network-alias",
-            "ref-pdf",
+            "bridge",
             "--memory=512m",
             "--cpus=1.0",
             "-p",
@@ -691,6 +704,19 @@ impl SandboxManager {
             REF_PDF_RUN_IMAGE,
         ];
         let out = Command::new("docker").args(run_args).output()?;
+        if out.status.success() {
+            let attach = Command::new("docker")
+                .args(["network", "connect", "--alias", "ref-pdf", &net, &name])
+                .output()?;
+            if !attach.status.success() {
+                let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+                return Err(anyhow!(
+                    "pdf reference started but could not join the run network {}: {}",
+                    net,
+                    String::from_utf8_lossy(&attach.stderr)
+                ));
+            }
+        }
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             // Fresh-checkout bootstrap: image missing -> build from the
