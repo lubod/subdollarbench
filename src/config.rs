@@ -921,20 +921,45 @@ impl TaskType {
     /// gate on *running* a task, not a deletion.
     pub fn retired(&self) -> Option<&'static str> {
         match self {
-            // 5/5 runs at 100% pass rate, spread 0 across four models - it
-            // separates nobody. The cause is the verifier, not the prompt: its
-            // six stages (handshake, A, A, TXT, NXDOMAIN, 800-query
-            // concurrency) are all satisfied by a hardcoded lookup table with
-            // correct 12-byte framing, so nothing rewards real DNS. Rewriting
-            // the prompt cannot fix that; it needs new stages or nothing.
+            // Saturated: 5/5 runs at 100% pass rate, spread 0 across four
+            // models - it separates nobody. Two independent defects, and the
+            // second one is the reason no reference throughput was ever
+            // recorded for this task.
+            //
+            // (1) The verifier, not the prompt. Its six stages (handshake, A, A,
+            // TXT, NXDOMAIN, 800-query concurrency) are all satisfied by a
+            // hardcoded lookup table with correct 12-byte framing, so nothing
+            // rewards real DNS.
+            //
+            // (2) The reference cannot satisfy the candidate's own acceptance
+            // criterion. The spec is a MOCK resolver: the probe requires the
+            // literal answer 93.184.216.34 (verifier/dns.rs:216-219), a stale
+            // Akamai-era address, and returns None without it. The reference
+            // container is CoreDNS, a real forwarding recursive resolver, which
+            // returns the current addresses for example.com and is therefore
+            // scored None by construction. A candidate is rewarded for echoing
+            // a stale IP; the reference is penalised for being correct. This is
+            // why reference_throughput_req_sec is null on every archived dns
+            // row - the denominator was never measurable, not merely missing.
+            //
+            // Also: the forwarding stage is unprovable - the only unknown name
+            // given is under .invalid, which can never resolve, so 'forward and
+            // cache' is indistinguishable from an instant NXDOMAIN.
+            //
+            // To return it needs new verifier stages (CNAME, AAAA, compression
+            // pointers, TCP truncation) AND a spec that a correct resolver can
+            // satisfy, so a real reference has a denominator to be measured
+            // against.
             TaskType::Dns => Some(
-                "retired 2026-09-30: saturated (5/5 at 100%, spread 0). \
-                 The spec also over-specifies every answer, and the forwarding \
-                 stage is unprovable - the only unknown name given is under the \
-                 .invalid TLD, which can never resolve, so 'forward and cache' \
-                 is indistinguishable from an instant NXDOMAIN. Needs new \
-                 verifier stages (CNAME, AAAA, compression pointers, TCP \
-                 truncation) before it earns trial budget again.",
+                "retired 2026-09-30: saturated (5/5 at 100%, spread 0). The spec \
+                 is a mock resolver - it demands the literal answer 93.184.216.34 \
+                 - while the reference is CoreDNS, which correctly returns current \
+                 addresses and so is scored unmeasurable by construction; that is \
+                 why no dns reference throughput was ever recorded. The forwarding \
+                 stage is also unprovable: the only unknown name given is under \
+                 .invalid, which can never resolve. Needs new verifier stages \
+                 (CNAME, AAAA, compression pointers, TCP truncation) and a spec a \
+                 correct resolver can satisfy.",
             ),
             _ => None,
         }
