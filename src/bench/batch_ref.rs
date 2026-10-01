@@ -117,7 +117,12 @@ fn ref_image(task: &TaskType) -> &'static str {
     }
 }
 
-fn wait_redis_ready(port: u16) -> bool {
+/// Readiness is probed from a container on the same network as the reference,
+/// addressed by alias - not through a 127.0.0.1-published port, which docker
+/// silently drops on an `--internal` network. Probing the published port made
+/// every batch reference under egress enforcement time out and fall back to a
+/// per-trial live reference, so the batch baseline was never used.
+fn wait_redis_ready(net: &str, host: &str, port: u16) -> bool {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(20) {
         let out = Command::new("docker")
@@ -125,11 +130,11 @@ fn wait_redis_ready(port: u16) -> bool {
                 "run",
                 "--rm",
                 "--network",
-                "host",
+                net,
                 BENCH_REDIS_CLIENT_IMAGE,
                 "redis-cli",
                 "-h",
-                "127.0.0.1",
+                host,
                 "-p",
                 &port.to_string(),
                 "ping",
@@ -240,7 +245,36 @@ fn measure_dns_queries_per_sec(port: u16) -> Result<f64> {
     Ok(ok as f64 / secs)
 }
 
-fn wait_http_ready(port: u16) -> bool {
+/// Probed from the run network by alias, for the same reason as
+/// `wait_redis_ready`. TCP accept means nginx is up.
+fn wait_http_ready(net: &str, host: &str, port: u16) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        let probe = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                net,
+                crate::bench::BENCH_WRK_IMAGE,
+                "-t1",
+                "-c1",
+                "-d1s",
+                &format!("http://{host}:{port}/"),
+            ])
+            .output();
+        if let Ok(o) = probe {
+            if o.status.success() {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+#[allow(dead_code)]
+fn wait_http_ready_hostnet(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let start = Instant::now();
@@ -264,10 +298,17 @@ pub fn drift_threshold(task: &TaskType) -> f64 {
     }
 }
 
-fn measure(task: &TaskType, port: u16) -> Result<f64> {
+/// `net` is the run network and `alias` the addressable name of the server on
+/// it. The bench client joins that network rather than reaching a
+/// 127.0.0.1-published port: docker silently drops `-p` on an `--internal`
+/// network, so the host-published path cannot work under egress enforcement -
+/// and measuring over the same network path the candidate uses is what makes
+/// the ratio mean anything. The container-internal ports are the protocol's
+/// canonical ones, not the host-published offsets.
+fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
     match task {
-        TaskType::Redis => BenchmarkRunner::run_redis_benchmark(port),
-        TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark(port),
+        TaskType::Redis => BenchmarkRunner::run_redis_benchmark(net, "ref-redis", 6379),
+        TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark(net, "ref-http", 80),
         TaskType::Dns => measure_dns_queries_per_sec(port),
         TaskType::Pdf => measure_pdf_pages_per_sec(port),
         _ => Err(anyhow!("no external reference for {:?}", task)),
@@ -332,9 +373,10 @@ impl BatchRef {
             log(&format!("[BATCH-REF] Warning: batch reference unavailable: {}. Trials fall back to live per-trial refs.", e));
             return Ok(None);
         }
+        let ref_net = sandbox.network_name();
         let ready = match task {
-            TaskType::Redis => wait_redis_ready(port),
-            TaskType::Http | TaskType::Proxy => wait_http_ready(port),
+            TaskType::Redis => wait_redis_ready(&ref_net, "ref-redis", 6379),
+            TaskType::Http | TaskType::Proxy => wait_http_ready(&ref_net, "ref-http", 80),
             TaskType::Dns => wait_dns_ready(port),
             TaskType::Pdf => wait_pdf_ready(port),
             _ => false,
@@ -353,8 +395,8 @@ impl BatchRef {
         }
         // Warmup window (discarded): settles page cache / JIT so measured
         // windows reflect steady state, not cold start.
-        let _ = measure(task, port);
-        match measure(task, port) {
+        let _ = measure(task, &sandbox.network_name(), port);
+        match measure(task, &sandbox.network_name(), port) {
             Ok(pre) => {
                 log(&format!(
                     "[BATCH-REF] Batch reference {} median: {:.0} req/sec on port {} (shared by all trials)",
@@ -415,7 +457,7 @@ impl BatchRef {
     /// Post-batch bracket: re-measure, flag drift, append history, clean up.
     /// Never fails the batch: worst case the report carries `post: None`.
     pub fn finish(self, log: &dyn Fn(&str)) -> BatchRefReport {
-        let post = match measure(&self.task, self.port) {
+        let post = match measure(&self.task, &self.sandbox.network_name(), self.port) {
             Ok(v) => Some(v),
             Err(e) => {
                 log(&format!(

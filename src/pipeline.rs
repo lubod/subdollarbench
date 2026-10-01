@@ -604,7 +604,17 @@ impl BenchmarkPipeline {
             // (default bridge has neither alias). Without this, DNS
             // candidates hang in libc resolution of `ref-dns` past the 1.5s
             // verifier timeout and fail stage 5 on transport, not logic.
-            if config.task == TaskType::Proxy || config.task == TaskType::Dns {
+            // Redis and Http join too: their throughput is now measured with
+            // the bench client on this network, addressed by the `candidate`
+            // alias. Without the attach the alias never exists and the
+            // measurement fails silently. This also aligns the sandbox with the
+            // redis prompt, which already tells the model that a reference
+            // server is reachable at `ref-redis` on this network - previously
+            // unreachable, because the candidate launched on the default bridge.
+            if matches!(
+                config.task,
+                TaskType::Proxy | TaskType::Dns | TaskType::Redis | TaskType::Http
+            ) {
                 if let Err(e) = sandbox.connect_candidate_to_network() {
                     logger.log(&format!(
                         "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
@@ -985,7 +995,11 @@ impl BenchmarkPipeline {
                 );
                 match config.task {
                     TaskType::Redis => {
-                        if let Ok(tp) = BenchmarkRunner::run_redis_benchmark(port) {
+                        if let Ok(tp) = BenchmarkRunner::run_redis_benchmark(
+                            &sandbox.network_name(),
+                            "candidate",
+                            port,
+                        ) {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -995,7 +1009,9 @@ impl BenchmarkPipeline {
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
                             match BenchmarkRunner::run_redis_benchmark(
-                                crate::web::server::worker_port(6380, config.worker),
+                                &sandbox.network_name(),
+                                "ref-redis",
+                                6379,
                             ) {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
@@ -1017,7 +1033,11 @@ impl BenchmarkPipeline {
                         }
                     }
                     TaskType::Http => {
-                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(port) {
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(
+                            &sandbox.network_name(),
+                            "candidate",
+                            port,
+                        ) {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1027,7 +1047,9 @@ impl BenchmarkPipeline {
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
                             match BenchmarkRunner::run_wrk_benchmark(
-                                crate::web::server::worker_port(8081, config.worker),
+                                &sandbox.network_name(),
+                                "ref-http",
+                                80,
                             ) {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
@@ -1060,7 +1082,11 @@ impl BenchmarkPipeline {
                         );
                     }
                     TaskType::Proxy => {
-                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(port) {
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(
+                            &sandbox.network_name(),
+                            "candidate",
+                            port,
+                        ) {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1072,7 +1098,9 @@ impl BenchmarkPipeline {
                             // beat direct. Live per-trial when no batch ref.
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
                             match BenchmarkRunner::run_wrk_benchmark(
-                                crate::web::server::worker_port(8081, config.worker),
+                                &sandbox.network_name(),
+                                "ref-http",
+                                80,
                             ) {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(

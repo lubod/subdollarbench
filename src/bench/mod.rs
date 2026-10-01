@@ -170,13 +170,13 @@ impl BenchmarkRunner {
         Err(anyhow!("Could not parse wrk output. stdout: '{}'", stdout))
     }
 
-    pub fn run_redis_benchmark(port: u16) -> Result<f64> {
-        Self::run_redis_benchmark_reps(port, BENCH_REPS)
+    pub fn run_redis_benchmark(net: &str, host: &str, port: u16) -> Result<f64> {
+        Self::run_redis_benchmark_reps(net, host, port, BENCH_REPS)
     }
 
     /// Median over `reps` windows under the host-global lock. Partial success
     /// still yields a median; total failure returns the last error.
-    pub fn run_redis_benchmark_reps(port: u16, reps: usize) -> Result<f64> {
+    pub fn run_redis_benchmark_reps(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
         let _lock = acquire_bench_lock();
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
@@ -188,11 +188,11 @@ impl BenchmarkRunner {
                     "run",
                     "--rm",
                     "--network",
-                    "host",
+                    net,
                     BENCH_REDIS_CLIENT_IMAGE,
                     "redis-benchmark",
                     "-h",
-                    "127.0.0.1",
+                    host,
                     "-p",
                     &port.to_string(),
                     "-n",
@@ -221,15 +221,15 @@ impl BenchmarkRunner {
         Ok(median(ok))
     }
 
-    pub fn run_wrk_benchmark(port: u16) -> Result<f64> {
-        Self::run_wrk_benchmark_reps(port, BENCH_REPS)
+    pub fn run_wrk_benchmark(net: &str, host: &str, port: u16) -> Result<f64> {
+        Self::run_wrk_benchmark_reps(net, host, port, BENCH_REPS)
     }
 
     /// Median over `reps` windows under the host-global lock. Partial success
     /// still yields a median; total failure returns the last error.
-    pub fn run_wrk_benchmark_reps(port: u16, reps: usize) -> Result<f64> {
+    pub fn run_wrk_benchmark_reps(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
         let _lock = acquire_bench_lock();
-        let url = format!("http://127.0.0.1:{}/", port);
+        let url = format!("http://{host}:{port}/");
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
         for _ in 0..reps.max(1) {
@@ -240,7 +240,7 @@ impl BenchmarkRunner {
                     "run",
                     "--rm",
                     "--network",
-                    "host",
+                    net,
                     BENCH_WRK_IMAGE,
                     "-t2",
                     "-c20",
@@ -343,14 +343,14 @@ mod tests {
     #[test]
     fn test_run_redis_benchmark_failure_on_unbound_port() {
         // Port 59997 has no redis running, docker redis-benchmark should fail and return Err
-        let res = BenchmarkRunner::run_redis_benchmark(59997);
+        let res = BenchmarkRunner::run_redis_benchmark("net", "ref-redis", 6379);
         assert!(res.is_err());
     }
 
     #[test]
     fn test_run_wrk_benchmark_failure_on_unbound_port() {
         // Port 59996 has no http running, wrk should fail and return Err
-        let res = BenchmarkRunner::run_wrk_benchmark(59996);
+        let res = BenchmarkRunner::run_wrk_benchmark("net", "ref-http", 80);
         assert!(res.is_err());
     }
 }

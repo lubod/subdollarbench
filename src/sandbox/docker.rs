@@ -555,6 +555,14 @@ impl SandboxManager {
             .args([
                 "network",
                 "connect",
+                "--alias",
+                // The bench client reaches the candidate by this alias on the
+                // run network, the same way it reaches `ref-redis`. Measuring
+                // both over one network path is what makes the ratio mean
+                // anything: the candidate's primary network is bridge, so its
+                // 127.0.0.1-published port measures it over a different path
+                // than the reference, which starts on the run network.
+                "candidate",
                 &self.network_name(),
                 &self.candidate_container_name(),
             ])
