@@ -792,4 +792,41 @@ mod tests {
             reserved.len()
         );
     }
+
+    /// Full PDF BatchRef lifecycle, isolated from the queue and the model.
+    ///
+    /// The dual-attach reference was verified by hand at the docker level, but
+    /// that proves `start_reference_pdf` only - not readiness, not the
+    /// PdfVerifier measurement, not the post bracket, not the history append,
+    /// not cleanup. This drives start -> finish directly and asserts the whole
+    /// chain, so a PDF batch can be validated without waiting on a queued run.
+    ///
+    /// Requires docker and the pinned `REF_PDF_RUN_IMAGE`; ignored so the
+    /// default suite stays hermetic. Run with:
+    ///   cargo test --lib pdf_batch_ref_lifecycle -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires docker + the pinned pdf-ref image"]
+    fn pdf_batch_ref_lifecycle() {
+        let log = |_m: &str| {};
+        let started = BatchRef::start(&TaskType::Pdf, "pdf-lifecycle-probe", &log)
+            .expect("BatchRef::start returned Err for pdf");
+        let batch = started
+            .expect("pdf BatchRef::start returned Ok(None) - the reference never became ready");
+
+        let report = batch.finish(&log);
+        assert!(
+            report.pre > 0.0,
+            "pre-measurement should be a positive pages/sec, got {}",
+            report.pre
+        );
+        let post = report.post.expect("post-measurement produced no value");
+        assert!(
+            post > 0.0,
+            "post-measurement should be positive, got {post}"
+        );
+        println!(
+            "PDF BatchRef lifecycle OK: pre={:.0} post={:.0} drift={}",
+            report.pre, post, report.drift
+        );
+    }
 }
