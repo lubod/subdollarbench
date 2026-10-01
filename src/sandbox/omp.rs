@@ -2263,29 +2263,37 @@ mod tests {
         session_dir: PathBuf,
         tx: mpsc::Sender<String>,
         running: Arc<AtomicBool>,
-    ) -> TailSessionContext {
-        TailSessionContext {
-            session_dir,
-            start_time: SystemTime::now(),
-            existing: HashSet::new(),
-            active_file: Arc::new(Mutex::new(None)),
-            running,
-            tx,
-            limits: AgentExecutionLimits {
-                max_turns: Some(5),
-                max_budget_usd: Some(0.10),
-                timeout_seconds: Some(10),
+    ) -> (TailSessionContext, Arc<Mutex<Option<PathBuf>>>) {
+        // The active_file Arc is handed back so a test can assert on what the
+        // tailer actually adopted, instead of inferring it from whether a line
+        // arrived before a timeout - which proves absence only if the machine
+        // is fast enough for a failure to have shown up.
+        let active_file = Arc::new(Mutex::new(None));
+        (
+            TailSessionContext {
+                session_dir,
+                start_time: SystemTime::now(),
+                existing: HashSet::new(),
+                active_file: active_file.clone(),
+                running,
+                tx,
+                limits: AgentExecutionLimits {
+                    max_turns: Some(5),
+                    max_budget_usd: Some(0.10),
+                    timeout_seconds: Some(10),
+                },
+                turn_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                accumulated_cost: Arc::new(Mutex::new(0.0f64)),
+                accumulated_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                limit_reached: Arc::new(AtomicBool::new(false)),
+                limit_reason: Arc::new(Mutex::new(None)),
+                cancel_flag: None,
+                extension_feed_active: Arc::new(AtomicBool::new(false)),
+                model: "test-model".to_string(),
+                billing_tripped: Arc::new(AtomicBool::new(false)),
             },
-            turn_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            accumulated_cost: Arc::new(Mutex::new(0.0f64)),
-            accumulated_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            limit_reached: Arc::new(AtomicBool::new(false)),
-            limit_reason: Arc::new(Mutex::new(None)),
-            cancel_flag: None,
-            extension_feed_active: Arc::new(AtomicBool::new(false)),
-            model: "test-model".to_string(),
-            billing_tripped: Arc::new(AtomicBool::new(false)),
-        }
+            active_file,
+        )
     }
 
     #[test]
@@ -2297,29 +2305,39 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
-        let tail_ctx = tailer_ctx(session_dir.clone(), tx, running.clone());
+        let (tail_ctx, active_file) = tailer_ctx(session_dir.clone(), tx, running.clone());
         let handle = std::thread::spawn(move || OmpRunner::tail_session_file(tail_ctx));
 
-        // Written AFTER the tailer starts: it has to find this, not be handed it.
-        std::thread::sleep(Duration::from_millis(150));
+        // No sleep. The discovery loop polls; the file simply has to be absent
+        // at the first scan and present by a later one. A sleep before the
+        // write only widens the window in which a slow box loses the race
+        // against the poll interval.
         let line = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"init","args":{"command":"echo discovered"}}}"#;
         std::fs::write(session_dir.join("live.jsonl"), format!("{}\n", line)).unwrap();
 
-        let got = rx.recv_timeout(Duration::from_millis(3000));
+        let got = rx.recv_timeout(Duration::from_secs(5));
         running.store(false, Ordering::SeqCst);
         let _ = handle.join();
 
         assert!(
             got.is_ok(),
-            "tailer must discover a session file written into its own dir after start"
+            "tailer must discover a session file written into its own dir"
+        );
+        let adopted = active_file.lock().unwrap().clone();
+        assert_eq!(
+            adopted.as_deref(),
+            Some(session_dir.join("live.jsonl").as_path()),
+            "the adopted path must be this run's own file"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The regression itself: a concurrent run's session file must never be
-    /// adopted. This is what let glm record muse's usage - both runs wrote into
-    /// one shared directory and the tailer took whichever file appeared
-    /// newest.
+    /// A concurrent run's session file must never be adopted. This is what let
+    /// glm record muse's usage: both wrote into one shared directory and the
+    /// tailer took whichever file appeared newest.
+    ///
+    /// Asserts on the adopted path directly rather than on a receive timeout -
+    /// "nothing arrived in 1200ms" is not proof of absence on a loaded box.
     #[test]
     fn test_tailer_ignores_session_file_in_another_runs_dir() {
         let base = std::env::temp_dir().join(format!("test_tail_iso_{}", std::process::id()));
@@ -2329,20 +2347,21 @@ mod tests {
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::create_dir_all(&theirs).unwrap();
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
-        let tail_ctx = tailer_ctx(mine.clone(), tx, running.clone());
+        let (tail_ctx, active_file) = tailer_ctx(mine.clone(), tx, running.clone());
         let handle = std::thread::spawn(move || OmpRunner::tail_session_file(tail_ctx));
 
         let line = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"init","args":{"command":"echo other-run"}}}"#;
         std::fs::write(theirs.join("theirs.jsonl"), format!("{}\n", line)).unwrap();
 
-        let got = rx.recv_timeout(Duration::from_millis(1200));
+        // Let several poll intervals elapse so a scan certainly happens.
+        std::thread::sleep(Duration::from_millis(900));
         running.store(false, Ordering::SeqCst);
         let _ = handle.join();
 
         assert!(
-            got.is_err(),
+            active_file.lock().unwrap().is_none(),
             "a session file in another run's directory must not be adopted"
         );
         let _ = std::fs::remove_dir_all(&base);
