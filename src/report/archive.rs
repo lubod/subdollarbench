@@ -2,9 +2,16 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::report::environment::EnvironmentInfo;
 use crate::verifier::StageResult;
+
+/// How old a staging dir must be before `cleanup_stale_tmp_dirs` will remove
+/// it. A live archive stages and renames within seconds; an hour is far beyond
+/// any observed archive and far beyond any plausible crash-recovery window, so
+/// this only ever removes genuine debris.
+pub const STAGING_STALE_AFTER: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -235,14 +242,43 @@ impl RunArchiver {
         name.ends_with(".tmp") || name.starts_with('.')
     }
 
-    /// Remove stale `<id>.tmp` leftovers from crashed archives. Called on
+    /// Remove abandoned `<id>.tmp` leftovers from crashed archives. Called on
     /// every archive and from `migrate` at startup.
+    ///
+    /// Bounded by age, deliberately. `archive_run` stages into `<id>.tmp` and
+    /// renames it into place within seconds, and a wave runs trials in
+    /// parallel - so a sweep that removed *every* staging dir would delete a
+    /// sibling trial's in-progress archive mid-write, failing it or leaving a
+    /// directory that renames into place with files missing. Anything younger
+    /// than [`STAGING_STALE_AFTER`] belongs to a live writer; only older ones
+    /// are crash debris.
     pub fn cleanup_stale_tmp_dirs(runs_dir: &Path) {
+        Self::cleanup_stale_tmp_dirs_older_than(runs_dir, STAGING_STALE_AFTER);
+    }
+
+    /// Same sweep with the age bound supplied, so a test can declare every
+    /// existing staging dir stale without backdating the filesystem.
+    pub fn cleanup_stale_tmp_dirs_older_than(runs_dir: &Path, stale_after: Duration) {
+        let now = SystemTime::now();
         if let Ok(entries) = fs::read_dir(runs_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.is_dir() && Self::is_staging_dir(&p) {
-                    let _ = fs::remove_dir_all(&p);
+                if !p.is_dir() || !Self::is_staging_dir(&p) {
+                    continue;
+                }
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok());
+                match modified {
+                    // Unreadable mtime: leave it. Guessing wrong here deletes
+                    // someone's live archive.
+                    None => continue,
+                    Some(age) if age < stale_after => continue,
+                    Some(_) => {
+                        let _ = fs::remove_dir_all(&p);
+                    }
                 }
             }
         }
@@ -489,6 +525,39 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
+    /// The sweep used to delete *every* staging dir. A wave runs trials in
+    /// parallel and each stages into `<id>.tmp`, so one trial's cleanup would
+    /// remove a sibling's in-progress archive mid-write - failing it, or letting
+    /// a directory rename into place with files missing. Age-bounding is what
+    /// separates crash debris from a live writer.
+    #[test]
+    fn test_cleanup_preserves_a_live_staging_dir() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_archive_race_{}", std::process::id()));
+        let runs_dir = temp_dir.join("runs");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        // A sibling trial, mid-archive, just created its staging dir.
+        let live = runs_dir.join("sibling_trial.tmp");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join("manifest.json"), "{\"in_progress\":true}").unwrap();
+
+        // Production sweep: nothing is an hour old, so the live dir survives.
+        RunArchiver::cleanup_stale_tmp_dirs(&runs_dir);
+        assert!(
+            live.exists(),
+            "a live staging dir must survive another trial's cleanup"
+        );
+        assert!(live.join("manifest.json").exists(), "and keep its contents");
+
+        // Debris of any age is still removed when the bound allows it.
+        RunArchiver::cleanup_stale_tmp_dirs_older_than(&runs_dir, Duration::ZERO);
+        assert!(!live.exists(), "genuine debris must still be swept");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     #[test]
     fn test_partial_archive_invisible_to_readers() {
         // A crashed archive leaves only `runs/<id>.tmp`; list_runs/get_run
@@ -510,7 +579,9 @@ mod tests {
         assert!(RunArchiver::get_console_log(&runs_dir, "crashed_run.tmp").is_none());
         assert!(RunArchiver::get_workspace_file(&runs_dir, "crashed_run.tmp", "x").is_none());
 
-        RunArchiver::cleanup_stale_tmp_dirs(&runs_dir);
+        // Declared stale explicitly: the production sweep is age-bounded so a
+        // sibling trial's live staging dir is not deleted mid-write.
+        RunArchiver::cleanup_stale_tmp_dirs_older_than(&runs_dir, Duration::ZERO);
         assert!(!stale.exists());
 
         // A `.tmp` dir for a live id must not shadow the complete archive.
