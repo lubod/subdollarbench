@@ -211,6 +211,44 @@ $$\text{Throughput Score} = \text{Base Efficiency} \times \text{Performance Mult
 1. **Live OpenRouter Accounting:** If an API key is provided, the harness queries the `/api/v1/auth/key` endpoint before and after the run to verify the exact billing delta deducted by OpenRouter.
 2. **Context Cache Awareness:** For token-based formula fallback, cached prompt tokens are discounted by 50% to 90% depending on model provider caching rules.
 
+
+### 🧠 Reasoning Effort Is A Request, Not A Guarantee
+
+`--effort` is forwarded to the agent as an explicit thinking level and is
+honoured **by some models and not others**. It is therefore **not a controlled
+variable** across the model set, and a wave that varies it is not comparing
+like with like.
+
+Measured 2026-10-01 on `binproto`, one trial per cell, `--trials 1`:
+
+| model | low total tok | high total tok | Δ total | Δ **completion** |
+|---|---|---|---|---|
+| muse-spark-1.3-contributor | 72,284 | 190,287 | +163% | **+145%** |
+| glm-5.3-flash | 169,322 | 243,114 | +44% | **+105%** |
+| deepseek-v4.1-flash | 185,019 | 180,865 | −2% | −3% |
+| qwen3.8-flash | 455,829 | 420,765 | −8% | **+54%** |
+
+Two results worth keeping:
+
+1. **deepseek-v4.1-flash ignored the flag.** It returned the same turn count
+   (13) and within 2% of the same token volume at both settings. The flag was
+   delivered — the run log records `thinking=low` and `thinking=high` — and had
+   no effect.
+2. **Total tokens is the wrong instrument for measuring thinking effort.** qwen
+   is the clearest case: its total fell 8% while its cost rose 9%, which reads
+   as "effort did nothing and got more expensive". Completion tokens show the
+   real effect, +54%. Total tokens are dominated by prompt-cache volume, which
+   tracks context shape rather than reasoning depth.
+
+**Caveat: every figure above is n=1 per cell.** These are single-trial
+observations, not per-model coefficients, and the spread they show is larger
+than a single trial can resolve. They are recorded to document *which models
+respond at all* — not to quantify by how much.
+
+Consequence for a wave: run a single effort level and record the caveat.
+Ranking models at two levels would double the spend to measure a dial that one
+model in four does not have.
+
 ---
 
 ## 📁 Run Traceability & Archival Structure
