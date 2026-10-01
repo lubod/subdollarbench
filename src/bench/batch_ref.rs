@@ -369,8 +369,12 @@ impl BatchRef {
                 // the recorded redis history that range spans ~5.9x, every
                 // batch of it flagged drift:false.
                 if let Some(h) = read_ref_history(task) {
-                    let dev_pct = h.deviation(pre) * 100.0;
-                    if dev_pct > CROSS_BATCH_DEVIATION_WARN {
+                    // Compare fraction to fraction. CROSS_BATCH_DEVIATION_WARN is
+                    // 0.10, so testing the percent form would warn on anything
+                    // above 0.1% and turn the log into noise nobody reads.
+                    let dev = h.deviation(pre);
+                    let dev_pct = dev * 100.0;
+                    if dev > CROSS_BATCH_DEVIATION_WARN {
                         log(&format!(
                             "[BATCH-REF] reference deviates {dev_pct:.0}% from median of {} recorded \
                              batches (median {:.0}, range {:.0}-{:.0} req/sec). Ratios against this \
@@ -639,6 +643,47 @@ mod tests {
         assert!(
             h.deviation(midpoint) > 0.0,
             "a value inside the envelope must still register if it is off-median"
+        );
+    }
+
+    /// `CROSS_BATCH_DEVIATION_WARN` is a fraction (0.10). Comparing a percentage
+    /// against it warns on anything above 0.1%, which makes the log noise and
+    /// the else-branch dead. Pin the unit: exactly at the threshold must NOT
+    /// warn, and the archived redis reference - 2% off its median - is well
+    /// inside it.
+    #[test]
+    fn test_cross_batch_warn_threshold_is_a_fraction() {
+        let h = RefHistory {
+            samples: 108,
+            min: 29_553.0,
+            max: 173_238.0,
+            median: 75_414.0,
+        };
+        let warns = |current: f64| h.deviation(current) > CROSS_BATCH_DEVIATION_WARN;
+
+        // Straddle the threshold rather than landing exactly on it. At the
+        // boundary the float comparison is a coin flip, and that is not the
+        // property worth pinning - the units are.
+        let below = h.median * (1.0 + CROSS_BATCH_DEVIATION_WARN * 0.99);
+        let above = h.median * (1.0 + CROSS_BATCH_DEVIATION_WARN * 1.01);
+        assert!(
+            !warns(below),
+            "just under threshold must not warn, got {}",
+            h.deviation(below)
+        );
+        assert!(
+            warns(above),
+            "just over threshold must warn, got {}",
+            h.deviation(above)
+        );
+        assert!(
+            !warns(74_155.0),
+            "the archived 74,155 reference is 2% off median"
+        );
+        // A reading the old envelope test called clean still registers here.
+        assert!(
+            warns(40_000.0),
+            "40k is inside the range but 47% off median"
         );
     }
 
