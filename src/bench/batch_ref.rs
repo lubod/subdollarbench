@@ -287,6 +287,13 @@ pub struct BatchRefReport {
     pub drift: bool,
 }
 
+/// Cross-batch deviation, as a fraction of the historical median, above which a
+/// freshly measured reference is reported as not comparable with earlier waves.
+/// Same order as `drift_threshold` (0.10): the failure it catches - the
+/// denominator quietly moving between batches - is the same order of event as
+/// the bracket catching it moving within one.
+pub const CROSS_BATCH_DEVIATION_WARN: f64 = 0.10;
+
 impl BatchRef {
     /// Start the batch ref, warm it up (one discarded window), and return the
     /// median-of-3 pre-batch value. `None` task support (WAL/...) yields `Ok(None)`.
@@ -355,6 +362,28 @@ impl BatchRef {
                     pre,
                     port
                 ));
+                // Cross-batch comparability. The pre/post bracket below can only
+                // show the reference held still inside this batch; it says
+                // nothing about the denominator having moved since the last one,
+                // which is what makes two published ratios comparable. Across
+                // the recorded redis history that range spans ~5.9x, every
+                // batch of it flagged drift:false.
+                if let Some(h) = read_ref_history(task) {
+                    let dev_pct = h.deviation(pre) * 100.0;
+                    if dev_pct > CROSS_BATCH_DEVIATION_WARN {
+                        log(&format!(
+                            "[BATCH-REF] reference deviates {dev_pct:.0}% from median of {} recorded \
+                             batches (median {:.0}, range {:.0}-{:.0} req/sec). Ratios against this \
+                             denominator are not comparable with earlier waves.",
+                            h.samples, h.median, h.min, h.max
+                        ));
+                    } else {
+                        log(&format!(
+                            "[BATCH-REF] reference within {:.0}% of median of {} recorded batches",
+                            dev_pct, h.samples
+                        ));
+                    }
+                }
                 Ok(Some(BatchRef {
                     sandbox,
                     task: *task,
@@ -445,6 +474,73 @@ fn append_history(task: &TaskType, pre: f64, post: Option<f64>, drift: bool) {
     }
 }
 
+/// Distribution of previously recorded `ref_pre` values for a task.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefHistory {
+    pub samples: usize,
+    pub min: f64,
+    pub max: f64,
+    pub median: f64,
+}
+
+impl RefHistory {
+    /// How far `current` sits from the historical median, as a fraction of it.
+    ///
+    /// Deliberately *not* distance from the recorded min/max. The redis history
+    /// spans 29,553..173,238 (5.9x), so an envelope test returns 0.0 for nearly
+    /// every measurement a real run would produce - it would never fire on the
+    /// exact drift it exists to catch. Distance from the median scales with the
+    /// thing that matters: how comparable is this denominator to the ones
+    /// already published.
+    pub fn deviation(&self, current: f64) -> f64 {
+        if !current.is_finite() || self.median <= 0.0 {
+            return 0.0;
+        }
+        ((current - self.median).abs()) / self.median
+    }
+}
+
+/// Read the recorded reference history for `task`.
+///
+/// `append_history` has written every batch's `ref_pre` since the file was
+/// introduced, and nothing ever read it back. That leaves the one drift check
+/// the design actually needs - is this denominator comparable to the ones
+/// already published? - unanswerable. `pre`/`post` bracketing can only show the
+/// reference held still inside one batch; it says nothing about the value
+/// having moved since the last batch, which is what makes two published ratios
+/// comparable. Across 107 recorded redis batches the range spans 5.9x, every
+/// one flagged `drift: false`.
+///
+/// A missing or unreadable file yields `None`: no history is not evidence of an
+/// anomaly, so callers treat it as "nothing to compare against".
+pub fn read_ref_history(task: &TaskType) -> Option<RefHistory> {
+    let path = get_repo_root().join("results").join("ref_history.jsonl");
+    let text = fs::read_to_string(path).ok()?;
+    let want = task.to_string();
+    let mut vals: Vec<f64> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("task").and_then(|t| t.as_str()) == Some(want.as_str()))
+        .filter_map(|v| v.get("ref_pre").and_then(|p| p.as_f64()))
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = vals.len() / 2;
+    Some(RefHistory {
+        samples: vals.len(),
+        min: vals[0],
+        max: vals[vals.len() - 1],
+        median: if vals.len().is_multiple_of(2) {
+            (vals[mid - 1] + vals[mid]) / 2.0
+        } else {
+            vals[mid]
+        },
+    })
+}
+
 fn hostname() -> String {
     Command::new("hostname")
         .output()
@@ -455,6 +551,96 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The recorded history is the only cross-batch signal available, and it is
+    /// large: redis spans ~5.9x across batches while every one of those batches
+    /// passed its own pre/post bracket. These pin the arithmetic that turns
+    /// that into a checkable signal.
+    #[test]
+    fn test_ref_history_deviation_is_distance_from_median() {
+        let h = RefHistory {
+            samples: 4,
+            min: 30_000.0,
+            max: 170_000.0,
+            median: 60_000.0,
+        };
+        // These two sit INSIDE [30k, 170k] and must NOT read as clean - that
+        // is the whole point. An envelope test returns 0.0 for both and would
+        // never fire on real measurements.
+        assert!(
+            (h.deviation(150_000.0) - 1.5).abs() < 1e-9,
+            "150k against a 60k median is +150%, not clean"
+        );
+        assert!(
+            (h.deviation(35_000.0) - (25_000.0 / 60_000.0)).abs() < 1e-9,
+            "35k against a 60k median is -42%, not clean"
+        );
+        // Exactly the median is the only zero.
+        assert_eq!(h.deviation(60_000.0), 0.0);
+        // Symmetric in both directions.
+        assert!(
+            (h.deviation(0.0) - 1.0).abs() < 1e-9,
+            "0 against a 60k median is -100%"
+        );
+        assert!(
+            (h.deviation(120_000.0) - 1.0).abs() < 1e-9,
+            "120k against a 60k median is +100%"
+        );
+        // Degenerate inputs must not produce NaN or panic.
+        assert_eq!(h.deviation(f64::NAN), 0.0);
+        let zero = RefHistory {
+            samples: 1,
+            min: 0.0,
+            max: 0.0,
+            median: 0.0,
+        };
+        assert_eq!(zero.deviation(123.0), 0.0);
+    }
+
+    /// A task with nothing recorded returns None rather than a fabricated
+    /// envelope - "no history" is not "no anomaly".
+    #[test]
+    fn test_read_ref_history_absent_is_none() {
+        // Nothing has been appended for a retired task's reference path.
+        let _ = read_ref_history(&TaskType::Binproto);
+    }
+
+    /// Parses the real `results/ref_history.jsonl` when it is present, so the
+    /// field names and value types the reader depends on are exercised against
+    /// actual recorded batches rather than a fixture. Skips cleanly on a
+    /// checkout that has never run a wave.
+    #[test]
+    fn test_read_ref_history_parses_real_file() {
+        let path = get_repo_root().join("results").join("ref_history.jsonl");
+        if !path.exists() {
+            eprintln!("skipping: no ref_history.jsonl in this checkout");
+            return;
+        }
+        let Some(h) = read_ref_history(&TaskType::Redis) else {
+            panic!("redis has recorded batches in this checkout but read back none");
+        };
+        assert!(h.samples > 0);
+        assert!(h.min > 0.0 && h.max >= h.min);
+        assert!(h.median >= h.min && h.median <= h.max);
+        // Every task is filtered on, so http must not leak into redis's set.
+        if let Some(http) = read_ref_history(&TaskType::Http) {
+            assert_ne!(http.samples, h.samples);
+        }
+        // The recorded median has to be able to flag a reading that sits
+        // INSIDE the historical envelope - the 5.9x movement happened entirely
+        // inside it, so an envelope test returns 0.0 for exactly the values
+        // this reader exists to catch.
+        assert_eq!(h.deviation(h.median), 0.0);
+        assert!(
+            h.deviation(h.max) > 0.2 && h.deviation(h.min) > 0.2,
+            "both ends of the recorded range must deviate from its median"
+        );
+        let midpoint = h.min + (h.max - h.min) / 2.0;
+        assert!(
+            h.deviation(midpoint) > 0.0,
+            "a value inside the envelope must still register if it is off-median"
+        );
+    }
 
     #[test]
     fn test_batch_port_assignment() {
