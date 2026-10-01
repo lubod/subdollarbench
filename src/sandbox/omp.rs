@@ -238,6 +238,9 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
 
 pub struct TailSessionContext {
     pub start_time: SystemTime,
+    /// This run's own session directory on the host. Never the shared parent:
+    /// every concurrent run writes there.
+    pub session_dir: PathBuf,
     pub existing: HashSet<PathBuf>,
     pub active_file: Arc<Mutex<Option<PathBuf>>>,
     pub running: Arc<AtomicBool>,
@@ -710,7 +713,12 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             .arg(&effective_prompt)
             .arg(format!("--model={}", effective_model))
             .arg("--cwd=/workspace")
-            .arg("--session-dir=/home/ubuntu/.omp/agent/sessions");
+            // Scoped per run. Every concurrent run shares /home/ubuntu/.omp, so
+            // a shared session dir means the tailer cannot tell whose session
+            // it is reading - and takes another run's, importing its tokens.
+            .arg(format!(
+                "--session-dir=/home/ubuntu/.omp/agent/sessions/{container_id}"
+            ));
 
         // Spike: bench policy extension (opt-out via SDB_BENCH_POLICY=0).
         if let Some(policy_path) = bench_policy_path {
@@ -727,7 +735,12 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let existing_files = Self::collect_all_session_files();
+        // This run's session directory on the host. It sits inside the shared
+        // ~/.omp mount so the container writes here and the host reads here,
+        // but only this run's sessions are ever visible to this run.
+        let session_dir = host_sessions_dir.join(&container_id);
+        let _ = std::fs::create_dir_all(&session_dir);
+        let existing_files = Self::collect_all_session_files_in(std::slice::from_ref(&session_dir));
         let active_file: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
         info!(
@@ -776,6 +789,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         let extension_feed = Arc::new(AtomicBool::new(false));
         // Spawn thread to tail the active session .jsonl file in real-time
         let tail_ctx = TailSessionContext {
+            session_dir,
             start_time,
             existing: existing_files,
             active_file: active_file.clone(),
@@ -961,39 +975,11 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         Ok(stats)
     }
 
-    fn get_sessions_dirs() -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        let host_sessions = Self::get_host_omp_dir().join("agent/sessions");
-        if host_sessions.exists() {
-            dirs.push(host_sessions);
-        }
-        let u = PathBuf::from("/home/ubuntu/.omp/agent/sessions");
-        if u.exists() && !dirs.contains(&u) {
-            dirs.push(u);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            let p = PathBuf::from(home).join(".omp/agent/sessions");
-            if p.exists() && !dirs.contains(&p) {
-                dirs.push(p);
-            }
-        }
-        let root = crate::config::get_repo_root();
-        let r_omp = root.join(".omp/agent/sessions");
-        if r_omp.exists() && !dirs.contains(&r_omp) {
-            dirs.push(r_omp);
-        }
-        let r = PathBuf::from("/root/.omp/agent/sessions");
-        if r.exists() && !dirs.contains(&r) {
-            dirs.push(r);
-        }
-        dirs
-    }
-
-    fn collect_all_session_files() -> HashSet<PathBuf> {
+    fn collect_all_session_files_in(dirs: &[PathBuf]) -> HashSet<PathBuf> {
         let mut set = HashSet::new();
-        for dir in Self::get_sessions_dirs() {
+        for dir in dirs {
             let mut candidates = Vec::new();
-            Self::collect_jsonl_files(&dir, &mut candidates);
+            Self::collect_jsonl_files(dir, &mut candidates);
             for (_, p) in candidates {
                 set.insert(p);
             }
@@ -1002,7 +988,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
     }
 
     fn tail_session_file(ctx: TailSessionContext) {
-        let dirs = Self::get_sessions_dirs();
+        // Only this run's own subdirectory. Scanning the shared parent lets a
+        // concurrent run's session be adopted as this run's own.
+        let dirs = vec![ctx.session_dir.clone()];
 
         // Check if active_file already has a pre-set file
         let mut session_file: Option<PathBuf> = ctx.active_file.lock().ok().and_then(|l| l.clone());
@@ -2235,6 +2223,7 @@ mod tests {
 
         let running_tailer = running.clone();
         let tail_ctx = TailSessionContext {
+            session_dir: temp_dir.clone(),
             start_time: SystemTime::now(),
             existing: HashSet::new(),
             active_file,
@@ -2264,6 +2253,99 @@ mod tests {
         let _ = handle.join();
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Spawns a tailer with `active_file = None` so it must DISCOVER the
+    /// session file by scanning `session_dir` - the path production takes and
+    /// the one this fix changed. Every other tailer test pre-sets `active_file`
+    /// and so returns early without ever scanning.
+    fn tailer_ctx(
+        session_dir: PathBuf,
+        tx: mpsc::Sender<String>,
+        running: Arc<AtomicBool>,
+    ) -> TailSessionContext {
+        TailSessionContext {
+            session_dir,
+            start_time: SystemTime::now(),
+            existing: HashSet::new(),
+            active_file: Arc::new(Mutex::new(None)),
+            running,
+            tx,
+            limits: AgentExecutionLimits {
+                max_turns: Some(5),
+                max_budget_usd: Some(0.10),
+                timeout_seconds: Some(10),
+            },
+            turn_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            accumulated_cost: Arc::new(Mutex::new(0.0f64)),
+            accumulated_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            limit_reached: Arc::new(AtomicBool::new(false)),
+            limit_reason: Arc::new(Mutex::new(None)),
+            cancel_flag: None,
+            extension_feed_active: Arc::new(AtomicBool::new(false)),
+            model: "test-model".to_string(),
+            billing_tripped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn test_tailer_discovers_session_file_in_own_dir() {
+        let base = std::env::temp_dir().join(format!("test_tail_disc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let session_dir = base.join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let tail_ctx = tailer_ctx(session_dir.clone(), tx, running.clone());
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(tail_ctx));
+
+        // Written AFTER the tailer starts: it has to find this, not be handed it.
+        std::thread::sleep(Duration::from_millis(150));
+        let line = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"init","args":{"command":"echo discovered"}}}"#;
+        std::fs::write(session_dir.join("live.jsonl"), format!("{}\n", line)).unwrap();
+
+        let got = rx.recv_timeout(Duration::from_millis(3000));
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+
+        assert!(
+            got.is_ok(),
+            "tailer must discover a session file written into its own dir after start"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The regression itself: a concurrent run's session file must never be
+    /// adopted. This is what let glm record muse's usage - both runs wrote into
+    /// one shared directory and the tailer took whichever file appeared
+    /// newest.
+    #[test]
+    fn test_tailer_ignores_session_file_in_another_runs_dir() {
+        let base = std::env::temp_dir().join(format!("test_tail_iso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mine = base.join("run-a/sessions");
+        let theirs = base.join("run-b/sessions");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let tail_ctx = tailer_ctx(mine.clone(), tx, running.clone());
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(tail_ctx));
+
+        let line = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"init","args":{"command":"echo other-run"}}}"#;
+        std::fs::write(theirs.join("theirs.jsonl"), format!("{}\n", line)).unwrap();
+
+        let got = rx.recv_timeout(Duration::from_millis(1200));
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+
+        assert!(
+            got.is_err(),
+            "a session file in another run's directory must not be adopted"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -2324,10 +2406,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sessions_dirs_and_collect() {
-        let dirs = OmpRunner::get_sessions_dirs();
-        let _ = OmpRunner::collect_all_session_files();
-        assert!(!dirs.is_empty() || dirs.is_empty()); // runs without panicking
+    fn test_collect_session_files_in_scoped_dir() {
+        let dir = std::env::temp_dir().join(format!("test_collect_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jsonl"), "{}\n").unwrap();
+        let found = OmpRunner::collect_all_session_files_in(std::slice::from_ref(&dir));
+        assert_eq!(found.len(), 1, "the scoped dir's own session must be found");
+        assert!(found.iter().all(|p| p.starts_with(&dir)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2388,6 +2475,7 @@ mod tests {
         let turn_c = turn_counter.clone();
         let lim_reached = limit_reached.clone();
         let tail_ctx = TailSessionContext {
+            session_dir: temp_dir.clone(),
             start_time: SystemTime::now() - Duration::from_secs(5),
             existing: HashSet::new(),
             active_file,
@@ -2503,6 +2591,7 @@ mod tests {
             timeout_seconds: Some(10),
         };
         let tail_ctx = TailSessionContext {
+            session_dir: temp_dir.clone(),
             start_time: SystemTime::now() - Duration::from_secs(5),
             existing: HashSet::new(),
             active_file,
