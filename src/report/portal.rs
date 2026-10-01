@@ -1763,13 +1763,7 @@ impl PortalExporter {
         // Initial server-side fallback rows for crawlers and JS-disabled view
         let mut initial_rows = String::new();
         for (i, r) in results.iter().enumerate() {
-            let unit = match r.task.to_lowercase().as_str() {
-                "pdf" => "pages/s",
-                "dns" => "queries/s",
-                "wal" => "msgs/s",
-                "pubsub" => "deliveries/s",
-                _ => "req/s",
-            };
+            let unit = crate::report::leaderboard::LeaderboardManager::throughput_unit(&r.task);
             let tp = r
                 .throughput_req_sec
                 .map(|v| format!("{:.0} {}", v, unit))
@@ -2037,13 +2031,7 @@ impl PortalExporter {
         let eff = m.effective_cost_usd.unwrap_or(m.cost_usd);
         let comp = (eff - api).max(0.0);
         let score = m.throughput_score.unwrap_or(m.efficiency_score);
-        let unit = match m.task.to_lowercase().as_str() {
-            "pdf" => "pages/s",
-            "dns" => "queries/s",
-            "wal" => "msgs/s",
-            "pubsub" => "deliveries/s",
-            _ => "req/s",
-        };
+        let unit = crate::report::leaderboard::LeaderboardManager::throughput_unit(&m.task);
         let (tp_txt, tp_bar) = match (m.throughput_req_sec, m.reference_throughput_req_sec) {
             (Some(tp), Some(ref_tp)) if ref_tp > 0.0 => {
                 let pct = (tp / ref_tp * 100.0).clamp(0.0, 100.0) as u32;

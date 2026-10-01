@@ -526,6 +526,24 @@ pub fn compute_pass_at_k(n: usize, c: usize, k: usize) -> f64 {
 pub struct LeaderboardManager;
 
 impl LeaderboardManager {
+    /// Unit for a task's throughput number.
+    ///
+    /// Most tasks measure requests per second, but not all, and the units are
+    /// not interchangeable: pubsub reports fan-out *deliveries* (200
+    /// subscribers x 20 publishes = 4,000 copies from 20 requests), wal
+    /// reports fsync-bound messages, binproto reports binary ops. Labelling any
+    /// of those "req/s" invites a reader to compare them against a real
+    /// request-rate task, which is not a comparison the numbers support.
+    pub fn throughput_unit(task: &str) -> &'static str {
+        match task.to_lowercase().as_str() {
+            "pdf" => "pages/s",
+            "dns" => "queries/s",
+            "wal" => "msgs/s",
+            "pubsub" => "deliveries/s",
+            "binproto" => "ops/s",
+            _ => "req/s",
+        }
+    }
     /// Detects the candidate implementation language by scanning source file extensions in `workdir`.
     ///
     /// Uses a deterministic priority hierarchy: `Rust` > `Go` > `C/C++` > `Node.js` > `Python`.
@@ -1195,10 +1213,21 @@ impl LeaderboardManager {
             let tp = match (r.throughput_req_sec, r.reference_throughput_req_sec) {
                 (Some(cand_tp), Some(ref_tp)) if ref_tp > 0.0 => {
                     let ratio = (cand_tp / ref_tp) * 100.0;
-                    format!("{:.0} req/s ({:.0}% ref, {})", cand_tp, ratio, r.language)
+                    format!(
+                        "{:.0} {} ({:.0}% ref, {})",
+                        cand_tp,
+                        Self::throughput_unit(&r.task),
+                        ratio,
+                        r.language
+                    )
                 }
                 // Unanchored timing: reported, never ranked.
-                (Some(cand_tp), _) => format!("{:.0} req/s (unscored, {})", cand_tp, r.language),
+                (Some(cand_tp), _) => format!(
+                    "{:.0} {} (unscored, {})",
+                    cand_tp,
+                    Self::throughput_unit(&r.task),
+                    r.language
+                ),
                 _ => "N/A".to_string(),
             };
 

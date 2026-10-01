@@ -1110,12 +1110,38 @@ impl BenchmarkPipeline {
                     ));
                     reference_throughput = Some(batch);
                 }
-                baseline_source = if config.batch_reference.is_some() {
-                    Some("batch".to_string())
-                } else if reference_throughput.is_some() {
-                    Some("live".to_string())
-                } else {
-                    None
+
+                // Two tasks have no valid throughput denominator, and ranking
+                // them on one asserts a comparison that cannot exist:
+                //
+                //   proxy - divided by DIRECT nginx while it has to forward to
+                //     a three-upstream pool. It is capped below 1.0 by
+                //     construction, so every proxy row reads as a deficit
+                //     against a ceiling it was never racing.
+                //   pdf   - the reference is our own ~275-line Python
+                //     extractor. That is a parity oracle, not a ceiling: it is
+                //     expected to be SLOWER than candidates, so the ratio
+                //     rewards distance from our own slow implementation.
+                //
+                // The candidate's raw rate is still reported - it is a real
+                // measurement - but it is not ranked, and the board shows no
+                // percentage for these tasks rather than a wrong one.
+                if matches!(config.task, TaskType::Proxy | TaskType::Pdf)
+                    && reference_throughput.is_some()
+                {
+                    logger.log(
+                        "[BENCH] No valid throughput denominator for this task \
+                         (reference is structurally unreachable); rate reported, not ranked.",
+                    );
+                    reference_throughput = None;
+                }
+                // `baseline_source` describes where the denominator came from,
+                // so it must follow reference_throughput: a batch reference
+                // that was just discarded is not a "batch" baseline.
+                baseline_source = match (config.batch_reference.is_some(), reference_throughput) {
+                    (true, Some(_)) => Some("batch".to_string()),
+                    (false, Some(_)) => Some("live".to_string()),
+                    _ => None,
                 };
 
                 if let (Some(cand_tp), Some(ref_tp)) = (throughput, reference_throughput) {
