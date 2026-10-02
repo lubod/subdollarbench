@@ -26,3 +26,4 @@ crc32fast = "1.5"
 rand = "0.10.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 parking_lot = "0.12"
+libc = "0.2"

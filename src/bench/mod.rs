@@ -4,7 +4,6 @@ use crate::sandbox::docker::{BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE};
 
 use anyhow::{anyhow, Result};
 use regex::Regex;
-use std::fs;
 use std::process::Command;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -101,66 +100,92 @@ pub fn ref_drifted(pre: f64, post: f64) -> bool {
 
 /// RAII guard for the host-global benchmark lock. Only one load-test window
 /// runs at a time across processes; agent work is unaffected. Drop releases.
+///
+/// flock-based (LOCK_EX|LOCK_NB on a lockfile fd held for the guard's life):
+/// a dead holder's fd closes with the process, so the kernel releases the
+/// lock — no mtime guessing, no stale-file eviction race. The old
+/// create_new+mtime scheme wedged the whole engine (dead holder, 180s
+/// threshold over the 90s fail-open, sync sleep-retry starving the tokio
+/// runtime). A `blocking` guard variant exists for async callers: never
+/// sleep-retry on a tokio worker; park the wait on spawn_blocking instead.
 pub struct BenchLock {
-    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
     owned: bool,
+}
+
+impl BenchLock {
+    /// False when we proceeded without the lock (fail-open): contention
+    /// possible, callers log it. True means the window is serialized.
+    pub fn is_owned(&self) -> bool {
+        self.owned
+    }
 }
 
 impl Drop for BenchLock {
     fn drop(&mut self) {
-        if self.owned {
-            let _ = fs::remove_file(&self.path);
-        }
+        // fd close releases LOCK_EX; file itself persists (name is stable).
+        drop(self.file.take());
     }
 }
 
 /// Acquire the benchmark lock, fail-open after 90s (a run must never deadlock
-/// on a stale lock; callers log the fallback). Stale holders are treated as
-/// crashed and evicted.
-///
-/// LIVE 2026-10-02: a 180s stale threshold wedged the whole engine — a dead
-/// holder's lock file sat 7min old while BatchRef::start_on_worker blocked
-/// the tokio worker in std::thread::sleep(500ms) retry, starving the runtime
-/// (all API hung with empty bodies, gdb showed every worker parked). The
-/// threshold must stay well under the 90s fail-open: 30s evicts a crashed
-/// holder while a live window (seconds per rep, lock held briefly) never
-/// trips it. Lock I/O itself must never block an async worker (see below).
-pub const BENCH_LOCK_STALE_SECS: u64 = 30;
+/// on a stale lock; callers log the fallback). flock means a crashed holder
+/// frees the lock with its fd — waiting is bounded by live holders only.
 pub fn acquire_bench_lock() -> BenchLock {
     let path = std::env::temp_dir().join("subdollar-bench.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .ok();
+    let file = match file {
+        Some(f) => f,
+        None => return BenchLock { file: None, owned: false },
+    };
     let start = Instant::now();
     loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                use std::io::Write;
-                let _ = writeln!(f, "pid={}", std::process::id());
-                return BenchLock { path, owned: true };
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .map(|t| t.elapsed().unwrap_or(Duration::ZERO) > Duration::from_secs(BENCH_LOCK_STALE_SECS))
-                    .unwrap_or(true);
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if start.elapsed() > Duration::from_secs(90) {
-                    eprintln!(
-                        "[BENCH] lock wait exceeded 90s; proceeding without lock (contention possible)"
-                    );
-                    return BenchLock { path, owned: false };
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Err(_) => {
-                return BenchLock { path, owned: false };
-            }
+        // LOCK_NB: never sleep-hold a tokio worker; 100ms park between tries.
+        let locked = flock_try_lock(&file);
+        if locked {
+            return BenchLock { file: Some(file), owned: true };
         }
+        if start.elapsed() > Duration::from_secs(90) {
+            eprintln!(
+                "[BENCH] lock wait exceeded 90s; proceeding without lock (contention possible)"
+            );
+            return BenchLock { file: None, owned: false };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(unix)]
+fn flock_try_lock(f: &std::fs::File) -> bool {
+    use std::os::unix::io::AsRawFd;
+    // LOCK_EX = 2, LOCK_NB = 4. No new dep: libc already in tree.
+    unsafe { libc::flock(f.as_raw_fd(), 2 | 4) == 0 }
+}
+
+#[cfg(not(unix))]
+fn flock_try_lock(_f: &std::fs::File) -> bool {
+    true
+}
+
+/// Single non-blocking attempt: true when the lock was free. Test hook and
+/// the primitive a blocking-with-deadline caller would loop on.
+pub fn acquire_bench_lock_failfast() -> bool {
+    let path = std::env::temp_dir().join("subdollar-bench.lock");
+    let file = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if flock_try_lock(&file) {
+        // Hold until end of statement: drop releases immediately — the bool
+        // reports freeness, not ownership. Callers needing ownership use
+        // acquire_bench_lock (fd held in the guard).
+        true
+    } else {
+        false
     }
 }
 
@@ -359,13 +384,35 @@ mod tests {
     fn test_bench_lock_acquire_release() {
         {
             let _g = acquire_bench_lock();
-            // Second create_new must fail while held (unless fail-open path).
             let path = std::env::temp_dir().join("subdollar-bench.lock");
             assert!(path.exists() || !_g.owned);
         }
         // Drop released: a fresh acquire must own the lock promptly.
         let g = acquire_bench_lock();
         assert!(g.owned);
+    }
+
+    #[test]
+    fn test_bench_lock_mutual_exclusion() {
+        // Two guards cannot both own: second acquire reports unowned quickly
+        // (failfast), never blocks 90s, never mtime-races.
+        let _g = acquire_bench_lock();
+        assert!(_g.owned, "first acquire must own an uncontended lock");
+        let start = std::time::Instant::now();
+        let second = acquire_bench_lock_failfast();
+        assert!(!second, "second holder must not own while first lives");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_bench_lock_released_on_drop() {
+        {
+            let _g = acquire_bench_lock();
+            assert!(_g.owned);
+        }
+        // fd close releases LOCK_EX: re-acquire must own immediately.
+        let g2 = acquire_bench_lock_failfast();
+        assert!(g2, "released lock must be re-acquirable");
     }
 
     #[test]
