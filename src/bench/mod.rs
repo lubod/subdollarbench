@@ -34,6 +34,16 @@ pub async fn measure_dns_reference(seed: &str) -> Option<f64> {
     tp
 }
 
+/// Load-test shape. Part of the measurement apparatus like BENCH_REPS:
+/// changing these moves every recorded denominator, so they are constants,
+/// not flags. `-q` keeps redis-benchmark output to the parseable summary
+/// lines the regex depends on.
+pub const REDIS_BENCH_N: &str = "5000";
+pub const REDIS_BENCH_C: &str = "10";
+pub const WRK_THREADS: &str = "2";
+pub const WRK_CONNS: &str = "20";
+pub const WRK_DURATION: &str = "3s";
+
 pub struct BenchmarkRunner;
 
 static REDIS_BENCH_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -60,8 +70,17 @@ pub fn median(mut xs: Vec<f64>) -> f64 {
 }
 
 /// Number of benchmark repetitions per window; the median is reported.
-/// Kills single-shot outliers (the 137k-type reading) at ~seconds of cost.
-pub const BENCH_REPS: usize = 3;
+///
+/// Calibrated 2026-10-02 (n=12 idle + n=12 loaded interleaved probe,
+/// pinned redis ref, same client/path as scoring): idle windows spread
+/// 2.1x (98k..210k, median 175k), loaded windows 1.2x (54k..66k, median
+/// 61k), idle/loaded medians 2.86x apart. A single window cannot separate
+/// host-load noise from candidate quality — and the 10% drift bracket is an
+/// order of magnitude tighter than what one window resolves. 5 reps keeps
+/// the median honest at ~2x the wall cost of 3; the BenchLock serializes
+/// windows against sibling workers, so the cost is contention, not just
+/// seconds.
+pub const BENCH_REPS: usize = 5;
 
 /// True when the `pre`/`post` batch reference brackets are not mutually
 /// trustworthy. A zero, negative, or non-finite reading on either side means
@@ -196,9 +215,9 @@ impl BenchmarkRunner {
                     "-p",
                     &port.to_string(),
                     "-n",
-                    "5000",
+                    REDIS_BENCH_N,
                     "-c",
-                    "10",
+                    REDIS_BENCH_C,
                     "-t",
                     "get,set",
                     "-q",
@@ -242,9 +261,9 @@ impl BenchmarkRunner {
                     "--network",
                     net,
                     BENCH_WRK_IMAGE,
-                    "-t2",
-                    "-c20",
-                    "-d3s",
+                    &format!("-t{}", WRK_THREADS),
+                    &format!("-c{}", WRK_CONNS),
+                    &format!("-d{}", WRK_DURATION),
                     &url,
                 ])
                 .output()

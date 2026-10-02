@@ -28,14 +28,16 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
     match task {
         TaskType::Redis => Some(6389),
         TaskType::Http | TaskType::Proxy => Some(8089),
-        // DNS batch ref: pinned CoreDNS + forwarding Corefile (same oracle
-        // as trial refs); offset from the per-trial ref port 5354.
-        TaskType::Dns => Some(5359),
+        // DNS is retired (config.rs): no batch denominator. Trials keep
+        // their live per-trial refs for reporting; nothing here may mint a
+        // batch baseline for a withdrawn task.
+        // (`batch_ports_are_disjoint` + `test_batch_port_assignment` pin this.)
+        TaskType::Dns => None,
         // PDF batch ref: canonical extractor (REF_PDF_IMAGE). 8409, not 8289:
         // every other batch base ends in 89, so an 89-based port collides with
         // `8089 + 100*w` at w=2 — i.e. pdf@w0 and http/proxy@w2 both bind
         // 8289, which the default 4-worker grid reaches. 8409 differs from
-        // 6389/8089/5359 by a non-multiple of 100, so no cross-worker overlap
+        // 6389/8089 by a non-multiple of 100, so no cross-worker overlap
         // is possible. `batch_ports_are_disjoint` below proves the whole map.
         TaskType::Pdf => Some(8409),
         TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
@@ -150,35 +152,6 @@ fn wait_redis_ready(net: &str, host: &str, port: u16) -> bool {
     false
 }
 
-fn wait_dns_ready(port: u16) -> bool {
-    use std::net::UdpSocket;
-    use std::time::Duration;
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(20) {
-        if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
-            let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
-            // Minimal A-query for example.com (header + 1 question).
-            let mut q = vec![
-                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ];
-            for l in "example.com".split('.') {
-                q.push(l.len() as u8);
-                q.extend_from_slice(l.as_bytes());
-            }
-            q.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]);
-            let target = format!("127.0.0.1:{port}");
-            if sock.send_to(&q, &target).is_ok() {
-                let mut buf = [0u8; 512];
-                if sock.recv_from(&mut buf).is_ok() {
-                    return true;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    false
-}
-
 fn wait_pdf_ready(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -210,39 +183,6 @@ fn measure_pdf_pages_per_sec(port: u16) -> Result<f64> {
             .await
             .ok_or_else(|| anyhow!("pdf batch ref: verifier soak returned None on port {port}"))
     })
-}
-
-fn measure_dns_queries_per_sec(port: u16) -> Result<f64> {
-    use std::net::UdpSocket;
-    use std::time::Duration;
-    let sock = UdpSocket::bind("127.0.0.1:0")?;
-    sock.set_read_timeout(Some(Duration::from_millis(500)))?;
-    sock.connect(format!("127.0.0.1:{port}"))?;
-    let iters = 200u32;
-    let mut q = vec![
-        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-    for l in "example.com".split('.') {
-        q.push(l.len() as u8);
-        q.extend_from_slice(l.as_bytes());
-    }
-    q.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]);
-    let start = Instant::now();
-    let mut ok = 0u32;
-    for _ in 0..iters {
-        if sock.send(&q).is_err() {
-            continue;
-        }
-        let mut buf = [0u8; 512];
-        if sock.recv(&mut buf).is_ok() {
-            ok += 1;
-        }
-    }
-    let secs = start.elapsed().as_secs_f64().max(0.001);
-    if ok == 0 {
-        return Err(anyhow!("dns batch ref: no query answered on port {port}"));
-    }
-    Ok(ok as f64 / secs)
 }
 
 /// Probed from the run network by alias, for the same reason as
@@ -305,13 +245,49 @@ pub fn drift_threshold(task: &TaskType) -> f64 {
 /// and measuring over the same network path the candidate uses is what makes
 /// the ratio mean anything. The container-internal ports are the protocol's
 /// canonical ones, not the host-published offsets.
+/// Reference-side measurement. Redis/http/proxy go through the SAME client,
+/// path, alias and rep count as the candidate (`candidate` alias on the run
+/// network, median-of-BENCH_REPS under the host-global lock): the ratio is
+/// only meaningful when numerator and denominator share the apparatus.
+/// DNS/PDF cannot share it — no container speaks their protocol — so they use
+/// the loopback path with the same rep/warmup discipline instead.
 fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
     match task {
         TaskType::Redis => BenchmarkRunner::run_redis_benchmark(net, "ref-redis", 6379),
         TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark(net, "ref-http", 80),
-        TaskType::Dns => measure_dns_queries_per_sec(port),
+        // Retired (see batch_port): a batch denominator for DNS must never
+        // exist. Per-trial live refs still use measure_dns_reference().
+        TaskType::Dns => Err(anyhow!("dns is retired; no batch denominator")),
         TaskType::Pdf => measure_pdf_pages_per_sec(port),
         _ => Err(anyhow!("no external reference for {:?}", task)),
+    }
+}
+
+/// Candidate-side co-measurement: the same client, path and reps as the
+/// reference, addressed by the `candidate` alias on the same run network.
+/// Redis/http/proxy candidates join the run network before verification, so
+/// this alias resolves exactly where `ref-redis`/`ref-http` resolve.
+pub fn measure_candidate(task: &TaskType, net: &str) -> Result<f64> {
+    match task {
+        TaskType::Redis => {
+            BenchmarkRunner::run_redis_benchmark(net, "candidate", candidate_port(task))
+        }
+        TaskType::Http | TaskType::Proxy => {
+            BenchmarkRunner::run_wrk_benchmark(net, "candidate", candidate_port(task))
+        }
+        _ => Err(anyhow!("no co-measured candidate path for {:?}", task)),
+    }
+}
+
+/// Container-internal port the candidate serves on the run network: the
+/// protocol's canonical port, matching how the reference is addressed
+/// (ref-redis:6379, ref-http:80). The host-published offsets (6380/8081/...)
+/// are a different path and must not enter the ratio.
+pub fn candidate_port(task: &TaskType) -> u16 {
+    match task {
+        TaskType::Redis => 6379,
+        TaskType::Http | TaskType::Proxy => 80,
+        _ => 0,
     }
 }
 
@@ -359,7 +335,6 @@ impl BatchRef {
         let start_res = match task {
             TaskType::Redis => sandbox.start_reference_redis(port),
             TaskType::Http | TaskType::Proxy => sandbox.start_reference_http(port),
-            TaskType::Dns => sandbox.start_reference_dns(port),
             TaskType::Pdf => sandbox.start_reference_pdf(port),
             _ => return Ok(None),
         };
@@ -377,7 +352,6 @@ impl BatchRef {
         let ready = match task {
             TaskType::Redis => wait_redis_ready(&ref_net, "ref-redis", 6379),
             TaskType::Http | TaskType::Proxy => wait_http_ready(&ref_net, "ref-http", 80),
-            TaskType::Dns => wait_dns_ready(port),
             TaskType::Pdf => wait_pdf_ready(port),
             _ => false,
         };
@@ -492,7 +466,13 @@ impl BatchRef {
                 true
             }
         };
-        append_history(&self.task, self.pre, post, drift);
+        let batch = self
+            .sandbox
+            .instance_id
+            .strip_suffix("_batchref")
+            .unwrap_or(&self.sandbox.instance_id)
+            .to_string();
+        append_history(&self.task, &batch, self.pre, post, drift);
         self.sandbox.cleanup();
         BatchRefReport {
             pre: self.pre,
@@ -517,14 +497,27 @@ fn ref_history_path() -> std::path::PathBuf {
     get_repo_root().join("results").join("ref_history.jsonl")
 }
 
-fn append_history(task: &TaskType, pre: f64, post: Option<f64>, drift: bool) {
+/// Exactly one row per `finish()` call: the batch bracket is one
+/// observation (pre, post, drift), never two. `batch` binds the row to the
+/// parent run id so a batch that restarts cannot double-append silently;
+/// `verified` is false when the bracket is unverified (post missing), so
+/// readers can exclude untrusted denominators instead of averaging them in.
+fn append_history(
+    task: &TaskType,
+    batch: &str,
+    pre: f64,
+    post: Option<f64>,
+    drift: bool,
+) {
     let line = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "task": task.to_string(),
+        "batch": batch,
         "image": ref_image(task),
         "ref_pre": pre,
         "ref_post": post,
         "drift": drift,
+        "verified": post.is_some() && !drift,
         "host": hostname(),
     });
     let path = ref_history_path();
@@ -745,12 +738,51 @@ mod tests {
     }
 
     #[test]
+    fn test_candidate_port_is_canonical_not_published_offset() {
+        // The ratio must share one network path: candidate by alias on the
+        // run network at the protocol's canonical port, exactly where the
+        // reference is addressed — never the host-published offsets.
+        assert_eq!(candidate_port(&TaskType::Redis), 6379);
+        assert_eq!(candidate_port(&TaskType::Http), 80);
+        assert_eq!(candidate_port(&TaskType::Proxy), 80);
+        assert_ne!(candidate_port(&TaskType::Redis), 6380);
+        assert_ne!(candidate_port(&TaskType::Http), 8081);
+    }
+
+    #[test]
+    fn test_history_row_carries_batch_and_verified() {
+        // Exactly one row per finish(), bound to the batch, with an explicit
+        // verified flag — readers must be able to exclude unverified
+        // denominators instead of averaging them in.
+        let dir = std::env::temp_dir().join(format!(
+            "sdb_hist_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let f = dir.join("h.jsonl");
+        std::env::set_var("SDB_REF_HISTORY", &f);
+        append_history(&TaskType::Redis, "parent_w0", 100.0, Some(105.0), false);
+        append_history(&TaskType::Redis, "parent_w0", 100.0, None, true);
+        let text = std::fs::read_to_string(&f).unwrap();
+        let rows: Vec<serde_json::Value> =
+            text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(rows.len(), 2, "one row per batch event, never two");
+        assert_eq!(rows[0]["batch"], "parent_w0");
+        assert_eq!(rows[0]["verified"], true);
+        assert_eq!(rows[1]["verified"], false);
+        assert_eq!(rows[1]["ref_post"], serde_json::Value::Null);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("SDB_REF_HISTORY");
+    }
+
+    #[test]
     fn test_batch_port_assignment() {
         assert_eq!(batch_port(&TaskType::Redis), Some(6389));
         assert_eq!(batch_port(&TaskType::Http), Some(8089));
-        assert_eq!(batch_port(&TaskType::Dns), Some(5359));
-        // Offset from per-trial ref port 5354: no collision with trial churn.
-        assert_ne!(batch_port(&TaskType::Dns), Some(5354));
+        // Retired: no batch denominator may exist for DNS (Step 3).
+        assert_eq!(batch_port(&TaskType::Dns), None);
         assert_eq!(batch_port(&TaskType::Pdf), Some(8409));
         // Regression: every batch base used to end in 89, so pdf@w0 (8289) and
         // http/proxy@w2 (8089 + 200) bound the same port on the default 4-worker
