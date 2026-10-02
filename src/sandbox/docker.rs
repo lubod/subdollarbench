@@ -351,19 +351,16 @@ impl SandboxManager {
             || e.contains("could not allocate subnet")
     }
 
-    /// Reap networks owned by THIS run id that hold no live containers
-    /// (finished trials' nets + batchref net). Sibling live trials keep
-    /// their networks: attached endpoints fail the rm, which we tolerate.
+    /// Reap the finished network owned by THIS run id. Never the batchref
+    /// net: while trials run it is live by definition, and `network rm`
+    /// on an attached net fails anyway — but on the brief window where the
+    /// ref container is restarting it would succeed and murder the bracket.
+    /// Sibling live trials keep their networks: attached endpoints fail the
+    /// rm, which we tolerate.
     fn cleanup_finished_networks(&self) {
-        for suffix in ["", "_batchref"] {
-            let _ = Command::new("docker")
-                .args([
-                    "network",
-                    "rm",
-                    &format!("subdollar-net-{}{}", self.instance_id, suffix),
-                ])
-                .output();
-        }
+        let _ = Command::new("docker")
+            .args(["network", "rm", &format!("subdollar-net-{}", self.instance_id)])
+            .output();
     }
 
     /// Confirm a just-created network is inspectable (retry ×5, 200ms).
@@ -1245,11 +1242,15 @@ impl SandboxManager {
         }
     }
 
-    /// Containers this instance may own. BatchRef uses `<parent>_batchref` as
-    /// its instance id while trials use `<parent>_trial<N>`/`<parent>`, so a
-    /// trial's cleanup must also reap the batch record's share: `*_batchref`
-    /// names, the batchref network, and any resources inherited from a parent
-    /// id embedded in this one.
+    /// Containers this instance may own: exactly its own. BatchRef uses
+    /// `<parent>_batchref` while trials use `<parent>_trial<N>`/`<parent>`,
+    /// and trials must NEVER reap the batchref share: the batch bracket
+    /// (pre ... post) outlives every trial, so trial N's normal exit
+    /// murdered the denominator trial N+1 still needed (live: post-batch
+    /// re-measure failed with "network ..._batchref not found" on both gate
+    /// cells). BatchRef::finish() owns its own cleanup; the batchref sandbox
+    /// drops via its own Drop. Trial cleanup keeps own containers, own
+    /// network, files — nothing else.
     fn owned_container_names(&self) -> Vec<String> {
         let mut names = vec![
             self.candidate_container_name(),
@@ -1263,27 +1264,6 @@ impl SandboxManager {
         ];
         for idx in 1..=8u8 {
             names.push(self.upstream_name(idx));
-        }
-        // BatchRef sibling: trials own `<parent>_trial<N>` but the batch ref
-        // lives under `<parent>_batchref` on its own network. `strip_suffix`
-        // only matches a genuine trial id, so an unrelated id that merely
-        // contains "_trial" is never truncated.
-        if let Some(parent) = self
-            .instance_id
-            .strip_suffix(|c: char| c.is_ascii_digit())
-            .and_then(|p| p.strip_suffix("_trial"))
-        {
-            let batch = SandboxManager::with_id(&format!("{}_batchref", parent));
-            names.push(batch.candidate_container_name());
-            names.push(batch.ref_redis_name());
-            names.push(batch.ref_http_name());
-            names.push(batch.ref_dns_name());
-            names.push(batch.ref_pdf_name());
-            names.push(batch.egress_proxy_name());
-            names.push(batch.agent_container_name());
-            for idx in 1..=8u8 {
-                names.push(batch.upstream_name(idx));
-            }
         }
         names
     }
@@ -1311,10 +1291,11 @@ impl SandboxManager {
                 .output();
         }
 
-        // Sibling sweep: exact instance-id match only. The old
-        // `^subdollar-.*-{clean}$` pattern matched a parent id against
-        // `<parent>_trial<N>` and `<parent>_batchref` containers, so one
-        // trial's cleanup reaped a sibling trial's live containers.
+        // Sibling sweep: exact instance-id match only — never the
+        // `_batchref` sibling (that share belongs to BatchRef::finish).
+        // The old `^subdollar-.*-{clean}$` pattern matched a parent id
+        // against `<parent>_trial<N>` and `<parent>_batchref` containers,
+        // so one trial's cleanup reaped a sibling trial's live containers.
         let clean = self.instance_id.replace(
             |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
             "",
@@ -1324,7 +1305,7 @@ impl SandboxManager {
                 .args([
                     "-c",
                     &format!(
-                        "docker ps -a --format '{{{{.Names}}}}' | grep -E -- '^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}($|_batchref$)' | xargs -r docker rm -f",
+                        "docker ps -a --format '{{{{.Names}}}}' | grep -E -- '^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}($)' | xargs -r docker rm -f",
                         clean
                     ),
                 ])
@@ -1344,17 +1325,6 @@ impl SandboxManager {
         }
         if !Self::network_in_use_or_young(&net) {
             Self::remove_network_retrying(&net);
-        }
-        // BatchRef sibling network for trial owners (see owned_container_names).
-        if let Some(parent) = self
-            .instance_id
-            .strip_suffix(|c: char| c.is_ascii_digit())
-            .and_then(|p| p.strip_suffix("_trial"))
-        {
-            let batch_net = format!("subdollar-net-{}_batchref", parent);
-            if !Self::network_in_use_or_young(&batch_net) {
-                Self::remove_network_retrying(&batch_net);
-            }
         }
     }
 }
@@ -1641,11 +1611,12 @@ mod tests {
             }
             assert!(names.iter().any(|n| n == want), "missing {want}");
         }
-        // BatchRef sibling share.
-        assert!(names.iter().any(|n| n
-            == "subdollar-ref-pdf-parent_20261002_120000_batchref"));
-        assert!(names.iter().any(|n| n
-            == "subdollar-ref-redis-parent_20261002_120000_batchref"));
+        // Trial cleanup must NEVER name the batchref share: the bracket
+        // outlives every trial, and trial N's exit murdered it (gate cells:
+        // post-batch "network ..._batchref not found" on both cells).
+        assert!(names
+            .iter()
+            .all(|n| !n.ends_with("_batchref")), "trial owns batchref share!");
     }
 
     #[test]
@@ -1668,21 +1639,18 @@ mod tests {
     fn test_sweep_pattern_is_exact_instance_match() {
         // The retired `^subdollar-.*-{id}$` pattern matched a parent id
         // against `<parent>_trial<N>` containers: trial 1's cleanup reaped
-        // trial 2's live candidate. The narrowed alternation only fires on
-        // the exact id or its `_batchref` sibling.
+        // trial 2's live candidate. The narrowed alternation fires on the
+        // exact id only — never the `_batchref` sibling (BatchRef::finish
+        // owns that share; trial N's exit murdered the bracket through it).
         let pat = |id: &str| {
             format!(
-                "^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}( $|_batchref$)",
+                "^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}($)",
                 id
             )
-            .replace(" ", "")
         };
         let re = ::regex::Regex::new(&pat("parent_20261002_120000_trial2")).unwrap();
         assert!(re.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
-        assert!(re.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref") == false);
-        let re_batch = ::regex::Regex::new(&pat("parent_20261002_120000")).unwrap();
-        assert!(re_batch.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref"));
-        assert!(!re_batch.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
-        assert!(!re_batch.is_match("subdollar-candidate-parent_20261002_120000_trial22"));
+        assert!(!re.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref"));
+        assert!(!re.is_match("subdollar-candidate-parent_20261002_120000_trial22"));
     }
 }
