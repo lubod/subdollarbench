@@ -34,14 +34,21 @@ TRIALS=$(awk '!/^#/ && NF {print $4; exit}' "$1")
 ./target/release/subdollarbench matrix --models "$MODELS" --tasks "$TASKS" --efforts "$EFFORTS" --trials "${TRIALS:-3}" --enqueue --extend-if-unstable --max-trials 7
 echo "ENQUEUED via matrix --enqueue"
 
-# 6. Spot check: first 3 cells must run REAL trials (turns>0, spend>0) within 15 min.
+# 6. Spot check: first 3 cells must run REAL trials (turn>0, spent>0).
+# worker_runs is a dispatch-time snapshot (turns/cost stay 0 there); live
+# trial state streams on /api/console as [LIVE]/[TELEMETRY] lines.
 echo "spot-checking first 3 cells (15 min window)..."
 sleep 600
 REAL=0
 for i in 1 2 3; do
-  ST=$(curl -s http://127.0.0.1:3000/api/status --max-time 10)
-  TURNS=$(echo "$ST" | python3 -c "import json,sys; print((json.load(sys.stdin).get('current_run') or {}).get('turns',0))")
-  SPENT=$(echo "$ST" | python3 -c "import json,sys; print((json.load(sys.stdin).get('current_run') or {}).get('cost_usd',0))")
+  CON=$(curl -s "http://127.0.0.1:3000/api/console?tail=400" --max-time 10)
+  HIT=$(printf '%s' "$CON" | grep -E "\[LIVE\]|\[TELEMETRY\]" | python3 -c 'import sys,re
+best=[0,0.0]
+for line in sys.stdin:
+    m=re.search(r"turn=(\d+).*spent=([0-9.]+)",line)
+    if m: best=[max(best[0],int(m.group(1))),max(best[1],float(m.group(2)))]
+print("%d %.4f"%(best[0],best[1]))')
+  TURNS=$(echo "$HIT" | cut -d" " -f1); SPENT=$(echo "$HIT" | cut -d" " -f2)
   [ "$TURNS" -gt 0 ] && REAL=$((REAL+1))
   echo "cell $i: turns=$TURNS spent=$SPENT"
   sleep 120

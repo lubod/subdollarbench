@@ -502,6 +502,10 @@ fn ref_history_path() -> std::path::PathBuf {
 /// parent run id so a batch that restarts cannot double-append silently;
 /// `verified` is false when the bracket is unverified (post missing), so
 /// readers can exclude untrusted denominators instead of averaging them in.
+/// `method` stamps the measurement regime (co-measured run-network path at
+/// BENCH_REPS=5): pre-regime rows used the host-published-port path that
+/// timed out under egress enforcement, so the cross-batch warn must compare
+/// within one method, never against the old regime's denominators.
 fn append_history(
     task: &TaskType,
     batch: &str,
@@ -514,6 +518,7 @@ fn append_history(
         "task": task.to_string(),
         "batch": batch,
         "image": ref_image(task),
+        "method": format!("comeas-net-alias/reps{}", crate::bench::BENCH_REPS),
         "ref_pre": pre,
         "ref_post": post,
         "drift": drift,
@@ -556,32 +561,31 @@ impl RefHistory {
 
 /// Read the recorded reference history for `task`.
 ///
-/// `append_history` has written every batch's `ref_pre` since the file was
-/// introduced, and nothing ever read it back. That leaves the one drift check
-/// the design actually needs - is this denominator comparable to the ones
-/// already published? - unanswerable. `pre`/`post` bracketing can only show the
-/// reference held still inside one batch; it says nothing about the value
-/// having moved since the last batch, which is what makes two published ratios
-/// comparable. Across 107 recorded redis batches the range spans 5.9x, every
-/// one flagged `drift: false`.
-///
-/// A missing or unreadable file yields `None`: no history is not evidence of an
-/// anomaly, so callers treat it as "nothing to compare against".
+/// Compared WITHIN one measurement method only: rows stamped with a
+/// different `method` (pre-regime host-published-port path) come from a
+/// broken apparatus and are excluded, so the warn cannot fire on regime
+/// mismatch. Unstamped legacy rows are treated as a different regime and
+/// likewise excluded. Gate on the pre/post bracket for drift; this warn is
+/// the cross-batch comparability signal, not the drift detector.
+pub fn current_method() -> String {
+    format!("comeas-net-alias/reps{}", crate::bench::BENCH_REPS)
+}
 pub fn read_ref_history(task: &TaskType) -> Option<RefHistory> {
     let path = ref_history_path();
     let text = fs::read_to_string(path).ok()?;
     let want = task.to_string();
+    let method = current_method();
     let mut vals: Vec<f64> = text
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| v.get("task").and_then(|t| t.as_str()) == Some(want.as_str()))
+        .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some(method.as_str()))
         .filter_map(|v| v.get("ref_pre").and_then(|p| p.as_f64()))
         .filter(|p| p.is_finite() && *p > 0.0)
         .collect();
     if vals.is_empty() {
         return None;
     }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = vals.len() / 2;
     Some(RefHistory {
         samples: vals.len(),
@@ -661,8 +665,9 @@ mod tests {
 
     /// Parses the real `results/ref_history.jsonl` when it is present, so the
     /// field names and value types the reader depends on are exercised against
-    /// actual recorded batches rather than a fixture. Skips cleanly on a
-    /// checkout that has never run a wave.
+    /// actual recorded batches rather than a fixture. Skips cleanly when no
+    /// row carries the current method stamp (legacy pre-regime file) or when
+    /// the checkout never ran a wave.
     #[test]
     fn test_read_ref_history_parses_real_file() {
         let path = ref_history_path();
@@ -670,8 +675,15 @@ mod tests {
             eprintln!("skipping: no ref_history.jsonl in this checkout");
             return;
         }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let stamped = text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|v| v.get("method").and_then(|m| m.as_str()) == Some(current_method().as_str())).count();
+        if stamped == 0 {
+            eprintln!("skipping: no current-method rows in ref_history.jsonl (pre-regime file)");
+            return;
+        }
         let Some(h) = read_ref_history(&TaskType::Redis) else {
-            panic!("redis has recorded batches in this checkout but read back none");
+            eprintln!("skipping: no current-method redis rows yet");
+            return;
         };
         assert!(h.samples > 0);
         assert!(h.min > 0.0 && h.max >= h.min);
@@ -694,6 +706,39 @@ mod tests {
             h.deviation(midpoint) > 0.0,
             "a value inside the envelope must still register if it is off-median"
         );
+    }
+
+    // These history tests mutate SDB_REF_HISTORY (process-global) and must
+    // not run in parallel: cargo runs #[test] on threads sharing one env, so
+    // a sibling set_var/remove_var mid-read opens the wrong file (observed:
+    // No such file at read_to_string). serial_test is not a dependency; the
+    // HIST_SERIAL mutex serializes the three.
+    static HIST_SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn test_history_reader_ignores_foreign_method_rows() {
+        // Regime mismatch is not drift: old-regime rows (host-published-port
+        // path that timed out under egress enforcement) must not enter the
+        // comparison set, or the 10% warn fires on every future batch.
+        let dir = std::env::temp_dir().join(format!(
+            "sdb_hist_method_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let f = dir.join("h.jsonl");
+        let _ = std::fs::create_dir_all(&dir);
+        let old_row = serde_json::json!({"task":"redis","ref_pre":10.0,"method":"host-published-port/reps3"});
+        let new_row = serde_json::json!({"task":"redis","ref_pre":100.0,"method":current_method()});
+        std::fs::write(&f, format!("{}\n{}\n", old_row, new_row)).unwrap();
+        let _g = HIST_SERIAL.lock();
+        std::env::set_var("SDB_REF_HISTORY", &f);
+        let h = read_ref_history(&TaskType::Redis).expect("current-method row must read back");
+        assert_eq!(h.samples, 1, "foreign-method row must be excluded");
+        assert_eq!(h.median, 100.0);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("SDB_REF_HISTORY");
     }
 
     /// `CROSS_BATCH_DEVIATION_WARN` is a fraction (0.10). Comparing a percentage
@@ -762,6 +807,7 @@ mod tests {
                 .as_nanos()
         ));
         let f = dir.join("h.jsonl");
+        let _g = HIST_SERIAL.lock();
         std::env::set_var("SDB_REF_HISTORY", &f);
         append_history(&TaskType::Redis, "parent_w0", 100.0, Some(105.0), false);
         append_history(&TaskType::Redis, "parent_w0", 100.0, None, true);
@@ -773,6 +819,8 @@ mod tests {
         assert_eq!(rows[0]["verified"], true);
         assert_eq!(rows[1]["verified"], false);
         assert_eq!(rows[1]["ref_post"], serde_json::Value::Null);
+        assert_eq!(rows[0]["method"], serde_json::Value::String(current_method()));
+        assert_eq!(rows[1]["method"], serde_json::Value::String(current_method()));
         let _ = std::fs::remove_dir_all(&dir);
         std::env::remove_var("SDB_REF_HISTORY");
     }
@@ -866,6 +914,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::env::set_var("SDB_REF_HISTORY", &scratch);
+        let _g = HIST_SERIAL.lock();
         let _ = std::fs::remove_file(&scratch);
 
         let run_id = format!(
