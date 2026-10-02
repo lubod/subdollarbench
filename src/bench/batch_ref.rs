@@ -502,6 +502,21 @@ impl BatchRef {
     }
 }
 
+/// Where `append_history` writes, and what `read_ref_history` reads.
+///
+/// Overridable so a test can exercise the real start -> finish lifecycle
+/// without appending a synthetic run to the production history that
+/// cross-batch comparability is judged against. Set `SDB_REF_HISTORY` to a
+/// scratch path; unset, this is the repository's own results file.
+fn ref_history_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SDB_REF_HISTORY") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    get_repo_root().join("results").join("ref_history.jsonl")
+}
+
 fn append_history(task: &TaskType, pre: f64, post: Option<f64>, drift: bool) {
     let line = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -512,7 +527,7 @@ fn append_history(task: &TaskType, pre: f64, post: Option<f64>, drift: bool) {
         "drift": drift,
         "host": hostname(),
     });
-    let path = get_repo_root().join("results").join("ref_history.jsonl");
+    let path = ref_history_path();
     let _ = fs::create_dir_all(path.parent().unwrap());
     use std::io::Write;
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
@@ -560,7 +575,7 @@ impl RefHistory {
 /// A missing or unreadable file yields `None`: no history is not evidence of an
 /// anomaly, so callers treat it as "nothing to compare against".
 pub fn read_ref_history(task: &TaskType) -> Option<RefHistory> {
-    let path = get_repo_root().join("results").join("ref_history.jsonl");
+    let path = ref_history_path();
     let text = fs::read_to_string(path).ok()?;
     let want = task.to_string();
     let mut vals: Vec<f64> = text
@@ -657,7 +672,7 @@ mod tests {
     /// checkout that has never run a wave.
     #[test]
     fn test_read_ref_history_parses_real_file() {
-        let path = get_repo_root().join("results").join("ref_history.jsonl");
+        let path = ref_history_path();
         if !path.exists() {
             eprintln!("skipping: no ref_history.jsonl in this checkout");
             return;
@@ -807,8 +822,43 @@ mod tests {
     #[test]
     #[ignore = "requires docker + the pinned pdf-ref image"]
     fn pdf_batch_ref_lifecycle() {
+        // Never append to the production history: it is the input to
+        // cross-batch comparability warnings, and a synthetic probe run would
+        // sit in that distribution as if it were a real measurement.
+        let scratch: std::path::PathBuf = std::env::temp_dir().join(format!(
+            "sdb_ref_history_test_{}_{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::env::set_var("SDB_REF_HISTORY", &scratch);
+        let _ = std::fs::remove_file(&scratch);
+
+        let run_id = format!(
+            "pdf-lifecycle-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+
+        // Leave no container or network behind even on panic.
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "-f", self.0.to_string_lossy().as_ref()])
+                    .output();
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _guard = Cleanup(scratch.clone());
+
         let log = |_m: &str| {};
-        let started = BatchRef::start(&TaskType::Pdf, "pdf-lifecycle-probe", &log)
+        let started = BatchRef::start(&TaskType::Pdf, &run_id, &log)
             .expect("BatchRef::start returned Err for pdf");
         let batch = started
             .expect("pdf BatchRef::start returned Ok(None) - the reference never became ready");
@@ -824,9 +874,20 @@ mod tests {
             post > 0.0,
             "post-measurement should be positive, got {post}"
         );
+
+        // The row must have landed in the scratch file, not the repo's.
+        let written = std::fs::read_to_string(&scratch).expect("no history row written");
+        let row: serde_json::Value =
+            serde_json::from_str(written.lines().last().expect("empty history")).unwrap();
+        assert_eq!(row["task"], "pdf");
+        assert!(row["ref_pre"].as_f64().unwrap() > 0.0);
+        assert!(row["ref_post"].as_f64().unwrap() > 0.0);
         println!(
-            "PDF BatchRef lifecycle OK: pre={:.0} post={:.0} drift={}",
-            report.pre, post, report.drift
+            "PDF BatchRef lifecycle OK: pre={:.0} post={:.0} drift={} (history -> {})",
+            report.pre,
+            post,
+            report.drift,
+            scratch.display()
         );
     }
 }
