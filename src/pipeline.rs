@@ -873,15 +873,12 @@ impl BenchmarkPipeline {
                     )
                 }
                 TaskType::Proxy => {
-                    if let Err(e) = sandbox.connect_candidate_to_network() {
-                        logger.log(&format!(
-                            "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
-                            e
-                        ));
-                    } else {
-                        // Alias propagation after connect.
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
+                    // No second attach: the setup gate above already joined
+                    // the run network (single attach point). `network connect`
+                    // is idempotent, but a second call here would re-sleep 2s
+                    // and widen the window where a sibling's cleanup can reap
+                    // a half-attached endpoint. Alias propagation was covered
+                    // by the 500ms setup-gate sleep.
                     let log_stage =
                         |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
                             let status_str = if s.passed { "PASS" } else { "FAIL" };

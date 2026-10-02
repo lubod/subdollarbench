@@ -193,9 +193,14 @@ impl ModelPricing {
         if !Self::has_valid_throughput_denominator(task) && task.is_some() {
             return None;
         }
+        // No evidence, no score: a failed trial (pass<=0, no throughput,
+        // no reference) must be None (unscored, ranks by P@1/cost), never
+        // Some(0.0) — a fabricated zero that reads as "measured slowest"
+        // and outranks nothing honestly. 58 archived trial rows carry
+        // throughput_score:0.0 with null throughput AND null reference.
         let base_eff = Self::calculate_efficiency_score(pass_rate, effective_cost_usd);
         if base_eff <= 0.0 {
-            return Some(0.0);
+            return None;
         }
         // No live reference, no score. Fallback baselines were unlabeled
         // constants unmeasured on this testbed; scoring against them made
@@ -205,7 +210,14 @@ impl ModelPricing {
             Some(v) if v > 0.0 => v,
             _ => return None,
         };
+        // Zero or missing candidate throughput is no measurement either:
+        // a crashed candidate never produced a rate. None, not a zero that
+        // reads as "measured slowest". Applies regardless of task — the
+        // unqualified wrapper (task=None) must not re-mint zeros either.
         let cand_tp = throughput_req_sec.unwrap_or(0.0).max(0.0);
+        if cand_tp <= 0.0 {
+            return None;
+        }
         let speed_ratio = cand_tp / ref_tp;
         Some(base_eff * speed_ratio * (1.0 + 2.0 * speed_ratio))
     }
@@ -790,12 +802,14 @@ mod tests {
             );
         }
 
-        // Zero throughput or missing throughput yields 0.0
+        // Zero or missing candidate throughput is no measurement: None
+        // (unscored), never a fabricated 0.0. A crashed candidate that never
+        // produced a rate must not read as "measured slowest".
         let tp_zero =
             ModelPricing::calculate_throughput_score(100.0, eff, Some(0.0), Some(30_000.0));
-        assert_eq!(tp_zero, Some(0.0));
+        assert_eq!(tp_zero, None);
         let tp_none = ModelPricing::calculate_throughput_score(100.0, eff, None, Some(30_000.0));
-        assert_eq!(tp_none, Some(0.0));
+        assert_eq!(tp_none, None);
 
         // Sub-reference performance (half-speed: ratio 0.5 => multiplier 0.5 * (1 + 1) = 1.0)
         let tp_half =

@@ -276,10 +276,14 @@ impl BenchmarkRunResult {
         // not ranked, exactly like a task with no reference at all. Before
         // this gate `ref_drift` was a display string and changed no outcome.
         let ref_trusted = has_ref && batch_drift != Some(true);
+        // None AND zero readings are no measurement (crashed candidate,
+        // unmeasured trial): the median must skip both, not average in a
+        // fabricated zero that drags the parent rate down.
         let fair_tp = if c > 0 && has_ref {
             let mut tps: Vec<f64> = passing
                 .iter()
                 .filter_map(|r| r.throughput_req_sec)
+                .filter(|t| *t > 0.0)
                 .collect();
             tps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             if tps.is_empty() {
@@ -1771,6 +1775,56 @@ mod tests {
         assert_eq!(m.reference_throughput_req_sec, None);
         assert_eq!(m.baseline_source, None);
         assert_eq!(m.throughput_score, None);
+    }
+
+    #[test]
+    fn test_merge_median_skips_zero_throughput() {
+        let mk = |id: &str, tp: Option<f64>| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: tp,
+            reference_throughput_req_sec: Some(70_000.0),
+            baseline_source: Some("live".to_string()),
+            ref_drift: None,
+            ref_image: Some("docker.io/library/redis@sha256:abc".to_string()),
+            prompt_tokens: 1000,
+            cached_tokens: 0,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            total_cost_usd: 0.01,
+            effective_cost_usd: Some(0.02),
+            duration_seconds: Some(10.0),
+            turns: Some(5),
+            savings_percent: 0.0,
+            efficiency_score: 1.0,
+            throughput_score: None,
+            timestamp: "2026-10-02T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+        };
+        // One crashed trial (0.0) + two real readings: median of the real two.
+        let m = BenchmarkRunResult::merge_subruns(
+            "p",
+            vec![mk("a", Some(0.0)), mk("b", Some(60_000.0)), mk("c", Some(70_000.0))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.throughput_req_sec, Some(65_000.0));
     }
 
     #[test]
