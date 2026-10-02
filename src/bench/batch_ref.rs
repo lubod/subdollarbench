@@ -299,6 +299,10 @@ pub struct BatchRef {
     task: TaskType,
     port: u16,
     pub pre: f64,
+    /// (1-min loadavg, logical cores) sampled at the load gate. Stamped on
+    /// the history row so a future reader can tell an idle-regime bracket
+    /// from a loaded one without trusting wall-clock proximity.
+    pub pre_load: Option<(f64, usize)>,
 }
 
 pub struct BatchRefReport {
@@ -323,6 +327,32 @@ impl BatchRef {
 
     /// Worker-aware start: batch port follows the worker offset so parallel
     /// cells never share a batch-ref container.
+    /// Host-load gate: refuse to mint a denominator under load. The
+    /// reference moves 2.86x idle-vs-loaded (gate-1 probe n=12+12), so a
+    /// pre-batch median taken under load is not a denominator but noise.
+    /// Threshold scales with core count (load per core), not absolute:
+    /// 1-min avg above 75% of cores refuses. Returns the sampled load for
+    /// stamping, or an Err-style None-signal via the log when refusing.
+    /// Pure function of (load1, ncores) so tests pin the rule, not the host.
+    pub fn load_gate_allows(load1: f64, ncores: usize) -> bool {
+        let cores = ncores.max(1) as f64;
+        load1 <= cores * Self::LOAD_GATE_PER_CORE
+    }
+
+    /// 1-min loadavg per core above which a batch bracket refuses. 0.75:
+    /// loaded-probe medians sat 2.86x off idle; refusing above 3/4 cores
+    /// keeps brackets in the idle regime where denominators repeat.
+    pub const LOAD_GATE_PER_CORE: f64 = 0.75;
+
+    /// Sample (1-min loadavg, logical cores). None when unreadable (fail
+    /// closed: no sample, no bracket — same rule as a missing network).
+    pub fn sample_host_load() -> Option<(f64, usize)> {
+        let text = std::fs::read_to_string("/proc/loadavg").ok()?;
+        let load1: f64 = text.split_whitespace().next()?.parse().ok()?;
+        let ncores = std::thread::available_parallelism().ok()?.get();
+        Some((load1, ncores))
+    }
+
     pub fn start_on_worker(
         task: &TaskType,
         parent_run_id: &str,
@@ -333,6 +363,22 @@ impl BatchRef {
             Some(p) => crate::web::server::worker_port(p, worker),
             None => return Ok(None),
         };
+        // Load gate BEFORE any container starts: a denominator minted
+        // under load poisons every trial in the batch. Non-pdf falls back to
+        // live per-trial refs (warn-and-None); pdf has no fallback (Err).
+        if let Some((load1, ncores)) = Self::sample_host_load() {
+            if !Self::load_gate_allows(load1, ncores) {
+                let msg = format!(
+                    "[BATCH-REF] REFUSED under host load (1-min avg {load1:.2} on {ncores} cores, gate {:.2}/core): denominator would be noise, not signal.",
+                    Self::LOAD_GATE_PER_CORE
+                );
+                log(&msg);
+                if *task == TaskType::Pdf {
+                    return Err(anyhow!("pdf batch reference refused under host load: {load1:.2} on {ncores} cores"));
+                }
+                return Ok(None);
+            }
+        }
         let sandbox = SandboxManager::with_id(&format!("{}_batchref", parent_run_id));
         let _guard = crate::sandbox::docker::RunGuard::new(SandboxManager::with_id(&format!(
             "{}_batchref",
@@ -417,6 +463,7 @@ impl BatchRef {
                     task: *task,
                     port,
                     pre,
+                    pre_load: Self::sample_host_load(),
                 }))
             }
             Err(e) => {
@@ -480,7 +527,7 @@ impl BatchRef {
             .strip_suffix("_batchref")
             .unwrap_or(&self.sandbox.instance_id)
             .to_string();
-        append_history(&self.task, &batch, self.pre, post, drift);
+        append_history(&self.task, &batch, self.pre, post, drift, self.pre_load, Self::sample_host_load());
         self.sandbox.cleanup();
         BatchRefReport {
             pre: self.pre,
@@ -520,6 +567,8 @@ fn append_history(
     pre: f64,
     post: Option<f64>,
     drift: bool,
+    pre_load: Option<(f64, usize)>,
+    post_load: Option<(f64, usize)>,
 ) {
     let line = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -527,6 +576,9 @@ fn append_history(
         "batch": batch,
         "image": ref_image(task),
         "method": format!("comeas-net-alias/reps{}", crate::bench::BENCH_REPS),
+        "load_pre": pre_load.map(|(l, _)| l),
+        "load_post": post_load.map(|(l, _)| l),
+        "ncores": pre_load.map(|(_, n)| n).or(post_load.map(|(_, n)| n)),
         "ref_pre": pre,
         "ref_post": post,
         "drift": drift,
@@ -818,8 +870,8 @@ mod tests {
         let f = dir.join("h.jsonl");
         let _g = HIST_SERIAL.lock();
         std::env::set_var("SDB_REF_HISTORY", &f);
-        append_history(&TaskType::Redis, "parent_w0", 100.0, Some(105.0), false);
-        append_history(&TaskType::Redis, "parent_w0", 100.0, None, true);
+        append_history(&TaskType::Redis, "parent_w0", 100.0, Some(105.0), false, Some((2.0, 24)), Some((2.1, 24)));
+        append_history(&TaskType::Redis, "parent_w0", 100.0, None, true, Some((2.0, 24)), None);
         let text = std::fs::read_to_string(&f).unwrap();
         let rows: Vec<serde_json::Value> =
             text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
@@ -830,6 +882,46 @@ mod tests {
         assert_eq!(rows[1]["ref_post"], serde_json::Value::Null);
         assert_eq!(rows[0]["method"], serde_json::Value::String(current_method()));
         assert_eq!(rows[1]["method"], serde_json::Value::String(current_method()));
+        assert_eq!(rows[0]["load_pre"], 2.0);
+        assert_eq!(rows[0]["ncores"], 24);
+        assert_eq!(rows[1]["load_post"], serde_json::Value::Null);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("SDB_REF_HISTORY");
+    }
+
+    #[test]
+    fn test_load_gate_rule_per_core() {
+        // 24-core host like dev: gate at 18.0. Quiet host passes, loaded
+        // host refuses — regardless of absolute numbers (a 4-core box gates
+        // at 3.0 for the same rule).
+        assert!(BatchRef::load_gate_allows(2.0, 24));
+        assert!(BatchRef::load_gate_allows(18.0, 24));
+        assert!(!BatchRef::load_gate_allows(18.01, 24));
+        assert!(BatchRef::load_gate_allows(2.9, 4));
+        assert!(!BatchRef::load_gate_allows(3.1, 4));
+        // Degenerate core count never divides by zero.
+        assert!(BatchRef::load_gate_allows(0.5, 0));
+        assert!(!BatchRef::load_gate_allows(5.0, 0));
+    }
+
+    #[test]
+    fn test_history_row_carries_load_stamps() {
+        let dir = std::env::temp_dir().join(format!(
+            "sdb_hist_load_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let f = dir.join("h.jsonl");
+        let _g = HIST_SERIAL.lock();
+        std::env::set_var("SDB_REF_HISTORY", &f);
+        append_history(&TaskType::Redis, "b", 100.0, Some(105.0), false, Some((2.0, 24)), Some((2.5, 24)));
+        let row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&f).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(row["load_pre"], 2.0);
+        assert_eq!(row["load_post"], 2.5);
+        assert_eq!(row["ncores"], 24);
         let _ = std::fs::remove_dir_all(&dir);
         std::env::remove_var("SDB_REF_HISTORY");
     }
