@@ -63,7 +63,7 @@ pub fn egress_allowed(host: &str) -> bool {
     }
     EGRESS_ALLOWLIST
         .iter()
-        .any(|a| h == *a || h.ends_with(&format!(".{a}")))
+        .any(|a| h == *a || h.ends_with(&format!(".{}", a)))
 }
 pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
 /// PDF reference: canonical extractor (extensions/pdf_reference.py).
@@ -1391,6 +1391,64 @@ impl SandboxManager {
         }
     }
 
+    /// Reap orphan *containers*: labeled containers whose network is gone
+    /// (or which outlived their run: crashed engine, killed process, test
+    /// scaffolding without Drop). Only containers whose sdb.run network no
+    /// longer exists AND which are not running a live trial: selected by
+    /// label, filtered to subdollar-* names, never by bare timestamp.
+    /// Returns the reaped count. Fail-closed: any inspect error keeps the
+    /// container (a live cell's container always has its network present).
+    pub fn reap_orphan_containers() -> usize {
+        let ls = Command::new("docker")
+            .args([
+                "ps", "-a", "-q",
+                "--filter", "label=sdb.run",
+            ])
+            .output();
+        let ids = match ls {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return 0,
+        };
+        let mut reaped = 0;
+        for id in Self::parse_network_ids(&ids) {
+            let detail = Command::new("docker")
+                .args([
+                    "inspect", id,
+                    "--format", "{{.Name}} {{.State.Running}} {{index .Config.Labels \"sdb.run\"}}",
+                ])
+                .output();
+            let text = match detail {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+                _ => continue,
+            };
+            let parts: Vec<&str> = text.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let (name, running, run) = (parts[0], parts[1], parts[2]);
+            // Only our names; never foreign containers that happen to share
+            // a label key.
+            if !name.contains("subdollar-") && !name.contains("guardprobe-") {
+                continue;
+            }
+            // Live trial containers keep running with their network present.
+            // Orphan = stopped container OR its network is gone.
+            let net_gone = Command::new("docker")
+                .args(["network", "inspect", &format!("subdollar-net-{run}")])
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(false);
+            let stopped = running != "true";
+            if stopped || net_gone {
+                let rm = Command::new("docker").args(["rm", "-f", id]).output();
+                if rm.map(|o| o.status.success()).unwrap_or(false) {
+                    reaped += 1;
+                }
+            }
+        }
+        reaped
+    }
+
     /// Legacy path, kept for Drop + tests. New code prefers RunGuard
     /// (label-filtered, panic-safe). Idempotent: safe to call twice.
     pub fn cleanup(&self) {
@@ -1587,6 +1645,7 @@ mod tests {
     #[test]
     fn test_docker_cleanup_and_logs() {
         let sm = SandboxManager::with_id("test-cleanup");
+        let _guard = RunGuard::new(SandboxManager::with_id("test-cleanup"));
         sm.cleanup();
         let logs = sm.get_candidate_logs();
         assert!(!logs.is_empty());
@@ -1595,6 +1654,7 @@ mod tests {
     #[test]
     fn test_start_and_cleanup_reference_containers() {
         let sm = SandboxManager::with_id("test-ref");
+        let _guard = RunGuard::new(SandboxManager::with_id("test-ref"));
         let res_redis = sm.start_reference_redis(59994);
         assert!(res_redis.is_ok());
         let res_http = sm.start_reference_http(59993);
@@ -1607,6 +1667,7 @@ mod tests {
     #[test]
     fn test_run_network_reference_alias_reachable() {
         let sm = SandboxManager::with_id("net-alias-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("net-alias-test"));
         sm.cleanup();
         assert!(sm.ensure_network().is_ok());
         // Idempotent: second create must not fail
@@ -1650,6 +1711,7 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
 
         let sm = SandboxManager::with_id("test-cand");
+        let _guard = RunGuard::new(SandboxManager::with_id("test-cand"));
 
         // 1. start.sh case
         fs::write(
@@ -1824,7 +1886,7 @@ mod tests {
             // needs_cleanup, so the temp manager's Drop at loop-end calls
             // cleanup() and reaps the probe just created (this faked
             // "never started" for three runs). Bare docker calls instead.
-            let net = format!("subdollar-net-{id}");
+            let net = format!("subdollar-net-{}", id);
             let _ = std::process::Command::new("docker")
                 .args(["rm", "-f", &format!("guardprobe-{}", id)])
                 .output();
@@ -1877,7 +1939,16 @@ mod tests {
             .unwrap_or_default();
         assert!(!left.contains(&format!("guardprobe-{}", a)), "own container must be reaped");
         assert!(left.contains(&format!("guardprobe-{}", b)), "sibling container must survive");
-        SandboxManager::with_id(b).cleanup();
+        // Full teardown through the guard path (nets carry the label now):
+        // B's guard reaps container + zero-container net; A's net likewise.
+        {
+            let _gb = RunGuard::new(SandboxManager::with_id(b));
+        }
+        for id in [a, b] {
+            let _ = std::process::Command::new("docker")
+                .args(["network", "rm", &format!("subdollar-net-{}", id)])
+                .output();
+        }
     }
 
     #[test]

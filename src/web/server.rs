@@ -918,11 +918,52 @@ impl UiServer {
             }
         }
 
+        // Periodic reconcile (60s): queue ghosts, orphan containers,
+        // stale labeled nets. Tick owns no worker slot; each sweep is
+        // fail-closed (live/attached/young skipped), so it can never reap a
+        // running cell. Without this, orphans accumulate between restarts
+        // (test-ref/net-alias-test unit nets, wedged trial shares) and the
+        // next cell hits "port already allocated".
+        {
+            let sweep = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    let ghosts = reconcile_queue(&sweep);
+                    let orphans =
+                        crate::sandbox::docker::SandboxManager::reap_orphan_containers();
+                    crate::sandbox::docker::SandboxManager::prune_labeled_networks();
+                    if ghosts + orphans > 0 {
+                        send_status(
+                            &sweep.log_sender,
+                            &sweep.log_buffer,
+                            format!(
+                                "[RECONCILE] periodic sweep: {ghosts} ghost(s), {orphans} orphan container(s) reaped"
+                            ),
+                        );
+                    }
+                }
+            });
+        }
+
         let app = Self::build_app(state);
 
+        // Startup reconcile: label-filtered docker sweep (orphan containers
+        // + stale labeled nets) BEFORE auto-dispatch replays the queue, so a
+        // restarted engine never binds a port held by its own corpse.
+        // prune_stale_networks (name-filter, age-gated) stays as belt for
+        // pre-label legacy nets; prune_labeled_networks covers labeled ones.
+        {
+            let stale_containers =
+                crate::sandbox::docker::SandboxManager::reap_orphan_containers();
+            if stale_containers > 0 {
+                println!("[RECONCILE] reaped {stale_containers} orphan container(s) at startup");
+            }
+            crate::sandbox::docker::SandboxManager::prune_labeled_networks();
+            crate::sandbox::docker::SandboxManager::prune_stale_networks();
+        }
         // Background check and auto-update of sandbox OMP on server startup
         tokio::spawn(async {
-            crate::sandbox::SandboxManager::prune_stale_networks();
             if let Err(e) = crate::sandbox::omp_updater::auto_update_if_needed().await {
                 eprintln!("[OMP Startup Check Warning] {}", e);
             }
