@@ -182,10 +182,22 @@ async fn get_status(State(state): State<AppState>) -> Response {
     if let Some(proxied) = proxy_read(&state, "/api/status", "").await {
         return proxied;
     }
+    // Read-path ghost sweep: a body that died without finishing leaves a
+    // Running row with no worker behind; without this the queue wedges
+    // (slots leak, is_running sticks, next wave waits on a dead cell).
+    // Live cells always hold a slot, so the sweep cannot touch them.
+    reconcile_queue(&state);
+    // is_running is DERIVED from live worker state, never the sticky legacy
+    // flag: the flag survives bodies that die without releasing (ghost q118
+    // reported running:true with workers {} and zero slots on an idle
+    // engine). Slots are 1:1 with live bodies (claimed at dispatch, released
+    // at every exit), so empty slots + empty workers = idle, full stop.
+    // The flag stays as a back-compat mirror only (set on claim, cleared on
+    // last release) and must never OR idle state back to running.
     let workers = state.worker_runs.read().unwrap().clone();
-    // Legacy fields mirror slot state: running = any slot busy, current =
-    // lowest-id worker run (back-compat for single-slot clients).
-    let is_running = !workers.is_empty() || state.is_running.load(Ordering::SeqCst);
+    let any_slot = !state.running_slots.lock().unwrap().is_empty();
+    let any_handle = !state.worker_handles.lock().unwrap().is_empty();
+    let is_running = !workers.is_empty() || any_slot || any_handle;
     let current_run = workers
         .iter()
         .min_by_key(|(w, _)| *w)
@@ -372,6 +384,56 @@ fn replay_queue(store: &Store) -> Vec<QueuedRun> {
     }
     items
 }
+
+/// Queue truth sweep: a `Running` item with no live worker slot, no
+/// worker_runs entry and no worker handle is a ghost — its body died without
+/// finishing (restart residue replay misses, or a mid-process abort that
+/// skipped the normal exit). Ghosts stay `Running` forever: slots leak,
+/// `is_running` sticks true, and the next wave waits on a dead cell (live
+/// q118: Running, workers {}, current None — engine idle, queue wedged).
+/// Queue items and worker slots are 1:1 (pump/kick claim exactly one slot
+/// per Running item), so an empty engine cannot own a Running item.
+/// Returns the number of ghosts reaped. Never touches live cells.
+fn reconcile_queue(state: &AppState) -> usize {
+    let engine_busy = !state.worker_runs.read().unwrap().is_empty()
+        || !state.worker_handles.lock().unwrap().is_empty()
+        || !state.running_slots.lock().unwrap().is_empty();
+    if engine_busy {
+        return 0;
+    }
+    let ghosts: Vec<String> = state
+        .queue
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|i| i.status == QueueStatus::Running)
+        .map(|i| i.id.clone())
+        .collect();
+    for id in &ghosts {
+        state
+            .queue
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|i| &i.id == id)
+            .map(|i| i.status = QueueStatus::Cancelled);
+        let now = now_rfc3339();
+        let qid = id.clone();
+        db_mirror(state, "reap ghost", move |store| {
+            db_try(
+                &format!("reap ghost {qid}"),
+                store.update_queue_status(&qid, "Cancelled", None, Some(&now)),
+            );
+        });
+        send_status(
+            &state.log_sender,
+            &state.log_buffer,
+            format!("[QUEUE] reaped ghost {id}: Running with no live worker; marked Cancelled."),
+        );
+    }
+    ghosts.len()
+}
+
 
 #[cfg(test)]
 pub fn test_queue_item(id: &str) -> QueuedRun {
@@ -2985,6 +3047,7 @@ async fn get_queue(State(state): State<AppState>) -> Response {
     if let Some(proxied) = proxy_read(&state, "/api/queue", "").await {
         return proxied;
     }
+    reconcile_queue(&state);
     Json::<Vec<QueuedRun>>(
         state
             .queue
@@ -3599,6 +3662,81 @@ mod tests {
         let legacy: ExtendRequest =
             serde_json::from_str(r#"{"parent_run_id":"p","trials":3}"#).unwrap();
         assert_eq!(legacy.api_key, None);
+    }
+
+    #[test]
+    fn test_reconcile_reaps_ghost_running_with_idle_engine() {
+        let state = create_test_state();
+        state.queue.lock().unwrap().push_back(QueuedRun {
+            id: "q99".to_string(),
+            enqueued_at: "2026-10-02T00:00:00Z".to_string(),
+            status: QueueStatus::Running,
+            kind: QueueKind::Run(queue_test_req()),
+        });
+        assert_eq!(reconcile_queue(&state), 1);
+        let q = state.queue.lock().unwrap();
+        assert_eq!(
+            q.iter().find(|i| i.id == "q99").map(|i| i.status),
+            Some(QueueStatus::Cancelled)
+        );
+    }
+
+    #[test]
+    fn test_reconcile_keeps_running_when_worker_live() {
+        let state = create_test_state();
+        state.running_slots.lock().unwrap().insert(0);
+        state.queue.lock().unwrap().push_back(QueuedRun {
+            id: "q100".to_string(),
+            enqueued_at: "2026-10-02T00:00:00Z".to_string(),
+            status: QueueStatus::Running,
+            kind: QueueKind::Run(queue_test_req()),
+        });
+        assert_eq!(reconcile_queue(&state), 0);
+        let q = state.queue.lock().unwrap();
+        assert_eq!(
+            q.iter().find(|i| i.id == "q100").map(|i| i.status),
+            Some(QueueStatus::Running)
+        );
+    }
+
+    #[tokio::test]
+    async fn status_truth_idle_engine_reports_not_running() {
+        // Ghost aftermath: sticky is_running flag true, but no workers,
+        // no slots, no handles. Status must derive from live state.
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        let resp = get_status(State(state.clone())).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v.get("is_running"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[tokio::test]
+    async fn status_truth_live_slot_reports_running() {
+        let state = create_test_state();
+        state.running_slots.lock().unwrap().insert(0);
+        let resp = get_status(State(state.clone())).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v.get("is_running"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_reconcile_leaves_pending_and_done_alone() {
+        let state = create_test_state();
+        for (id, st) in [("q101", QueueStatus::Pending), ("q102", QueueStatus::Done)] {
+            state.queue.lock().unwrap().push_back(QueuedRun {
+                id: id.to_string(),
+                enqueued_at: "2026-10-02T00:00:00Z".to_string(),
+                status: st,
+                kind: QueueKind::Run(queue_test_req()),
+            });
+        }
+        assert_eq!(reconcile_queue(&state), 0);
     }
 
     #[tokio::test]
