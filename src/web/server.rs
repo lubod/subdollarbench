@@ -918,18 +918,25 @@ impl UiServer {
             }
         }
 
-        // Periodic reconcile (60s): queue ghosts, orphan containers,
-        // stale labeled nets. Tick owns no worker slot; each sweep is
-        // fail-closed (live/attached/young skipped), so it can never reap a
-        // running cell. Without this, orphans accumulate between restarts
-        // (test-ref/net-alias-test unit nets, wedged trial shares) and the
-        // next cell hits "port already allocated".
+        // Periodic reconcile (60s): queue ghosts always; docker sweeps only
+        // when the engine is idle (same engine_busy rule as reconcile_queue).
+        // A mid-trial candidate legitimately stops for seconds in its kill -9
+        // window with its network present; sweeping then rm -f's it and
+        // `docker start` fails (same murder class as the batchref kills).
+        // Startup sweep stays ungated (engine provably idle at boot).
         {
             let sweep = state.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    // Queue ghosts are memory-only flips: always safe.
                     let ghosts = reconcile_queue(&sweep);
+                    let busy = !sweep.worker_runs.read().unwrap().is_empty()
+                        || !sweep.worker_handles.lock().unwrap().is_empty()
+                        || !sweep.running_slots.lock().unwrap().is_empty();
+                    if busy {
+                        continue;
+                    }
                     let orphans =
                         crate::sandbox::docker::SandboxManager::reap_orphan_containers();
                     crate::sandbox::docker::SandboxManager::prune_labeled_networks();

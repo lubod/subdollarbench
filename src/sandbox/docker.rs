@@ -1431,15 +1431,19 @@ impl SandboxManager {
             if !name.contains("subdollar-") && !name.contains("guardprobe-") {
                 continue;
             }
-            // Live trial containers keep running with their network present.
-            // Orphan = stopped container OR its network is gone.
+            // Orphan = stopped AND its network is gone. A legitimately
+            // stopped candidate (kill -9 crash window before restart) keeps
+            // its network present, so AND keeps the sweep out of live
+            // trials. `stopped || net_gone` murdered mid-trial candidates
+            // in their kill window (same class as the batchref murders).
+            // kill_candidate containers persist (no --rm) by design.
             let net_gone = Command::new("docker")
                 .args(["network", "inspect", &format!("subdollar-net-{run}")])
                 .output()
                 .map(|o| !o.status.success())
                 .unwrap_or(false);
             let stopped = running != "true";
-            if stopped || net_gone {
+            if stopped && net_gone {
                 let rm = Command::new("docker").args(["rm", "-f", id]).output();
                 if rm.map(|o| o.status.success()).unwrap_or(false) {
                     reaped += 1;
