@@ -349,6 +349,19 @@ impl BenchmarkRunResult {
         // Unanchored tasks (no live/batch ref) keep fair_tp_score None:
         // reported, never ranked. A drifted bracket is unanchored for scoring
         // purposes — `fair_tp` (the candidate's own reading) stays reported.
+        // Denominator gate (Step 4): proxy/pdf/wal/pubsub/binproto/dns have
+        // no valid throughput denominator. Archived rows predate the scorer
+        // gate and may still carry a reference + score; reconsolidation must
+        // heal them, not re-publish them. Scrub first, then let the scorer
+        // gate decide — belt and suspenders against a future caller that
+        // passes a reference for an unscorable task.
+        let trusted_reference = if crate::cost::calculator::ModelPricing::has_valid_throughput_denominator(
+            Some(&best.task),
+        ) {
+            best.reference_throughput_req_sec
+        } else {
+            None
+        };
         let (fair_eff_score, fair_tp_score): (f64, Option<f64>) = if c > 0 {
             let base_eff = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
                 100.0,
@@ -359,7 +372,7 @@ impl BenchmarkRunResult {
                     100.0,
                     fair_eff_cost_usd,
                     fair_tp,
-                    best.reference_throughput_req_sec,
+                    trusted_reference,
                     Some(&best.task),
                 )
             } else {
@@ -414,8 +427,12 @@ impl BenchmarkRunResult {
             passed_stages: headline_passed_stages,
             total_stages: best.total_stages,
             throughput_req_sec: fair_tp,
-            reference_throughput_req_sec: best.reference_throughput_req_sec,
-            baseline_source: best.baseline_source.clone(),
+            reference_throughput_req_sec: trusted_reference,
+            baseline_source: if trusted_reference.is_some() {
+                best.baseline_source.clone()
+            } else {
+                None
+            },
             ref_drift: batch_drift,
             ref_image: best.ref_image.clone(),
             prompt_tokens: fair_prompt,
@@ -1634,7 +1651,10 @@ mod tests {
             |id: &str, tp: f64, dur: f64, turns: u32, cost: f64, pass: f64| BenchmarkRunResult {
                 id: id.to_string(),
                 model: "test-model".to_string(),
-                task: "dns".to_string(),
+                // redis: an anchored task, so the fixture tests merge math
+                // rather than the retired-dns denominator scrub (pinned by
+                // the gate test in cost/calculator.rs).
+                task: "redis".to_string(),
                 language: "Python".to_string(),
                 effort: Some("auto".to_string()),
                 pass_rate: pass,
@@ -1702,6 +1722,55 @@ mod tests {
         assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
         assert!(mixed.efficiency_score > 0.0);
         assert!(mixed.throughput_score.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_merge_scrubs_unscorable_denominator() {
+        let mk = |id: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "proxy".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            pass_rate: 100.0,
+            passed_stages: 5,
+            total_stages: 5,
+            throughput_req_sec: Some(9_000.0),
+            reference_throughput_req_sec: Some(30_000.0),
+            baseline_source: Some("live".to_string()),
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 100,
+            cached_tokens: 0,
+            completion_tokens: 50,
+            total_tokens: 150,
+            total_cost_usd: 0.01,
+            effective_cost_usd: Some(0.02),
+            duration_seconds: Some(10.0),
+            turns: Some(5),
+            savings_percent: 0.0,
+            efficiency_score: 1.0,
+            throughput_score: Some(3.0),
+            timestamp: "2026-10-02T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+        };
+        let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None).unwrap();
+        // Candidate rate survives (real measurement); denominator, source
+        // and score are gone (no valid comparison exists).
+        assert_eq!(m.throughput_req_sec, Some(9_000.0));
+        assert_eq!(m.reference_throughput_req_sec, None);
+        assert_eq!(m.baseline_source, None);
+        assert_eq!(m.throughput_score, None);
     }
 
     #[test]

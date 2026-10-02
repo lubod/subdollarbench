@@ -996,9 +996,10 @@ impl BenchmarkPipeline {
                 );
                 match config.task {
                     TaskType::Redis => {
-                        if let Ok(tp) = crate::bench::batch_ref::measure_candidate(
-                            &config.task,
+                        if let Ok(tp) = BenchmarkRunner::run_redis_benchmark(
                             &sandbox.network_name(),
+                            "candidate",
+                            port,
                         ) {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
@@ -1033,9 +1034,10 @@ impl BenchmarkPipeline {
                         }
                     }
                     TaskType::Http => {
-                        if let Ok(tp) = crate::bench::batch_ref::measure_candidate(
-                            &config.task,
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(
                             &sandbox.network_name(),
+                            "candidate",
+                            port,
                         ) {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
@@ -1068,9 +1070,14 @@ impl BenchmarkPipeline {
                     }
                     TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
                         if let Some(tp) = extra_throughput {
+                            let unit = match config.task {
+                                TaskType::Wal => "msgs/sec",
+                                TaskType::Pubsub => "deliveries/sec",
+                                _ => "ops/sec",
+                            };
                             logger.log(&format!(
-                                "  Candidate Throughput (verifier soak, median-grade): {:.0} msgs/sec",
-                                tp
+                                "  Candidate Throughput (verifier soak, median-grade): {:.0} {}",
+                                tp, unit
                             ));
                             throughput = Some(tp);
                         }
@@ -1081,9 +1088,10 @@ impl BenchmarkPipeline {
                         );
                     }
                     TaskType::Proxy => {
-                        if let Ok(tp) = crate::bench::batch_ref::measure_candidate(
-                            &config.task,
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(
                             &sandbox.network_name(),
+                            "candidate",
+                            port,
                         ) {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",

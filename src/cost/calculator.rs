@@ -164,13 +164,35 @@ impl ModelPricing {
         )
     }
 
+    /// Tasks with no valid throughput denominator, enforced by task name
+    /// rather than by trusting callers to pass reference=None:
+    ///
+    /// - proxy: divided by DIRECT nginx while it must forward through a
+    ///   three-upstream pool — capped below 1.0 by construction.
+    /// - pdf: the reference is our own slow parity oracle, expected SLOWER
+    ///   than candidates — the ratio rewards distance from ourselves.
+    /// - wal/pubsub/binproto/dns: verifier-timed, no external reference.
+    ///
+    /// The pipeline already discards these denominators before scoring; this
+    /// is the second gate so a future caller cannot re-mint a proxy/pdf
+    /// score by passing a reference anyway.
+    pub fn has_valid_throughput_denominator(task: Option<&str>) -> bool {
+        match task.map(|t| t.to_lowercase()).as_deref() {
+            Some("redis") | Some("http") => true,
+            _ => false,
+        }
+    }
+
     pub fn calculate_throughput_score_for_task(
         pass_rate: f64,
         effective_cost_usd: f64,
         throughput_req_sec: Option<f64>,
         reference_throughput_req_sec: Option<f64>,
-        _task: Option<&str>,
+        task: Option<&str>,
     ) -> Option<f64> {
+        if !Self::has_valid_throughput_denominator(task) && task.is_some() {
+            return None;
+        }
         let base_eff = Self::calculate_efficiency_score(pass_rate, effective_cost_usd);
         if base_eff <= 0.0 {
             return Some(0.0);
@@ -571,6 +593,48 @@ mod tests {
         let clamped = ModelPricing::calculate_effective_cost(0.0, 0.0, 100, 999_999);
         let want_c = 100.0 * COMPUTE_COST_PER_TOKEN * COMPUTE_COST_CACHED_FRACTION;
         assert!((clamped - want_c).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_denominator_gate_proxy_pdf_unscored_despite_reference() {
+        let eff = 0.05;
+        for task in ["proxy", "pdf", "wal", "pubsub", "binproto", "dns"] {
+            assert_eq!(
+                ModelPricing::calculate_throughput_score_for_task(
+                    100.0,
+                    eff,
+                    Some(50_000.0),
+                    Some(30_000.0),
+                    Some(task)
+                ),
+                None,
+                "task {task} must never score"
+            );
+        }
+        for task in ["redis", "http"] {
+            assert!(
+                ModelPricing::calculate_throughput_score_for_task(
+                    100.0,
+                    eff,
+                    Some(30_000.0),
+                    Some(30_000.0),
+                    Some(task)
+                )
+                .is_some(),
+                "task {task} must keep scoring"
+            );
+        }
+        // Case-insensitive: "Proxy" from a manifest must not slip through.
+        assert_eq!(
+            ModelPricing::calculate_throughput_score_for_task(
+                100.0,
+                eff,
+                Some(50_000.0),
+                Some(30_000.0),
+                Some("Proxy")
+            ),
+            None
+        );
     }
 
     #[test]

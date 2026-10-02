@@ -494,7 +494,7 @@ const PORTAL_JS: &str = r#"
       icon: '🌐',
       desc: 'RFC 7230/7231 web server handling GET /, 404s, /echo/{str}, header reflection, POST/GET /files/{name} persistence, keep-alive socket reuse, and path traversal security guards.',
       stagesCount: 5,
-      refInfo: 'nginx:alpine reference container on port 8081 (~33,000 req/s with wrk load test)',
+      refInfo: 'nginx:alpine reference container on port 8081 (live-measured per batch; no fixed baseline)',
       benchTool: 'wrk -t2 -c20 -d3s http://127.0.0.1:8080/'
     },
     redis: {
@@ -502,7 +502,7 @@ const PORTAL_JS: &str = r#"
       icon: '⚡',
       desc: 'RESP2 protocol TCP server handling pipelined streams, simple strings, bulk strings, integers, errors, PING, ECHO, SET (with PX expiry), GET, DEL, EXISTS, and INCR non-integer guards.',
       stagesCount: 4,
-      refInfo: 'redis:alpine reference container on port 6380 (~71,000 req/s with redis-benchmark)',
+      refInfo: 'redis:alpine reference container on port 6380 (live-measured per batch; no fixed baseline)',
       benchTool: 'redis-benchmark -p 6379 -n 5000 -c 10 -t get,set -q'
     },
     dns: {
@@ -510,7 +510,7 @@ const PORTAL_JS: &str = r#"
       icon: '📡',
       desc: 'Raw UDP DNS resolver handling RFC 1035 packet headers, query questions, standard flags (QR, Opcode, AA, RD, RA, RCODE), dynamic port listening, and A-record address resolution.',
       stagesCount: 6,
-      refInfo: 'Reference RFC 1035 UDP resolver on testbed (~19,000 queries/s)',
+      refInfo: 'Retired 2026-09-30 (saturated, mock-resolver spec): archived rows report queries/s, unscored',
       benchTool: 'UDP raw-socket sequential burst (200 queries)'
     },
     wal: {
@@ -518,7 +518,7 @@ const PORTAL_JS: &str = r#"
       icon: '📓',
       desc: 'TCP WAL broker handling PUB append with fsync durability, SUB-from-offset replay, topic isolation, SIGKILL crash recovery, and PUB burst throughput.',
       stagesCount: 5,
-      refInfo: 'fsync-bound append on disk (~1,000 msgs/s calibrated from empirical batches)',
+      refInfo: 'No external reference: verifier-timed msgs/s, reported but unscored',
       benchTool: '2000-msg PUB burst + SIGKILL recovery probe'
     },
     proxy: {
@@ -526,7 +526,7 @@ const PORTAL_JS: &str = r#"
       icon: '🔀',
       desc: 'HTTP reverse proxy on port 8091 over three upstream servers: round-robin routing, upstream keep-alive pooling, X-Forwarded-For injection, and failover with zero dropped requests.',
       stagesCount: 5,
-      refInfo: 'same nginx denominator as http (~33,000 req/s: a proxy cannot beat direct)',
+      refInfo: 'No valid throughput denominator (direct-nginx comparison is structurally unreachable): rate reported, not ranked',
       benchTool: '200-req routing + failover + concurrent GET burst'
     },
     pubsub: {
@@ -534,7 +534,7 @@ const PORTAL_JS: &str = r#"
       icon: '📢',
       desc: 'WebSocket fan-out broker on port 8092: RFC 6455 handshake, multi-subscriber broadcast, channel isolation, ping/pong, and 200-subscriber soak.',
       stagesCount: 4,
-      refInfo: 'fan-out soak on testbed (~80,000 deliveries/s calibrated from empirical batches)',
+      refInfo: 'No external reference: verifier soak in deliveries/s, reported but unscored',
       benchTool: 'Soak: 200 subscribers x 20 msgs'
     },
     pdf: {
@@ -542,7 +542,7 @@ const PORTAL_JS: &str = r#"
       icon: '📄',
       desc: 'RFC-compliant HTTP microservice on port 8090 converting binary PDF documents to plaintext using a custom PDF parser and DEFLATE engine (no external PDF libraries).',
       stagesCount: 5,
-      refInfo: 'Reference DEFLATE/xref text extractor on testbed (~4,600 pages/s)',
+      refInfo: 'Parity oracle only (own slow extractor, expected slower than candidates): pages/s reported, not ranked',
       benchTool: 'Synthetic multi-page PDF extraction burst (20 requests, 60 pages)'
     }
   };
@@ -575,10 +575,20 @@ const PORTAL_JS: &str = r#"
     return `${m}m ${s}s`;
   }
 
+  // Units are not interchangeable: pubsub reports fan-out *deliveries*
+  // (200 subs x 20 msgs = 4000 copies from 20 requests), wal reports
+  // fsync-bound messages, binproto reports binary ops. Any of those labelled
+  // "req/s" invites comparing them against a real request rate, which the
+  // numbers do not support. Mirrors throughput_unit() in leaderboard.rs.
   function formatThroughput(tp, task) {
     if (!tp) return 'N/A';
     const t = (task || '').toLowerCase();
-    const unit = t === 'pdf' ? 'pages/s' : (t === 'dns' ? 'queries/s' : 'req/s');
+    const unit = t === 'pdf' ? 'pages/s'
+      : t === 'dns' ? 'queries/s'
+      : t === 'wal' ? 'msgs/s'
+      : t === 'pubsub' ? 'deliveries/s'
+      : t === 'binproto' ? 'ops/s'
+      : 'req/s';
     return `${Math.round(tp).toLocaleString()} ${unit}`;
   }
 
@@ -593,16 +603,11 @@ const PORTAL_JS: &str = r#"
     }
   }
 
-  function getBaseline(task) {
-    const t = (task || 'http').toLowerCase();
-    if (t === 'redis') return 71000;
-    if (t === 'dns') return 19000;
-    if (t === 'pdf') return 4600;
-    if (t === 'wal') return 1000;
-    if (t === 'proxy') return 33000;
-    if (t === 'pubsub') return 80000;
-    return 33000;
-  }
+  // NOTE: there is deliberately no fallback-baseline function. A hardcoded
+  // constant (the old getBaseline: 71000/19000/4600/...) is unmeasured on
+  // this testbed and makes refless tasks look comparable to anchored ones.
+  // Ratios render only from a row's measured reference_throughput_req_sec;
+  // tasks without one show the raw rate, unscored (--).
   function regimeOf(r) {
     if (r.ref_image) {
       const hex = (r.ref_image.split('@')[1] || r.ref_image).replace(/^sha256:/, '');
