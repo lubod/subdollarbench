@@ -1404,13 +1404,19 @@ impl BenchmarkPipeline {
             timestamp: completed_at,
             method_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             subruns: Vec::new(),
-            total_trials: None,
+            total_trials: Some(1),
             rules_version: Some(crate::report::rules_fingerprint()),
-            pass_at_1: None,
-            pass_at_k: None,
-            avg_pass_rate: None,
-            pass_at_1_lo: None,
-            pass_at_1_hi: None,
+            pass_at_1: Some(if pass_rate >= 100.0 { 100.0 } else { 0.0 }),
+            pass_at_k: Some(if pass_rate >= 100.0 { 100.0 } else { 0.0 }),
+            avg_pass_rate: Some(pass_rate),
+            pass_at_1_lo: Some({
+                let c = usize::from(pass_rate >= 100.0);
+                crate::report::leaderboard::wilson_interval_95(1, c).0
+            }),
+            pass_at_1_hi: Some({
+                let c = usize::from(pass_rate >= 100.0);
+                crate::report::leaderboard::wilson_interval_95(1, c).1
+            }),
             stability: None,
             frontier_fraction: None,
         };

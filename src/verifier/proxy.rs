@@ -76,6 +76,24 @@ fn parse_header_block(block: &str) -> HashMap<String, String> {
     headers
 }
 
+/// True when the bytes so far contain a complete framed message:
+/// chunked with terminal zero chunk, or Content-Length satisfied, or no
+/// framing (body runs to close — only EOF completes those).
+fn content_length_satisfied(buf: &[u8], resp: &HttpResponse) -> bool {
+    if resp.is_chunked() {
+        // parse succeeded => terminal chunk present (decode errors -> None).
+        return true;
+    }
+    if let Some(cl) = resp.headers.get("content-length") {
+        if let Ok(len) = cl.trim().parse::<usize>() {
+            let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(buf.len());
+            return buf.len() >= head_end + 4 + len;
+        }
+        return false;
+    }
+    false
+}
+
 /// Decode chunked transfer-coding (trailers ignored after terminal chunk).
 fn decode_chunked_body(data: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
@@ -177,14 +195,41 @@ impl ProxyVerifier {
             .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
             .map_err(|e| format!("Write to {} failed: {}", addr, e))?;
+        // One absolute exchange deadline: per-read timeouts restart every
+        // loop, so a slow-drip response (complete headers, open connection,
+        // periodic bytes) hangs verification indefinitely. Finish on HTTP
+        // framing (Content-Length satisfied) or the deadline, not on EOF.
+        let start_ex = Instant::now();
+        let max_exchange = Duration::from_secs(8);
         let mut buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
-            match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut tmp)).await {
-                Err(_) => return Err(format!("Read from {} timed out", addr)),
+            let elapsed = start_ex.elapsed();
+            if elapsed >= max_exchange {
+                return Err(format!("Exchange with {} exceeded 8s deadline", addr));
+            }
+            let left = max_exchange - elapsed;
+            match tokio::time::timeout(left.min(Duration::from_secs(3)), stream.read(&mut tmp)).await {
+                Err(_) => {
+                    // Timeout with a complete framed response is success, not
+                    // failure: the server answered, it just holds the socket.
+                    if let Some(resp) = parse_http_response(&buf) {
+                        if content_length_satisfied(&buf, &resp) {
+                            break;
+                        }
+                    }
+                    return Err(format!("Read from {} timed out", addr));
+                }
                 Ok(Err(e)) => return Err(format!("Read from {} failed: {}", addr, e)),
                 Ok(Ok(0)) => break,
-                Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+                Ok(Ok(n)) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(resp) = parse_http_response(&buf) {
+                        if content_length_satisfied(&buf, &resp) {
+                            break;
+                        }
+                    }
+                }
             }
         }
         if buf.is_empty() {

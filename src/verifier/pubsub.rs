@@ -579,12 +579,16 @@ impl PubsubVerifier {
             }
             pub_at.push(start.elapsed());
         }
+        // Distinctness: duplicates of one index must not count as deliveries
+        // of twenty. Per-subscriber, dedupe by index; only in-range indices
+        // count, and latency needs the matching publish timestamp.
         let (mut delivered, mut lat) = (0u64, Vec::with_capacity(SOAK_SUBS * SOAK_MSGS));
         for h in readers {
             if let Ok(got) = h.await {
-                delivered += got.len() as u64;
+                let mut seen = std::collections::HashSet::with_capacity(got.len());
                 for (idx, arr) in got {
-                    if idx < pub_at.len() {
+                    if idx < pub_at.len() && seen.insert(idx) {
+                        delivered += 1;
                         lat.push(arr.saturating_sub(pub_at[idx]));
                     }
                 }

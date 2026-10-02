@@ -1036,12 +1036,21 @@ impl SandboxManager {
                             &image_tag,
                         ])
                         .output();
-                    if let Ok(run_out) = run_res {
-                        if !run_out.status.success() {
-                            warn!(
-                                "Failed to start custom container: {}",
+                    match run_res {
+                        Ok(run_out) if run_out.status.success() => {}
+                        Ok(run_out) => {
+                            // Was warn + Ok(()): swallowed launch faults made
+                            // the caller record a model 0% instead of an
+                            // infra-error (indistinguishable verdicts).
+                            return Err(anyhow!(
+                                "candidate container failed to start: {}",
                                 String::from_utf8_lossy(&run_out.stderr)
-                            );
+                            ));
+                        }
+                        Err(e) => {
+                            return Err(anyhow!(
+                                "candidate container spawn failed: {e}"
+                            ));
                         }
                     }
                     return Ok(());
@@ -1064,7 +1073,7 @@ impl SandboxManager {
         // CASE B: Standard Sandbox with start.sh
         let mount_arg = format!("{}:/workspace", canonical_workdir.display());
         let launch_cmd = "cd /workspace && if [ -f start.sh ]; then chmod +x start.sh && exec ./start.sh; elif [ -f main.py ]; then exec python3 main.py; elif [ -f app.py ]; then exec python3 app.py; elif [ -f server.py ]; then exec python3 server.py; elif [ -f main.go ]; then exec go run main.go; elif [ -f Cargo.toml ]; then exec cargo run --release; elif [ -f main.js ]; then exec node main.js; elif [ -f index.js ]; then exec node index.js; else chmod +x start.sh 2>/dev/null && exec ./start.sh; fi";
-        let _ = Command::new("docker")
+        let out = Command::new("docker")
             .args([
                 "run",
                 "-d",
@@ -1088,7 +1097,13 @@ impl SandboxManager {
                 "-c",
                 launch_cmd,
             ])
-            .output();
+            .output()?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "candidate sandbox failed to start: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
 
         Ok(())
     }

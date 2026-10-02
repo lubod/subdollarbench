@@ -2263,11 +2263,15 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
         let mut combined = data.subruns.clone();
         combined.extend(out.results);
         let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
+        // Quarantine is sticky: the parent's stored drift OR the extension
+        // drift. Passing only out.drift let a clean extension erase a drifted
+        // parent (score 5.625 on a known-bad denominator, reproduced).
+        let drift = data.ref_drift.or(out.drift).or(Some(false));
         let merged = LeaderboardManager::consolidate_multi_trial_run(
             &ext.parent_run_id,
             &combined,
             true,
-            out.drift,
+            drift,
         );
         let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
         let (stab2, reason2) = assess_stability(&parked);
@@ -3005,11 +3009,12 @@ async fn extend_parent_run(
             let mut combined = data.subruns.clone();
             combined.extend(out.results);
             let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
+            let drift = data.ref_drift.or(out.drift).or(Some(false));
             let merged = LeaderboardManager::consolidate_multi_trial_run(
                 &clean_for_task,
                 &combined,
                 true,
-                out.drift,
+                drift,
             );
             let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
             let (stab2, reason2) = assess_stability(&parked);

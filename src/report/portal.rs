@@ -980,10 +980,18 @@ const PORTAL_JS: &str = r#"
       if (!existing) {
         canonical[key] = r;
       } else {
+        // Same comparability rule as Rust rollup_models: regime match
+        // outranks sample size (a 9-trial row under a new ruleset must not
+        // supplant a 3-trial row under the old one).
         const exN = existing.total_trials || (existing.subruns && existing.subruns.length) || 1;
-        if (n > exN || (n === exN && (r.timestamp || '') > (existing.timestamp || ''))) {
-          canonical[key] = r;
-        }
+        const rulesEq = (r.rules_version || null) === (existing.rules_version || null);
+        const selfSt = !!r.rules_version, exSt = !!existing.rules_version;
+        let take = false;
+        if (rulesEq) take = n > exN || (n === exN && (r.timestamp || '') > (existing.timestamp || ''));
+        else if (selfSt && !exSt) take = true;
+        else if (!selfSt && exSt) take = false;
+        else take = (r.timestamp || '') > (existing.timestamp || '');
+        if (take) canonical[key] = r;
       }
     }
 

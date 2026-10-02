@@ -173,16 +173,24 @@ fn wait_pdf_ready(port: u16) -> bool {
 
 fn measure_pdf_pages_per_sec(port: u16) -> Result<f64> {
     // Sync wrapper over the async verifier soak (stage-4 multipage path).
-    // A throwaway single-thread runtime keeps batch_ref sync like DNS.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
+    // Must not block_on inside engine async dispatch (exit 101 "Cannot start
+    // a runtime from within a runtime", reproduced on PDF batches): reuse
+    // the caller's runtime when one exists, else build a throwaway.
+    let work = || async move {
         let v = crate::verifier::PdfVerifier::new(port, Some("batchref"));
         v.measure_throughput()
             .await
             .ok_or_else(|| anyhow!("pdf batch ref: verifier soak returned None on port {port}"))
-    })
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => tokio::task::block_in_place(|| h.block_on(work())),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(work())
+        }
+    }
 }
 
 /// Probed from the run network by alias, for the same reason as
