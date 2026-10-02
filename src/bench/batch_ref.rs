@@ -586,6 +586,7 @@ pub fn read_ref_history(task: &TaskType) -> Option<RefHistory> {
     if vals.is_empty() {
         return None;
     }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = vals.len() / 2;
     Some(RefHistory {
         samples: vals.len(),
