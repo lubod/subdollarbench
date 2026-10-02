@@ -581,7 +581,7 @@ impl SandboxManager {
 
     pub fn stop_upstream(&self, idx: u8) -> Result<()> {
         let _ = Command::new("docker")
-            .args(["stop", &self.upstream_name(idx)])
+            .args(["rm", "-f", &self.upstream_name(idx)])
             .output()?;
         Ok(())
     }
@@ -1245,36 +1245,76 @@ impl SandboxManager {
         }
     }
 
+    /// Containers this instance may own. BatchRef uses `<parent>_batchref` as
+    /// its instance id while trials use `<parent>_trial<N>`/`<parent>`, so a
+    /// trial's cleanup must also reap the batch record's share: `*_batchref`
+    /// names, the batchref network, and any resources inherited from a parent
+    /// id embedded in this one.
+    fn owned_container_names(&self) -> Vec<String> {
+        let mut names = vec![
+            self.candidate_container_name(),
+            self.ref_redis_name(),
+            self.ref_http_name(),
+            self.ref_dns_name(),
+            self.ref_pdf_name(),
+            self.egress_proxy_name(),
+            self.agent_container_name(),
+            format!("subdollar-omp-agent-{}", std::process::id()),
+        ];
+        for idx in 1..=8u8 {
+            names.push(self.upstream_name(idx));
+        }
+        // BatchRef sibling: trials own `<parent>_trial<N>` but the batch ref
+        // lives under `<parent>_batchref` on its own network. `strip_suffix`
+        // only matches a genuine trial id, so an unrelated id that merely
+        // contains "_trial" is never truncated.
+        if let Some(parent) = self
+            .instance_id
+            .strip_suffix(|c: char| c.is_ascii_digit())
+            .and_then(|p| p.strip_suffix("_trial"))
+        {
+            let batch = SandboxManager::with_id(&format!("{}_batchref", parent));
+            names.push(batch.candidate_container_name());
+            names.push(batch.ref_redis_name());
+            names.push(batch.ref_http_name());
+            names.push(batch.ref_dns_name());
+            names.push(batch.ref_pdf_name());
+            names.push(batch.egress_proxy_name());
+            names.push(batch.agent_container_name());
+            for idx in 1..=8u8 {
+                names.push(batch.upstream_name(idx));
+            }
+        }
+        names
+    }
+
     pub fn cleanup(&self) {
         self.needs_cleanup.store(false, Ordering::SeqCst);
-        let cand = self.candidate_container_name();
-        let ref_redis = self.ref_redis_name();
-        let ref_http = self.ref_http_name();
-        let ref_dns = self.ref_dns_name();
         let net = self.network_name();
-        let agent_name = self.agent_container_name();
-        let agent_pid = format!("subdollar-omp-agent-{}", std::process::id());
-        let mut rm_args: Vec<&str> = vec![
-            "rm",
-            "-f",
-            &cand,
-            &ref_redis,
-            &ref_http,
-            &ref_dns,
-            &agent_name,
-            &agent_pid,
-        ];
+        let owned = self.owned_container_names();
+        let owned_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+        let _ = Command::new("docker")
+            .args([["rm", "-f"].as_slice(), owned_refs.as_slice()].concat())
+            .output();
         if self.instance_id == "default" {
-            rm_args.extend_from_slice(&[
-                "subdollar-ref-redis",
-                "subdollar-ref-http",
-                "subdollar-ref-dns",
-                "subdollar-candidate",
-                "subdollar-omp-agent",
-            ]);
+            let _ = Command::new("docker")
+                .args([
+                    "rm",
+                    "-f",
+                    "subdollar-ref-redis",
+                    "subdollar-ref-http",
+                    "subdollar-ref-dns",
+                    "subdollar-ref-pdf",
+                    "subdollar-candidate",
+                    "subdollar-omp-agent",
+                ])
+                .output();
         }
-        let _ = Command::new("docker").args(&rm_args).output();
 
+        // Sibling sweep: exact instance-id match only. The old
+        // `^subdollar-.*-{clean}$` pattern matched a parent id against
+        // `<parent>_trial<N>` and `<parent>_batchref` containers, so one
+        // trial's cleanup reaped a sibling trial's live containers.
         let clean = self.instance_id.replace(
             |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
             "",
@@ -1284,15 +1324,12 @@ impl SandboxManager {
                 .args([
                     "-c",
                     &format!(
-                        "docker ps -a --format '{{{{.Names}}}}' | grep -E '^subdollar-.*-{}' | xargs -r docker rm -f",
+                        "docker ps -a --format '{{{{.Names}}}}' | grep -E -- '^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}($|_batchref$)' | xargs -r docker rm -f",
                         clean
                     ),
                 ])
                 .output();
         }
-
-        // Egress sidecar shares the instance id: reaped with the rest.
-        self.stop_egress_proxy();
         // Never reap a live or newborn network: attached containers OR age
         // under the staleness threshold mean a sibling worker is
         // creating-then-attaching (parallel ghost-run race). remove_network
@@ -1305,10 +1342,20 @@ impl SandboxManager {
         for idx in 1..=8u8 {
             let _ = fs::remove_file(self.upstream_marker_path(idx));
         }
-        if Self::network_in_use_or_young(&net) {
-            return;
+        if !Self::network_in_use_or_young(&net) {
+            Self::remove_network_retrying(&net);
         }
-        Self::remove_network_retrying(&net);
+        // BatchRef sibling network for trial owners (see owned_container_names).
+        if let Some(parent) = self
+            .instance_id
+            .strip_suffix(|c: char| c.is_ascii_digit())
+            .and_then(|p| p.strip_suffix("_trial"))
+        {
+            let batch_net = format!("subdollar-net-{}_batchref", parent);
+            if !Self::network_in_use_or_young(&batch_net) {
+                Self::remove_network_retrying(&batch_net);
+            }
+        }
     }
 }
 
@@ -1571,5 +1618,71 @@ mod tests {
         assert!(SandboxManager::parse_network_ids("   \n").is_empty());
         let ids = SandboxManager::parse_network_ids("abc123\ndef456\n");
         assert_eq!(ids, vec!["abc123", "def456"]);
+    }
+
+    #[test]
+    fn test_owned_names_cover_pdf_egress_upstreams() {
+        let sm = SandboxManager::with_id("parent_20261002_120000_trial2");
+        let names = sm.owned_container_names();
+        // Previously leaked: nothing named the pdf ref, the egress
+        // sidecar, or the proxy upstreams, so trial cleanup left them
+        // running (97 leaked corefiles proved the file side; the
+        // container side was the missing ref-pdf/upstream/egress rms).
+        for want in [
+            "subdollar-ref-pdf-parent_20261002_120000_trial2",
+            "subdollar-egress-parent_20261002_120000_trial2",
+            "subdollar-upstream1-parent_20261002_120000_trial2",
+            "subdollar-upstream8-parent_20261002_120000_trial2",
+            "subdollar-agent-nonexistent-should-not-matter",
+        ] {
+            if want.contains("nonexistent") {
+                assert!(!names.iter().any(|n| n == want));
+                continue;
+            }
+            assert!(names.iter().any(|n| n == want), "missing {want}");
+        }
+        // BatchRef sibling share.
+        assert!(names.iter().any(|n| n
+            == "subdollar-ref-pdf-parent_20261002_120000_batchref"));
+        assert!(names.iter().any(|n| n
+            == "subdollar-ref-redis-parent_20261002_120000_batchref"));
+    }
+
+    #[test]
+    fn test_owned_names_do_not_truncate_non_trial_ids() {
+        // An id that merely contains "_trial" without the trailing
+        // `<parent>_trial<N>` shape must not sprout batchref names.
+        let sm = SandboxManager::with_id("my_trial_run");
+        assert!(sm
+            .owned_container_names()
+            .iter()
+            .all(|n| !n.ends_with("_batchref")));
+        let plain = SandboxManager::with_id("parent_20261002_120000");
+        assert!(plain
+            .owned_container_names()
+            .iter()
+            .all(|n| !n.ends_with("_batchref")));
+    }
+
+    #[test]
+    fn test_sweep_pattern_is_exact_instance_match() {
+        // The retired `^subdollar-.*-{id}$` pattern matched a parent id
+        // against `<parent>_trial<N>` containers: trial 1's cleanup reaped
+        // trial 2's live candidate. The narrowed alternation only fires on
+        // the exact id or its `_batchref` sibling.
+        let pat = |id: &str| {
+            format!(
+                "^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}( $|_batchref$)",
+                id
+            )
+            .replace(" ", "")
+        };
+        let re = ::regex::Regex::new(&pat("parent_20261002_120000_trial2")).unwrap();
+        assert!(re.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
+        assert!(re.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref") == false);
+        let re_batch = ::regex::Regex::new(&pat("parent_20261002_120000")).unwrap();
+        assert!(re_batch.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref"));
+        assert!(!re_batch.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
+        assert!(!re_batch.is_match("subdollar-candidate-parent_20261002_120000_trial22"));
     }
 }

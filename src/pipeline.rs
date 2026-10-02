@@ -248,10 +248,11 @@ impl BenchmarkPipeline {
 
         let run_id = config.run_id.clone().unwrap_or_else(|| {
             format!(
-                "{}_{}_{}",
+                "{}_{}_{}_w{}",
                 config.task,
                 config.model.replace(['/', ':'], "_"),
-                Utc::now().format("%Y%m%d_%H%M%S")
+                Utc::now().format("%Y%m%d_%H%M%S%.3f"),
+                config.worker
             )
         });
         let verifier_seed = hash_seed(&run_id);

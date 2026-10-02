@@ -2219,12 +2219,16 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     let mut total_trials = req.trials.max(1);
     let mut passing_trials = 0;
     let mut subrun_results = Vec::new();
-    let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    // Millis + worker suffix: two workers dispatching in the same second
+    // must not share one parent id — same-second collisions merged two
+    // cells' trials into one runs/ dir (15-16 dirs on 20261001_151246).
+    let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S%.3f").to_string();
     let parent_run_id = format!(
-        "{}_{}_{}",
+        "{}_{}_{}_w{}",
         req.task,
         req.model.replace(['/', ':'], "_"),
-        run_timestamp
+        run_timestamp,
+        worker
     );
     // Per-run cancel flag (cleanup discipline: removed at every exit below
     // AND by stop-by-id, so the map never grows across waves).

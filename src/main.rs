@@ -335,9 +335,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 subdollarbench::config::get_repo_root().join(&workdir)
             };
 
-            let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+            let run_timestamp = Utc::now().format("%Y%m%d_%H%M%S%.3f").to_string();
             let parent_run_id = format!(
-                "{}_{}_{}",
+                "{}_{}_{}_w0",
                 task,
                 model.replace(['/', ':'], "_"),
                 run_timestamp
