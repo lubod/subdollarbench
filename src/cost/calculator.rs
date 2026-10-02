@@ -468,6 +468,111 @@ mod tests {
         assert!((b.savings_percent - 75.0).abs() < 1e-4);
     }
 
+    /// Cross-model attribution: the model in the row must be the model
+    /// priced. A muse-spark row priced at deepseek rates (or vice versa)
+    /// silently moves every score that divides by cost. Pin one exact
+    /// hand-computed row per priced model family.
+    #[test]
+    fn test_attribution_each_model_prices_its_own_rates() {
+        // prompt=1M fresh, cached=1M, completion=1M.
+        // total = prompt + 1M*cache_frac + completion.
+        let cases = [
+            ("google/gemini-2.5-flash", 0.15, 0.60, 0.0375),
+            ("deepseek/deepseek-chat", 0.14, 0.28, 0.014),
+            ("qwen/qwen-2.5-coder-32b-instruct", 0.06, 0.15, 0.015),
+            ("meta-llama/llama-3.3-70b-instruct", 0.12, 0.30, 0.030),
+            ("openai/gpt-4o-mini", 0.15, 0.60, 0.075),
+            ("anthropic/claude-3-haiku", 0.80, 4.00, 0.08),
+            ("mistralai/mistral-small", 0.10, 0.30, 0.025),
+        ];
+        for (model, pr, co, ca) in cases {
+            let p = ModelPricing::for_model(model);
+            let b = p.compute_cost_with_cache(1_000_000, 1_000_000, 1_000_000);
+            let want = pr + ca + co;
+            assert!(
+                (b.total_cost_usd - want).abs() < 1e-9,
+                "{model}: got {}, want {want}",
+                b.total_cost_usd
+            );
+        }
+        // Unknown models share one fallback; a silent per-model drift
+        // (e.g. muse-spark priced as deepseek) shows up as a mismatch here.
+        let fb = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor");
+        let b = fb.compute_cost_with_cache(1_000_000, 1_000_000, 1_000_000);
+        assert!((b.total_cost_usd - (0.20 + 0.050 + 0.60)).abs() < 1e-9);
+    }
+
+    /// Completion tokens bill at completion rates, not prompt rates. Swapping
+    /// the two underprices every reasoning-heavy run (completion is 2-5x
+    /// prompt across the table).
+    #[test]
+    fn test_attribution_completion_billed_at_completion_rate() {
+        let p = ModelPricing::for_model("google/gemini-2.5-flash");
+        let b = p.compute_cost_with_cache(0, 0, 1_000_000);
+        assert!((b.total_cost_usd - 0.60).abs() < 1e-9);
+        let b2 = p.compute_cost_with_cache(1_000_000, 0, 0);
+        assert!((b2.total_cost_usd - 0.15).abs() < 1e-9);
+    }
+
+    /// Cache math is a discount off the prompt rate, never free and never
+    /// full price: 0 < cached < fresh for the same token count.
+    #[test]
+    fn test_attribution_cached_between_zero_and_fresh() {
+        for model in [
+            "google/gemini-2.5-flash",
+            "deepseek/deepseek-chat",
+            "openai/gpt-4o-mini",
+            "some-random-unknown-model",
+        ] {
+            let p = ModelPricing::for_model(model);
+            let fresh = p.compute_cost_with_cache(1_000_000, 0, 0).total_cost_usd;
+            let cached = p.compute_cost_with_cache(0, 1_000_000, 0).total_cost_usd;
+            assert!(
+                cached > 0.0 && cached < fresh,
+                "{model}: cached {cached} not in (0, {fresh})"
+            );
+        }
+    }
+
+    /// Effective-cost formula exactness: api + time floor + fresh baseline +
+    /// discounted cached baseline, with cached clamped at total.
+    /// Live-spend precedence: when the key checkpoint reports a delta,
+    /// `cost_usd` is the PROVIDER's number, not the formula's. The formula
+    /// still governs the compute floor inside effective cost. Regression:
+    /// archived rows whose api cost matches neither fallback nor catalog
+    /// (muse-spark trial2: archived $0.035377 vs fallback $0.076029 vs
+    /// catalog $0.014668) are live-spend rows — effective = live + floor.
+    #[test]
+    fn test_live_spend_delta_overrides_formula_api_cost() {
+        // muse-spark-1.3-contributor trial2 tokens, duration 438.55s.
+        let (prompt, cached, comp, total, dur) = (75_932u64, 900_407u64, 26_370u64, 1_002_709u64, 438.55f64);
+        let fallback = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor")
+            .compute_cost_with_cache(prompt, cached, comp)
+            .total_cost_usd;
+        assert!((fallback - 0.076029).abs() < 1e-4, "fallback moved: {fallback}");
+        // Pipeline line: cost_usd = live_spend_delta.unwrap_or(breakdown).
+        let live: Option<f64> = Some(0.035377375);
+        let breakdown = fallback;
+        let cost_usd = live.unwrap_or(breakdown);
+        assert!((cost_usd - 0.035377375).abs() < 1e-9);
+        // Effective cost still adds the compute floor on token totals.
+        let eff = ModelPricing::calculate_effective_cost(cost_usd, dur, total, cached);
+        assert!((eff - 0.064904).abs() < 1e-4, "effective moved: {eff}");
+    }
+
+    #[test]
+    fn test_effective_cost_formula_exactness() {
+        let eff = ModelPricing::calculate_effective_cost(1.0, 100.0, 200_000, 50_000);
+        let want = 1.0 + 100.0 * COMPUTE_COST_PER_SECOND
+            + 150_000.0 * COMPUTE_COST_PER_TOKEN
+            + 50_000.0 * COMPUTE_COST_PER_TOKEN * COMPUTE_COST_CACHED_FRACTION;
+        assert!((eff - want).abs() < 1e-12, "got {eff}, want {want}");
+        // Cached > total clamps instead of underflowing the fresh term.
+        let clamped = ModelPricing::calculate_effective_cost(0.0, 0.0, 100, 999_999);
+        let want_c = 100.0 * COMPUTE_COST_PER_TOKEN * COMPUTE_COST_CACHED_FRACTION;
+        assert!((clamped - want_c).abs() < 1e-12);
+    }
+
     #[test]
     fn test_cost_calculation_cached_exceeds_prompt() {
         let p = ModelPricing::for_model("google/gemini-2.5-flash");
