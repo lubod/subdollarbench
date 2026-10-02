@@ -409,20 +409,29 @@ fn reconcile_queue(state: &AppState) -> usize {
         .filter(|i| i.status == QueueStatus::Running)
         .map(|i| i.id.clone())
         .collect();
+    if ghosts.is_empty() {
+        return 0;
+    }
+    // Memory first: flip every ghost while holding the queue lock once.
+    state
+        .queue
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .filter(|i| ghosts.contains(&i.id))
+        .for_each(|i| i.status = QueueStatus::Cancelled);
+    // DB mirror + console outside the lock: rusqlite is synchronous, and a
+    // slow/blocked DB must never stall a status read (live: every API hung
+    // with empty bodies while two trial bodies held the queue path busy).
+    // Memory is dispatch truth; the DB is a best-effort mirror.
+    let now = now_rfc3339();
     for id in &ghosts {
-        state
-            .queue
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .find(|i| &i.id == id)
-            .map(|i| i.status = QueueStatus::Cancelled);
-        let now = now_rfc3339();
         let qid = id.clone();
+        let now_c = now.clone();
         db_mirror(state, "reap ghost", move |store| {
             db_try(
                 &format!("reap ghost {qid}"),
-                store.update_queue_status(&qid, "Cancelled", None, Some(&now)),
+                store.update_queue_status(&qid, "Cancelled", None, Some(&now_c)),
             );
         });
         send_status(
@@ -2534,14 +2543,18 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         }
     }
 
-    let batch_drift = batch_ref.map(|b| b.finish(&batch_log).drift);
+    // Any untrusted denominator quarantines the parent: initial + extension
+    // batches mint separate BatchRefs, so OR-accumulate drift across all of
+    // them. (Gate: initial bracket drifted but extensions clean — the merge
+    // kept only the last drift and scored off a known-bad denominator.)
+    let mut any_drift = batch_ref.map(|b| b.finish(&batch_log).drift).unwrap_or(false);
 
     let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
         LeaderboardManager::consolidate_multi_trial_run(
             &parent_run_id,
             &subrun_results,
             req.save_results.unwrap_or(true),
-            batch_drift,
+            Some(any_drift),
         )
     } else {
         None
@@ -2653,11 +2666,12 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             total_trials += out.results.len() as u32;
             passing_trials += out.passing;
             subrun_results.extend(out.results);
+            any_drift = any_drift || out.drift.unwrap_or(false);
             merged_opt = LeaderboardManager::consolidate_multi_trial_run(
                 &parent_run_id,
                 &subrun_results,
                 req.save_results.unwrap_or(true),
-                out.drift,
+                Some(any_drift),
             );
         }
     }

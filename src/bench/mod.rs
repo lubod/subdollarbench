@@ -115,8 +115,17 @@ impl Drop for BenchLock {
 }
 
 /// Acquire the benchmark lock, fail-open after 90s (a run must never deadlock
-/// on a stale lock; callers log the fallback). Stale holders (>180s, longer
-/// than any window) are treated as crashed and evicted.
+/// on a stale lock; callers log the fallback). Stale holders are treated as
+/// crashed and evicted.
+///
+/// LIVE 2026-10-02: a 180s stale threshold wedged the whole engine — a dead
+/// holder's lock file sat 7min old while BatchRef::start_on_worker blocked
+/// the tokio worker in std::thread::sleep(500ms) retry, starving the runtime
+/// (all API hung with empty bodies, gdb showed every worker parked). The
+/// threshold must stay well under the 90s fail-open: 30s evicts a crashed
+/// holder while a live window (seconds per rep, lock held briefly) never
+/// trips it. Lock I/O itself must never block an async worker (see below).
+pub const BENCH_LOCK_STALE_SECS: u64 = 30;
 pub fn acquire_bench_lock() -> BenchLock {
     let path = std::env::temp_dir().join("subdollar-bench.lock");
     let start = Instant::now();
@@ -134,7 +143,7 @@ pub fn acquire_bench_lock() -> BenchLock {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let stale = fs::metadata(&path)
                     .and_then(|m| m.modified())
-                    .map(|t| t.elapsed().unwrap_or(Duration::ZERO) > Duration::from_secs(180))
+                    .map(|t| t.elapsed().unwrap_or(Duration::ZERO) > Duration::from_secs(BENCH_LOCK_STALE_SECS))
                     .unwrap_or(true);
                 if stale {
                     let _ = fs::remove_file(&path);
