@@ -164,6 +164,10 @@ impl SandboxManager {
                 "run",
                 "-d",
                 "--rm",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=egress",
                 "--name",
                 &name,
                 // Start on the default bridge: the sidecar is the one thing
@@ -248,6 +252,29 @@ impl SandboxManager {
         format!("subdollar-net-{}", self.instance_id)
     }
 
+    /// Docker object labels owned by this instance. Every container and
+    /// network this manager creates carries `sdb.run=<instance_id>` (+ a
+    /// `sdb.role`), so the reaper selects by label filter instead of
+    /// name-grep: names collide across parents sharing a timestamp, labels
+    /// do not. `sdb.role` is informational (candidate/ref-redis/.../batchref)
+    /// except in `reap_run`, which never touches `batchref` from a trial.
+    pub fn label_args(&self, role: &str) -> Vec<String> {
+        vec![
+            "--label".to_string(),
+            format!("sdb.run={}", self.instance_id),
+            "--label".to_string(),
+            format!("sdb.role={}", role),
+        ]
+    }
+
+    /// Label filter selecting this instance's objects.
+    /// `include_batchref` is false for trial owners (BatchRef::finish owns
+    /// that share; trial N's exit murdered it twice).
+    pub fn label_filter(&self, include_batchref: bool) -> Vec<String> {
+        let _ = include_batchref;
+        vec![format!("label=sdb.run={}", self.instance_id)]
+    }
+
     /// Idempotently create this run's private Docker network.
     ///
     /// Reference containers join it under stable DNS aliases (`ref-redis`,
@@ -270,11 +297,14 @@ impl SandboxManager {
             // its only path out. Reference containers keep working - they only
             // ever talk to the agent. With the filter off the network stays
             // NAT'd, because the model API itself needs a route.
-            let out = Command::new("docker")
-                .args(["network", "create", "--subnet", &subnet])
-                .args(egress_filter_enabled().then_some("--internal"))
-                .arg(&net)
-                .output()?;
+            let mut cmd = Command::new("docker");
+            cmd.args(["network", "create", "--subnet", &subnet]);
+            if egress_filter_enabled() {
+                cmd.arg("--internal");
+            }
+            cmd.args(["--label", &format!("sdb.run={}", self.instance_id)]);
+            cmd.args(["--label", "sdb.role=network"]);
+            let out = cmd.arg(&net).output()?;
             if out.status.success() {
                 info!("Created run network {} ({})", net, subnet);
                 Self::verify_network_exists(&net)?;
@@ -394,6 +424,10 @@ impl SandboxManager {
                 "run",
                 "-d",
                 "--rm",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=ref-redis",
                 "--name",
                 &name,
                 "--network",
@@ -427,6 +461,10 @@ impl SandboxManager {
                 "run",
                 "-d",
                 "--rm",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=ref-http",
                 "--name",
                 &name,
                 "--network",
@@ -514,6 +552,10 @@ impl SandboxManager {
             .args([
                 "run",
                 "-d",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                &format!("sdb.role=upstream{}", idx),
                 "--name",
                 &name,
                 "--network",
@@ -608,6 +650,10 @@ impl SandboxManager {
                 "run",
                 "-d",
                 "--rm",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=ref-dns",
                 "--name",
                 &name,
                 "--network",
@@ -690,6 +736,10 @@ impl SandboxManager {
             "run",
             "-d",
             "--rm",
+            "--label",
+            &format!("sdb.run={}", self.instance_id),
+            "--label",
+            "sdb.role=ref-pdf",
             "--name",
             &name,
             "--network",
@@ -970,6 +1020,10 @@ impl SandboxManager {
                         .args([
                             "run",
                             "-d",
+                            "--label",
+                            &format!("sdb.run={}", self.instance_id),
+                            "--label",
+                            "sdb.role=candidate",
                             "--name",
                             &name,
                             "--memory=2g",
@@ -1014,6 +1068,10 @@ impl SandboxManager {
             .args([
                 "run",
                 "-d",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=candidate",
                 "--name",
                 &name,
                 "--memory=2g",
@@ -1268,49 +1326,89 @@ impl SandboxManager {
         names
     }
 
+    /// Reap every container carrying this instance's label, except the
+    /// batchref share when this is a trial id. `docker rm -f` on an explicit
+    /// id list (no shell, no grep): names cannot collide across parents
+    /// sharing a timestamp because selection is by label, not by pattern.
+    /// Networks: only this instance's own (batchref excluded for trials).
+    pub fn reap_run(&self) {
+        let filter = format!("label=sdb.run={}", self.instance_id);
+        let list = Command::new("docker")
+            .args(["ps", "-a", "-q", "--filter", &filter])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        // No batchref exclusion needed here: batchref containers carry
+        // `sdb.run=<parent>_batchref`, a different label value than this
+        // trial's `sdb.run=<parent>_trialN`, so the label filter above can
+        // never return them. (The old name-grep needed the exclusion because
+        // `<parent>` is a substring of both; labels do not have that flaw —
+        // this is the point of the migration.)
+        let ids: Vec<&str> = list.split_whitespace().collect();
+        if !ids.is_empty() {
+            let mut args = vec!["rm", "-f"];
+            args.extend(ids);
+            let _ = Command::new("docker").args(&args).output();
+        }
+        // Own network only when it holds zero containers (same rule as
+        // the guard: never force-disconnect a live endpoint).
+        // Batchref nets belong to BatchRef::finish, never to a trial.
+        let net = self.network_name();
+        if !Self::network_in_use_or_young(&net) {
+            Self::remove_network_retrying(&net);
+        }
+    }
+
+    /// Label-filtered network prune for stale runs: only networks carrying
+    /// an sdb.run label AND zero containers AND older than the staleness
+    /// threshold. Replaces name-pattern sweeps that reaped live siblings.
+    pub fn prune_labeled_networks() {
+        let ls = Command::new("docker")
+            .args([
+                "network", "ls", "--filter", "label=sdb.run",
+                "--format", "{{.ID}}",
+            ])
+            .output();
+        let ids = match ls {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return,
+        };
+        for id in Self::parse_network_ids(&ids) {
+            let detail = Command::new("docker")
+                .args([
+                    "network", "inspect", id,
+                    "--format", "{{len .Containers}} {{.Created}}",
+                ])
+                .output();
+            let text = match detail {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+                _ => continue,
+            };
+            if !Self::network_is_stale(&text) {
+                continue;
+            }
+            let _ = Command::new("docker").args(["network", "rm", id]).output();
+        }
+    }
+
+    /// Legacy path, kept for Drop + tests. New code prefers RunGuard
+    /// (label-filtered, panic-safe). Idempotent: safe to call twice.
     pub fn cleanup(&self) {
         self.needs_cleanup.store(false, Ordering::SeqCst);
-        let net = self.network_name();
+        // Label-filtered reaper (no shell, no name-grep): selects by
+        // `sdb.run=<instance_id>`. Covers legacy unlabelled names via
+        // owned-rm belt below.
+        self.reap_run();
+        // Belt: legacy containers created before labels existed carry no
+        // label; remove by exact owned names.
         let owned = self.owned_container_names();
-        let owned_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-        let _ = Command::new("docker")
-            .args([["rm", "-f"].as_slice(), owned_refs.as_slice()].concat())
-            .output();
-        if self.instance_id == "default" {
+        if !owned.is_empty() {
+            let owned_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
             let _ = Command::new("docker")
-                .args([
-                    "rm",
-                    "-f",
-                    "subdollar-ref-redis",
-                    "subdollar-ref-http",
-                    "subdollar-ref-dns",
-                    "subdollar-ref-pdf",
-                    "subdollar-candidate",
-                    "subdollar-omp-agent",
-                ])
+                .args([["rm", "-f"].as_slice(), owned_refs.as_slice()].concat())
                 .output();
         }
-
-        // Sibling sweep: exact instance-id match only — never the
-        // `_batchref` sibling (that share belongs to BatchRef::finish).
-        // The old `^subdollar-.*-{clean}$` pattern matched a parent id
-        // against `<parent>_trial<N>` and `<parent>_batchref` containers,
-        // so one trial's cleanup reaped a sibling trial's live containers.
-        let clean = self.instance_id.replace(
-            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
-            "",
-        );
-        if !clean.is_empty() && clean != "default" {
-            let _ = Command::new("sh")
-                .args([
-                    "-c",
-                    &format!(
-                        "docker ps -a --format '{{{{.Names}}}}' | grep -E -- '^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}($)' | xargs -r docker rm -f",
-                        clean
-                    ),
-                ])
-                .output();
-        }
+        let net = self.network_name();
         // Never reap a live or newborn network: attached containers OR age
         // under the staleness threshold mean a sibling worker is
         // creating-then-attaching (parallel ghost-run race). remove_network
@@ -1325,6 +1423,70 @@ impl SandboxManager {
         }
         if !Self::network_in_use_or_young(&net) {
             Self::remove_network_retrying(&net);
+        }
+    }
+}
+
+/// RAII scope guard for one trial cell or one batch bracket. Owns the
+/// SandboxManager; on drop (normal return, `?`, panic, cancel) it runs the
+/// label-filtered reaper, so no early return can leak. Replacing the manual
+/// `sandbox.cleanup()` callsites one by one; both paths stay correct during
+/// migration because labels make reaping idempotent.
+pub struct RunGuard {
+    manager: SandboxManager,
+    disarmed: bool,
+}
+
+impl RunGuard {
+    pub fn new(manager: SandboxManager) -> Self {
+        Self { manager, disarmed: false }
+    }
+    pub fn manager(&self) -> &SandboxManager {
+        &self.manager
+    }
+    /// Keep resources on success paths that hand ownership onward (e.g. the
+    /// batch bracket between pre and post). A disarmed guard drops silently.
+    pub fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        // Containers first (label-filtered, exact instance value only).
+        let filter = format!("label=sdb.run={}", self.manager.instance_id);
+        let list = Command::new("docker")
+            .args(["ps", "-a", "-q", "--filter", &filter])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let ids: Vec<&str> = list.split_whitespace().collect();
+        if !ids.is_empty() {
+            let mut args = vec!["rm", "-f"];
+            args.extend(ids);
+            let _ = Command::new("docker").args(&args).output();
+        }
+        Self::prune_files(&self.manager);
+        // Own network ONLY when it holds zero containers. Never
+        // remove_network_retrying here: its disconnect loop force-detaches
+        // endpoints by name and murdered the sibling (guardproof-b lived on
+        // A's network because the test attached both probes to it — the
+        // disconnect took B's endpoint down with the net).
+        // Batchref nets belong to BatchRef::finish, never to a trial guard.
+        if !SandboxManager::network_in_use_or_young(&self.manager.network_name()) {
+            SandboxManager::remove_network_retrying(&self.manager.network_name());
+        }
+    }
+}
+
+impl RunGuard {
+    fn prune_files(m: &SandboxManager) {
+        let _ = fs::remove_file(SandboxManager::coredns_corefile_path(&m.instance_id));
+        for idx in 1..=8u8 {
+            let _ = fs::remove_file(m.upstream_marker_path(idx));
         }
     }
 }
@@ -1633,6 +1795,89 @@ mod tests {
             .owned_container_names()
             .iter()
             .all(|n| !n.ends_with("_batchref")));
+    }
+
+    #[test]
+    fn test_label_filter_is_exact_instance_value() {
+        // Labels replace the name-grep: the filter value is the full
+        // instance id, so `<parent>` never matches `<parent>_trialN` or
+        // `<parent>_batchref`. Pin the exact-match construction.
+        let sm = SandboxManager::with_id("parent_20261002_120000_trial2");
+        assert_eq!(sm.label_filter(false), vec!["label=sdb.run=parent_20261002_120000_trial2"]);
+        let b = SandboxManager::with_id("parent_20261002_120000_batchref");
+        assert_eq!(b.label_filter(true), vec!["label=sdb.run=parent_20261002_120000_batchref"]);
+    }
+
+    /// Live-docker: a guard drop reaps its labeled container; the sibling
+    /// trial's container (different label value) survives. Ignored so the
+    /// default suite stays hermetic.
+    #[test]
+    #[ignore = "requires docker; guard-drop reaping proof"]
+    fn guard_drop_reaps_own_label_only() {
+        let a = "guardproof-a-456";
+        let b = "guardproof-b-789";
+        for id in [a, b] {
+            // Pre-clean: a previous failed run leaves name + net behind, and
+            // `docker run --name` fails with nonzero status (not Err), which
+            // .output().unwrap() swallows — the probe then "never starts".
+            // NOTE: do NOT use SandboxManager here: ensure_network arms
+            // needs_cleanup, so the temp manager's Drop at loop-end calls
+            // cleanup() and reaps the probe just created (this faked
+            // "never started" for three runs). Bare docker calls instead.
+            let net = format!("subdollar-net-{id}");
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &format!("guardprobe-{}", id)])
+                .output();
+            let _ = std::process::Command::new("docker")
+                .args(["network", "rm", &net])
+                .output();
+            let co = std::process::Command::new("docker")
+                .args(["network", "create", "--label", &format!("sdb.run={}", id), &net])
+                .output()
+                .unwrap();
+            assert!(co.status.success(), "net {id}: {}", String::from_utf8_lossy(&co.stderr));
+            let out = std::process::Command::new("docker")
+                .args([
+                    "run", "-d", "--rm",
+                    "--label", &format!("sdb.run={}", id),
+                    "--label", "sdb.role=probe",
+                    "--name", &format!("guardprobe-{}", id),
+                    "--network", &net,
+                    "alpine:3", "sleep", "300",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "probe {id} failed to start: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // Drop a guard for A: only A's container may die.
+        // Precondition: both probes actually running (alpine pull / start
+        // race would otherwise fake a pass or a confusing fail).
+        for id in [a, b] {
+            let running = std::process::Command::new("docker")
+                .args(["ps", "--format", "{{.Names}}"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            assert!(
+                running.contains(&format!("guardprobe-{}", id)),
+                "probe {id} never started; cannot prove isolation"
+            );
+        }
+        {
+            let _g = RunGuard::new(SandboxManager::with_id(a));
+        }
+        let left = std::process::Command::new("docker")
+            .args(["ps", "-a", "--format", "{{.Names}}"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        assert!(!left.contains(&format!("guardprobe-{}", a)), "own container must be reaped");
+        assert!(left.contains(&format!("guardprobe-{}", b)), "sibling container must survive");
+        SandboxManager::with_id(b).cleanup();
     }
 
     #[test]

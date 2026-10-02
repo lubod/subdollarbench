@@ -445,6 +445,10 @@ impl OmpRunner {
         let bench_policy_path = install_bench_policy_extension(&host_agent_dir);
         cmd.arg("run")
             .arg("--rm")
+            .arg("--label")
+            .arg(format!("sdb.run={}", container_id))
+            .arg("--label")
+            .arg("sdb.role=omp-agent")
             .arg("--name")
             .arg(&container_name)
             .arg("--memory=3g")

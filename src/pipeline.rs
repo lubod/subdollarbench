@@ -14,7 +14,7 @@ use crate::report::archive::{RunArchiver, RunManifest, RunTokenUsage};
 use crate::report::judge::RunJudge;
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
 use crate::report::portal::PortalExporter;
-use crate::sandbox::docker::{SandboxManager, PROXY_UPSTREAM_PORTS};
+use crate::sandbox::docker::{RunGuard, SandboxManager, PROXY_UPSTREAM_PORTS};
 
 /// Upstream pool ports for a worker (base pool + worker*100 offset).
 fn worker_upstream_ports(worker: u8) -> [u16; 3] {
@@ -276,6 +276,9 @@ impl BenchmarkPipeline {
         }
 
         let sandbox = SandboxManager::with_id(&run_id);
+        // RAII owner: trial exit (return/Err/panic/cancel) reaps by label.
+        // Manual cleanup() calls below remain as belt; both are idempotent.
+        let _trial_guard = RunGuard::new(SandboxManager::with_id(&run_id));
 
         // 1b. Create the run's private Docker network (reference aliases + agent attach)
         match sandbox.ensure_network() {

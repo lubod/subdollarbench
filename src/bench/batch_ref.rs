@@ -292,6 +292,9 @@ pub fn candidate_port(task: &TaskType) -> u16 {
 }
 
 pub struct BatchRef {
+    // Guard order matters: guard drops first (reaps by label), manager second
+    // (belt). Both idempotent.
+    _guard: crate::sandbox::docker::RunGuard,
     sandbox: SandboxManager,
     task: TaskType,
     port: u16,
@@ -331,6 +334,10 @@ impl BatchRef {
             None => return Ok(None),
         };
         let sandbox = SandboxManager::with_id(&format!("{}_batchref", parent_run_id));
+        let _guard = crate::sandbox::docker::RunGuard::new(SandboxManager::with_id(&format!(
+            "{}_batchref",
+            parent_run_id
+        )));
         sandbox.ensure_network()?;
         let start_res = match task {
             TaskType::Redis => sandbox.start_reference_redis(port),
@@ -405,6 +412,7 @@ impl BatchRef {
                     }
                 }
                 Ok(Some(BatchRef {
+                    _guard,
                     sandbox,
                     task: *task,
                     port,
