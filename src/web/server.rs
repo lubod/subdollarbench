@@ -2177,9 +2177,12 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
                 ext.parent_run_id
             ),
         );
-        *state.task_handle.lock().unwrap() = None;
+        // Same exit discipline as parent-gone above: release_slot frees the
+        // worker and clears is_running only when the last slot frees. The
+        // old task_handle/is_running writes leaked the slot AND cleared the
+        // global flag under live siblings (legacy single-runner residue).
+        release_slot(&state, worker);
         if !pump_queue(&state) {
-            state.is_running.store(false, Ordering::SeqCst);
             send_status(&tx, &log_buf, "[DONE]".to_string());
         }
         return;
@@ -2193,9 +2196,8 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
                 ext.parent_run_id
             ),
         );
-        *state.task_handle.lock().unwrap() = None;
+        release_slot(&state, worker);
         if !pump_queue(&state) {
-            state.is_running.store(false, Ordering::SeqCst);
             send_status(&tx, &log_buf, "[DONE]".to_string());
         }
         return;
@@ -3804,6 +3806,100 @@ mod tests {
             });
         }
         assert_eq!(reconcile_queue(&state), 0);
+    }
+
+    /// Skipped extends must free the worker slot (release_slot), not leak
+    /// it — and must not clear is_running under a live sibling. Reproduced:
+    /// not-multi-trial + stable skips cleared task_handle/is_running(false)
+    /// while holding the slot: slots leaked, flag lied under live workers.
+    /// Uses real results files (execute_extend_body reads <root>/results).
+    async fn extend_skip_state(
+        parent_id: &str,
+        doc: serde_json::Value,
+    ) -> (AppState, u8, ExtendRequest, String) {
+        // Write into the real results dir (unique suffix, removed at test
+        // end) like test_extend_queue_unstable_parent_pending does. Never
+        // SDB_HOME: process-global env races parallel tests sharing one
+        // process (observed: unstable_parent_pending failed at :4033 when
+        // run in the full suite, green in isolation).
+        let real = crate::config::get_repo_root().join("results");
+        let _ = std::fs::create_dir_all(&real);
+        std::fs::write(real.join(format!("{parent_id}.json")), serde_json::to_string(&doc).unwrap()).unwrap();
+        let state = create_test_state();
+        // Claim worker 0 for the extend; hold worker 1 as a live sibling.
+        state.running_slots.lock().unwrap().insert(0);
+        state.running_slots.lock().unwrap().insert(1);
+        state.is_running.store(true, Ordering::SeqCst);
+        let ext = ExtendRequest {
+            parent_run_id: parent_id.to_string(),
+            trials: 3,
+            max_turns: None,
+            budget_usd: None,
+            timeout_min: None,
+            eval_only: None,
+            api_key: None,
+        };
+        let qid = "qskip".to_string();
+        state.queue.lock().unwrap().push_back(QueuedRun {
+            id: qid.clone(),
+            enqueued_at: "2026-10-02T00:00:00Z".to_string(),
+            status: QueueStatus::Running,
+            kind: QueueKind::Extend(ext.clone()),
+        });
+        (state, 0, ext, qid)
+    }
+
+    fn two_trial_doc(pass: f64) -> serde_json::Value {
+        let sub = |id: &str| {
+            serde_json::json!({
+                "id": id, "model": "m", "task": "redis", "language": "Go",
+                "pass_rate": pass, "passed_stages": 4, "total_stages": 4,
+                "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+                "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+                "timestamp": "2026-09-12T08:00:00Z", "subruns": []
+            })
+        };
+        serde_json::json!({
+            "id": "qp", "model": "m", "task": "redis", "language": "Go",
+            "pass_rate": pass, "passed_stages": 4, "total_stages": 4,
+            "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+            "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 1.0,
+            "timestamp": "2026-09-12T08:00:00Z",
+            "subruns": [sub("qp_trial1"), sub("qp_trial2")]
+        })
+    }
+
+    #[tokio::test]
+    async fn test_extend_skip_not_multitrial_frees_slot_keeps_running() {
+        // Single-subrun parent: not multi-trial skip.
+        let mut doc = two_trial_doc(100.0);
+        doc["subruns"] = serde_json::Value::Array(vec![doc["subruns"][0].clone()]);
+        let (state, worker, ext, qid) = extend_skip_state("qp_single", doc).await;
+        execute_extend_body(state.clone(), ext, qid.clone(), worker).await;
+        // Slot 0 freed, sibling slot 1 still held; is_running stays true.
+        assert!(!state.running_slots.lock().unwrap().contains(&0));
+        assert!(state.running_slots.lock().unwrap().contains(&1));
+        assert!(state.is_running.load(Ordering::SeqCst));
+        assert_eq!(
+            state.queue.lock().unwrap().iter().find(|i| i.id == qid).map(|i| i.status),
+            Some(QueueStatus::Done)
+        );
+        let _ = std::fs::remove_file(crate::config::get_repo_root().join("results").join(format!("qp_single.json")));
+    }
+
+    #[tokio::test]
+    async fn test_extend_skip_stable_frees_slot_keeps_running() {
+        // Two passing trials: stable skip.
+        let (state, worker, ext, qid) = extend_skip_state("qp_stable", two_trial_doc(100.0)).await;
+        execute_extend_body(state.clone(), ext, qid.clone(), worker).await;
+        assert!(!state.running_slots.lock().unwrap().contains(&0));
+        assert!(state.running_slots.lock().unwrap().contains(&1));
+        assert!(state.is_running.load(Ordering::SeqCst));
+        assert_eq!(
+            state.queue.lock().unwrap().iter().find(|i| i.id == qid).map(|i| i.status),
+            Some(QueueStatus::Done)
+        );
+        let _ = std::fs::remove_file(crate::config::get_repo_root().join("results").join(format!("qp_stable.json")));
     }
 
     #[tokio::test]
