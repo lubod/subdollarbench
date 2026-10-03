@@ -701,10 +701,18 @@ impl BenchmarkPipeline {
                                 ));
                                 stages.push(st);
                             }
-                            Err(e) => logger.log(&format!(
-                                "  AOF probe write failed (skipping crash stage): {}",
-                                e
-                            )),
+                            Err(e) => {
+                                // Same denominator-manipulation class as the
+                                // WAL fix: a broken probe must score 5/6, not
+                                // 5/5=100%. Push the failed stage like the
+                                // adjacent else-branch does.
+                                let st = fail6(format!("AOF probe write failed: {}", e));
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> FAIL {}",
+                                    st.stage, st.name, st.error.as_deref().unwrap_or("")
+                                ));
+                                stages.push(st);
+                            }
                         }
                     } else {
                         let st = crate::verifier::StageResult {

@@ -348,6 +348,37 @@ impl WalVerifier {
     /// `min_msgs`. This method `SUB`s `recovery_probe` from offset 0 and
     /// passes iff **all** acknowledged pre-kill messages replayed: durability
     /// means zero acked-message loss, not merely a non-empty log.
+    /// Pure replay verdict: exact count, contiguous from 0, payload
+    /// `msg-{offset}` per index. Unit-tested against the 2000xoffset-0
+    /// fixture (must fail) without a live server.
+    pub fn verify_recovery_payloads(msgs: &[(u64, String)], min_msgs: usize) -> Result<(), String> {
+        if msgs.len() != min_msgs {
+            return Err(format!(
+                "Only {}/{} acked messages survived on `{RECOVERY_TOPIC}`",
+                msgs.len(),
+                min_msgs
+            ));
+        }
+        if !offsets_contiguous(msgs) {
+            return Err(format!(
+                "replayed offsets not contiguous from 0 on `{RECOVERY_TOPIC}` ({} msgs)",
+                msgs.len()
+            ));
+        }
+        if msgs.first().map(|(o, _)| *o) != Some(0) {
+            return Err(format!("replay must start at offset 0 on `{RECOVERY_TOPIC}`"));
+        }
+        for (off, payload) in msgs {
+            let want = format!("msg-{}", off);
+            if payload != &want {
+                return Err(format!(
+                    "payload mismatch at offset {off} on `{RECOVERY_TOPIC}`: got {payload:?}, want {want:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn check_recovery(&self, min_msgs: usize) -> StageResult {
         let stage = 4;
         let name = "Stage 4: Recovery (durable log survives SIGKILL+restart)".to_string();
@@ -359,16 +390,8 @@ impl WalVerifier {
             Ok(m) => m,
             Err(e) => return Self::fail(stage, name, anyhow!("SUB {RECOVERY_TOPIC} failed: {e}")),
         };
-        if msgs.len() < min_msgs {
-            return Self::fail(
-                stage,
-                name,
-                anyhow!(
-                    "Only {}/{} acked messages survived on `{RECOVERY_TOPIC}`",
-                    msgs.len(),
-                    min_msgs
-                ),
-            );
+        if let Err(e) = Self::verify_recovery_payloads(&msgs, min_msgs) {
+            return Self::fail(stage, name, anyhow!(e));
         }
         Self::pass(stage, name)
     }
@@ -491,5 +514,35 @@ mod tests {
     #[test]
     fn recovery_topic_is_fixed() {
         assert_eq!(RECOVERY_TOPIC, "recovery_probe");
+    }
+
+    #[test]
+    fn recovery_rejects_offset_zero_fixture() {
+        // Reviewer fixture: 2000 repetitions of offset 0 must FAIL, not pass.
+        let dup = vec![(0u64, "msg-0".to_string()); 2000];
+        assert!(WalVerifier::verify_recovery_payloads(&dup, 2000).is_err());
+    }
+
+    #[test]
+    fn recovery_accepts_exact_replay() {
+        let good: Vec<(u64, String)> =
+            (0u64..2000).map(|i| (i, format!("msg-{}", i))).collect();
+        assert!(WalVerifier::verify_recovery_payloads(&good, 2000).is_ok());
+    }
+
+    #[test]
+    fn recovery_rejects_shifted_and_short_replay() {
+        // Right count, wrong start.
+        let shifted: Vec<(u64, String)> =
+            (1u64..=2000).map(|i| (i, format!("msg-{}", i))).collect();
+        assert!(WalVerifier::verify_recovery_payloads(&shifted, 2000).is_err());
+        // Contiguous but short.
+        let short: Vec<(u64, String)> =
+            (0u64..1999).map(|i| (i, format!("msg-{}", i))).collect();
+        assert!(WalVerifier::verify_recovery_payloads(&short, 2000).is_err());
+        // Right offsets, wrong payload.
+        let mut bad = (0u64..3).map(|i| (i, format!("msg-{}", i))).collect::<Vec<_>>();
+        bad[1].1 = "tampered".to_string();
+        assert!(WalVerifier::verify_recovery_payloads(&bad, 3).is_err());
     }
 }
