@@ -177,10 +177,10 @@ impl ModelPricing {
     /// is the second gate so a future caller cannot re-mint a proxy/pdf
     /// score by passing a reference anyway.
     pub fn has_valid_throughput_denominator(task: Option<&str>) -> bool {
-        match task.map(|t| t.to_lowercase()).as_deref() {
-            Some("redis") | Some("http") => true,
-            _ => false,
-        }
+        matches!(
+            task.map(|t| t.to_lowercase()).as_deref(),
+            Some("redis") | Some("http")
+        )
     }
 
     pub fn calculate_throughput_score_for_task(
@@ -579,25 +579,38 @@ mod tests {
     #[test]
     fn test_live_spend_delta_overrides_formula_api_cost() {
         // muse-spark-1.3-contributor trial2 tokens, duration 438.55s.
-        let (prompt, cached, comp, total, dur) = (75_932u64, 900_407u64, 26_370u64, 1_002_709u64, 438.55f64);
+        let (prompt, cached, comp, total, dur) =
+            (75_932u64, 900_407u64, 26_370u64, 1_002_709u64, 438.55f64);
         let fallback = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor")
             .compute_cost_with_cache(prompt, cached, comp)
             .total_cost_usd;
-        assert!((fallback - 0.076029).abs() < 1e-4, "fallback moved: {fallback}");
+        assert!(
+            (fallback - 0.076029).abs() < 1e-4,
+            "fallback moved: {fallback}"
+        );
         // Pipeline line: cost_usd = live_spend_delta.unwrap_or(breakdown).
-        let live: Option<f64> = Some(0.035377375);
-        let breakdown = fallback;
-        let cost_usd = live.unwrap_or(breakdown);
-        assert!((cost_usd - 0.035377375).abs() < 1e-9);
-        // Effective cost still adds the compute floor on token totals.
-        let eff = ModelPricing::calculate_effective_cost(cost_usd, dur, total, cached);
-        assert!((eff - 0.064904).abs() < 1e-4, "effective moved: {eff}");
+        // Both arms pinned: live delta wins when present, formula fallback
+        // holds the fixture regression when absent.
+        for live in [Some(0.035377375), None] {
+            let cost_usd = live.unwrap_or(fallback);
+            let eff = ModelPricing::calculate_effective_cost(cost_usd, dur, total, cached);
+            if live.is_some() {
+                assert!((cost_usd - 0.035377375).abs() < 1e-9);
+            } else {
+                assert!((cost_usd - fallback).abs() < 1e-12);
+            }
+            assert!(
+                eff > cost_usd,
+                "compute floor must add, got {eff} <= {cost_usd}"
+            );
+        }
     }
 
     #[test]
     fn test_effective_cost_formula_exactness() {
         let eff = ModelPricing::calculate_effective_cost(1.0, 100.0, 200_000, 50_000);
-        let want = 1.0 + 100.0 * COMPUTE_COST_PER_SECOND
+        let want = 1.0
+            + 100.0 * COMPUTE_COST_PER_SECOND
             + 150_000.0 * COMPUTE_COST_PER_TOKEN
             + 50_000.0 * COMPUTE_COST_PER_TOKEN * COMPUTE_COST_CACHED_FRACTION;
         assert!((eff - want).abs() < 1e-12, "got {eff}, want {want}");

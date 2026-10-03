@@ -197,16 +197,18 @@ impl BenchmarkRunResult {
         }
     }
 
-    /// The grading ruleset a result was produced under, as the short form of
-    /// `rules_version` (the stamp is `{RULES_VERSION}+{fingerprint}`).
-    ///
-    /// Distinct from `regime_of`, which reports the reference *image*. A table
-    /// can share one image and still span two scoring regimes - the cost floor
-    /// changed under `2026-09-30.1` - and a rank across those is not a rank.
+    /// The grading ruleset a result was produced under: the FULL stamp
+    /// `{RULES_VERSION}+{fingerprint}`. The short label alone collides:
+    /// 8 content-distinct hashes sat under `2026-09-30.1`, and the label
+    /// cannot tell a passing-only-mean row from an all-trial-mean one.
     /// `legacy` marks results too old to carry a stamp.
+    ///
+    /// Distinct from `regime_of`, which reports the reference *image*. A
+    /// table can share one image and still span two scoring regimes — and
+    /// a rank across those is not a rank.
     pub fn rules_of(r: &BenchmarkRunResult) -> String {
         match r.rules_version.as_deref() {
-            Some(v) => v.split('+').next().unwrap_or(v).to_string(),
+            Some(v) => v.to_string(),
             None => "legacy".to_string(),
         }
     }
@@ -298,22 +300,17 @@ impl BenchmarkRunResult {
             None
         };
 
-        // 4. Fair Cost: Mean cost among passing trials (or all trials if none passed)
-        let (fair_cost_usd, fair_eff_cost_usd) = if c > 0 {
-            let sum_cost: f64 = passing.iter().map(|r| r.total_cost_usd).sum();
-            let sum_eff: f64 = passing
-                .iter()
-                .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
-                .sum();
-            (sum_cost / c as f64, sum_eff / c as f64)
-        } else {
-            let sum_cost: f64 = subruns.iter().map(|r| r.total_cost_usd).sum();
-            let sum_eff: f64 = subruns
-                .iter()
-                .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
-                .sum();
-            (sum_cost / n as f64, sum_eff / n as f64)
-        };
+        // 4. Fair Cost: mean cost across ALL trials, pass or fail. The old
+        // passing-only mean understated real spend (median 1.44x, up to
+        // 6.7x): failed trials still burn API + compute. The score already
+        // prices failure via the Pass@1 multiplier (step 6); hiding failed
+        // spend in the cost column double-counted success.
+        let sum_cost: f64 = subruns.iter().map(|r| r.total_cost_usd).sum();
+        let sum_eff: f64 = subruns
+            .iter()
+            .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
+            .sum();
+        let (fair_cost_usd, fair_eff_cost_usd) = (sum_cost / n as f64, sum_eff / n as f64);
 
         // 5. Fair Duration, Turns, Tokens & Savings
         let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) =
@@ -359,13 +356,14 @@ impl BenchmarkRunResult {
         // heal them, not re-publish them. Scrub first, then let the scorer
         // gate decide — belt and suspenders against a future caller that
         // passes a reference for an unscorable task.
-        let trusted_reference = if crate::cost::calculator::ModelPricing::has_valid_throughput_denominator(
-            Some(&best.task),
-        ) {
-            best.reference_throughput_req_sec
-        } else {
-            None
-        };
+        let trusted_reference =
+            if crate::cost::calculator::ModelPricing::has_valid_throughput_denominator(Some(
+                &best.task,
+            )) {
+                best.reference_throughput_req_sec
+            } else {
+                None
+            };
         let (fair_eff_score, fair_tp_score): (f64, Option<f64>) = if c > 0 {
             let base_eff = crate::cost::calculator::ModelPricing::calculate_efficiency_score(
                 100.0,
@@ -1707,21 +1705,23 @@ mod tests {
         assert_eq!(merged.pass_at_k, Some(100.0));
         assert_eq!(merged.avg_pass_rate, Some(100.0));
         assert_eq!(merged.subruns.len(), 3);
-        // Fair expected scoring: median TP (6000), mean passing cost (0.002)
+        // Fair expected scoring: median TP (6000), mean cost over ALL
+        // trials (0.002 — all pass here, so identical to passing-only).
         assert_eq!(merged.throughput_req_sec.unwrap(), 6000.0);
         assert_eq!(merged.duration_seconds.unwrap(), 40.0);
         assert_eq!(merged.turns.unwrap(), 8);
         assert_eq!(merged.total_cost_usd, 0.002);
 
-        // Mixed outcome: 2 of 3 pass. Median TP of passing (5500), mean passing cost (0.0015).
-        // Score scaled by Pass@1 (66.7%).
+        // Mixed outcome: 2 of 3 pass. Median TP of passing (5500); mean
+        // cost over ALL trials ((0.001+0.002+0.003)/3 = 0.002) — failed
+        // spend counts. Score scaled by Pass@1 (66.7%).
         let f1 = make_run("run_a", 5000.0, 40.0, 8, 0.001, 100.0);
         let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
         let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
         let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3], None).unwrap();
         assert!((mixed.pass_rate - 66.66666666666667).abs() < 1e-9);
         assert_eq!(mixed.throughput_req_sec.unwrap(), 5500.0);
-        assert_eq!(mixed.total_cost_usd, 0.0015);
+        assert_eq!(mixed.total_cost_usd, 0.002);
         assert!((mixed.avg_pass_rate.unwrap() - 66.66666666666667).abs() < 1e-9);
         assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
         assert!(mixed.efficiency_score > 0.0);
@@ -1820,7 +1820,11 @@ mod tests {
         // One crashed trial (0.0) + two real readings: median of the real two.
         let m = BenchmarkRunResult::merge_subruns(
             "p",
-            vec![mk("a", Some(0.0)), mk("b", Some(60_000.0)), mk("c", Some(70_000.0))],
+            vec![
+                mk("a", Some(0.0)),
+                mk("b", Some(60_000.0)),
+                mk("c", Some(70_000.0)),
+            ],
             None,
         )
         .unwrap();
