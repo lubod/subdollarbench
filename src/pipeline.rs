@@ -709,7 +709,9 @@ impl BenchmarkPipeline {
                                 let st = fail6(format!("AOF probe write failed: {}", e));
                                 logger.log(&format!(
                                     "  Stage {}: {} -> FAIL {}",
-                                    st.stage, st.name, st.error.as_deref().unwrap_or("")
+                                    st.stage,
+                                    st.name,
+                                    st.error.as_deref().unwrap_or("")
                                 ));
                                 stages.push(st);
                             }
@@ -1008,7 +1010,9 @@ impl BenchmarkPipeline {
                             &sandbox.network_name(),
                             "candidate",
                             port,
-                        ).await {
+                        )
+                        .await
+                        {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1021,7 +1025,9 @@ impl BenchmarkPipeline {
                                 &sandbox.network_name(),
                                 "ref-redis",
                                 6379,
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
                                         "  Official Reference Redis: {:.0} req/sec",
@@ -1046,7 +1052,9 @@ impl BenchmarkPipeline {
                             &sandbox.network_name(),
                             "candidate",
                             port,
-                        ).await {
+                        )
+                        .await
+                        {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1059,7 +1067,9 @@ impl BenchmarkPipeline {
                                 &sandbox.network_name(),
                                 "ref-http",
                                 80,
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
                                         "  Official Reference Nginx: {:.0} req/sec",
@@ -1100,7 +1110,9 @@ impl BenchmarkPipeline {
                             &sandbox.network_name(),
                             "candidate",
                             port,
-                        ).await {
+                        )
+                        .await
+                        {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1115,7 +1127,9 @@ impl BenchmarkPipeline {
                                 &sandbox.network_name(),
                                 "ref-http",
                                 80,
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
                                         "  Official Reference Nginx: {:.0} req/sec",

@@ -86,7 +86,10 @@ fn content_length_satisfied(buf: &[u8], resp: &HttpResponse) -> bool {
     }
     if let Some(cl) = resp.headers.get("content-length") {
         if let Ok(len) = cl.trim().parse::<usize>() {
-            let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(buf.len());
+            let head_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .unwrap_or(buf.len());
             return buf.len() >= head_end + 4 + len;
         }
         return false;
@@ -209,7 +212,9 @@ impl ProxyVerifier {
                 return Err(format!("Exchange with {} exceeded 8s deadline", addr));
             }
             let left = max_exchange - elapsed;
-            match tokio::time::timeout(left.min(Duration::from_secs(3)), stream.read(&mut tmp)).await {
+            match tokio::time::timeout(left.min(Duration::from_secs(3)), stream.read(&mut tmp))
+                .await
+            {
                 Err(_) => {
                     // Timeout with a complete framed response is success, not
                     // failure: the server answered, it just holds the socket.

@@ -366,7 +366,9 @@ impl WalVerifier {
             ));
         }
         if msgs.first().map(|(o, _)| *o) != Some(0) {
-            return Err(format!("replay must start at offset 0 on `{RECOVERY_TOPIC}`"));
+            return Err(format!(
+                "replay must start at offset 0 on `{RECOVERY_TOPIC}`"
+            ));
         }
         for (off, payload) in msgs {
             let want = format!("msg-{}", off);
@@ -525,8 +527,7 @@ mod tests {
 
     #[test]
     fn recovery_accepts_exact_replay() {
-        let good: Vec<(u64, String)> =
-            (0u64..2000).map(|i| (i, format!("msg-{}", i))).collect();
+        let good: Vec<(u64, String)> = (0u64..2000).map(|i| (i, format!("msg-{}", i))).collect();
         assert!(WalVerifier::verify_recovery_payloads(&good, 2000).is_ok());
     }
 
@@ -537,11 +538,12 @@ mod tests {
             (1u64..=2000).map(|i| (i, format!("msg-{}", i))).collect();
         assert!(WalVerifier::verify_recovery_payloads(&shifted, 2000).is_err());
         // Contiguous but short.
-        let short: Vec<(u64, String)> =
-            (0u64..1999).map(|i| (i, format!("msg-{}", i))).collect();
+        let short: Vec<(u64, String)> = (0u64..1999).map(|i| (i, format!("msg-{}", i))).collect();
         assert!(WalVerifier::verify_recovery_payloads(&short, 2000).is_err());
         // Right offsets, wrong payload.
-        let mut bad = (0u64..3).map(|i| (i, format!("msg-{}", i))).collect::<Vec<_>>();
+        let mut bad = (0u64..3)
+            .map(|i| (i, format!("msg-{}", i)))
+            .collect::<Vec<_>>();
         bad[1].1 = "tampered".to_string();
         assert!(WalVerifier::verify_recovery_payloads(&bad, 3).is_err());
     }
