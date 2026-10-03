@@ -9,14 +9,17 @@ fail() { echo "LAUNCH ABORT: $1" >&2; exit 1; }
 # 1. Clean tree (frozen fingerprint requirement).
 [ -z "$(git status --porcelain | grep -v '^??')" ] || fail "dirty tree: $(git status --porcelain | grep -v '^??' | head -3)"
 
-# 2. Green suite (documented skips: parallel-flaky console test, isolated in #gate;
+# 2. Engine idle FIRST (before the suite): the docker-touching tests contend
+# with a live engine on the shared daemon (ports, container churn) and flake
+# green-alone/red-together (93s red vs 15s green, unnamed, unreproduced).
+# Failing fast here also saves a 90s+ wasted suite run.
+curl -s http://127.0.0.1:3000/api/status --max-time 10 | grep -q '"is_running":false' || fail "engine busy"
+
+# 3. Green suite (documented skips: parallel-flaky console test, isolated in #gate;
 # bench-lock tests, which contend on the cross-process /tmp/subdollar-bench.lock
 # against a live engine and fail-open after 90s x 3 tests under `timeout 300`).
 export PATH=/home/ubuntu/.cargo/bin:$PATH
 cargo test --lib -- --skip pipeline::tests::test_pipeline_buffers_and_writes_console_log --skip bench::tests::test_bench_lock 2>&1 | grep "test result" | grep -q "0 failed" || fail "suite not green"
-
-# 3. Engine idle.
-curl -s http://127.0.0.1:3000/api/status --max-time 10 | grep -q '"is_running":false' || fail "engine busy"
 
 # 4. Fingerprint recorded.
 FP="$(grep RULES_VERSION src/report/rules.rs | head -1) @ $(git rev-parse --short HEAD)"
