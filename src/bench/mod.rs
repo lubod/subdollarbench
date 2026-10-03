@@ -145,6 +145,7 @@ fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
     let path = std::env::temp_dir().join("subdollar-bench.lock");
     let file = match std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&path)
     {
@@ -154,8 +155,15 @@ fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
             // window (20:06 root-owned file: whole wave unserialized, zero
             // log lines). Fail-open stays (a run must never deadlock), but
             // the operator must see it.
-            eprintln!("[BENCH] lock file {} not openable ({}); windows UNSERIALIZED", path.display(), e);
-            return BenchLock { file: None, owned: false };
+            eprintln!(
+                "[BENCH] lock file {} not openable ({}); windows UNSERIALIZED",
+                path.display(),
+                e
+            );
+            return BenchLock {
+                file: None,
+                owned: false,
+            };
         }
     };
     let start = Instant::now();
@@ -163,14 +171,20 @@ fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
         // LOCK_NB: bounded park between tries.
         let locked = flock_try_lock(&file);
         if locked {
-            return BenchLock { file: Some(file), owned: true };
+            return BenchLock {
+                file: Some(file),
+                owned: true,
+            };
         }
         if start.elapsed() > limit {
             eprintln!(
                 "[BENCH] lock wait exceeded {}s; proceeding without lock (contention possible)",
                 limit.as_secs()
             );
-            return BenchLock { file: None, owned: false };
+            return BenchLock {
+                file: None,
+                owned: false,
+            };
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -182,7 +196,10 @@ fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
 pub async fn acquire_bench_lock_async() -> BenchLock {
     match tokio::task::spawn_blocking(|| acquire_bench_lock_sync(Duration::from_secs(90))).await {
         Ok(g) => g,
-        Err(_) => BenchLock { file: None, owned: false },
+        Err(_) => BenchLock {
+            file: None,
+            owned: false,
+        },
     }
 }
 
@@ -202,7 +219,12 @@ fn flock_try_lock(_f: &std::fs::File) -> bool {
 /// the primitive a blocking-with-deadline caller would loop on.
 pub fn acquire_bench_lock_failfast() -> bool {
     let path = std::env::temp_dir().join("subdollar-bench.lock");
-    let file = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -285,7 +307,12 @@ impl BenchmarkRunner {
     /// Async shell: lock wait + every blocking `docker run` window parks on
     /// the blocking pool. A wedged client (5h redis-benchmark, 2026-10-03)
     /// stalls one blocking thread, not a tokio worker serving the API.
-    pub async fn run_redis_benchmark_reps_async(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
+    pub async fn run_redis_benchmark_reps_async(
+        net: &str,
+        host: &str,
+        port: u16,
+        reps: usize,
+    ) -> Result<f64> {
         let net = net.to_string();
         let host = host.to_string();
         tokio::task::spawn_blocking(move || {
@@ -317,13 +344,18 @@ impl BenchmarkRunner {
             let _ = Command::new("docker").args(["rm", "-f", &client]).output();
             let output = Command::new("timeout")
                 .args([
-                    "-k", "5", "15",
+                    "-k",
+                    "5",
+                    "15",
                     "docker",
                     "run",
                     "--rm",
-                    "--name", &client,
-                    "--label", "sdb.run=bench-client",
-                    "--label", "sdb.role=bench-client",
+                    "--name",
+                    &client,
+                    "--label",
+                    "sdb.run=bench-client",
+                    "--label",
+                    "sdb.role=bench-client",
                     "--network",
                     net,
                     BENCH_REDIS_CLIENT_IMAGE,
@@ -378,7 +410,12 @@ impl BenchmarkRunner {
         })
     }
 
-    pub async fn run_wrk_benchmark_reps_async(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
+    pub async fn run_wrk_benchmark_reps_async(
+        net: &str,
+        host: &str,
+        port: u16,
+        reps: usize,
+    ) -> Result<f64> {
         let net = net.to_string();
         let host = host.to_string();
         tokio::task::spawn_blocking(move || {
@@ -405,13 +442,18 @@ impl BenchmarkRunner {
             let _ = Command::new("docker").args(["rm", "-f", &client]).output();
             let output = Command::new("timeout")
                 .args([
-                    "-k", "5", "15",
+                    "-k",
+                    "5",
+                    "15",
                     "docker",
                     "run",
                     "--rm",
-                    "--name", &client,
-                    "--label", "sdb.run=bench-client",
-                    "--label", "sdb.role=bench-client",
+                    "--name",
+                    &client,
+                    "--label",
+                    "sdb.run=bench-client",
+                    "--label",
+                    "sdb.role=bench-client",
                     "--network",
                     net,
                     BENCH_WRK_IMAGE,

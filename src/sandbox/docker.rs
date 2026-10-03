@@ -389,7 +389,11 @@ impl SandboxManager {
     /// rm, which we tolerate.
     fn cleanup_finished_networks(&self) {
         let _ = Command::new("docker")
-            .args(["network", "rm", &format!("subdollar-net-{}", self.instance_id)])
+            .args([
+                "network",
+                "rm",
+                &format!("subdollar-net-{}", self.instance_id),
+            ])
             .output();
     }
 
@@ -1048,9 +1052,7 @@ impl SandboxManager {
                             ));
                         }
                         Err(e) => {
-                            return Err(anyhow!(
-                                "candidate container spawn failed: {e}"
-                            ));
+                            return Err(anyhow!("candidate container spawn failed: {e}"));
                         }
                     }
                     return Ok(());
@@ -1294,11 +1296,10 @@ impl SandboxManager {
                 Self::NETWORK_STALE_AGE_SECS as u64,
             ))
             .and_then(|t| {
-                t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
-                    let secs = d.as_secs() as i64;
-                    // Format back via chrono if available, else compare raw.
-                    secs
-                })
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs() as i64)
+                // Format back via chrono if available, else compare raw.
             });
         // Simplest robust check: ask docker for Created seconds directly is an
         // extra call; instead parse the leading date "YYYY-MM-DD HH:MM:SS".
@@ -1380,8 +1381,12 @@ impl SandboxManager {
     pub fn prune_labeled_networks() {
         let ls = Command::new("docker")
             .args([
-                "network", "ls", "--filter", "label=sdb.run",
-                "--format", "{{.ID}}",
+                "network",
+                "ls",
+                "--filter",
+                "label=sdb.run",
+                "--format",
+                "{{.ID}}",
             ])
             .output();
         let ids = match ls {
@@ -1391,8 +1396,11 @@ impl SandboxManager {
         for id in Self::parse_network_ids(&ids) {
             let detail = Command::new("docker")
                 .args([
-                    "network", "inspect", id,
-                    "--format", "{{len .Containers}} {{.Created}}",
+                    "network",
+                    "inspect",
+                    id,
+                    "--format",
+                    "{{len .Containers}} {{.Created}}",
                 ])
                 .output();
             let text = match detail {
@@ -1415,10 +1423,7 @@ impl SandboxManager {
     /// container (a live cell's container always has its network present).
     pub fn reap_orphan_containers() -> usize {
         let ls = Command::new("docker")
-            .args([
-                "ps", "-a", "-q",
-                "--filter", "label=sdb.run",
-            ])
+            .args(["ps", "-a", "-q", "--filter", "label=sdb.run"])
             .output();
         let ids = match ls {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -1428,8 +1433,10 @@ impl SandboxManager {
         for id in Self::parse_network_ids(&ids) {
             let detail = Command::new("docker")
                 .args([
-                    "inspect", id,
-                    "--format", "{{.Name}} {{.State.Running}} {{index .Config.Labels \"sdb.run\"}}",
+                    "inspect",
+                    id,
+                    "--format",
+                    "{{.Name}} {{.State.Running}} {{index .Config.Labels \"sdb.run\"}}",
                 ])
                 .output();
             let text = match detail {
@@ -1516,7 +1523,10 @@ pub struct RunGuard {
 
 impl RunGuard {
     pub fn new(manager: SandboxManager) -> Self {
-        Self { manager, disarmed: false }
+        Self {
+            manager,
+            disarmed: false,
+        }
     }
     pub fn manager(&self) -> &SandboxManager {
         &self.manager
@@ -1857,9 +1867,10 @@ mod tests {
         // Trial cleanup must NEVER name the batchref share: the bracket
         // outlives every trial, and trial N's exit murdered it (gate cells:
         // post-batch "network ..._batchref not found" on both cells).
-        assert!(names
-            .iter()
-            .all(|n| !n.ends_with("_batchref")), "trial owns batchref share!");
+        assert!(
+            names.iter().all(|n| !n.ends_with("_batchref")),
+            "trial owns batchref share!"
+        );
     }
 
     #[test]
@@ -1884,9 +1895,15 @@ mod tests {
         // instance id, so `<parent>` never matches `<parent>_trialN` or
         // `<parent>_batchref`. Pin the exact-match construction.
         let sm = SandboxManager::with_id("parent_20261002_120000_trial2");
-        assert_eq!(sm.label_filter(false), vec!["label=sdb.run=parent_20261002_120000_trial2"]);
+        assert_eq!(
+            sm.label_filter(false),
+            vec!["label=sdb.run=parent_20261002_120000_trial2"]
+        );
         let b = SandboxManager::with_id("parent_20261002_120000_batchref");
-        assert_eq!(b.label_filter(true), vec!["label=sdb.run=parent_20261002_120000_batchref"]);
+        assert_eq!(
+            b.label_filter(true),
+            vec!["label=sdb.run=parent_20261002_120000_batchref"]
+        );
     }
 
     /// Live-docker: a guard drop reaps its labeled container; the sibling
@@ -1913,18 +1930,36 @@ mod tests {
                 .args(["network", "rm", &net])
                 .output();
             let co = std::process::Command::new("docker")
-                .args(["network", "create", "--label", &format!("sdb.run={}", id), &net])
+                .args([
+                    "network",
+                    "create",
+                    "--label",
+                    &format!("sdb.run={}", id),
+                    &net,
+                ])
                 .output()
                 .unwrap();
-            assert!(co.status.success(), "net {id}: {}", String::from_utf8_lossy(&co.stderr));
+            assert!(
+                co.status.success(),
+                "net {id}: {}",
+                String::from_utf8_lossy(&co.stderr)
+            );
             let out = std::process::Command::new("docker")
                 .args([
-                    "run", "-d", "--rm",
-                    "--label", &format!("sdb.run={}", id),
-                    "--label", "sdb.role=probe",
-                    "--name", &format!("guardprobe-{}", id),
-                    "--network", &net,
-                    "alpine:3", "sleep", "300",
+                    "run",
+                    "-d",
+                    "--rm",
+                    "--label",
+                    &format!("sdb.run={}", id),
+                    "--label",
+                    "sdb.role=probe",
+                    "--name",
+                    &format!("guardprobe-{}", id),
+                    "--network",
+                    &net,
+                    "alpine:3",
+                    "sleep",
+                    "300",
                 ])
                 .output()
                 .unwrap();
@@ -1956,8 +1991,14 @@ mod tests {
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
-        assert!(!left.contains(&format!("guardprobe-{}", a)), "own container must be reaped");
-        assert!(left.contains(&format!("guardprobe-{}", b)), "sibling container must survive");
+        assert!(
+            !left.contains(&format!("guardprobe-{}", a)),
+            "own container must be reaped"
+        );
+        assert!(
+            left.contains(&format!("guardprobe-{}", b)),
+            "sibling container must survive"
+        );
         // Full teardown through the guard path (nets carry the label now):
         // B's guard reaps container + zero-container net; A's net likewise.
         {
