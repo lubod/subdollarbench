@@ -171,10 +171,14 @@ async fn run_trial_batch(
     logger: Arc<CliPipelineLogger>,
 ) -> Result<TrialBatchOutput> {
     let batch_ref = if p.count > 1 {
-        match subdollarbench::bench::batch_ref::BatchRef::start_async(&p.task, &p.parent_run_id, &|m| {
-            println!("{}", m)
-        }, 0)
-        .await {
+        match subdollarbench::bench::batch_ref::BatchRef::start_async(
+            &p.task,
+            &p.parent_run_id,
+            &|m| println!("{}", m),
+            0,
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
@@ -356,7 +360,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     &parent_run_id,
                     &|m| println!("{}", m),
                     0,
-                ).await {
+                )
+                .await
+                {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
@@ -453,9 +459,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
 
             let batch_drift = match batch_ref {
-        Some(b) => Some(b.finish(&|m| println!("{}", m)).await.drift),
-        None => None,
-    };
+                Some(b) => Some(b.finish(&|m| println!("{}", m)).await.drift),
+                None => None,
+            };
 
             let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
                 LeaderboardManager::consolidate_multi_trial_run(
@@ -695,13 +701,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 .collect();
             entries.sort();
             let (mut rewritten, mut stamped, mut skipped) = (0, 0, 0);
-            // Runs graded under a different ruleset must NOT be re-scored here.
-            // Backfill recomputes efficiency/throughput with *current* maths;
-            // doing that to a run stamped `2026-09-28.1` and leaving its stamp
-            // alone changes the published numbers while keeping the label that
-            // says they are comparable. Counted and reported instead.
-            let mut foreign_ruleset = 0usize;
-            let current_rules = subdollarbench::report::rules::RULES_VERSION.to_string();
+            // Cutover backfill: every stored parent is re-merged with
+            // current scoring and re-stamped with the current fingerprint
+            // (see `fresh_stamp`). The old guard that left foreign
+            // rulesets alone is gone on purpose: leaving old maths next
+            // to new maths under comparable-looking labels is exactly
+            // the inconsistency this cutover fixes.
             for name in &entries {
                 let fp = path.join(name);
                 let Ok(text) = std::fs::read_to_string(&fp) else {
@@ -715,20 +720,45 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     continue;
                 };
                 if run.subruns.is_empty() {
+                    // Single-trial row: no merge math to redo, but the
+                    // stamp still moves to the current fingerprint so
+                    // no old label survives next to new maths.
+                    let fresh = subdollarbench::report::rules::fingerprint();
+                    if run.rules_version.as_deref() != Some(fresh.as_str()) {
+                        let mut single = run.clone();
+                        single.rules_version = Some(fresh.clone());
+                        if yes {
+                            let data = serde_json::to_string_pretty(&single)?;
+                            std::fs::write(&fp, data)?;
+                            if let Some(store) = LeaderboardManager::open_store_if_exists() {
+                                if let Err(e) = store.upsert_parent(&single) {
+                                    tracing::warn!(
+                                        "backfill DB upsert {} failed: {:#}",
+                                        single.id,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        stamped += usize::from(yes);
+                        rewritten += usize::from(!yes);
+                    } else {
+                        skipped += 1;
+                    }
                     continue;
                 }
-                // Foreign ruleset: leave it entirely alone.
-                if let Some(existing) = &run.rules_version {
-                    if !existing.starts_with(&current_rules) {
-                        foreign_ruleset += 1;
-                        continue;
-                    }
-                }
+                // Regime cutover: a stored run graded under an older ruleset
+                // IS re-scored here and re-stamped with the current
+                // fingerprint (see `fresh_stamp` below). Publishing old and
+                // new maths side by side under one label is the worse
+                // outcome; the re-stamp makes the cutover explicit and the
+                // matrix gate refuses cross-regime ranks either way.
                 // Legacy stamp when the run predates fingerprinting.
                 let want_stamp = run.rules_version.is_none();
                 let stamp = want_stamp.then(|| {
                     subdollarbench::report::legacy_rules_version(&run.timestamp).to_string()
                 });
+                let fresh_stamp = subdollarbench::report::rules::fingerprint();
                 // Re-merge with current scoring from stored subruns.
                 // Stored subruns also predate fingerprinting: stamp them first
                 // so the merge inherits a unanimous (non-mixed) version.
@@ -775,8 +805,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         None => m,
                     })
                     .collect();
-                if out.rules_version.is_none() {
-                    out.rules_version = stamp.clone();
+                // Cutover re-stamp: this row was just re-scored with current
+                // maths (all-trial mean), so it carries the current
+                // fingerprint — never the old label. Unchanged rows keep
+                // their stamp via the `same` short-circuit below.
+                out.rules_version = Some(fresh_stamp.clone());
+                for sub in &mut out.subruns {
+                    sub.rules_version = out.rules_version.clone();
                 }
                 fn opt_eq(a: Option<f64>, b: Option<f64>) -> bool {
                     match (a, b) {
@@ -802,42 +837,42 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     && opt_eq(run.throughput_score, out.throughput_score)
                     && (run.efficiency_score - out.efficiency_score).abs() < 1e-9
                     && (run.total_cost_usd - out.total_cost_usd).abs() < 1e-9
-                    && subs_same
-                    && run.rules_version == out.rules_version;
-                if same {
-                    if want_stamp && out.rules_version.is_some() && run.rules_version.is_none() {
-                        // Stamp-only change.
-                        if yes {
-                            let data = serde_json::to_string_pretty(&out)?;
-                            std::fs::write(&fp, data)?;
-                            // Best-effort DB mirror (same gating as consolidate); never fatal.
-                            if let Some(store) = LeaderboardManager::open_store_if_exists() {
-                                if let Err(e) = store.upsert_parent(&out) {
-                                    tracing::warn!("backfill DB upsert {} failed: {:#}", out.id, e);
-                                }
-                            }
-                            // Mirror the stamp into the parent manifest.
-                            let mpath = subdollarbench::report::RunArchiver::resolve_runs_dir()
-                                .join(&run.id)
-                                .join("manifest.json");
-                            if let Ok(mtext) = std::fs::read_to_string(&mpath) {
-                                if let Ok(mut mval) =
-                                    serde_json::from_str::<serde_json::Value>(&mtext)
-                                {
-                                    mval["rules_version"] = serde_json::Value::String(
-                                        out.rules_version.clone().unwrap_or_default(),
-                                    );
-                                    let _ = std::fs::write(
-                                        &mpath,
-                                        serde_json::to_string_pretty(&mval)?,
-                                    );
-                                }
+                    && subs_same;
+                // NOTE: stamp excluded from `same` on purpose — a
+                // cutover re-stamp (old label → current fingerprint)
+                // with identical numbers is still a rewrite, not a skip.
+                let stamp_changed = run.rules_version != out.rules_version;
+                if same && !stamp_changed {
+                    skipped += 1;
+                    continue;
+                }
+                if same && stamp_changed {
+                    // Cutover re-stamp with identical numbers: rewrite
+                    // the file + DB + manifest (not a skip), so no old
+                    // label survives next to new maths.
+                    if yes {
+                        let data = serde_json::to_string_pretty(&out)?;
+                        std::fs::write(&fp, data)?;
+                        if let Some(store) = LeaderboardManager::open_store_if_exists() {
+                            if let Err(e) = store.upsert_parent(&out) {
+                                tracing::warn!("backfill DB upsert {} failed: {:#}", out.id, e);
                             }
                         }
-                        stamped += 1;
-                    } else {
-                        skipped += 1;
+                        let mpath = subdollarbench::report::RunArchiver::resolve_runs_dir()
+                            .join(&run.id)
+                            .join("manifest.json");
+                        if let Ok(mtext) = std::fs::read_to_string(&mpath) {
+                            if let Ok(mut mval) = serde_json::from_str::<serde_json::Value>(&mtext)
+                            {
+                                mval["rules_version"] = serde_json::Value::String(
+                                    out.rules_version.clone().unwrap_or_default(),
+                                );
+                                let _ =
+                                    std::fs::write(&mpath, serde_json::to_string_pretty(&mval)?);
+                            }
+                        }
                     }
+                    stamped += 1;
                     continue;
                 }
                 println!(
@@ -928,17 +963,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         rewritten += 1;
                     }
                 }
-                rewritten += usize::from(!yes);
             }
             if yes {
                 println!(
-                    "backfill: rewrote {rewritten}, stamped {stamped}, skipped {skipped}, \
-                     left alone (other ruleset) {foreign_ruleset}"
+                    "backfill: rewrote {rewritten}, re-stamped {stamped}, skipped {skipped} \
+                     (all rescored rows carry the current fingerprint)"
                 );
             } else {
                 println!(
-                    "backfill plan: {rewritten} to rewrite, {stamped} stamp-only, {skipped} unchanged, \
-                     {foreign_ruleset} blocked on a different ruleset (re-run with --yes)"
+                    "backfill plan: {rewritten} to rewrite, {stamped} re-stamp-only, {skipped} unchanged \
+                     (re-run with --yes)"
                 );
             }
         }

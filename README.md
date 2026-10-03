@@ -51,9 +51,9 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 
 2. **Dual-Tier Docker Isolation & Private Run Network:**
    - **OMP Agent Sandbox (`subdollar-sandbox`):** The LLM operates strictly inside an isolated Docker container with pre-installed toolchains (Rust, Go, Node, Python, Clang/GCC, Bun) and workspace volume mounting. The agent is attached to a **per-run user-defined Docker network** (`subdollar-net-<run_id>`) — never the host network — so loopback-bound host services (including the UI at its default `127.0.0.1` bind) are unreachable from model-executed code. Note: services deliberately exposed on `0.0.0.0` remain reachable via the bridge gateway, as from any container on the host.
-   - **Ground-Truth Reference:** An official reference server (`redis:alpine`, `nginx:alpine`, or `coredns`) runs on the same private network under a stable DNS alias (`ref-redis` / `ref-http` / `ref-dns`). The agent issues black-box requests (e.g. `redis-cli -h ref-redis -p 6379` or `curl http://ref-http/`) to inspect actual protocol responses. Reference ports are additionally published on the host (6380/8081/5354) for manual debugging.
+   - **Ground-Truth Reference:** A pinned reference server runs on the same private network under a stable DNS alias — `redis:alpine` as `ref-redis`, `nginx:alpine` as `ref-http`, `coredns` as `ref-dns` (redis/http/dns tasks). Batch-anchored tasks (redis, http) share one median denominator per batch with a pre/post drift bracket; per-trial live refs cover the rest. The agent issues black-box requests (e.g. `redis-cli -h ref-redis -p 6379` or `curl http://ref-http/`) to inspect actual protocol responses.
    - **Candidate Isolation (`subdollar-candidate-<run_id>`):** The generated code is compiled and launched in a clean run-scoped container, mapping candidate ports (6379 for Redis, 8080 for HTTP, 5353 for DNS).
-   - **Known Limitation (roadmap):** the run network still NATs to the internet, which the agent requires for the OpenRouter API and language toolchains. Static anti-cheat scanning (framework/daemon blocklists, Dockerfile inspection) guards against prebuilt-server shortcuts; a domain-allowlist egress proxy (OpenRouter-only) is the planned next step for full network-level integrity.
+   - **Egress filter (`SDB_EGRESS_FILTER=1`, on in production):** the run network is created `--internal` and a per-run allowlist proxy sidecar (openrouter + language registries + github) is the agent's only route out. Raw sockets can still bypass proxy env (documented residual); the API key is readable in-container by design — use per-run capped OpenRouter keys to bound blast radius.
 
 3. **Packaging Freedom (`Dockerfile` or `./start.sh`):**
    The harness automatically detects if the model built a standalone `Dockerfile` (root or nested project directory) and builds a clean container. If no Dockerfile is found, it automatically wraps `./start.sh` inside the multi-language sandbox environment.
@@ -72,12 +72,21 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 
 ---
 
-## 🎯 Supported Tasks
+## 🎯 Supported Tasks (8)
 
-| Task | Description | Stages Verified | Concurrency Stress Test |
-| :--- | :--- | :--- | :--- |
-| **`redis`** | In-memory key-value database implementing the RESP2 wire protocol | 1. `PING` / `ECHO` Handshake<br>2. `SET`, `GET`, `DEL`, `EXISTS`<br>3. `SET ... PX <ms>` (TTL expiration & passive eviction)<br>4. `INCR` / `DECR` Atomic Counters | `redis-benchmark -p 6379 -t set,get -n 5000 -c 10 -q` |
-| **`http`** | RFC 7230 / RFC 7231 compliant HTTP/1.1 web server | 1. Root `GET /` (200 OK)<br>2. 404 Not Found Handling<br>3. `GET /echo/{str}` with dynamic `Content-Length`<br>4. `GET /user-agent` Header Reflection<br>5. `POST` & `GET /files/{name}` File Persistence | `wrk -t2 -c20 -d3s http://127.0.0.1:8080/` |
+| Task | Description | Throughput axis |
+| :--- | :--- | :--- |
+| **`redis`** | In-memory key-value database, RESP2 wire protocol (`PING`/`ECHO`, `SET`/`GET`/`DEL`/`EXISTS`, `SET ... PX` TTL, `INCR`/`DECR`) | `redis-benchmark`, batch-anchored denominator |
+| **`http`** | RFC 7230/7231 HTTP/1.1 server (`GET /`, 404, `GET /echo/{str}`, `GET /user-agent`, `POST`/`GET /files/{name}`) | `wrk`, batch-anchored denominator |
+| **`dns`** | RFC 1035 UDP server on 5353 | reported per-trial, never scored (no valid denominator) |
+| **`pdf`** | HTTP microservice on 8090 extracting text from binary PDF payloads (`POST /extract`) | reported per-trial, never scored |
+| **`wal`** | Durable append-only log on TCP 6390 (`PUB`/`SUB`, fsync before ack, `kill -9` recovery) | reported per-trial, never scored |
+| **`proxy`** | HTTP reverse proxy on 8091 (round-robin, keep-alive, `X-Forwarded-For`, failover) | reported per-trial, never scored |
+| **`pubsub`** | Topic bus with replay (`SUB <topic> <offset>`, `:off payload` + `+END`) | reported per-trial, never scored |
+| **`binproto`** | Binary length-prefixed RPC (SDB1) | reported per-trial, never scored |
+
+Only **redis** and **http** have a live reference denominator and therefore a
+Throughput Score. The other six tasks rank by Pass@1 / cost (efficiency only).
 
 ---
 
@@ -132,22 +141,20 @@ cargo run --release -- run \
   --budget-usd 0.50
 ```
 
-#### CLI Options Reference
+#### CLI Options Reference (from `run --help`; abbreviated)
 ```text
 Usage: subdollarbench run [OPTIONS] --model <MODEL>
 
-Options:
-  -m, --model <MODEL>            OpenRouter model ID (e.g. openrouter/deepseek/deepseek-chat)
-  -t, --task <TASK>              Benchmark task [possible values: redis, http, dns] [default: redis]
-  -e, --effort <EFFORT>          Reasoning effort: auto, max, high, medium, low, off [default: auto]
-  -b, --budget-usd <BUDGET_USD>  Maximum cost allowance in USD [default: 0.50]
-      --max-turns <MAX_TURNS>    Maximum agent conversation turns [default: 100]
-      --timeout-min <MINUTES>    Execution timeout in minutes [default: 15]
-      --api-key <KEY>            OpenRouter API key (overrides OPENROUTER_API_KEY env var)
-      --workdir <DIR>            Candidate workspace output directory [default: ./workspace]
-      --eval-only                Skip agent generation; evaluate existing code in workdir
-      --trials <TRIALS>          Number of repeated trials for statistical variance (Pass@k) [default: 1]
-      --no-save                  Do not save results or archive run artifacts to disk [default: false]
+  -m, --model <MODEL>            OpenRouter model ID (e.g. openrouter/google/gemini-2.5-flash)
+  -t, --task <TASK>              [default: redis] [possible values: redis, http, dns, pdf, wal, proxy, pubsub, binproto]
+  -e, --effort <EFFORT>          (off, minimal, low, medium, high, xhigh, max) [default: high]
+  -b, --budget-usd <BUDGET_USD>  Maximum cost budget in USD [default: 1]
+      --max-turns <MAX_TURNS>    [default: 100]
+      --timeout-min <MINUTES>    [default: 30]
+      --trials <TRIALS>          Repeated trials for Pass@k (n=9 default; n=3 spans ±40pt) [default: 9]
+      --extend-if-unstable       Keep adding trials in batches of 3 while unstable
+      --max-trials <MAX_TRIALS>  Trial cap incl. initial batch [default: 7]
+      --review-model <MODEL>     End-of-run code-review judge [default: openrouter/meta/muse-spark-1.3-contributor]
 ```
 
 #### Direct Protocol Evaluation (Standalone Mode)
@@ -179,37 +186,42 @@ rsync -az --delete ./portal/ <vps>:/srv/bench/
 
 ## 💰 Pricing Engine & Efficiency Scoring
 
-SubDollarBench ranks models primarily by their **Engineering Efficiency Score**:
+Parent rows aggregate **all** trials (pass or fail). The headline score is an
+expected-utility form — pass rate scaled by Pass@1, divided by the mean trial
+cost — i.e. the inverse of **cost per solved task**:
 
-$$\text{Efficiency Score} = \frac{\text{Pass Rate (\%)}}{\text{Effective Cost (Cents)}} = \frac{\text{Pass Rate (\%)}}{C_{\text{eff}} \times 100}$$
+$$\text{Efficiency Score} = \frac{\text{Pass Rate (\%)} \times \text{Pass@1} / 100}{\text{Mean Effective Cost (Cents)}}$$
 
-Where **Effective Cost ($C_{\text{eff}}$)** incorporates API billing with compute duration and token baseline floor:
+Failed trials still burn API + compute, so the mean is over every trial, not
+just passing ones (since `2026-10-03.1`; the old passing-only mean understated
+spend by a median 1.44x). Failure is priced once, in the Pass@1 multiplier.
 
-$$C_{\text{compute}} = (T_{\text{seconds}} \times \$0.00003) + (N_{\text{tokens}} \times \$0.00000005)$$
+Where **Effective Cost ($C_{\text{eff}}$)** is API billing plus a compute floor:
+
+$$C_{\text{compute}} = (T_{\text{seconds}} \times \$0.00003) + (N_{\text{fresh}} \times \$0.00000005) + (N_{\text{cached}} \times \$0.00000005 \times 0.25)$$
 $$C_{\text{eff}} = C_{\text{API}} + C_{\text{compute}}$$
 
-- **Time Rate ($R_{\text{time}}$)**: $0.00003 / sec ($\\approx \$0.108 / hr$ container compute equivalent).
-- **Token Baseline ($R_{\text{token}}$)**: $0.00000005 / token ($0.05 / 1M tokens).
+- **Time Rate**: $0.00003 / sec ($\approx \$0.108 / hr$ container compute equivalent).
+- **Token Baseline**: $0.00000005 / token ($0.05 / 1M tokens); cache-read tokens at 0.25x.
+- **Live OpenRouter Accounting:** with an API key, the harness diffs `/api/v1/auth/key` spend before/after each run; the formula is the fallback.
 
-### Example Rankings:
-- Fast Cloud Model: 100% pass rate, $0.003 API + $0.002 compute = $0.005 (0.5¢) $\rightarrow$ **200.0 pts/¢**
-- Slow Looping Model: 100% pass rate, $0.002 API + $0.025 compute = $0.027 (2.7¢) $\rightarrow$ **37.0 pts/¢**
-
-### ⚡ Throughput-Adjusted Scoring
-
-To ensure that fast, production-grade compiled implementations are properly recognized and rewarded over sluggish scripts, the benchmark computes a **Throughput Score** when runtime stress benchmarks complete:
+### ⚡ Throughput-Adjusted Scoring (redis + http only)
 
 $$\text{Speed Ratio} = \frac{\text{Throughput}_{\text{candidate}}}{\text{Throughput}_{\text{reference}}}$$
 $$\text{Performance Multiplier} = \text{Speed Ratio} \times (1.0 + 2.0 \times \text{Speed Ratio})$$
 $$\text{Throughput Score} = \text{Base Efficiency} \times \text{Performance Multiplier}$$
 
-- **Reference Baseline Calibration**: At $\text{Speed Ratio} = 1.0$ (matching reference implementations e.g. Nginx, Redis-Alpine, Python RFC 1035 UDP resolver), the performance multiplier is exactly $3.0\times$, preserving baseline calibration.
-- **Decisive Performance Impact**: Sub-reference throughput drops quadratically (e.g. $0.2\times$ reference speed yields $0.28\times$, penalizing slow implementations by over $10\times$ compared to reference), while implementations that crash under load ($0\text{ req/s}$) receive $0.0\text{ pts/¢}$.
-- **Superlinear Reward**: High-speed implementations surpassing reference baselines receive superlinear bonuses (e.g. $1.5\times$ reference speed yields $6.0\times$, double the reference baseline multiplier).
+At $\text{Speed Ratio} = 1.0$ the multiplier is $3.0\times$. The reference
+denominator is a batch-anchored median with a pre/post drift bracket; a
+drifted bracket keeps the candidate's own rate reported but unscored.
 
-### Supported Cost Calculation:
-1. **Live OpenRouter Accounting:** If an API key is provided, the harness queries the `/api/v1/auth/key` endpoint before and after the run to verify the exact billing delta deducted by OpenRouter.
-2. **Context Cache Awareness:** For token-based formula fallback, cached prompt tokens are discounted by 50% to 90% depending on model provider caching rules.
+### Comparability: the Rules stamp
+
+Every result carries `rules_version = {RULES_VERSION}+{content-hash}` (e.g.
+`2026-10-03.1+24e3310c`). The hash covers prompts, verifiers, **and** the
+scoring path. Ranks are only comparable within one full stamp — the leaderboard
+and matrix gate refuse cross-regime ranks. A version bump means: re-run, or
+`backfill --yes` to re-score stored trials onto the new stamp.
 
 
 ### 🧠 Reasoning Effort Is A Request, Not A Guarantee

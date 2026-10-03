@@ -8,6 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.1`: fair cost is the mean over ALL trials, not just
+///   passing ones. The old passing-only mean understated real spend
+///   (median 1.44x, up to 6.7x on mixed outcomes): failed trials still
+///   burn API + compute, and failure is already priced by the Pass@1
+///   multiplier — hiding failed spend double-counted success. Every mixed
+///   parent row gets *more expensive* and its headline score drops; the
+///   score is now pass% x P@1 per mean trial cost = 1 / (cost per solved
+///   task). Results stamped `2026-09-30.1` or earlier are not comparable.
 /// - `2026-09-30.1`: effective cost charges cache-read tokens at
 ///   `COMPUTE_COST_CACHED_FRACTION` of the baseline instead of the full
 ///   `COMPUTE_COST_PER_TOKEN`, so cached context is no longer billed twice
@@ -28,7 +36,7 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
-pub const RULES_VERSION: &str = "2026-09-30.1";
+pub const RULES_VERSION: &str = "2026-10-03.1";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
