@@ -143,14 +143,20 @@ pub fn acquire_bench_lock() -> BenchLock {
 
 fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
     let path = std::env::temp_dir().join("subdollar-bench.lock");
-    let file = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(&path)
-        .ok();
-    let file = match file {
-        Some(f) => f,
-        None => return BenchLock { file: None, owned: false },
+    {
+        Ok(f) => f,
+        Err(e) => {
+            // LOUD: an unwritable lock file silently unserializes every
+            // window (20:06 root-owned file: whole wave unserialized, zero
+            // log lines). Fail-open stays (a run must never deadlock), but
+            // the operator must see it.
+            eprintln!("[BENCH] lock file {} not openable ({}); windows UNSERIALIZED", path.display(), e);
+            return BenchLock { file: None, owned: false };
+        }
     };
     let start = Instant::now();
     loop {
@@ -210,6 +216,17 @@ pub fn acquire_bench_lock_failfast() -> bool {
     }
 }
 
+/// Stable client tag for bench-client container names: same (net, kind)
+/// always maps to the same name, so a stale wedged client is reaped
+/// pre-start instead of colliding on `--name` reuse.
+fn bench_client_tag(net: &str, kind: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    net.hash(&mut h);
+    kind.hash(&mut h);
+    h.finish()
+}
+
 impl BenchmarkRunner {
     pub fn parse_redis_benchmark_output(stdout: &str) -> Result<f64> {
         let mut rates = Vec::new();
@@ -258,6 +275,9 @@ impl BenchmarkRunner {
         let host = host.to_string();
         tokio::task::block_in_place(|| {
             let _lock = acquire_bench_lock();
+            if !_lock.is_owned() {
+                eprintln!("[BENCH] redis window proceeding UNSERIALIZED (lock fail-open)");
+            }
             Self::redis_reps_blocking(&net, &host, port, reps)
         })
     }
@@ -270,6 +290,9 @@ impl BenchmarkRunner {
         let host = host.to_string();
         tokio::task::spawn_blocking(move || {
             let _lock = acquire_bench_lock();
+            if !_lock.is_owned() {
+                eprintln!("[BENCH] redis window proceeding UNSERIALIZED (lock fail-open)");
+            }
             Self::redis_reps_blocking(&net, &host, port, reps)
         })
         .await
@@ -284,12 +307,23 @@ impl BenchmarkRunner {
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
         for _ in 0..reps.max(1) {
+            // Named + labeled client: an unnamed --rm client that never
+            // exits (5h wizardly_herschel) is invisible to reap_run/prune/
+            // orphan-sweep (no label) and --rm never fires. The name below
+            // is the exact manual recovery (docker kill + rm -f), mechanized.
+            // timeout -k 5 15: SIGTERM demonstrably did not end the docker
+            // CLI; KILL after 5s grace bounds every window at ~20s.
+            let client = format!("subdollar-benchclient-{:x}", bench_client_tag(net, "redis"));
+            let _ = Command::new("docker").args(["rm", "-f", &client]).output();
             let output = Command::new("timeout")
                 .args([
-                    "15",
+                    "-k", "5", "15",
                     "docker",
                     "run",
                     "--rm",
+                    "--name", &client,
+                    "--label", "sdb.run=bench-client",
+                    "--label", "sdb.role=bench-client",
                     "--network",
                     net,
                     BENCH_REDIS_CLIENT_IMAGE,
@@ -308,6 +342,9 @@ impl BenchmarkRunner {
                 ])
                 .output()
                 .map_err(|e| anyhow!("Failed to execute docker redis-benchmark: {}", e))?;
+            // Reap regardless of outcome: a killed-but-lingering container
+            // holds its trial net alive and defeats the orphan rule.
+            let _ = Command::new("docker").args(["rm", "-f", &client]).output();
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             match Self::parse_redis_benchmark_output(&stdout) {
@@ -334,6 +371,9 @@ impl BenchmarkRunner {
         let net = net.to_string();
         tokio::task::block_in_place(|| {
             let _lock = acquire_bench_lock();
+            if !_lock.is_owned() {
+                eprintln!("[BENCH] wrk window proceeding UNSERIALIZED (lock fail-open)");
+            }
             Self::wrk_reps_blocking(&net, host, port, reps)
         })
     }
@@ -343,6 +383,9 @@ impl BenchmarkRunner {
         let host = host.to_string();
         tokio::task::spawn_blocking(move || {
             let _lock = acquire_bench_lock();
+            if !_lock.is_owned() {
+                eprintln!("[BENCH] wrk window proceeding UNSERIALIZED (lock fail-open)");
+            }
             Self::wrk_reps_blocking(&net, &host, port, reps)
         })
         .await
@@ -358,12 +401,17 @@ impl BenchmarkRunner {
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
         for _ in 0..reps.max(1) {
+            let client = format!("subdollar-benchclient-{:x}", bench_client_tag(net, "wrk"));
+            let _ = Command::new("docker").args(["rm", "-f", &client]).output();
             let output = Command::new("timeout")
                 .args([
-                    "15",
+                    "-k", "5", "15",
                     "docker",
                     "run",
                     "--rm",
+                    "--name", &client,
+                    "--label", "sdb.run=bench-client",
+                    "--label", "sdb.role=bench-client",
                     "--network",
                     net,
                     BENCH_WRK_IMAGE,
@@ -374,6 +422,7 @@ impl BenchmarkRunner {
                 ])
                 .output()
                 .map_err(|e| anyhow!("Failed to execute docker wrk: {}", e))?;
+            let _ = Command::new("docker").args(["rm", "-f", &client]).output();
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             match Self::parse_wrk_output(&stdout) {
@@ -454,6 +503,25 @@ mod tests {
         assert!(!ref_drifted_with_tol(70000.0, 73500.0, 0.10));
         // The boundary is strict: exactly at tolerance is not drift.
         assert!(!ref_drifted_with_tol(100.0, 110.0, 0.10));
+    }
+
+    #[test]
+    fn test_bench_client_name_is_deterministic() {
+        // Same (net, kind) always maps to the same --name, so a stale wedged
+        // client is reaped pre-start instead of colliding on reuse; distinct
+        // nets never share a name (no cross-trial kill).
+        assert_eq!(
+            bench_client_tag("net-a", "redis"),
+            bench_client_tag("net-a", "redis")
+        );
+        assert_ne!(
+            bench_client_tag("net-a", "redis"),
+            bench_client_tag("net-b", "redis")
+        );
+        assert_ne!(
+            bench_client_tag("net-a", "redis"),
+            bench_client_tag("net-a", "wrk")
+        );
     }
 
     #[test]
