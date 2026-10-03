@@ -1530,7 +1530,10 @@ impl PortalExporter {
         )
     }
 
-    fn secret_patterns() -> Vec<Regex> {
+    /// Shared scrubber: also used by [`crate::report::archive`] so raw
+    /// `console.log` never lands on disk with keys (the agent env-dumps
+    /// `OPENROUTER_API_KEY=sk-or-v1-...` into the log stream).
+    pub fn secret_patterns() -> Vec<Regex> {
         [
             r"sk-or-v1-[A-Za-z0-9_-]+",
             r"sk-proj-[A-Za-z0-9_-]+",

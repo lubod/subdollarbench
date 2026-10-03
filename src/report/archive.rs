@@ -176,8 +176,11 @@ impl RunArchiver {
         let manifest_json = serde_json::to_string_pretty(&manifest_to_save)?;
         fs::write(tmp_dir.join("manifest.json"), manifest_json)?;
 
-        // 2. Write console.log
-        fs::write(tmp_dir.join("console.log"), console_log)?;
+        // 2. Write console.log (secret-scrubbed: the agent env-dumps the
+        // live OPENROUTER_API_KEY into the log stream, and raw runs/ dirs
+        // previously held real keys).
+        let scrubbed = Self::scrub_secrets(console_log);
+        fs::write(tmp_dir.join("console.log"), scrubbed)?;
 
         // 3. Write env.json if available
         if let Some(ref env) = manifest_to_save.env {
@@ -282,6 +285,14 @@ impl RunArchiver {
                 }
             }
         }
+    }
+
+    /// Strip secrets from a log stream before it touches disk. Reuses the
+    /// portal's patterns so archive + export redact identically. Compiles
+    /// regexes per call — archive is once-per-run, never hot.
+    pub fn scrub_secrets(text: &str) -> String {
+        let patterns = crate::report::portal::PortalExporter::secret_patterns();
+        crate::report::portal::PortalExporter::redact(text, &patterns)
     }
 
     pub fn get_console_log(runs_dir: &Path, run_id: &str) -> Option<String> {

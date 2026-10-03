@@ -39,7 +39,7 @@ pub enum Commands {
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
-        #[arg(long, env = "OPENROUTER_API_KEY")]
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
 
         /// Directory for candidate workspace
@@ -127,7 +127,7 @@ pub enum Commands {
         model: String,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
-        #[arg(long, env = "OPENROUTER_API_KEY")]
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
 
         /// Overwrite existing review.json files
@@ -372,7 +372,7 @@ pub enum Commands {
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
-        #[arg(long, env = "OPENROUTER_API_KEY")]
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
 
         /// Directory for candidate workspace
@@ -527,7 +527,7 @@ pub enum Commands {
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
-        #[arg(long, env = "OPENROUTER_API_KEY")]
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
 
         /// Skip OMP agent run and evaluate existing server directly
