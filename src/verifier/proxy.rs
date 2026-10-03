@@ -504,4 +504,81 @@ mod tests {
         let resp = parse_http_response(raw).expect("must parse");
         assert_eq!(resp.body, b"close-delimited-body");
     }
+
+    /// Stub-must-not-pass: a "proxy" that answers 200 with a static body
+    /// matching no upstream marker scores 0 on stage 1. `body_marker`
+    /// returns None for exactly this shape; stage 1 fails on it.
+    #[test]
+    fn test_fake_proxy_static_body_matches_no_marker() {
+        let markers = vec!["upstream-alpha".to_string(), "upstream-beta".to_string()];
+        assert_eq!(ProxyVerifier::body_marker("static hello", &markers), None);
+        assert_eq!(
+            ProxyVerifier::body_marker("served by upstream-alpha", &markers),
+            Some(0)
+        );
+    }
+
+    /// Stage-level: a static-body stub fails routing against live markers.
+    #[tokio::test]
+    async fn test_fake_proxy_fails_stage1() {
+        use tokio::net::TcpListener;
+        async fn serve_static(listener: TcpListener) {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf).await;
+                    let body = b"static stub";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = s.write_all(&head.into_bytes()).await;
+                    let _ = s.write_all(body).await;
+                });
+            }
+        }
+        let up = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = up.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf).await;
+                    let body = b"real-upstream-marker";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = s.write_all(&head.into_bytes()).await;
+                    let _ = s.write_all(body).await;
+                });
+            }
+        });
+        let stub = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stub_port = stub.local_addr().unwrap().port();
+        tokio::spawn(serve_static(stub));
+        let v = ProxyVerifier::new(
+            stub_port,
+            None,
+            vec![
+                ("up".to_string(), up_port),
+                ("up2".to_string(), up_port),
+                ("up3".to_string(), up_port),
+            ],
+        );
+        let r = v.test_stage1().await;
+        assert!(
+            !r.passed,
+            "static-body stub must fail routing: {:?}",
+            r.error
+        );
+    }
 }

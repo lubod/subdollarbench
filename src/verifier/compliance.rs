@@ -67,17 +67,22 @@ impl ComplianceChecker {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
 
-                // Skip hidden folders, git, target, node_modules, etc.
-                if name.starts_with('.')
-                    || name == "target"
-                    || name == "node_modules"
-                    || name == "vendor"
-                    || name == "__pycache__"
-                {
+                // Build outputs stay out (target, node_modules,
+                // __pycache__); everything else is scanned INCLUDING
+                // `vendor/` and hidden dirs — a prebuilt server hides
+                // exactly there, and the old skip list blessed it.
+                // Symlinks are not followed (see below): a link
+                // escaping the workspace is a violation, not a path.
+                if name == "target" || name == "node_modules" || name == "__pycache__" {
                     continue;
                 }
 
-                if path.is_dir() {
+                if path.is_symlink() {
+                    violations.push(format!(
+                        "symlink not followed (escape risk): {}",
+                        path.display()
+                    ));
+                } else if path.is_dir() {
                     Self::scan_dir(&path, violations);
                 } else if path.is_file() {
                     Self::inspect_file(&path, &name, violations);
@@ -1196,11 +1201,40 @@ mod tests {
         assert!(res_df_ep.unwrap_err().contains("nginx"));
         let _ = fs::remove_file(temp_dir.join("Dockerfile"));
 
-        // 15. Hidden folder ignore
-        let hidden = temp_dir.join(".git");
+        // 15. Hidden dirs are SCANNED (a prebuilt server hides exactly
+        // here): a forbidden import under .hidden/ must fail.
+        let hidden = temp_dir.join(".hidden");
         let _ = fs::create_dir_all(&hidden);
         fs::write(hidden.join("server.py"), "import http.server\n").unwrap();
-        assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
+        let res_hidden = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_hidden.is_err());
+        assert!(res_hidden.unwrap_err().contains("http.server"));
+        let _ = fs::remove_dir_all(&hidden);
+
+        // 16. vendor/ is SCANNED for the same reason.
+        let vendored = temp_dir.join("vendor");
+        let _ = fs::create_dir_all(&vendored);
+        fs::write(vendored.join("server.py"), "import http.server\n").unwrap();
+        let res_vendor = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_vendor.is_err());
+        assert!(res_vendor.unwrap_err().contains("http.server"));
+        let _ = fs::remove_dir_all(&vendored);
+
+        // 17. Workspace-escaping symlink is a violation, not a skip.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = temp_dir.join("outside_target.py");
+            fs::write(&outside, "import http.server\n").unwrap();
+            let link = temp_dir.join("link_in.py");
+            let _ = std::fs::remove_file(&link);
+            let _ = symlink(&outside, &link);
+            let res_link = ComplianceChecker::check_no_frameworks(&temp_dir);
+            assert!(res_link.is_err());
+            assert!(res_link.unwrap_err().contains("symlink"));
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::remove_file(&outside);
+        }
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

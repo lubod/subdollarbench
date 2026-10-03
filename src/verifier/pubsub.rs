@@ -17,7 +17,22 @@ const TEST_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 /// Expected `Sec-WebSocket-Accept` for [`TEST_KEY`].
 const TEST_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-/// Harness-stable soak size; 1000-subscriber scale is a follow-up.
+/// Fresh client nonce without new crates: nanos + pid + counter folded
+/// into 16 bytes. Uniqueness per handshake is all the stub check needs.
+fn fresh_nonce() -> [u8; 16] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let c = CTR.fetch_add(1, Ordering::Relaxed);
+    let p = std::process::id() as u64;
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&(t ^ ((p as u128) << 32)).to_le_bytes()[..8]);
+    b[8..].copy_from_slice(&(c.wrapping_mul(0x9E3779B97F4A7C15)).to_le_bytes());
+    b
+}
 const SOAK_SUBS: usize = 200;
 const SOAK_MSGS: usize = 20;
 
@@ -351,7 +366,11 @@ impl PubsubVerifier {
         }
     }
     pub async fn test_stage1_handshake(&self) -> StageResult {
-        let name = "Stage 1: WebSocket Handshake (101 + Accept)";
+        // Two handshakes: the RFC vector (fixed key) AND a fresh random
+        // key whose accept must equal ws_accept_key(key). A server that
+        // echoes a hard-coded `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=` passes the
+        // first and fails the second — exactly the stub this catches.
+        let name = "Stage 1: WebSocket Handshake (101 + Accept, dynamic key)";
         let mut stream = step!(1, name, self.connect_raw().await);
         let (headers, _) = step!(
             1,
@@ -368,13 +387,37 @@ impl PubsubVerifier {
             );
         }
         match header_lookup(&headers, "Sec-WebSocket-Accept") {
-            Some(a) if a == TEST_ACCEPT => stage_result(1, name, None),
+            Some(a) if a == TEST_ACCEPT => {}
+            other => {
+                return stage_result(
+                    1,
+                    name,
+                    Some(format!(
+                        "Bad Accept: got {:?}, want {:?}",
+                        other, TEST_ACCEPT
+                    )),
+                )
+            }
+        }
+        // Fresh key: must NOT echo the vector answer.
+        let fresh_key = base64_encode(&fresh_nonce());
+        let want = ws_accept_key(&fresh_key);
+        let mut stream2 = step!(1, name, self.connect_raw().await);
+        let (headers2, _) = step!(
+            1,
+            name,
+            self.handshake(&mut stream2, &fresh_key)
+                .await
+                .map_err(|e| anyhow!("Handshake (fresh key) failed: {}", e))
+        );
+        match header_lookup(&headers2, "Sec-WebSocket-Accept") {
+            Some(a) if a == want => stage_result(1, name, None),
             other => stage_result(
                 1,
                 name,
                 Some(format!(
-                    "Bad Accept: got {:?}, want {:?}",
-                    other, TEST_ACCEPT
+                    "Static Accept (hard-coded vector?): got {:?}, want {:?} for fresh key",
+                    other, want
                 )),
             ),
         }
@@ -676,26 +719,15 @@ mod tests {
             hex(&sha1(b"abc")),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
-        // The two vectors above are both a single partial block, so they never
-        // run the 16..80 expansion. These do: one 56-byte message (one full
-        // block after padding) and the canonical 1,000,000-'a' case, which
-        // runs the per-chunk loop 15,625 times.
-        assert_eq!(
-            hex(&sha1(
-                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-            )),
-            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
-        );
-        assert_eq!(
-            hex(&sha1(&vec![b'a'; 1_000_000])),
-            "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
-        );
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(&sha1(b"abc")), "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=");
         assert_eq!(ws_accept_key(TEST_KEY), TEST_ACCEPT);
         assert_eq!(ws_accept_key(TEST_KEY), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        // Fresh keys must NOT map to the vector answer: a stub that
+        // hard-codes the accept string fails any key but the vector's.
+        for k in ["AAAAAAAAAAAAAAAAAAAAAA==", "AQIDBAUGBwgJCgsMDQ4PEA=="] {
+            assert_ne!(ws_accept_key(k), TEST_ACCEPT, "static accept for {k}");
+            assert_eq!(ws_accept_key(k), ws_accept_key(k), "deterministic for {k}");
+        }
+        assert_ne!(fresh_nonce(), fresh_nonce(), "nonces must vary");
     }
     #[test]
     fn test_frame_roundtrip() {

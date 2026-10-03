@@ -301,6 +301,21 @@ impl DnsVerifier {
                             ),
                         };
                     }
+                    // QR set by accident of copying flags but carries no
+                    // answer section and a zeroed rcode path. Require a
+                    // well-formed response: matching question echo AND
+                    // at least one answer record for example.com.
+                    if parsed.ancount == 0 {
+                        return StageResult {
+                            stage: 1,
+                            name,
+                            passed: false,
+                            error: Some(
+                                "Handshake carries no answer records (packet echo scores 0)"
+                                    .to_string(),
+                            ),
+                        };
+                    }
                     StageResult {
                         stage: 1,
                         name,
@@ -756,6 +771,35 @@ mod tests {
         let res = verifier.test_stage1_handshake().await;
         assert!(!res.passed);
         assert!(!verifier.wait_for_ready(1).await);
+    }
+
+    /// Stub-must-not-pass: a server that echoes the query packet verbatim
+    /// (QR copied, no answer section) scores 0 on the handshake — the old
+    /// QR-only check passed it.
+    #[tokio::test]
+    async fn test_dns_packet_echo_scores_zero() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let Ok((len, src)) = socket.recv_from(&mut buf).await else {
+                    continue;
+                };
+                if len < 12 {
+                    continue;
+                }
+                // Verbatim echo: query bytes back unchanged.
+                let _ = socket.send_to(&buf[..len], src).await;
+            }
+        });
+        let v = DnsVerifier::new(port, None);
+        let r = v.test_stage1_handshake().await;
+        assert!(
+            !r.passed,
+            "packet echo must fail the handshake: {:?}",
+            r.error
+        );
     }
     #[test]
     fn test_dns_parser_handles_standard_and_rejects_truncated() {
