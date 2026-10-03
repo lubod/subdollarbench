@@ -31,6 +31,22 @@ fn client() -> reqwest::Client {
         .expect("reqwest client builds")
 }
 
+/// Bearer for mutating engine calls, from `SDB_UI_TOKEN`. Same source the
+/// server's `csrf_guard` layer checks, so CLI and curl agree. Empty when
+/// unset (tokenless local dev stays working).
+pub fn ui_token() -> Option<String> {
+    std::env::var("SDB_UI_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+}
+
+fn auth(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match ui_token() {
+        Some(t) => req.header("Authorization", format!("Bearer {}", t.trim())),
+        None => req,
+    }
+}
+
 fn check(url: &str, status: reqwest::StatusCode, body: String) -> Result<String> {
     if status.is_success() {
         Ok(body)
@@ -77,8 +93,7 @@ pub async fn post_json(
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let url = endpoint(server, path);
-    let resp = client()
-        .post(&url)
+    let resp = auth(client().post(&url))
         .json(body)
         .send()
         .await
@@ -92,8 +107,7 @@ pub async fn post_json(
 /// POST with no body; the stop/rebuild endpoints answer plain text or JSON.
 pub async fn post_empty(server: &str, path: &str) -> Result<String> {
     let url = endpoint(server, path);
-    let resp = client()
-        .post(&url)
+    let resp = auth(client().post(&url))
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
@@ -105,8 +119,7 @@ pub async fn post_empty(server: &str, path: &str) -> Result<String> {
 /// POST a raw text body (prompt save); answers plain text.
 pub async fn post_text(server: &str, path: &str, body: String) -> Result<String> {
     let url = endpoint(server, path);
-    let resp = client()
-        .post(&url)
+    let resp = auth(client().post(&url))
         .header("content-type", "text/plain")
         .body(body)
         .send()
@@ -120,8 +133,7 @@ pub async fn post_text(server: &str, path: &str, body: String) -> Result<String>
 /// DELETE an endpoint; answers plain text (`Removed q4 from queue`) or JSON.
 pub async fn delete_text(server: &str, path: &str) -> Result<String> {
     let url = endpoint(server, path);
-    let resp = client()
-        .delete(&url)
+    let resp = auth(client().delete(&url))
         .send()
         .await
         .with_context(|| format!("DELETE {url}"))?;

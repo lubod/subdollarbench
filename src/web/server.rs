@@ -1229,16 +1229,56 @@ fn csrf_reject() -> Response {
 }
 
 /// Axum layer guarding every mutating endpoint (POST/PUT/PATCH/DELETE).
-/// Browser cross-site requests always carry Origin; curl/CLI send neither
-/// (allowed) and loopback Origins are trusted. Rejection happens before
-/// dispatch, so direct handler unit tests (no Origin) stay green.
+/// Two gates, in order: (1) bearer token when `SDB_UI_TOKEN` is set —
+/// `Authorization: Bearer <token>` must match, no Origin bypass; (2) the
+/// CSRF Origin/Referer check below. Reads stay open. When no token is
+/// configured the layer is CSRF-only (documented insecure default for
+/// local dev); production sets the token in `.env` (0600, like the API key).
+fn ui_token() -> Option<String> {
+    std::env::var("SDB_UI_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+}
+
+fn token_ok(headers: &HeaderMap, token: &str) -> bool {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let presented = bearer.strip_prefix("Bearer ").unwrap_or("").trim();
+    !presented.is_empty() && subtle_eq(presented, token)
+}
+
+/// Constant-time compare so a local timing probe cannot walk the token.
+fn subtle_eq(a: &str, b: &str) -> bool {
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    if ab.len() != bb.len() {
+        return false;
+    }
+    ab.iter()
+        .zip(bb.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 async fn csrf_guard(req: Request, next: middleware::Next) -> Response {
     let mutating = matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     );
-    if mutating && !csrf_origin_allowed(req.headers()) {
-        return csrf_reject();
+    if mutating {
+        if let Some(token) = ui_token() {
+            if !token_ok(req.headers(), &token) {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "Missing or invalid UI token (Authorization: Bearer <SDB_UI_TOKEN>)",
+                )
+                    .into_response();
+            }
+        }
+        if !csrf_origin_allowed(req.headers()) {
+            return csrf_reject();
+        }
     }
     next.run(req).await
 }
