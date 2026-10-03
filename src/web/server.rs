@@ -443,7 +443,6 @@ fn reconcile_queue(state: &AppState) -> usize {
     ghosts.len()
 }
 
-
 #[cfg(test)]
 pub fn test_queue_item(id: &str) -> QueuedRun {
     QueuedRun {
@@ -937,8 +936,7 @@ impl UiServer {
                     if busy {
                         continue;
                     }
-                    let orphans =
-                        crate::sandbox::docker::SandboxManager::reap_orphan_containers();
+                    let orphans = crate::sandbox::docker::SandboxManager::reap_orphan_containers();
                     crate::sandbox::docker::SandboxManager::prune_labeled_networks();
                     if ghosts + orphans > 0 {
                         send_status(
@@ -961,8 +959,7 @@ impl UiServer {
         // prune_stale_networks (name-filter, age-gated) stays as belt for
         // pre-label legacy nets; prune_labeled_networks covers labeled ones.
         {
-            let stale_containers =
-                crate::sandbox::docker::SandboxManager::reap_orphan_containers();
+            let stale_containers = crate::sandbox::docker::SandboxManager::reap_orphan_containers();
             if stale_containers > 0 {
                 println!("[RECONCILE] reaped {stale_containers} orphan container(s) at startup");
             }
@@ -1908,13 +1905,20 @@ async fn run_extension_batch(
     worker: u8,
 ) -> ExtBatchOut {
     let ext_batch_ref = if spec.count > 1 {
+        // Per-bracket id: the extension's pre must pair with ITS post, not
+        // the initial bracket's pre (regime-change the bracket exists to
+        // catch). `_ext<N>` brackets vs `_trial<N>` trial dirs below:
+        // distinct suffix spaces for brackets vs trials.
+        let bracket_id = format!("{}_ext{}", spec.parent_run_id, spec.start_idx);
         match crate::bench::batch_ref::BatchRef::start_on_worker(
             &spec.task,
             &spec.parent_run_id,
             batch_log,
             worker,
+            Some(&bracket_id),
         )
-        .await {
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
                 // Pdf has no live-ref fallback: FATAL (loud) instead of
@@ -2391,8 +2395,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             &parent_run_id,
             &batch_log,
             worker,
+            None,
         )
-        .await {
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
                 // Pdf has no live-ref fallback: FATAL (loud). Other tasks
@@ -3832,7 +3838,11 @@ mod tests {
         // run in the full suite, green in isolation).
         let real = crate::config::get_repo_root().join("results");
         let _ = std::fs::create_dir_all(&real);
-        std::fs::write(real.join(format!("{parent_id}.json")), serde_json::to_string(&doc).unwrap()).unwrap();
+        std::fs::write(
+            real.join(format!("{parent_id}.json")),
+            serde_json::to_string(&doc).unwrap(),
+        )
+        .unwrap();
         let state = create_test_state();
         // Claim worker 0 for the extend; hold worker 1 as a live sibling.
         state.running_slots.lock().unwrap().insert(0);
@@ -3889,10 +3899,20 @@ mod tests {
         assert!(state.running_slots.lock().unwrap().contains(&1));
         assert!(state.is_running.load(Ordering::SeqCst));
         assert_eq!(
-            state.queue.lock().unwrap().iter().find(|i| i.id == qid).map(|i| i.status),
+            state
+                .queue
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == qid)
+                .map(|i| i.status),
             Some(QueueStatus::Done)
         );
-        let _ = std::fs::remove_file(crate::config::get_repo_root().join("results").join(format!("qp_single.json")));
+        let _ = std::fs::remove_file(
+            crate::config::get_repo_root()
+                .join("results")
+                .join("qp_single.json"),
+        );
     }
 
     #[tokio::test]
@@ -3904,10 +3924,20 @@ mod tests {
         assert!(state.running_slots.lock().unwrap().contains(&1));
         assert!(state.is_running.load(Ordering::SeqCst));
         assert_eq!(
-            state.queue.lock().unwrap().iter().find(|i| i.id == qid).map(|i| i.status),
+            state
+                .queue
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == qid)
+                .map(|i| i.status),
             Some(QueueStatus::Done)
         );
-        let _ = std::fs::remove_file(crate::config::get_repo_root().join("results").join(format!("qp_stable.json")));
+        let _ = std::fs::remove_file(
+            crate::config::get_repo_root()
+                .join("results")
+                .join("qp_stable.json"),
+        );
     }
 
     #[tokio::test]

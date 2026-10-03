@@ -262,7 +262,9 @@ pub fn drift_threshold(task: &TaskType) -> f64 {
 async fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
     match task {
         TaskType::Redis => BenchmarkRunner::run_redis_benchmark_async(net, "ref-redis", 6379).await,
-        TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark_async(net, "ref-http", 80).await,
+        TaskType::Http | TaskType::Proxy => {
+            BenchmarkRunner::run_wrk_benchmark_async(net, "ref-http", 80).await
+        }
         // Retired (see batch_port): a batch denominator for DNS must never
         // exist. Per-trial live refs still use measure_dns_reference().
         TaskType::Dns => Err(anyhow!("dns is retired; no batch denominator")),
@@ -311,6 +313,14 @@ pub struct BatchRef {
     /// the history row so a future reader can tell an idle-regime bracket
     /// from a loaded one without trusting wall-clock proximity.
     pub pre_load: Option<(f64, usize)>,
+    /// Per-bracket history id: `<parent_run_id>` for the initial bracket,
+    /// `<parent_run_id>_ext<start_idx>` for extensions (extension brackets
+    /// are `_ext<N>`; trial dirs are `_trial<N>` — distinct suffix spaces).
+    /// Each bracket's pre pairs ONLY with its own post — merging an
+    /// extend's post into the initial row would compare across a regime
+    /// change the bracket exists to catch. One row per bracket, and the
+    /// cross-batch distribution stays honestly dense, not duplicated.
+    pub bracket_id: String,
 }
 
 pub struct BatchRefReport {
@@ -329,11 +339,17 @@ pub const CROSS_BATCH_DEVIATION_WARN: f64 = 0.10;
 impl BatchRef {
     /// Start the batch ref, warm it up (one discarded window), and return the
     /// median-of-3 pre-batch value. `None` task support (WAL/...) yields `Ok(None)`.
-    pub fn start(task: &TaskType, parent_run_id: &str, log: &(dyn Fn(&str) + Sync)) -> Result<Option<Self>> {
+    pub fn start(
+        task: &TaskType,
+        parent_run_id: &str,
+        log: &(dyn Fn(&str) + Sync),
+    ) -> Result<Option<Self>> {
         // Sync bridge for CLI/tests. Async callers use start_async below:
         // block_on inside a runtime panics (exit 101), so reuse-or-build.
         match tokio::runtime::Handle::try_current() {
-            Ok(h) => tokio::task::block_in_place(|| h.block_on(Self::start_async(task, parent_run_id, log, 0))),
+            Ok(h) => tokio::task::block_in_place(|| {
+                h.block_on(Self::start_async(task, parent_run_id, log, 0))
+            }),
             Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -349,7 +365,7 @@ impl BatchRef {
         log: &(dyn Fn(&str) + Sync),
         worker: u8,
     ) -> Result<Option<Self>> {
-        Self::start_on_worker(task, parent_run_id, log, worker).await
+        Self::start_on_worker(task, parent_run_id, log, worker, None).await
     }
 
     /// Worker-aware start: batch port follows the worker offset so parallel
@@ -380,11 +396,17 @@ impl BatchRef {
         Some((load1, ncores))
     }
 
+    /// `bracket_id` stamps the history row: `<parent_run_id>` for the initial
+    /// bracket, `<parent_run_id>_ext<start_idx>` for extensions (see
+    /// run_extension_batch). Each bracket pairs its own pre with its own
+    /// post; sharing one id across initial+extends multi-rowed the
+    /// distribution (9 multi-row batches among 63 stamped rows).
     pub async fn start_on_worker(
         task: &TaskType,
         parent_run_id: &str,
         log: &(dyn Fn(&str) + Sync),
         worker: u8,
+        bracket_id: Option<&str>,
     ) -> Result<Option<Self>> {
         let port = match batch_port(task) {
             Some(p) => crate::web::server::worker_port(p, worker),
@@ -401,7 +423,9 @@ impl BatchRef {
                 );
                 log(&msg);
                 if *task == TaskType::Pdf {
-                    return Err(anyhow!("pdf batch reference refused under host load: {load1:.2} on {ncores} cores"));
+                    return Err(anyhow!(
+                        "pdf batch reference refused under host load: {load1:.2} on {ncores} cores"
+                    ));
                 }
                 return Ok(None);
             }
@@ -491,6 +515,7 @@ impl BatchRef {
                     port,
                     pre,
                     pre_load: Self::sample_host_load(),
+                    bracket_id: bracket_id.unwrap_or(parent_run_id).to_string(),
                 }))
             }
             Err(e) => {
@@ -548,13 +573,19 @@ impl BatchRef {
                 true
             }
         };
-        let batch = self
-            .sandbox
-            .instance_id
-            .strip_suffix("_batchref")
-            .unwrap_or(&self.sandbox.instance_id)
-            .to_string();
-        append_history(&self.task, &batch, self.pre, post, drift, self.pre_load, Self::sample_host_load());
+        // Per-bracket id (initial vs _extN): each bracket pairs its own pre
+        // with its own post. Deriving from instance_id re-merged extends
+        // into the initial row (9 multi-row batches among 63 stamped rows).
+        let batch = self.bracket_id.clone();
+        append_history(
+            &self.task,
+            &batch,
+            self.pre,
+            post,
+            drift,
+            self.pre_load,
+            Self::sample_host_load(),
+        );
         self.sandbox.cleanup();
         BatchRefReport {
             pre: self.pre,
@@ -764,7 +795,11 @@ mod tests {
             return;
         }
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let stamped = text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|v| v.get("method").and_then(|m| m.as_str()) == Some(current_method().as_str())).count();
+        let stamped = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some(current_method().as_str()))
+            .count();
         if stamped == 0 {
             eprintln!("skipping: no current-method rows in ref_history.jsonl (pre-regime file)");
             return;
@@ -817,7 +852,8 @@ mod tests {
         ));
         let f = dir.join("h.jsonl");
         let _ = std::fs::create_dir_all(&dir);
-        let old_row = serde_json::json!({"task":"redis","ref_pre":10.0,"method":"host-published-port/reps3"});
+        let old_row =
+            serde_json::json!({"task":"redis","ref_pre":10.0,"method":"host-published-port/reps3"});
         let new_row = serde_json::json!({"task":"redis","ref_pre":100.0,"method":current_method()});
         std::fs::write(&f, format!("{}\n{}\n", old_row, new_row)).unwrap();
         let _g = HIST_SERIAL.lock();
@@ -897,18 +933,42 @@ mod tests {
         let f = dir.join("h.jsonl");
         let _g = HIST_SERIAL.lock();
         std::env::set_var("SDB_REF_HISTORY", &f);
-        append_history(&TaskType::Redis, "parent_w0", 100.0, Some(105.0), false, Some((2.0, 24)), Some((2.1, 24)));
-        append_history(&TaskType::Redis, "parent_w0", 100.0, None, true, Some((2.0, 24)), None);
+        append_history(
+            &TaskType::Redis,
+            "parent_w0",
+            100.0,
+            Some(105.0),
+            false,
+            Some((2.0, 24)),
+            Some((2.1, 24)),
+        );
+        append_history(
+            &TaskType::Redis,
+            "parent_w0",
+            100.0,
+            None,
+            true,
+            Some((2.0, 24)),
+            None,
+        );
         let text = std::fs::read_to_string(&f).unwrap();
-        let rows: Vec<serde_json::Value> =
-            text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(rows.len(), 2, "one row per batch event, never two");
         assert_eq!(rows[0]["batch"], "parent_w0");
         assert_eq!(rows[0]["verified"], true);
         assert_eq!(rows[1]["verified"], false);
         assert_eq!(rows[1]["ref_post"], serde_json::Value::Null);
-        assert_eq!(rows[0]["method"], serde_json::Value::String(current_method()));
-        assert_eq!(rows[1]["method"], serde_json::Value::String(current_method()));
+        assert_eq!(
+            rows[0]["method"],
+            serde_json::Value::String(current_method())
+        );
+        assert_eq!(
+            rows[1]["method"],
+            serde_json::Value::String(current_method())
+        );
         assert_eq!(rows[0]["load_pre"], 2.0);
         assert_eq!(rows[0]["ncores"], 24);
         assert_eq!(rows[1]["load_post"], serde_json::Value::Null);
@@ -943,9 +1003,18 @@ mod tests {
         let f = dir.join("h.jsonl");
         let _g = HIST_SERIAL.lock();
         std::env::set_var("SDB_REF_HISTORY", &f);
-        append_history(&TaskType::Redis, "b", 100.0, Some(105.0), false, Some((2.0, 24)), Some((2.5, 24)));
+        append_history(
+            &TaskType::Redis,
+            "b",
+            100.0,
+            Some(105.0),
+            false,
+            Some((2.0, 24)),
+            Some((2.5, 24)),
+        );
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&f).unwrap().lines().next().unwrap()).unwrap();
+            serde_json::from_str(std::fs::read_to_string(&f).unwrap().lines().next().unwrap())
+                .unwrap();
         assert_eq!(row["load_pre"], 2.0);
         assert_eq!(row["load_post"], 2.5);
         assert_eq!(row["ncores"], 24);
@@ -1042,8 +1111,13 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::env::set_var("SDB_REF_HISTORY", &scratch);
-        let _g = HIST_SERIAL.lock();
-        let _ = std::fs::remove_file(&scratch);
+        // Scope the serial guard: it must drop before the awaits below
+        // (clippy::await_holding_lock). Serialisation only covers the
+        // scratch-file setup, which is the racy part under parallel tests.
+        {
+            let _g = HIST_SERIAL.lock();
+            let _ = std::fs::remove_file(&scratch);
+        }
 
         let run_id = format!(
             "pdf-lifecycle-probe-{}-{}",
