@@ -179,6 +179,19 @@ impl BenchmarkRunResult {
         self.effective_cost_usd.unwrap_or(self.total_cost_usd)
     }
 
+    /// Cost per solved task: mean trial cost / Pass@1 fraction. Bounded,
+    /// monotonic, and directly spendable ("$0.42 per solved redis task"),
+    /// unlike pts/¢ which explodes toward infinity as cost → 0. None when
+    /// Pass@1 is 0 (nothing solved: cost per solve is undefined, not zero).
+    pub fn cost_per_solved(&self) -> Option<f64> {
+        let p1 = self.pass_at_1.unwrap_or(self.pass_rate) / 100.0;
+        if p1 > 0.0 {
+            Some(self.effective_cost() / p1)
+        } else {
+            None
+        }
+    }
+
     /// First 12 hex chars of the digest (or trailing image tag when unpinned).
     fn short_digest(img: &str) -> String {
         let hex = img.rsplit('@').next().unwrap_or(img);
@@ -1211,8 +1224,8 @@ impl LeaderboardManager {
                 "Rules",
                 "API cost ($)",
                 "Effective cost ($)",
+                "$/solved",
                 "Cache Savings",
-                "Score / ¢",
             ]);
 
         for (idx, r) in results.iter().enumerate() {
@@ -1329,6 +1342,11 @@ impl LeaderboardManager {
                 Cell::new(BenchmarkRunResult::rules_of(r)),
                 Cell::new(format!("${:.4}", r.total_cost_usd)).fg(Color::Magenta),
                 Cell::new(format!("${:.4}", r.effective_cost())).fg(Color::Magenta),
+                Cell::new(match r.cost_per_solved() {
+                    Some(c) => format!("${:.4}", c),
+                    None => "--".to_string(),
+                })
+                .fg(Color::Magenta),
                 Cell::new(savings_str).fg(Color::Green),
                 Cell::new(match r.throughput_score {
                     Some(tp) => format!("{tp:.1}"),

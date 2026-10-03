@@ -8,6 +8,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.2`: verifier hardening. DNS stage 1 requires an answer
+///   section (packet echo scores 0); pubsub stage 1 handshakes a fresh
+///   random key (hard-coded `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=` stub fails);
+///   proxy stage 1 pinned by a static-body negative test; the compliance
+///   scanner covers `vendor/` + hidden dirs and rejects escaping symlinks.
+///   Stricter gates: previously passing stubs now fail.
 /// - `2026-10-03.1`: fair cost is the mean over ALL trials, not just
 ///   passing ones. The old passing-only mean understated real spend
 ///   (median 1.44x, up to 6.7x on mixed outcomes): failed trials still
@@ -36,7 +42,7 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
-pub const RULES_VERSION: &str = "2026-10-03.1";
+pub const RULES_VERSION: &str = "2026-10-03.2";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
