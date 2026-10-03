@@ -259,10 +259,10 @@ pub fn drift_threshold(task: &TaskType) -> f64 {
 /// only meaningful when numerator and denominator share the apparatus.
 /// DNS/PDF cannot share it — no container speaks their protocol — so they use
 /// the loopback path with the same rep/warmup discipline instead.
-fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
+async fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
     match task {
-        TaskType::Redis => BenchmarkRunner::run_redis_benchmark(net, "ref-redis", 6379),
-        TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark(net, "ref-http", 80),
+        TaskType::Redis => BenchmarkRunner::run_redis_benchmark_async(net, "ref-redis", 6379).await,
+        TaskType::Http | TaskType::Proxy => BenchmarkRunner::run_wrk_benchmark_async(net, "ref-http", 80).await,
         // Retired (see batch_port): a batch denominator for DNS must never
         // exist. Per-trial live refs still use measure_dns_reference().
         TaskType::Dns => Err(anyhow!("dns is retired; no batch denominator")),
@@ -275,13 +275,13 @@ fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
 /// reference, addressed by the `candidate` alias on the same run network.
 /// Redis/http/proxy candidates join the run network before verification, so
 /// this alias resolves exactly where `ref-redis`/`ref-http` resolve.
-pub fn measure_candidate(task: &TaskType, net: &str) -> Result<f64> {
+pub async fn measure_candidate(task: &TaskType, net: &str) -> Result<f64> {
     match task {
         TaskType::Redis => {
-            BenchmarkRunner::run_redis_benchmark(net, "candidate", candidate_port(task))
+            BenchmarkRunner::run_redis_benchmark_async(net, "candidate", candidate_port(task)).await
         }
         TaskType::Http | TaskType::Proxy => {
-            BenchmarkRunner::run_wrk_benchmark(net, "candidate", candidate_port(task))
+            BenchmarkRunner::run_wrk_benchmark_async(net, "candidate", candidate_port(task)).await
         }
         _ => Err(anyhow!("no co-measured candidate path for {:?}", task)),
     }
@@ -329,8 +329,27 @@ pub const CROSS_BATCH_DEVIATION_WARN: f64 = 0.10;
 impl BatchRef {
     /// Start the batch ref, warm it up (one discarded window), and return the
     /// median-of-3 pre-batch value. `None` task support (WAL/...) yields `Ok(None)`.
-    pub fn start(task: &TaskType, parent_run_id: &str, log: &dyn Fn(&str)) -> Result<Option<Self>> {
-        Self::start_on_worker(task, parent_run_id, log, 0)
+    pub fn start(task: &TaskType, parent_run_id: &str, log: &(dyn Fn(&str) + Sync)) -> Result<Option<Self>> {
+        // Sync bridge for CLI/tests. Async callers use start_async below:
+        // block_on inside a runtime panics (exit 101), so reuse-or-build.
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => tokio::task::block_in_place(|| h.block_on(Self::start_async(task, parent_run_id, log, 0))),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(Self::start_async(task, parent_run_id, log, 0))
+            }
+        }
+    }
+
+    pub async fn start_async(
+        task: &TaskType,
+        parent_run_id: &str,
+        log: &(dyn Fn(&str) + Sync),
+        worker: u8,
+    ) -> Result<Option<Self>> {
+        Self::start_on_worker(task, parent_run_id, log, worker).await
     }
 
     /// Worker-aware start: batch port follows the worker offset so parallel
@@ -361,10 +380,10 @@ impl BatchRef {
         Some((load1, ncores))
     }
 
-    pub fn start_on_worker(
+    pub async fn start_on_worker(
         task: &TaskType,
         parent_run_id: &str,
-        log: &dyn Fn(&str),
+        log: &(dyn Fn(&str) + Sync),
         worker: u8,
     ) -> Result<Option<Self>> {
         let port = match batch_port(task) {
@@ -430,8 +449,8 @@ impl BatchRef {
         }
         // Warmup window (discarded): settles page cache / JIT so measured
         // windows reflect steady state, not cold start.
-        let _ = measure(task, &sandbox.network_name(), port);
-        match measure(task, &sandbox.network_name(), port) {
+        let _ = measure(task, &sandbox.network_name(), port).await;
+        match measure(task, &sandbox.network_name(), port).await {
             Ok(pre) => {
                 log(&format!(
                     "[BATCH-REF] Batch reference {} median: {:.0} req/sec on port {} (shared by all trials)",
@@ -493,8 +512,8 @@ impl BatchRef {
 
     /// Post-batch bracket: re-measure, flag drift, append history, clean up.
     /// Never fails the batch: worst case the report carries `post: None`.
-    pub fn finish(self, log: &dyn Fn(&str)) -> BatchRefReport {
-        let post = match measure(&self.task, &self.sandbox.network_name(), self.port) {
+    pub async fn finish(self, log: &(dyn Fn(&str) + Sync)) -> BatchRefReport {
+        let post = match measure(&self.task, &self.sandbox.network_name(), self.port).await {
             Ok(v) => Some(v),
             Err(e) => {
                 log(&format!(
@@ -1008,9 +1027,9 @@ mod tests {
     /// Requires docker and the pinned `REF_PDF_RUN_IMAGE`; ignored so the
     /// default suite stays hermetic. Run with:
     ///   cargo test --lib pdf_batch_ref_lifecycle -- --ignored --nocapture
-    #[test]
+    #[tokio::test]
     #[ignore = "requires docker + the pinned pdf-ref image"]
-    fn pdf_batch_ref_lifecycle() {
+    async fn pdf_batch_ref_lifecycle() {
         // Never append to the production history: it is the input to
         // cross-batch comparability warnings, and a synthetic probe run would
         // sit in that distribution as if it were a real measurement.
@@ -1053,7 +1072,7 @@ mod tests {
         let batch = started
             .expect("pdf BatchRef::start returned Ok(None) - the reference never became ready");
 
-        let report = batch.finish(&log);
+        let report = batch.finish(&log).await;
         assert!(
             report.pre > 0.0,
             "pre-measurement should be a positive pages/sec, got {}",

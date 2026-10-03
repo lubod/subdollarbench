@@ -1913,7 +1913,8 @@ async fn run_extension_batch(
             &spec.parent_run_id,
             batch_log,
             worker,
-        ) {
+        )
+        .await {
             Ok(b) => b,
             Err(e) => {
                 // Pdf has no live-ref fallback: FATAL (loud) instead of
@@ -2036,7 +2037,10 @@ async fn run_extension_batch(
             }
         }
     }
-    let drift = ext_batch_ref.map(|b| b.finish(batch_log).drift);
+    let drift = match ext_batch_ref {
+        Some(b) => Some(b.finish(batch_log).await.drift),
+        None => None,
+    };
     ExtBatchOut {
         results,
         passing,
@@ -2387,7 +2391,8 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
             &parent_run_id,
             &batch_log,
             worker,
-        ) {
+        )
+        .await {
             Ok(b) => b,
             Err(e) => {
                 // Pdf has no live-ref fallback: FATAL (loud). Other tasks
@@ -2601,7 +2606,10 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
     // batches mint separate BatchRefs, so OR-accumulate drift across all of
     // them. (Gate: initial bracket drifted but extensions clean — the merge
     // kept only the last drift and scored off a known-bad denominator.)
-    let mut any_drift = batch_ref.map(|b| b.finish(&batch_log).drift).unwrap_or(false);
+    let mut any_drift = match batch_ref {
+        Some(b) => b.finish(&batch_log).await.drift,
+        None => false,
+    };
 
     let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
         LeaderboardManager::consolidate_multi_trial_run(

@@ -1004,11 +1004,11 @@ impl BenchmarkPipeline {
                 );
                 match config.task {
                     TaskType::Redis => {
-                        if let Ok(tp) = BenchmarkRunner::run_redis_benchmark(
+                        if let Ok(tp) = BenchmarkRunner::run_redis_benchmark_async(
                             &sandbox.network_name(),
                             "candidate",
                             port,
-                        ) {
+                        ).await {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1017,11 +1017,11 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
-                            match BenchmarkRunner::run_redis_benchmark(
+                            match BenchmarkRunner::run_redis_benchmark_async(
                                 &sandbox.network_name(),
                                 "ref-redis",
                                 6379,
-                            ) {
+                            ).await {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
                                         "  Official Reference Redis: {:.0} req/sec",
@@ -1042,11 +1042,11 @@ impl BenchmarkPipeline {
                         }
                     }
                     TaskType::Http => {
-                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark_async(
                             &sandbox.network_name(),
                             "candidate",
                             port,
-                        ) {
+                        ).await {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1055,11 +1055,11 @@ impl BenchmarkPipeline {
                         }
                         if config.batch_reference.is_none() {
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            match BenchmarkRunner::run_wrk_benchmark(
+                            match BenchmarkRunner::run_wrk_benchmark_async(
                                 &sandbox.network_name(),
                                 "ref-http",
                                 80,
-                            ) {
+                            ).await {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
                                         "  Official Reference Nginx: {:.0} req/sec",
@@ -1096,11 +1096,11 @@ impl BenchmarkPipeline {
                         );
                     }
                     TaskType::Proxy => {
-                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark(
+                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark_async(
                             &sandbox.network_name(),
                             "candidate",
                             port,
-                        ) {
+                        ).await {
                             logger.log(&format!(
                                 "  Candidate Throughput (median of 3): {:.0} req/sec",
                                 tp
@@ -1111,11 +1111,11 @@ impl BenchmarkPipeline {
                             // Same nginx denominator as http: a proxy cannot
                             // beat direct. Live per-trial when no batch ref.
                             logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            match BenchmarkRunner::run_wrk_benchmark(
+                            match BenchmarkRunner::run_wrk_benchmark_async(
                                 &sandbox.network_name(),
                                 "ref-http",
                                 80,
-                            ) {
+                            ).await {
                                 Ok(ref_tp) => {
                                     logger.log(&format!(
                                         "  Official Reference Nginx: {:.0} req/sec",

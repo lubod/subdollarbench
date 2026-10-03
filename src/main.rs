@@ -171,9 +171,10 @@ async fn run_trial_batch(
     logger: Arc<CliPipelineLogger>,
 ) -> Result<TrialBatchOutput> {
     let batch_ref = if p.count > 1 {
-        match subdollarbench::bench::batch_ref::BatchRef::start(&p.task, &p.parent_run_id, &|m| {
+        match subdollarbench::bench::batch_ref::BatchRef::start_async(&p.task, &p.parent_run_id, &|m| {
             println!("{}", m)
-        }) {
+        }, 0)
+        .await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
@@ -240,7 +241,10 @@ async fn run_trial_batch(
             }
         }
     }
-    let drift = batch_ref.map(|b| b.finish(&|m| println!("{}", m)).drift);
+    let drift = match batch_ref {
+        Some(b) => Some(b.finish(&|m| println!("{}", m)).await.drift),
+        None => None,
+    };
     Ok(TrialBatchOutput {
         results,
         passing,
@@ -347,11 +351,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             // Batch reference: one shared denominator for all trials.
             // Single-trial runs keep live per-trial measurement.
             let batch_ref = if total_trials > 1 {
-                match subdollarbench::bench::batch_ref::BatchRef::start(
+                match subdollarbench::bench::batch_ref::BatchRef::start_async(
                     &task,
                     &parent_run_id,
                     &|m| println!("{}", m),
-                ) {
+                    0,
+                ).await {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("  [BATCH-REF] setup failed ({}); trials use live refs.", e);
@@ -447,7 +452,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
             }
 
-            let batch_drift = batch_ref.map(|b| b.finish(&|m| println!("{}", m)).drift);
+            let batch_drift = match batch_ref {
+        Some(b) => Some(b.finish(&|m| println!("{}", m)).await.drift),
+        None => None,
+    };
 
             let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
                 LeaderboardManager::consolidate_multi_trial_run(

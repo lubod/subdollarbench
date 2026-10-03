@@ -131,7 +131,17 @@ impl Drop for BenchLock {
 /// Acquire the benchmark lock, fail-open after 90s (a run must never deadlock
 /// on a stale lock; callers log the fallback). flock means a crashed holder
 /// frees the lock with its fd — waiting is bounded by live holders only.
+///
+/// Sync version: blocks the calling thread (100ms park). NEVER call from a
+/// tokio worker: the sleep-retry starves the runtime — gdb showed every
+/// worker parked and the whole API hung with empty bodies (2026-10-02 and
+/// again 2026-10-03, when a wedged redis-benchmark client held a worker
+/// inside Command::output for 5h). Async callers use acquire_bench_lock_async.
 pub fn acquire_bench_lock() -> BenchLock {
+    acquire_bench_lock_sync(Duration::from_secs(90))
+}
+
+fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
     let path = std::env::temp_dir().join("subdollar-bench.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -144,18 +154,29 @@ pub fn acquire_bench_lock() -> BenchLock {
     };
     let start = Instant::now();
     loop {
-        // LOCK_NB: never sleep-hold a tokio worker; 100ms park between tries.
+        // LOCK_NB: bounded park between tries.
         let locked = flock_try_lock(&file);
         if locked {
             return BenchLock { file: Some(file), owned: true };
         }
-        if start.elapsed() > Duration::from_secs(90) {
+        if start.elapsed() > limit {
             eprintln!(
-                "[BENCH] lock wait exceeded 90s; proceeding without lock (contention possible)"
+                "[BENCH] lock wait exceeded {}s; proceeding without lock (contention possible)",
+                limit.as_secs()
             );
             return BenchLock { file: None, owned: false };
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Async acquisition: parks the sync wait on spawn_blocking so no tokio
+/// worker ever sleeps holding the runtime hostage. Same fd/flock semantics;
+/// the guard still releases on drop.
+pub async fn acquire_bench_lock_async() -> BenchLock {
+    match tokio::task::spawn_blocking(|| acquire_bench_lock_sync(Duration::from_secs(90))).await {
+        Ok(g) => g,
+        Err(_) => BenchLock { file: None, owned: false },
     }
 }
 
@@ -229,8 +250,37 @@ impl BenchmarkRunner {
 
     /// Median over `reps` windows under the host-global lock. Partial success
     /// still yields a median; total failure returns the last error.
+    /// Sync core runs on block_in_place (never parks the runtime event loop
+    /// in sleep, but a wedged client still pins a blocking thread — the
+    /// async shell below is the path async pipelines must take).
     pub fn run_redis_benchmark_reps(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
-        let _lock = acquire_bench_lock();
+        let net = net.to_string();
+        let host = host.to_string();
+        tokio::task::block_in_place(|| {
+            let _lock = acquire_bench_lock();
+            Self::redis_reps_blocking(&net, &host, port, reps)
+        })
+    }
+
+    /// Async shell: lock wait + every blocking `docker run` window parks on
+    /// the blocking pool. A wedged client (5h redis-benchmark, 2026-10-03)
+    /// stalls one blocking thread, not a tokio worker serving the API.
+    pub async fn run_redis_benchmark_reps_async(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
+        let net = net.to_string();
+        let host = host.to_string();
+        tokio::task::spawn_blocking(move || {
+            let _lock = acquire_bench_lock();
+            Self::redis_reps_blocking(&net, &host, port, reps)
+        })
+        .await
+        .map_err(|e| anyhow!("bench blocking pool join failed: {}", e))?
+    }
+
+    pub async fn run_redis_benchmark_async(net: &str, host: &str, port: u16) -> Result<f64> {
+        Self::run_redis_benchmark_reps_async(net, host, port, BENCH_REPS).await
+    }
+
+    fn redis_reps_blocking(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
         for _ in 0..reps.max(1) {
@@ -278,10 +328,32 @@ impl BenchmarkRunner {
         Self::run_wrk_benchmark_reps(net, host, port, BENCH_REPS)
     }
 
-    /// Median over `reps` windows under the host-global lock. Partial success
-    /// still yields a median; total failure returns the last error.
+    /// Same sync/async split as redis above: sync core on block_in_place,
+    /// async shell on spawn_blocking for async pipelines.
     pub fn run_wrk_benchmark_reps(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
-        let _lock = acquire_bench_lock();
+        let net = net.to_string();
+        tokio::task::block_in_place(|| {
+            let _lock = acquire_bench_lock();
+            Self::wrk_reps_blocking(&net, host, port, reps)
+        })
+    }
+
+    pub async fn run_wrk_benchmark_reps_async(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
+        let net = net.to_string();
+        let host = host.to_string();
+        tokio::task::spawn_blocking(move || {
+            let _lock = acquire_bench_lock();
+            Self::wrk_reps_blocking(&net, &host, port, reps)
+        })
+        .await
+        .map_err(|e| anyhow!("bench blocking pool join failed: {}", e))?
+    }
+
+    pub async fn run_wrk_benchmark_async(net: &str, host: &str, port: u16) -> Result<f64> {
+        Self::run_wrk_benchmark_reps_async(net, host, port, BENCH_REPS).await
+    }
+
+    fn wrk_reps_blocking(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
         let url = format!("http://{host}:{port}/");
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
@@ -321,6 +393,10 @@ impl BenchmarkRunner {
 
 #[cfg(test)]
 mod tests {
+    // Lock tests share one kernel flock: parallel threads race (holder vs
+    // failfast), so a green-alone/red-together flake. Serialize like
+    // HIST_SERIAL in batch_ref.
+    static LOCK_SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
     use super::*;
 
     #[test]
@@ -382,6 +458,7 @@ mod tests {
 
     #[test]
     fn test_bench_lock_acquire_release() {
+        let _g = LOCK_SERIAL.lock();
         {
             let _g = acquire_bench_lock();
             let path = std::env::temp_dir().join("subdollar-bench.lock");
@@ -394,6 +471,7 @@ mod tests {
 
     #[test]
     fn test_bench_lock_mutual_exclusion() {
+        let _g = LOCK_SERIAL.lock();
         // Two guards cannot both own: second acquire reports unowned quickly
         // (failfast), never blocks 90s, never mtime-races.
         let _g = acquire_bench_lock();
@@ -406,6 +484,7 @@ mod tests {
 
     #[test]
     fn test_bench_lock_released_on_drop() {
+        let _g = LOCK_SERIAL.lock();
         {
             let _g = acquire_bench_lock();
             assert!(_g.owned);
