@@ -1185,9 +1185,16 @@ impl PortalExporter {
         let runs_path = Path::new(runs_dir);
         let mut results = LeaderboardManager::load_all(results_dir);
         results.truncate(keep);
+        // Retired tasks (dns 2026-09-30): archived in results//DB, never
+        // published per-run either. Explicit ?task=dns / --task dns still
+        // renders the withdrawn rows from the API/CLI.
         let visible: Vec<_> = results
             .into_iter()
-            .filter(|r| !is_hidden(runs_path, &r.id) && !r.id.starts_with("test_"))
+            .filter(|r| {
+                !is_hidden(runs_path, &r.id)
+                    && !r.id.starts_with("test_")
+                    && !crate::report::is_quarantined(&r.task)
+            })
             .collect();
         let pre_freeze = visible.len();
         let visible: Vec<_> = visible
@@ -1260,6 +1267,12 @@ impl PortalExporter {
     /// above); the public portal is aggregated by design.
     pub fn export_rollup(results_dir: &str, out: &str, base_url: &str) -> Result<PortalSummary> {
         let results = LeaderboardManager::load_all(results_dir);
+        // Retired tasks (dns 2026-09-30) stay archived in results//DB but
+        // never publish: the rollup ranks comparable active tasks only.
+        let results: Vec<_> = results
+            .into_iter()
+            .filter(|r| !crate::report::is_quarantined(&r.task))
+            .collect();
         let pre_freeze = results.len();
         let fresh: Vec<_> = results
             .into_iter()

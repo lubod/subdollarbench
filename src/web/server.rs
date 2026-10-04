@@ -7,8 +7,8 @@
 use crate::config::TaskType;
 use crate::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use crate::report::{
-    assess_stability, is_hidden, set_hidden, BenchmarkRunResult, EnvironmentInfo, FileInfo,
-    LeaderboardManager, PortalExporter, RunArchiver, RunManifest, Stability, Store,
+    assess_stability, is_hidden, is_quarantined, set_hidden, BenchmarkRunResult, EnvironmentInfo,
+    FileInfo, LeaderboardManager, PortalExporter, RunArchiver, RunManifest, Stability, Store,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -1158,6 +1158,15 @@ pub struct LeaderboardQuery {
 async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<serde_json::Value>> {
     let r_dir = resolve_results_dir();
     let mut list = LeaderboardManager::load_all(r_dir.to_str().unwrap_or("./results"));
+    // Retired tasks (dns) are archived, not published: the default API
+    // omits them; explicit ?task=dns still renders the withdrawn rows.
+    let want_retired = query
+        .task
+        .as_deref()
+        .is_some_and(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("all"));
+    if !want_retired {
+        list.retain(|r| !is_quarantined(&r.task));
+    }
     if let Some(task_filter) = query.task {
         let trimmed = task_filter.trim();
         if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("all") {

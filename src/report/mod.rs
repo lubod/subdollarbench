@@ -11,6 +11,7 @@ pub use archive::{FileInfo, RunArchiver, RunManifest, RunTokenUsage};
 pub use environment::EnvironmentInfo;
 pub use judge::{ReviewJson, RunJudge};
 pub use leaderboard::{assess_stability, BenchmarkRunResult, LeaderboardManager, Stability};
+pub use leaderboard::{is_quarantined, QUARANTINED_TASKS};
 pub use leaderboard::{legacy_rules_version, RULES_LEGACY_CHEAT, RULES_LEGACY_PRE_CHEAT};
 pub use matrix::{regime_of_version, validate_comparison_wave, validate_matrix_plan};
 pub use portal::{is_hidden, set_hidden, PortalExporter};

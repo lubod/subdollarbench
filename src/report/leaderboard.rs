@@ -119,7 +119,12 @@ pub fn legacy_rules_version(timestamp: &str) -> &'static str {
 /// under investigation (see DNS stage-5 89% failure analysis). Ranked
 /// within-task only; excluded from the consolidated global board until
 /// cleared here.
-pub const QUARANTINED_TASKS: &[&str] = &[];
+/// Retired tasks stay archived (rows parse, stamps verify) but never rank:
+/// excluded from the global board, the portal rollup, and the API default.
+/// `dns` retired 2026-09-30 (saturated + lenient verifier + unmeasurable
+/// mock-spec denominator); per-task `leaderboard --task dns` still renders
+/// the 5 archived rows with their withdrawal banner.
+pub const QUARANTINED_TASKS: &[&str] = &["dns"];
 
 /// True when a task is quarantined from cross-model ranking.
 pub fn is_quarantined(task: &str) -> bool {

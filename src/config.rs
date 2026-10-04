@@ -873,6 +873,8 @@ pub enum SandboxCommands {
 pub enum TaskType {
     Redis,
     Http,
+    /// Retired 2026-09-30: parses (archived rows) but refuses to run.
+    #[value(hide = true)]
     Dns,
     Pdf,
     Wal,
