@@ -791,6 +791,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     &run.id,
                     subs.clone(),
                     run.ref_drift,
+                    // Pass-through, never overwrite: the stored grader is
+                    // the witness value (or honest None). Merge takes it as
+                    // a param precisely so a re-merge cannot launder trial
+                    // stamps onto the parent (420/420 incident, .3 cutover).
+                    run.graded_under.clone(),
                 ) else {
                     skipped += 1;
                     continue;

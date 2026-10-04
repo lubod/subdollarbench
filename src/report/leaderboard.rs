@@ -249,6 +249,7 @@ impl BenchmarkRunResult {
         parent_id: &str,
         subruns: Vec<BenchmarkRunResult>,
         batch_drift: Option<bool>,
+        graded_under: Option<String>,
     ) -> Option<BenchmarkRunResult> {
         if subruns.is_empty() {
             return None;
@@ -431,22 +432,16 @@ impl BenchmarkRunResult {
                 _ => Some("mixed".to_string()),
             }
         };
-        // Grader provenance inherits like the score stamp, preferring the
-        // explicit `graded_under` and falling back to the subrun's score
-        // stamp (pre-split rows). Mixed graders stay "mixed".
-        let merged_graded_under: Option<String> = {
-            let mut vs: Vec<String> = subruns
-                .iter()
-                .filter_map(|r| r.graded_under.clone().or_else(|| r.rules_version.clone()))
-                .collect();
-            vs.sort();
-            vs.dedup();
-            match vs.len() {
-                1 => Some(vs.into_iter().next().unwrap()),
-                0 => None,
-                _ => Some("mixed".to_string()),
-            }
-        };
+        // Grader provenance: trials carry NO independent grader — a trial is
+        // graded when its parent batch runs, so the parent's `graded_under`
+        // is the only source of truth. Never derive the parent from trial
+        // stamps: the .3 cutover wrote the fresh score stamp into trial
+        // `graded_under` (420/420 wrong), and any merge reading them back
+        // would launder that error onto the parent. `merge_subruns` takes
+        // an explicit grader param; backfill/extend pass the stored parent
+        // value through, and a parent without one stays None (honest
+        // unknown), never a trial stamp, never the fresh score stamp.
+        let merged_graded_under: Option<String> = graded_under;
         let (stab, _) = assess_stability(&subruns);
         let stab_str = match stab {
             Stability::Stable => "stable",
@@ -688,8 +683,12 @@ impl LeaderboardManager {
             return None;
         }
 
-        let merged =
-            BenchmarkRunResult::merge_subruns(parent_run_id, subrun_results.to_vec(), batch_drift)?;
+        let merged = BenchmarkRunResult::merge_subruns(
+            parent_run_id,
+            subrun_results.to_vec(),
+            batch_drift,
+            Some(crate::report::rules::fingerprint()),
+        )?;
 
         if save_results {
             let repo_root = crate::config::get_repo_root();
@@ -1102,7 +1101,9 @@ impl LeaderboardManager {
         for (parent_id, mut subruns) in groups {
             if subruns.len() > 1 {
                 subruns.sort_by(|a, b| a.id.cmp(&b.id));
-                if let Some(merged) = BenchmarkRunResult::merge_subruns(&parent_id, subruns, None) {
+                if let Some(merged) =
+                    BenchmarkRunResult::merge_subruns(&parent_id, subruns, None, None)
+                {
                     consolidated.push(merged);
                 }
             } else {
@@ -1742,8 +1743,32 @@ mod tests {
         let t3 = make_run("run_trial3", 7000.0, 50.0, 9, 0.003, 100.0);
 
         let merged =
-            BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3], None).unwrap();
+            BenchmarkRunResult::merge_subruns("run_parent", vec![t1, t2, t3], None, None).unwrap();
         assert_eq!(merged.id, "run_parent");
+        // Grader pass-through (420/420 incident): the parent grader comes
+        // ONLY from the explicit param — never from trial stamps. A re-merge
+        // of stored rows whose trials carry a newer stamp must not launder
+        // it onto the parent.
+        let stale_trials = vec![
+            make_run("s1", 5000.0, 40.0, 8, 0.001, 100.0),
+            make_run("s2", 6000.0, 30.0, 7, 0.002, 100.0),
+        ];
+        let kept = BenchmarkRunResult::merge_subruns(
+            "p",
+            stale_trials,
+            None,
+            Some("grader-a".to_string()),
+        )
+        .unwrap();
+        assert_eq!(kept.graded_under.as_deref(), Some("grader-a"));
+        let dropped = BenchmarkRunResult::merge_subruns(
+            "p",
+            vec![make_run("s3", 5000.0, 40.0, 8, 0.001, 100.0)],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(dropped.graded_under, None);
         assert_eq!(merged.total_trials, Some(3));
         assert_eq!(merged.pass_rate, 100.0);
         assert_eq!(merged.pass_at_1, Some(100.0));
@@ -1764,7 +1789,8 @@ mod tests {
         let f1 = make_run("run_a", 5000.0, 40.0, 8, 0.001, 100.0);
         let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
         let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
-        let mixed = BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3], None).unwrap();
+        let mixed =
+            BenchmarkRunResult::merge_subruns("run_mixed", vec![f1, f2, f3], None, None).unwrap();
         assert!((mixed.pass_rate - 66.66666666666667).abs() < 1e-9);
         assert_eq!(mixed.throughput_req_sec.unwrap(), 5500.0);
         assert_eq!(mixed.total_cost_usd, 0.002);
@@ -1817,7 +1843,7 @@ mod tests {
             stability: None,
             frontier_fraction: None,
         };
-        let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None).unwrap();
+        let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
         // Candidate rate survives (real measurement); denominator, source
         // and score are gone (no valid comparison exists).
         assert_eq!(m.throughput_req_sec, Some(9_000.0));
@@ -1875,6 +1901,7 @@ mod tests {
                 mk("b", Some(60_000.0)),
                 mk("c", Some(70_000.0)),
             ],
+            None,
             None,
         )
         .unwrap();
@@ -1938,6 +1965,7 @@ mod tests {
             "w",
             vec![mk("a", 100.0), mk("b", 100.0), mk("c", 0.0)],
             None,
+            None,
         )
         .unwrap();
         let (lo, hi) = (m.pass_at_1_lo.unwrap(), m.pass_at_1_hi.unwrap());
@@ -1993,14 +2021,16 @@ mod tests {
         };
         let subs = vec![trial("a"), trial("b"), trial("c")];
 
-        let clean = BenchmarkRunResult::merge_subruns("clean", subs.clone(), Some(false)).unwrap();
+        let clean =
+            BenchmarkRunResult::merge_subruns("clean", subs.clone(), Some(false), None).unwrap();
         assert!(
             clean.throughput_score.unwrap_or(0.0) > 0.0,
             "an un-drifted batch reference must still score"
         );
         assert_eq!(clean.throughput_req_sec, Some(35_000.0));
 
-        let drifted = BenchmarkRunResult::merge_subruns("drift", subs.clone(), Some(true)).unwrap();
+        let drifted =
+            BenchmarkRunResult::merge_subruns("drift", subs.clone(), Some(true), None).unwrap();
         assert_eq!(
             drifted.throughput_score, None,
             "a drifted bracket must not yield a ranked throughput score"
@@ -2017,7 +2047,7 @@ mod tests {
         );
 
         // Same trials, unknown bracket: not scored, not silently trusted.
-        let unknown = BenchmarkRunResult::merge_subruns("unknown", subs, None).unwrap();
+        let unknown = BenchmarkRunResult::merge_subruns("unknown", subs, None, None).unwrap();
         assert!(unknown.throughput_score.unwrap_or(0.0) > 0.0);
     }
 
@@ -2516,7 +2546,8 @@ mod tests {
             stability: None,
             frontier_fraction: None,
         };
-        let one = BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None).unwrap();
+        let one =
+            BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None, None).unwrap();
         assert!(one.pass_at_1_lo.unwrap() > 0.0);
         let (olo, ohi) = (one.pass_at_1_lo.unwrap(), one.pass_at_1_hi.unwrap());
         assert!(
@@ -2529,7 +2560,8 @@ mod tests {
             "single-trial lo {olo} should rank below 9/9 lo {lo9}"
         );
         // A lone failure pins lo at 0 with a wide upper bound.
-        let zero = BenchmarkRunResult::merge_subruns("zero", vec![mk("z", 0.0)], None).unwrap();
+        let zero =
+            BenchmarkRunResult::merge_subruns("zero", vec![mk("z", 0.0)], None, None).unwrap();
         assert!((zero.pass_at_1_lo.unwrap() - 0.0).abs() < 1e-9);
         assert!(zero.pass_at_1_hi.unwrap() > 50.0);
     }
