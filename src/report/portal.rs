@@ -95,7 +95,7 @@ pub struct ModelRollupRow {
 const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (DNS) are judged on pass spread alone; single-trial runs default to <em>stable</em>.</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens), falling back to API-only spend when compute metering is absent; avg cost/run is total divided by runs.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS scope:</strong> the verifier scores six MUST stages (header handshake, example.com A, localhost A, test TXT, NXDOMAIN-or-empty for unknown names, 800-query burst with at least 760 ID-matched); TTL values are parsed but never asserted, and forwarding/caching are SHOULD-have judge scope only.</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li><li><strong>Publish freeze:</strong> only runs graded at or after the 2026-09-26 anti-cheat fix are published (timestamp &ge; 2026-09-26T15:34:10Z); earlier rows were graded under a stricter rule that has since changed. Fingerprint allowlists alone are insufficient because graded content changed without a version bump.</li><li><strong>Integrity limits:</strong> egress/static anti-cheat blocklists are self-admitted; a DNS candidate forwarding to the reference is indistinguishable from a real resolver by design; binproto STREAM, proxy X-Forwarded-For, and pubsub 1,000-subscriber requirements are published as specified but verified at reduced scale; the LLM judge may review its own model family rows; the API key travels in the agent container env.</li></ul></section>"#;
 
 /// Rollup page appends the coverage-floor note to the shared methodology.
-const ROLLUP_FLOOR_NOTE_HTML: &str = r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 8 tasks and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
+const ROLLUP_FLOOR_NOTE_HTML: &str = r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 7 active tasks (dns retired 2026-09-30) and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
 
 /// Publish floor for the public rollup: one row per model only with >= 6 of
 /// 8 tasks AND >= 18 total trials (avg 3/task). Thin-coverage rows (e.g. a
@@ -1482,10 +1482,8 @@ impl PortalExporter {
                 p1 = r.p1, lo = r.p1_lo, hi = r.p1_hi,
                 w = (r.p1_hi - r.p1_lo).max(2.0),
             );
-            // Task dots: 8 possible tasks, filled = covered.
-            let all_tasks = [
-                "binproto", "dns", "http", "pdf", "proxy", "pubsub", "redis", "wal",
-            ];
+            // Task dots: 7 active tasks (dns retired 2026-09-30), filled = covered.
+            let all_tasks = ["binproto", "http", "pdf", "proxy", "pubsub", "redis", "wal"];
             let mut dots = String::new();
             for t in all_tasks {
                 let on = r.tasks.iter().any(|x| x == t);
@@ -2587,7 +2585,7 @@ mod tests {
         let results_dir = base.join("results");
         let out_dir = base.join("portal");
         fs::create_dir_all(&results_dir).unwrap();
-        // Fixture meets the rollup coverage floor: 6 tasks x 3 trials = 18.
+        // Fixture meets the rollup coverage floor: 6 active tasks x 3 trials = 18.
         let parents = vec![
             rollup_parent(
                 "roll_c1",
@@ -2622,7 +2620,8 @@ mod tests {
             rollup_parent(
                 "roll_c4",
                 "model-c",
-                "dns",
+                // dns retired: fixtures use active tasks only.
+                "binproto",
                 100.0,
                 0.10,
                 Some(0.10),
