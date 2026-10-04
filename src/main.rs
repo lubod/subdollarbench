@@ -721,11 +721,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 };
                 if run.subruns.is_empty() {
                     // Single-trial row: no merge math to redo, but the
-                    // stamp still moves to the current fingerprint so
-                    // no old label survives next to new maths.
+                    // score stamp still moves to the current fingerprint.
+                    // Grader provenance is preserved, never overwritten.
                     let fresh = subdollarbench::report::rules::fingerprint();
                     if run.rules_version.as_deref() != Some(fresh.as_str()) {
                         let mut single = run.clone();
+                        if single.graded_under.is_none() {
+                            single.graded_under = single.rules_version.clone();
+                        }
                         single.rules_version = Some(fresh.clone());
                         if yes {
                             let data = serde_json::to_string_pretty(&single)?;
@@ -805,14 +808,19 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         None => m,
                     })
                     .collect();
-                // Cutover re-stamp: this row was just re-scored with current
-                // maths (all-trial mean), so it carries the current
-                // fingerprint — never the old label. Unchanged rows keep
-                // their stamp via the `same` short-circuit below.
+                // Cutover re-stamp: `rules_version` carries the current
+                // scoring fingerprint; `graded_under` is NEVER derived here
+                // — it arrives on the row from the witness backfill (or a
+                // fresh run's own stamp) and is preserved untouched. A
+                // backfill recomputes cost, it does not re-grade. If the
+                // row has no grader, that is honest None (inferred legacy
+                // downstream), never the fresh stamp laundered as history.
+                let grader = run.graded_under.clone();
                 out.rules_version = Some(fresh_stamp.clone());
                 for sub in &mut out.subruns {
                     sub.rules_version = out.rules_version.clone();
                 }
+                out.graded_under = grader;
                 fn opt_eq(a: Option<f64>, b: Option<f64>) -> bool {
                     match (a, b) {
                         (Some(x), Some(y)) => (x - y).abs() < 1e-9,
@@ -2280,6 +2288,7 @@ mod tests {
             timestamp: "2026-09-04T12:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,

@@ -488,6 +488,7 @@ mod tests {
             timestamp: "2026-09-25T00:00:00Z".to_string(),
             method_version: None,
             rules_version: Some("test-rules".to_string()),
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,

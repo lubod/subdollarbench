@@ -2478,6 +2478,7 @@ mod tests {
             timestamp: "2026-09-26T16:00:00".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: vec![],
             total_trials: Some(trials),
             pass_at_1: None,

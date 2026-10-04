@@ -45,11 +45,21 @@ pub struct BenchmarkRunResult {
     pub throughput_score: Option<f64>,
     pub timestamp: String,
     pub method_version: Option<String>,
-    /// Rule-set fingerprint: hash over task prompts + verifier sources +
-    /// cheat-stage flag. Runs are only comparable within one rules_version;
-    /// the leaderboard groups by it. Backfilled legacy values below.
+    /// Grader provenance vs score stamp (split 2026-10-03.3 review).
+    /// `graded_under`: the rule-set whose prompts+verifiers actually
+    /// graded this run (what the model faced). `rules_version`: the
+    /// rule-set whose scoring maths produced the stored numbers
+    /// (re-scored by backfill as maths evolve). Re-scored rows keep
+    /// their original `graded_under` and carry the new `rules_version` —
+    /// a backfill recomputes cost, it does not re-grade. Runs are only
+    /// comparable when BOTH agree; the leaderboard groups by the pair.
+    /// Legacy rows: `graded_under` backfilled from the recorded stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_version: Option<String>,
+    /// Original grading rule-set; None only on rows predating the split
+    /// (backfilled on next backfill pass from the pre-cutover stamp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graded_under: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subruns: Vec<BenchmarkRunResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,19 +220,21 @@ impl BenchmarkRunResult {
         }
     }
 
-    /// The grading ruleset a result was produced under: the FULL stamp
-    /// `{RULES_VERSION}+{fingerprint}`. The short label alone collides:
-    /// 8 content-distinct hashes sat under `2026-09-30.1`, and the label
-    /// cannot tell a passing-only-mean row from an all-trial-mean one.
-    /// `legacy` marks results too old to carry a stamp.
+    /// Comparability key: the FULL `{VERSION}+{hash}` score stamp, plus the
+    /// grader stamp when it differs. Format: `scored` when grader == scorer
+    /// (fresh runs), else `graded→scored`. The short label alone collides
+    /// (8 content-distinct hashes sat under `2026-09-30.1`), and a re-score
+    /// must not launder grader provenance: a DNS row graded 09-27 under
+    /// pre-echo-zero verifiers that was re-scored under `.3` maths groups
+    /// apart from rows both graded AND scored under `.3`. `legacy` marks
+    /// rows too old to carry a stamp.
     ///
-    /// Distinct from `regime_of`, which reports the reference *image*. A
-    /// table can share one image and still span two scoring regimes — and
-    /// a rank across those is not a rank.
+    /// Distinct from `regime_of`, which reports the reference *image*.
     pub fn rules_of(r: &BenchmarkRunResult) -> String {
-        match r.rules_version.as_deref() {
-            Some(v) => v.to_string(),
-            None => "legacy".to_string(),
+        let scored = r.rules_version.as_deref().unwrap_or("legacy");
+        match r.graded_under.as_deref() {
+            Some(g) if g != scored => format!("{g}→{scored}"),
+            _ => scored.to_string(),
         }
     }
 
@@ -414,6 +426,22 @@ impl BenchmarkRunResult {
                 _ => Some("mixed".to_string()),
             }
         };
+        // Grader provenance inherits like the score stamp, preferring the
+        // explicit `graded_under` and falling back to the subrun's score
+        // stamp (pre-split rows). Mixed graders stay "mixed".
+        let merged_graded_under: Option<String> = {
+            let mut vs: Vec<String> = subruns
+                .iter()
+                .filter_map(|r| r.graded_under.clone().or_else(|| r.rules_version.clone()))
+                .collect();
+            vs.sort();
+            vs.dedup();
+            match vs.len() {
+                1 => Some(vs.into_iter().next().unwrap()),
+                0 => None,
+                _ => Some("mixed".to_string()),
+            }
+        };
         let (stab, _) = assess_stability(&subruns);
         let stab_str = match stab {
             Stability::Stable => "stable",
@@ -453,6 +481,7 @@ impl BenchmarkRunResult {
             timestamp: latest_timestamp,
             method_version: best.method_version.clone(),
             rules_version: merged_rules_version,
+            graded_under: merged_graded_under,
             subruns,
             total_trials: Some(n as u32),
             pass_at_1: Some(pass_at_1),
@@ -1548,6 +1577,7 @@ mod tests {
             timestamp: String::new(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -1598,6 +1628,7 @@ mod tests {
             timestamp: String::new(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -1689,6 +1720,7 @@ mod tests {
                 timestamp: "2026-09-12T08:00:00Z".to_string(),
                 method_version: Some("0.2.0".to_string()),
                 rules_version: None,
+                graded_under: None,
                 subruns: Vec::new(),
                 total_trials: None,
                 pass_at_1: None,
@@ -1769,6 +1801,7 @@ mod tests {
             timestamp: "2026-10-02T00:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -1818,6 +1851,7 @@ mod tests {
             timestamp: "2026-10-02T00:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -1884,6 +1918,7 @@ mod tests {
             timestamp: "2026-09-12T08:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -1940,6 +1975,7 @@ mod tests {
             timestamp: "2026-09-30T00:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -2112,6 +2148,7 @@ mod tests {
             timestamp: "2026-09-04T12:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -2166,6 +2203,7 @@ mod tests {
             timestamp: "2026-09-28T00:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -2212,6 +2250,7 @@ mod tests {
             timestamp: "2026-09-04T06:00:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -2252,6 +2291,7 @@ mod tests {
             timestamp: "2026-09-04T06:05:00Z".to_string(),
             method_version: Some("0.1.0".to_string()),
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -2359,6 +2399,7 @@ mod tests {
             timestamp: String::new(),
             method_version: None,
             rules_version: Some("v1".to_string()),
+            graded_under: None,
             subruns: vec![BenchmarkRunResult {
                 id: format!("{id}_trial1"),
                 model: "m".to_string(),
@@ -2387,6 +2428,7 @@ mod tests {
                 timestamp: String::new(),
                 method_version: None,
                 rules_version: Some("v1".to_string()),
+                graded_under: None,
                 subruns: vec![],
                 total_trials: None,
                 pass_at_1: None,
@@ -2458,6 +2500,7 @@ mod tests {
             timestamp: "2026-09-12T08:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,
@@ -2554,6 +2597,7 @@ mod tests {
             timestamp: "2026-09-26T00:00:00Z".to_string(),
             method_version: None,
             rules_version: None,
+            graded_under: None,
             subruns: Vec::new(),
             total_trials: None,
             pass_at_1: None,

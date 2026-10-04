@@ -1428,6 +1428,7 @@ impl BenchmarkPipeline {
             subruns: Vec::new(),
             total_trials: Some(1),
             rules_version: Some(crate::report::rules_fingerprint()),
+            graded_under: Some(crate::report::rules_fingerprint()),
             pass_at_1: Some(if pass_rate >= 100.0 { 100.0 } else { 0.0 }),
             pass_at_k: Some(if pass_rate >= 100.0 { 100.0 } else { 0.0 }),
             avg_pass_rate: Some(pass_rate),

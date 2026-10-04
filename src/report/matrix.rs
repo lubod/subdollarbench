@@ -34,12 +34,20 @@ pub fn validate_matrix_plan(efforts: &[String], per_effort_columns: bool) -> any
     Ok(())
 }
 
-/// Regime of a stored run: its recorded fingerprint, else the legacy stamp
-/// for its timestamp (pre-fingerprint runs).
+/// Comparability key: score stamp, plus the grader stamp when it differs
+/// (`graded→scored`). Fresh runs agree; re-scored history groups apart —
+/// a DNS row graded 09-27 under pre-echo-zero verifiers never ranks with
+/// rows both graded AND scored under the current regime, even after its
+/// cost maths were recomputed. Falls back to the legacy timestamp stamp.
 pub fn regime_of_version(r: &BenchmarkRunResult) -> String {
-    r.rules_version
+    let scored = r
+        .rules_version
         .clone()
-        .unwrap_or_else(|| legacy_rules_version(&r.timestamp).to_string())
+        .unwrap_or_else(|| legacy_rules_version(&r.timestamp).to_string());
+    match r.graded_under.as_deref() {
+        Some(g) if g != scored => format!("{g}→{scored}"),
+        _ => scored,
+    }
 }
 
 /// Report gate: refuse to rank a result set that mixes `rules_version`
@@ -127,6 +135,7 @@ mod tests {
             timestamp: timestamp.to_string(),
             method_version: None,
             rules_version: rules.map(|s| s.to_string()),
+            graded_under: None,
             subruns: vec![],
             total_trials: None,
             pass_at_1: None,

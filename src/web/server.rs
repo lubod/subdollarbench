@@ -1134,6 +1134,12 @@ async fn save_prompt(
     body: String,
 ) -> Result<&'static str, StatusCode> {
     validate_task_name(&task)?;
+    // Test guard: the lifecycle test POSTs tasks/test_task/prompt.md as its
+    // write probe. Unknown tasks must not sprout directories in the repo's
+    // tasks/ tree — only known tasks are editable via the prompt editor.
+    if crate::config::TaskType::from_name(&task).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let path = resolve_task_path(&task);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -3605,6 +3611,10 @@ async fn update_sandbox_omp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Shared probe bearer for UI-gate tests. Parallel tests share process
+    /// env, so ALL of them use one value — different per-test tokens race
+    /// (one test's set_var overwrites another's mid-flight → 401 flake).
+    const TEST_UI_TOKEN: &str = "sdb-test-ui-token";
     use crate::report::RunTokenUsage;
     use tokio::net::TcpListener;
 
@@ -4397,6 +4407,7 @@ mod tests {
     /// one run must be refused rather than killing all of them.
     #[tokio::test]
     async fn test_stop_rejects_short_and_ambiguous_fragments() {
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
         fn active(run_id: &str) -> ActiveRunInfo {
             ActiveRunInfo {
                 run_id: run_id.to_string(),
@@ -4433,7 +4444,15 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
+        let mut _h = reqwest::header::HeaderMap::new();
+        _h.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {TEST_UI_TOKEN}")).unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(_h)
+            .build()
+            .unwrap();
         let stop = |needle: &'static str| {
             let url = format!("http://127.0.0.1:{port}/api/run/stop?run={needle}");
             let client = client.clone();
@@ -4492,6 +4511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_delete_guards() {
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
         let state = create_test_state();
         let app = UiServer::build_app(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4499,7 +4519,15 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let client = reqwest::Client::new();
+        let mut _h = reqwest::header::HeaderMap::new();
+        _h.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {TEST_UI_TOKEN}")).unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(_h)
+            .build()
+            .unwrap();
         let base = format!("http://127.0.0.1:{}", port);
 
         // Traversal rejected.
@@ -4557,6 +4585,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_routes_lifecycle() {
+        // Token isolation: the bearer gate reads SDB_UI_TOKEN from the
+        // environment, and the production token is set in this shell's
+        // env (or CI's). A tokenless probe would 401 (20:31 incident
+        // masked the real failure as a 500 hunt). Scoped override keeps
+        // the gate covered without touching the real secret.
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
         let state = create_test_state();
         state
             .log_buffer
@@ -4572,7 +4606,15 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let client = reqwest::Client::new();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {TEST_UI_TOKEN}")).unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
         let base = format!("http://127.0.0.1:{}", port);
 
         // 1. GET /
@@ -4610,10 +4652,32 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), 200);
 
-        // 5. POST /api/prompt/test_task
+        // 5. POST /api/prompt/test_task: unknown tasks must NOT sprout
+        // directories (404, no write) — the prompt editor covers known
+        // tasks only.
         let res = client
             .post(format!("{}/api/prompt/test_task", base))
             .body("# Test Task")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+        // 5b. POST /api/prompt/redis: known tasks still save. Round-trip
+        // the EXISTING bytes (never a probe string): the graded prompt is
+        // the model's input and a write probe must not mutate it (20:31
+        // incident: `# Test Task` overwrote tasks/redis/prompt.md).
+        let orig = client
+            .get(format!("{}/api/prompt/redis", base))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(!orig.is_empty() && orig != "# Test Task");
+        let res = client
+            .post(format!("{}/api/prompt/redis", base))
+            .body(orig)
             .send()
             .await
             .unwrap();

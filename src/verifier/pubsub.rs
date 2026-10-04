@@ -719,6 +719,24 @@ mod tests {
             hex(&sha1(b"abc")),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
+        // The two vectors above are both a single partial block, so they never
+        // run the 16..80 expansion. These do: one 56-byte message (one full
+        // block after padding) and the canonical 1,000,000-'a' case, which
+        // runs the per-chunk loop 15,625 times.
+        assert_eq!(
+            hex(&sha1(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
+        assert_eq!(
+            hex(&sha1(&vec![b'a'; 1_000_000])),
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
+        );
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(&sha1(b"abc")), "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=");
         assert_eq!(ws_accept_key(TEST_KEY), TEST_ACCEPT);
         assert_eq!(ws_accept_key(TEST_KEY), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
         // Fresh keys must NOT map to the vector answer: a stub that
