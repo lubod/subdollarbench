@@ -8,6 +8,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.5`: verifier pins (stricter gates, no leniency change to
+///   honest rows). Proxy + HTTP: keep-alive (3 sequential 200s, one
+///   connection). PDF: dynamic-content (distinct nonces, distinct bodies).
+///   Redis INCR/AOF reviewed already-strict, untouched. Curve unchanged:
+///   zero anchored ratios in the fresh wave (5/5 drifted), so any retune
+///   is unverifiable. Drift is reference-instability under parallel load
+///   (windows already serialized under the bench lock), not tolerance.
 /// - `2026-10-03.4`: retired-task freeze (dns). `tasks/dns/prompt.md` +
 ///   `src/verifier/dns.rs` frozen in GRADED_FILES (archived rows + panic
 ///   guard); no-edit policy so a dead task can never roll live stamps again.
@@ -59,7 +66,7 @@ use std::hash::{Hash, Hasher};
 /// every stamp for all 7 live tasks. So: hands off both files; the next
 /// touch of either must move them OUT of GRADED_FILES (with a deliberate
 /// one-time bump) instead of editing in place.
-pub const RULES_VERSION: &str = "2026-10-03.4";
+pub const RULES_VERSION: &str = "2026-10-03.5";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

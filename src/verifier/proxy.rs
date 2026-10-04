@@ -338,7 +338,7 @@ impl ProxyVerifier {
     }
 
     async fn test_stage3(&self) -> StageResult {
-        let name = "Stage 3: Valid HTTP/1.1 framing";
+        let name = "Stage 3: Valid HTTP/1.1 framing + keep-alive";
         let (raw, resp) = match Self::fetch(self.target_port).await {
             Ok(r) => r,
             Err(e) => return stage_fail(3, name, format!("GET / via proxy: {}", e)),
@@ -349,7 +349,66 @@ impl ProxyVerifier {
         if !resp.headers.contains_key("content-length") && !resp.is_chunked() {
             return stage_fail(3, name, "No Content-Length or chunked framing".to_string());
         }
-        stage_ok(3, name)
+        // Keep-alive: 3 sequential GETs on ONE connection must all 200.
+        // A stub that closes every connection (or answers once then hangs)
+        // fails here; Connection: close per-request still passes stage 1-2.
+        match Self::fetch_keepalive(self.target_port, 3).await {
+            Ok(3) => stage_ok(3, name),
+            Ok(n) => stage_fail(
+                3,
+                name,
+                format!("keep-alive: {n}/3 sequential 200s on one connection"),
+            ),
+            Err(e) => stage_fail(3, name, format!("keep-alive: {}", e)),
+        }
+    }
+
+    /// 3 sequential `GET /` on one `Connection: keep-alive` socket, counting
+    /// 200s by framed Content-Length boundaries (no EOF reliance).
+    async fn fetch_keepalive(port: u16, n: usize) -> Result<usize, String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = format!("127.0.0.1:{}", port);
+        let conn = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("Connection timed out to {}", addr))?;
+        let mut stream = conn.map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+        let mut ok = 0;
+        for _ in 0..n {
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+                .await
+                .map_err(|e| format!("Write to {} failed: {}", addr, e))?;
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let start = Instant::now();
+            loop {
+                if start.elapsed() > Duration::from_secs(8) {
+                    return Err(format!("keep-alive read from {} timed out", addr));
+                }
+                match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut tmp)).await {
+                    Err(_) => return Err(format!("Read from {} timed out", addr)),
+                    Ok(Err(e)) => return Err(format!("Read from {} failed: {}", addr, e)),
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(m)) => {
+                        buf.extend_from_slice(&tmp[..m]);
+                        if let Some(resp) = parse_http_response(&buf) {
+                            if content_length_satisfied(&buf, &resp) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            match parse_http_response(&buf) {
+                Some(r) if r.status == 200 => ok += 1,
+                Some(r) => return Err(format!("keep-alive GET got {}", r.status)),
+                None => return Err("keep-alive response unparseable".to_string()),
+            }
+        }
+        Ok(ok)
     }
 
     pub async fn run_failover(&self) -> StageResult {

@@ -94,6 +94,14 @@ impl PdfVerifier {
         Self::build_pdf(&objs, 1)
     }
 
+    /// Single arbitrary-text page (dynamic-content pin): the caller supplies
+    /// the literal text; the Tj escaping burden stays on the caller (nonces
+    /// are `[a-z0-9-]` by construction).
+    fn build_text_pdf(text: &str) -> Vec<u8> {
+        let stream = format!("BT /F1 12 Tf 72 720 Td ({}) Tj ET", text);
+        Self::single_page_pdf(stream.as_bytes(), "")
+    }
+
     pub fn pdf_stage1(&self) -> (Vec<u8>, String) {
         let pfx = self.get_seed_prefix("live");
         let want = format!("Hello, SubDollar {}!", pfx);
@@ -293,6 +301,60 @@ impl PdfVerifier {
                     return done(false, Some(format!("GET /nope status {}", resp.status())));
                 }
             }
+        }
+        // Dynamic-content pin: two extracts with distinct nonce text must
+        // return DISTINCT bodies containing their nonce. A stub returning a
+        // canned extraction passes every stage above and fails here — the
+        // PDF analogue of the pubsub hard-coded-Accept stub.
+        let nonce_a = format!("nonce-a-{}", self.get_seed_prefix("pdfdyn"));
+        let nonce_b = format!("nonce-b-{}", self.get_seed_prefix("pdfdyn"));
+        let pdf_a = Self::build_text_pdf(&nonce_a);
+        let pdf_b = Self::build_text_pdf(&nonce_b);
+        let got_a = match self.post_extract(&pdf_a).await {
+            Err(e) => return done(false, Some(format!("dynamic POST A failed: {}", e))),
+            Ok(resp) => {
+                if resp.status().as_u16() != 200 {
+                    return done(
+                        false,
+                        Some(format!("dynamic POST A status {}", resp.status())),
+                    );
+                }
+                match resp.bytes().await {
+                    Err(e) => return done(false, Some(format!("dynamic read A: {}", e))),
+                    Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                }
+            }
+        };
+        let got_b = match self.post_extract(&pdf_b).await {
+            Err(e) => return done(false, Some(format!("dynamic POST B failed: {}", e))),
+            Ok(resp) => {
+                if resp.status().as_u16() != 200 {
+                    return done(
+                        false,
+                        Some(format!("dynamic POST B status {}", resp.status())),
+                    );
+                }
+                match resp.bytes().await {
+                    Err(e) => return done(false, Some(format!("dynamic read B: {}", e))),
+                    Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                }
+            }
+        };
+        if !got_a.contains(&nonce_a) || !got_b.contains(&nonce_b) {
+            return done(
+                false,
+                Some(format!(
+                    "dynamic extraction mismatch: A→{:?} B→{:?}",
+                    Self::short(&got_a),
+                    Self::short(&got_b)
+                )),
+            );
+        }
+        if got_a == got_b {
+            return done(
+                false,
+                Some("canned extraction: distinct inputs, identical output".to_string()),
+            );
         }
         done(true, None)
     }

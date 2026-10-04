@@ -55,32 +55,57 @@ impl HttpVerifier {
     }
 
     pub async fn test_stage1_root(&self) -> StageResult {
-        let name = "Stage 1: GET / (Root 200 OK)".to_string();
+        let name = "Stage 1: GET / (Root 200 OK + keep-alive)".to_string();
         let url = format!("http://127.0.0.1:{}/", self.target_port);
         match self.client.get(&url).send().await {
             Ok(resp) => {
-                if resp.status() == reqwest::StatusCode::OK {
-                    StageResult {
-                        stage: 1,
-                        name,
-                        passed: true,
-                        error: None,
-                    }
-                } else {
-                    StageResult {
+                if resp.status() != reqwest::StatusCode::OK {
+                    return StageResult {
                         stage: 1,
                         name,
                         passed: false,
                         error: Some(format!("Expected 200 OK, got {}", resp.status())),
+                    };
+                }
+            }
+            Err(e) => {
+                return StageResult {
+                    stage: 1,
+                    name,
+                    passed: false,
+                    error: Some(e.to_string()),
+                }
+            }
+        }
+        // Keep-alive: reqwest reuses the pooled connection; 3 sequential
+        // GETs must all 200. A stub that closes every connection (or
+        // answers once then hangs) fails here.
+        for i in 2..=3 {
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status() == reqwest::StatusCode::OK => {}
+                Ok(resp) => {
+                    return StageResult {
+                        stage: 1,
+                        name,
+                        passed: false,
+                        error: Some(format!("keep-alive GET {} got {}", i, resp.status())),
+                    }
+                }
+                Err(e) => {
+                    return StageResult {
+                        stage: 1,
+                        name,
+                        passed: false,
+                        error: Some(format!("keep-alive GET {}: {}", i, e)),
                     }
                 }
             }
-            Err(e) => StageResult {
-                stage: 1,
-                name,
-                passed: false,
-                error: Some(e.to_string()),
-            },
+        }
+        StageResult {
+            stage: 1,
+            name,
+            passed: true,
+            error: None,
         }
     }
 
