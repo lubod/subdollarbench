@@ -1101,6 +1101,12 @@ impl LeaderboardManager {
         for (parent_id, mut subruns) in groups {
             if subruns.len() > 1 {
                 subruns.sort_by(|a, b| a.id.cmp(&b.id));
+                // Read-path only: this merged row lives in the in-memory
+                // view, nothing writes it back — so graded_under=None here
+                // cannot overwrite a stored witness grader. Stored parents
+                // (with embedded subruns) never reach this branch: the
+                // child-subrun filter above drops their trials first. Do
+                // NOT "fix" by persisting this row.
                 if let Some(merged) =
                     BenchmarkRunResult::merge_subruns(&parent_id, subruns, None, None)
                 {

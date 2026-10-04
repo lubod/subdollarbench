@@ -722,13 +722,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 if run.subruns.is_empty() {
                     // Single-trial row: no merge math to redo, but the
                     // score stamp still moves to the current fingerprint.
-                    // Grader provenance is preserved, never overwritten.
+                    // Grader provenance is preserved, never derived: None
+                    // stays None (honest unknown). Deriving it from
+                    // rules_version here would stamp the CURRENT fingerprint
+                    // as the grader on the next regime bump — the exact
+                    // false-provenance bug this split exists to prevent.
                     let fresh = subdollarbench::report::rules::fingerprint();
                     if run.rules_version.as_deref() != Some(fresh.as_str()) {
                         let mut single = run.clone();
-                        if single.graded_under.is_none() {
-                            single.graded_under = single.rules_version.clone();
-                        }
                         single.rules_version = Some(fresh.clone());
                         if yes {
                             let data = serde_json::to_string_pretty(&single)?;
