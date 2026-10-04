@@ -364,8 +364,13 @@ impl BenchmarkPipeline {
             None
         };
         if let Some(init) = initial_spend {
+            // Label honesty: after the swap above, config.api_key is the
+            // capped run key when minted (spend ~$0.00 fresh) or the account
+            // key on fail-open. Never imply whose balance this is.
+            let minted = revoke_guard.hash.is_some();
             logger.log(&format!(
-                "[ACCOUNT] OpenRouter initial key spend: ${:.4} USD",
+                "[KEY] initial {} spend: ${:.4} USD",
+                if minted { "run-key" } else { "account-key" },
                 init
             ));
         }
