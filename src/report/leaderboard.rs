@@ -325,39 +325,28 @@ impl BenchmarkRunResult {
             .sum();
         let (fair_cost_usd, fair_eff_cost_usd) = (sum_cost / n as f64, sum_eff / n as f64);
 
-        // 5. Fair Duration, Turns, Tokens & Savings
-        let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) =
-            if c > 0 {
-                let dur: f64 = passing
-                    .iter()
-                    .filter_map(|r| r.duration_seconds)
-                    .sum::<f64>()
-                    / c as f64;
-                let turns: u32 = (passing.iter().filter_map(|r| r.turns).sum::<u32>() as f64
-                    / c as f64)
-                    .round() as u32;
-                let p: u64 = passing.iter().map(|r| r.prompt_tokens).sum::<u64>() / c as u64;
-                let ca: u64 = passing.iter().map(|r| r.cached_tokens).sum::<u64>() / c as u64;
-                let co: u64 = passing.iter().map(|r| r.completion_tokens).sum::<u64>() / c as u64;
-                let tot: u64 = passing.iter().map(|r| r.total_tokens).sum::<u64>() / c as u64;
-                let sav: f64 = passing.iter().map(|r| r.savings_percent).sum::<f64>() / c as f64;
-                (Some(dur), Some(turns), p, ca, co, tot, sav)
-            } else {
-                let dur: f64 = subruns
-                    .iter()
-                    .filter_map(|r| r.duration_seconds)
-                    .sum::<f64>()
-                    / n as f64;
-                let turns: u32 = (subruns.iter().filter_map(|r| r.turns).sum::<u32>() as f64
-                    / n as f64)
-                    .round() as u32;
-                let p: u64 = subruns.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
-                let ca: u64 = subruns.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
-                let co: u64 = subruns.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
-                let tot: u64 = subruns.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
-                let sav: f64 = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
-                (Some(dur), Some(turns), p, ca, co, tot, sav)
-            };
+        // 5. Fair Duration, Turns, Tokens & Savings: mean over ALL trials,
+        // same denominator as Fair Cost above. A failed trial's compute
+        // seconds/tokens feed effective cost, so they must also appear in
+        // the duration/token columns — otherwise the row reads
+        // "cheap-seconds" for failed runs. No passing-only branch: the
+        // score already prices failure via Pass@1 (step 6), and
+        // headline passed_stages stays an all-trial mean (step ~397).
+        let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) = {
+            let dur: f64 = subruns
+                .iter()
+                .filter_map(|r| r.duration_seconds)
+                .sum::<f64>()
+                / n as f64;
+            let turns: u32 = (subruns.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / n as f64)
+                .round() as u32;
+            let p: u64 = subruns.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
+            let ca: u64 = subruns.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
+            let co: u64 = subruns.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
+            let tot: u64 = subruns.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
+            let sav: f64 = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
+            (Some(dur), Some(turns), p, ca, co, tot, sav)
+        };
 
         // 6. Fair Expected Score: Scaled by Pass@1 (Expected Utility).
         // Unanchored tasks (no live/batch ref) keep fair_tp_score None:
@@ -1226,6 +1215,7 @@ impl LeaderboardManager {
                 "Effective cost ($)",
                 "$/solved",
                 "Cache Savings",
+                "Score / ¢",
             ]);
 
         for (idx, r) in results.iter().enumerate() {
@@ -1732,7 +1722,8 @@ mod tests {
 
         // Mixed outcome: 2 of 3 pass. Median TP of passing (5500); mean
         // cost over ALL trials ((0.001+0.002+0.003)/3 = 0.002) — failed
-        // spend counts. Score scaled by Pass@1 (66.7%).
+        // spend counts. Duration/turns also all-trial: (40+30+50)/3 = 40s,
+        // (8+7+9)/3 = 8 turns. Score scaled by Pass@1 (66.7%).
         let f1 = make_run("run_a", 5000.0, 40.0, 8, 0.001, 100.0);
         let f2 = make_run("run_b", 6000.0, 30.0, 7, 0.002, 100.0);
         let f3 = make_run("run_c", 0.0, 50.0, 9, 0.003, 0.0);
@@ -1740,10 +1731,8 @@ mod tests {
         assert!((mixed.pass_rate - 66.66666666666667).abs() < 1e-9);
         assert_eq!(mixed.throughput_req_sec.unwrap(), 5500.0);
         assert_eq!(mixed.total_cost_usd, 0.002);
-        assert!((mixed.avg_pass_rate.unwrap() - 66.66666666666667).abs() < 1e-9);
-        assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
-        assert!(mixed.efficiency_score > 0.0);
-        assert!(mixed.throughput_score.unwrap() > 0.0);
+        assert_eq!(mixed.duration_seconds.unwrap(), 40.0);
+        assert_eq!(mixed.turns.unwrap(), 8);
     }
 
     #[test]

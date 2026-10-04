@@ -8,6 +8,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.3`: merged-row consistency (advisor round). Step 5
+///   (duration/turns/tokens/savings) joins step 4 on the all-trial
+///   denominator — a failed trial's seconds/tokens feed effective cost
+///   and now also the duration column (no more "cheap-seconds"); plus
+///   the `$/solved` column fix (restored `Score / \u00a2` header dropped
+///   by a bad dedup: 17 cells vs 16 headers).
 /// - `2026-10-03.2`: verifier hardening. DNS stage 1 requires an answer
 ///   section (packet echo scores 0); pubsub stage 1 handshakes a fresh
 ///   random key (hard-coded `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=` stub fails);
@@ -42,7 +48,7 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
-pub const RULES_VERSION: &str = "2026-10-03.2";
+pub const RULES_VERSION: &str = "2026-10-03.3";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
