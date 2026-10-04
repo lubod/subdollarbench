@@ -1733,6 +1733,10 @@ mod tests {
         assert_eq!(mixed.total_cost_usd, 0.002);
         assert_eq!(mixed.duration_seconds.unwrap(), 40.0);
         assert_eq!(mixed.turns.unwrap(), 8);
+        assert!((mixed.avg_pass_rate.unwrap() - 66.66666666666667).abs() < 1e-9);
+        assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
+        assert!(mixed.efficiency_score > 0.0);
+        assert!(mixed.throughput_score.unwrap() > 0.0);
     }
 
     #[test]
