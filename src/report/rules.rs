@@ -51,6 +51,7 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
+///
 /// Retired-task freeze: `tasks/dns/prompt.md` + `src/verifier/dns.rs` stay
 /// in GRADED_FILES (fingerprint panics on a missing graded file, and
 /// archived dns rows must keep verifying) but are FROZEN — no-edit policy.
