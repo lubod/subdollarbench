@@ -236,7 +236,7 @@ pub struct BenchmarkPipeline;
 
 impl BenchmarkPipeline {
     pub async fn execute(
-        config: BenchmarkConfig,
+        mut config: BenchmarkConfig,
         logger: Arc<dyn PipelineLogger>,
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<PipelineOutput> {
@@ -262,6 +262,56 @@ impl BenchmarkPipeline {
             run_id, config.model, config.task, config.effort, config.budget_usd
         ));
 
+        // Per-run capped key: the container must never see the account key.
+        // Mint `budget + headroom` capped, 24h-expiring; revoke at every exit
+        // via the guard below (return/Err/panic/cancel). No mgmt key (or
+        // mint failure) = loud fail-open to the account key, never a failed
+        // batch. The plaintext is never logged (RunKey has no Debug).
+        // Async drop guard: revoke fires on EVERY exit (happy path,
+        // early return, cancel, panic-unwind) exactly once. Drop cannot
+        // await, so it spawns the revoke onto the runtime; if no runtime
+        // is alive (test teardown) the hash is simply dropped and the
+        // 24h expiry bounds the leak.
+        struct RevokeGuard {
+            hash: Option<String>,
+        }
+        impl Drop for RevokeGuard {
+            fn drop(&mut self) {
+                if let Some(hash) = self.hash.take() {
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        tokio::spawn(async move {
+                            let _ = crate::cost::keys::revoke_run_key(&hash).await;
+                        });
+                    }
+                }
+            }
+        }
+        let mut revoke_guard = RevokeGuard { hash: None };
+        if crate::cost::keys::mgmt_key().is_some() {
+            // Headroom: live-spend metering lags; the cap must survive the
+            // batch without tripping mid-run. 2x budget, min $2.
+            let cap = (config.budget_usd * 2.0).max(2.0);
+            match crate::cost::keys::mint_run_key(&run_id, cap).await {
+                Ok(rk) => {
+                    logger.log(&format!(
+                        "[KEY] minted capped run key (limit ${:.2}, 24h expiry; hash {}…) for this batch",
+                        cap,
+                        &rk.hash[..rk.hash.len().min(8)]
+                    ));
+                    revoke_guard.hash = Some(rk.hash);
+                    config.api_key = Some(rk.key);
+                }
+                Err(e) => {
+                    logger.log(&format!(
+                        "[KEY] WARNING: mint failed ({e:#}); continuing with account key (fail-open, blast radius = account)"
+                    ));
+                }
+            }
+        } else {
+            logger.log(
+                "[KEY] no OPENROUTER_MGMT_KEY: using account key in container (set a mgmt key + per-key credit limit for blast-radius control)",
+            );
+        }
         // 1. Prepare Workspace
         if !config.eval_only {
             if config.workdir.exists() {
@@ -1537,7 +1587,21 @@ impl BenchmarkPipeline {
                 200,
             );
         }
-
+        // Revoke the capped run key on the happy path. Early returns above
+        // (cancel/infra-error) revoke via the same call — see the helper:
+        // best-effort, logged, never fails the batch. Panic-unwind skips
+        // revoke (documented residual: 24h expiry bounds it).
+        if let Some(hash) = revoke_guard.hash.take() {
+            match crate::cost::keys::revoke_run_key(&hash).await {
+                Ok(()) => logger.log(&format!(
+                    "[KEY] revoked run key (hash {}…)",
+                    &hash[..hash.len().min(8)]
+                )),
+                Err(e) => logger.log(&format!(
+                    "[KEY] WARNING: revoke failed ({e:#}); key expires in 24h"
+                )),
+            }
+        }
         Ok(PipelineOutput {
             manifest,
             benchmark_result,
