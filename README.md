@@ -27,9 +27,9 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 |                                                                                         |
 |  +---------------------------+  private run network      +----------------------------+  |
 |  |     OMP Agent Sandbox     |  subdollar-net-<run_id>   |  Ground-Truth Reference    |  |
-|  |   'subdollar-sandbox'     | ------------------------> | (redis:alpine / nginx /    |  |
-|  | (Rust, Go, Node, Python,  |  ref-redis / ref-http     |  pinned digests under      |  |
-|  |  GCC, Bun, OMP runtime)   |  DNS aliases              |  stable network aliases)   |  |
+|  |   'subdollar-sandbox'     | ------------------------> | (redis:alpine / nginx)    |  |
+|  | (Rust, Go, Node, Python,  |  ref-redis / ref-http     |  pinned digests under     |  |
+|  |  GCC, Bun, OMP runtime)   |  aliases                  |  stable aliases)          |  |
 |  +-------------+-------------+                                                          |
 |                | produces candidate code                                                |
 |                v                                                                        |
@@ -52,7 +52,7 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 2. **Dual-Tier Docker Isolation & Private Run Network:**
    - **OMP Agent Sandbox (`subdollar-sandbox`):** The LLM operates strictly inside an isolated Docker container with pre-installed toolchains (Rust, Go, Node, Python, Clang/GCC, Bun) and workspace volume mounting. The agent is attached to a **per-run user-defined Docker network** (`subdollar-net-<run_id>`) — never the host network — so loopback-bound host services (including the UI at its default `127.0.0.1` bind) are unreachable from model-executed code. Note: services deliberately exposed on `0.0.0.0` remain reachable via the bridge gateway, as from any container on the host.
    - **Ground-Truth Reference:** A pinned reference server runs on the same private network under a stable DNS alias — `redis:alpine` as `ref-redis`, `nginx:alpine` as `ref-http` (redis/http tasks; dns retired 2026-09-30, its `coredns`/`ref-dns` path is dead code, see below). Batch-anchored tasks (redis, http) share one median denominator per batch with a pre/post drift bracket; per-trial live refs cover the rest. The agent issues black-box requests (e.g. `redis-cli -h ref-redis -p 6379` or `curl http://ref-http/`) to inspect actual protocol responses.
-   - **Candidate Isolation (`subdollar-candidate-<run_id>`):** The generated code is compiled and launched in a clean run-scoped container, mapping candidate ports (6379 for Redis, 8080 for HTTP, 5353 for DNS).
+   - **Candidate Isolation (`subdollar-candidate-<run_id>`):** The generated code is compiled and launched in a clean run-scoped container, mapping candidate ports (6379 for Redis, 8080 for HTTP).
    - **Egress filter (`SDB_EGRESS_FILTER=1`, on in production):** the run network is created `--internal` and a per-run allowlist proxy sidecar (openrouter + language registries + github) is the agent's only route out. Raw sockets can still bypass proxy env (documented residual); the API key is readable in-container by design — use per-run capped OpenRouter keys to bound blast radius.
 
 3. **Packaging Freedom (`Dockerfile` or `./start.sh`):**
@@ -161,7 +161,7 @@ cargo run --release -- run \
 Usage: subdollarbench run [OPTIONS] --model <MODEL>
 
   -m, --model <MODEL>            OpenRouter model ID (e.g. openrouter/google/gemini-2.5-flash)
-  -t, --task <TASK>              [default: redis] [possible values: redis, http, pdf, wal, proxy, pubsub, binproto, dns (retired: parses, refuses to run)]
+  -t, --task <TASK>              [default: redis] [possible values: redis, http, pdf, wal, proxy, pubsub, binproto] (`--task dns` parses for archived rows but refuses to run: retired 2026-09-30)
   -e, --effort <EFFORT>          (off, minimal, low, medium, high, xhigh, max) [default: high]
   -b, --budget-usd <BUDGET_USD>  Maximum cost budget in USD [default: 1]
       --max-turns <MAX_TURNS>    [default: 100]
@@ -181,8 +181,7 @@ cargo run --release -- eval --task redis --port 6379
 # Verify HTTP server on port 8080
 cargo run --release -- eval --task http --port 8080
 
-# Verify DNS server on port 5353
-# dns retired 2026-09-30: eval --task dns now refuses (use --task redis)
+# dns retired 2026-09-30: eval --task dns refuses (archived rows only)
 ```
 
 #### Inspect Leaderboard

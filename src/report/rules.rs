@@ -8,6 +8,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.4`: retired-task freeze (dns). `tasks/dns/prompt.md` +
+///   `src/verifier/dns.rs` frozen in GRADED_FILES (archived rows + panic
+///   guard); no-edit policy so a dead task can never roll live stamps again.
 /// - `2026-10-03.3`: merged-row consistency (advisor round). Step 5
 ///   (duration/turns/tokens/savings) joins step 4 on the all-trial
 ///   denominator — a failed trial's seconds/tokens feed effective cost
@@ -48,7 +51,14 @@ use std::hash::{Hash, Hasher};
 ///   language; DNS unquarantined post-fix.
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
-pub const RULES_VERSION: &str = "2026-10-03.3";
+/// Retired-task freeze: `tasks/dns/prompt.md` + `src/verifier/dns.rs` stay
+/// in GRADED_FILES (fingerprint panics on a missing graded file, and
+/// archived dns rows must keep verifying) but are FROZEN — no-edit policy.
+/// A retired task has no live grading path, yet any dns.rs touch would roll
+/// every stamp for all 7 live tasks. So: hands off both files; the next
+/// touch of either must move them OUT of GRADED_FILES (with a deliberate
+/// one-time bump) instead of editing in place.
+pub const RULES_VERSION: &str = "2026-10-03.4";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
