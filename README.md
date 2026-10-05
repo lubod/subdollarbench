@@ -72,7 +72,7 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 
 ---
 
-## 🎯 Supported Tasks (8)
+## 🎯 Supported Tasks (7 live, 1 removed)
 
 | Task | Description | Throughput axis |
 | :--- | :--- | :--- |
@@ -121,7 +121,7 @@ cargo run --release -- ui --port 3000
 Open `http://localhost:3000` in your browser. From the UI, you can:
 - Browse all models on OpenRouter priced below $1.00 / 1M tokens.
 - Choose between `redis` and `http` tasks.
-- Configure reasoning effort (`auto`, `max`, `high`, `medium`, `low`, `off`).
+- Configure reasoning effort (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; default `high`).
 - Watch live agent thoughts, bash actions, and verification stages stream in real-time.
 - Inspect candidate source code in the full-screen modal code browser.
 - Finished runs refresh the static portal mirror automatically.
@@ -134,7 +134,7 @@ Open `http://localhost:3000` in your browser. From the UI, you can:
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
 
-# Run Redis benchmark with auto reasoning effort
+# Run Redis benchmark (default high reasoning effort)
 cargo run --release -- run \
   --task redis \
   --model openrouter/deepseek/deepseek-chat \
@@ -236,6 +236,10 @@ Every result carries `rules_version = {RULES_VERSION}+{content-hash}` (e.g.
 scoring path. Ranks are only comparable within one full stamp — the leaderboard
 and matrix gate refuse cross-regime ranks. A version bump means: re-run, or
 `backfill --yes` to re-score stored trials onto the new stamp.
+
+> Deferred decisions with evidence (curve, DNS, effort, egress, compute floor,
+> review-judge scope) live in [`docs/DECISIONS.md`](docs/DECISIONS.md) — one entry
+> each, status + next trigger.
 
 
 ### 🧠 Reasoning Effort Is A Request, Not A Guarantee

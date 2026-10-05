@@ -11,8 +11,8 @@ use subdollarbench::pipeline::{
 };
 use subdollarbench::remote;
 use subdollarbench::report::{
-    assess_stability, BenchmarkRunResult, LeaderboardManager, PortalExporter, RunJudge,
-    RunManifest, Stability,
+    assess_stability, BenchmarkRunResult, LeaderboardManager, PortalExporter, RunManifest,
+    Stability,
 };
 use subdollarbench::verifier::{
     BinprotoVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier,
@@ -20,6 +20,9 @@ use subdollarbench::verifier::{
 };
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
+
+mod main_queue;
+mod review_cmd;
 
 struct CliPipelineLogger;
 
@@ -36,7 +39,7 @@ async fn main() -> Result<()> {
     run_cli(cli).await
 }
 
-fn resolve_run_id(runs_dir: &str, prefix: &str) -> Result<String> {
+pub(crate) fn resolve_run_id(runs_dir: &str, prefix: &str) -> Result<String> {
     let path = Path::new(runs_dir);
     if path.join(prefix).is_dir() {
         return Ok(prefix.to_string());
@@ -108,7 +111,7 @@ fn parse_task(s: &str) -> Result<TaskType> {
     TaskType::parse(s)
 }
 
-fn resolve_parent_id(results_dir: &str, prefix: &str) -> Result<String> {
+pub(crate) fn resolve_parent_id(results_dir: &str, prefix: &str) -> Result<String> {
     let path = Path::new(results_dir);
     if path.join(format!("{prefix}.json")).exists() {
         return Ok(prefix.to_string());
@@ -257,7 +260,7 @@ async fn run_trial_batch(
 }
 
 /// Resolve `--server` for remote commands: flag > SDB_SERVER env > default.
-fn resolve_server_flag(server: &Option<String>) -> String {
+pub(crate) fn resolve_server_flag(server: &Option<String>) -> String {
     remote::resolve_server(server.as_deref())
 }
 
@@ -490,7 +493,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 } else {
                     let max_total = max_trials.max(total_trials);
                     while total_trials < max_total {
-                        let merged = match merged_opt {
+                        let merged = match merged_opt.as_ref() {
                             Some(m) => m,
                             None => break,
                         };
@@ -532,11 +535,23 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         total_trials += batch.results.len() as u32;
                         passing_trials += batch.passing as usize;
                         subrun_results.extend(batch.results);
+                        // Quarantine is sticky (web path already does this):
+                        // a drifted parent stays drifted even when the
+                        // extension bracket is clean. Passing only
+                        // batch.drift would erase it and re-score a bad
+                        // denominator.
+                        let kept_drift = merged_opt
+                            .as_ref()
+                            .and_then(|m| m.ref_drift)
+                            .or(batch.drift);
+                        // Take ownership back for the reassignment below
+                        // (borrow ends here; NLL releases it).
+                        let _ = &kept_drift;
                         merged_opt = LeaderboardManager::consolidate_multi_trial_run(
                             &parent_run_id,
                             &subrun_results,
                             !no_save,
-                            batch.drift,
+                            kept_drift,
                         );
                     }
                 }
@@ -581,6 +596,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Eval { task, port } => {
+            // Fresh random seed per eval: static nonces (seed=None) make
+            // standalone eval a stub-passable pre-flight. Same rule as runs.
+            let eval_seed = format!(
+                "eval-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
             let p = port.unwrap_or(match task {
                 TaskType::Redis => 6379,
                 TaskType::Http => 8080,
@@ -593,7 +617,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("Evaluating {} on port {}...", task, p);
             match task {
                 TaskType::Redis => {
-                    let v = RedisVerifier::new(p, None);
+                    let v = RedisVerifier::new(p, Some(&eval_seed));
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -601,7 +625,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
                 TaskType::Http => {
-                    let v = HttpVerifier::new(p, None);
+                    let v = HttpVerifier::new(p, Some(&eval_seed));
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -609,7 +633,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
                 TaskType::Pdf => {
-                    let v = PdfVerifier::new(p, None);
+                    let v = PdfVerifier::new(p, Some(&eval_seed));
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -617,7 +641,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
                 TaskType::Wal => {
-                    let v = WalVerifier::new(p, None);
+                    let v = WalVerifier::new(p, Some(&eval_seed));
                     let res = v.run_basic().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -642,7 +666,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
                 TaskType::Pubsub => {
-                    let v = PubsubVerifier::new(p, None);
+                    let v = PubsubVerifier::new(p, Some(&eval_seed));
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -650,7 +674,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
                 TaskType::Binproto => {
-                    let v = BinprotoVerifier::new(p, None);
+                    let v = BinprotoVerifier::new(p, Some(&eval_seed));
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -1109,79 +1133,19 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             keep,
             rollup_only,
         } => {
-            let runs_path = std::path::Path::new(&runs_dir);
-            let mut ids: Vec<String> = std::fs::read_dir(runs_path)
-                .with_context(|| format!("read runs dir {runs_dir}"))?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|id| run_id.as_ref().map(|w| w == id).unwrap_or(true))
-                .collect();
-            ids.sort();
-            let (mut done, mut skipped, mut failed) = (0, 0, 0);
-            for id in &ids {
-                let dir = runs_path.join(id);
-                if dir.join("review.json").exists() && !force {
-                    skipped += 1;
-                    continue;
-                }
-                let manifest: RunManifest = match std::fs::read_to_string(dir.join("manifest.json"))
-                    .ok()
-                    .and_then(|t| serde_json::from_str(&t).ok())
-                {
-                    Some(m) => m,
-                    None => {
-                        eprintln!("[SKIP] {id}: no readable manifest.json");
-                        failed += 1;
-                        continue;
-                    }
-                };
-                let task_prompt = std::fs::read_to_string(
-                    std::path::Path::new("tasks")
-                        .join(&manifest.task)
-                        .join("prompt.md"),
-                )
-                .unwrap_or_default();
-                match RunJudge::judge_run(
-                    api_key.as_deref(),
-                    &model,
-                    &manifest.task,
-                    &task_prompt,
-                    &dir.join("workspace"),
-                    &manifest,
-                )
-                .await
-                {
-                    Ok(review) => {
-                        let text = serde_json::to_string_pretty(&review)?;
-                        std::fs::write(dir.join("review.json"), text)?;
-                        println!(
-                            "[OK] {id}: {}+{} bullets",
-                            review.good.len(),
-                            review.bad.len()
-                        );
-                        done += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("[FAIL] {id}: {e:#}");
-                        failed += 1;
-                    }
-                }
-            }
-            let summary = if rollup_only {
-                PortalExporter::export_rollup(&results_dir, &out, &base_url)?
-            } else {
-                PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?
-            };
-            println!(
-                "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} {}",
-                summary.run_count,
-                if rollup_only {
-                    "models (rollup-only)"
-                } else {
-                    "runs"
-                },
-            );
+            review_cmd::handle_regen_reviews(
+                runs_dir,
+                run_id,
+                model,
+                api_key,
+                force,
+                results_dir,
+                out,
+                base_url,
+                keep,
+                rollup_only,
+            )
+            .await?
         }
         Commands::ReviewRun {
             run_id,
@@ -1189,176 +1153,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             model,
             api_key,
             force,
-        } => {
-            use subdollarbench::report::RunJudge;
-            let id = resolve_run_id(&runs_dir, &run_id)?;
-            let rdir = Path::new(&runs_dir).join(&id);
-            let out_path = rdir.join("run-review.md");
-            if out_path.exists() && !force {
-                println!("run-review exists for {id} (use --force to regenerate)");
-                return Ok(());
-            }
-            // Parent result: results/<id>.json preferred, else reconstruct
-            // trial list from runs/<id>_trial* dirs.
-            let results_path = subdollarbench::config::get_repo_root()
-                .join("results")
-                .join(format!("{id}.json"));
-            type TrialRow = (String, f64, u32, u64, f64, f64);
-            let (parent_model, parent_task, trials): (String, String, Vec<TrialRow>) =
-                if let Ok(text) = std::fs::read_to_string(&results_path) {
-                    let v: serde_json::Value = serde_json::from_str(&text)?;
-                    let subs = v
-                        .get("subruns")
-                        .and_then(|s| s.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    let t = subs
-                        .iter()
-                        .map(|s| {
-                            (
-                                s.get("id")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("?")
-                                    .to_string(),
-                                s.get("pass_rate").and_then(|x| x.as_f64()).unwrap_or(0.0),
-                                s.get("turns").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                                s.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                                s.get("total_cost_usd")
-                                    .and_then(|x| x.as_f64())
-                                    .unwrap_or(0.0),
-                                s.get("duration_seconds")
-                                    .and_then(|x| x.as_f64())
-                                    .unwrap_or(0.0),
-                            )
-                        })
-                        .collect();
-                    (
-                        v.get("model")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        v.get("task")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        t,
-                    )
-                } else {
-                    anyhow::bail!(
-                        "no results/{id}.json for {id}; run-review needs the merged parent"
-                    );
-                };
-            // Per-trial review conclusions (best-effort: missing files skipped).
-            // Plus deterministic failure reasons from trial manifests: failed
-            // stage names + errors, so cross-trial failure claims are grounded
-            // facts, not judge inference.
-            let mut notes: Vec<(String, String)> = Vec::new();
-            let mut failures: Vec<String> = Vec::new();
-            for (tid, _, _, _, _, _) in &trials {
-                let mp = Path::new(&runs_dir).join(tid).join("manifest.json");
-                let mut freasons = String::new();
-                if let Ok(mtext) = std::fs::read_to_string(&mp) {
-                    if let Ok(mv) = serde_json::from_str::<serde_json::Value>(&mtext) {
-                        if let Some(stages) = mv.get("stages").and_then(|s| s.as_array()) {
-                            let failed: Vec<String> = stages
-                                .iter()
-                                .filter(|s| {
-                                    s.get("passed") == Some(&serde_json::Value::Bool(false))
-                                })
-                                .map(|s| {
-                                    let nm = s.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-                                    let er = s.get("error").and_then(|x| x.as_str()).unwrap_or("");
-                                    if er.is_empty() {
-                                        nm.to_string()
-                                    } else {
-                                        format!("{nm}: {er}")
-                                    }
-                                })
-                                .collect();
-                            freasons = failed.join("; ");
-                            if freasons.len() > 600 {
-                                freasons.truncate(600);
-                                freasons.push_str("...");
-                            }
-                        }
-                    }
-                }
-                failures.push(freasons);
-                let rp = Path::new(&runs_dir).join(tid).join("review.json");
-                if let Ok(text) = std::fs::read_to_string(&rp) {
-                    if let Ok(rv) = serde_json::from_str::<serde_json::Value>(&text) {
-                        let c = rv
-                            .get("conclusion")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if !c.is_empty() {
-                            notes.push((tid.clone(), c));
-                        }
-                    }
-                }
-            }
-            let stats = RunJudge::run_stats_block_with_failures(
-                &id,
-                &parent_model,
-                &parent_task,
-                &trials,
-                &failures,
-            );
-            print!("{}", stats);
-            // Canonical best-trial workspace via the shared helper: the
-            // parent row deserializes into the typed struct (subruns carry
-            // full scores) so both callers converge on one rule. Fallback:
-            // best tuple by pass rate when the parent file is missing.
-            let best_id: String = {
-                let rp2 = subdollarbench::config::get_repo_root()
-                    .join("results")
-                    .join(format!("{id}.json"));
-                let from_parent: Option<String> = std::fs::read_to_string(&rp2)
-                    .ok()
-                    .and_then(|t| {
-                        serde_json::from_str::<subdollarbench::report::BenchmarkRunResult>(&t).ok()
-                    })
-                    .and_then(|parent| {
-                        subdollarbench::report::BenchmarkRunResult::canonical_best(&parent.subruns)
-                            .map(|b| b.id.clone())
-                    });
-                from_parent.unwrap_or_else(|| {
-                    trials
-                        .iter()
-                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|t| t.0.clone())
-                        .unwrap_or_default()
-                })
-            };
-            let best_files =
-                RunJudge::collect_workspace(&Path::new(&runs_dir).join(&best_id).join("workspace"));
-            println!(
-                "[REVIEW-RUN] canonical workspace: {best_id} ({} files)",
-                best_files.len()
-            );
-            // Task prompt excerpt for grounding.
-            let task_prompt = std::fs::read_to_string(
-                subdollarbench::config::get_repo_root()
-                    .join("tasks")
-                    .join(&parent_task)
-                    .join("prompt.md"),
-            )
-            .unwrap_or_default();
-            let prompt =
-                RunJudge::build_synthesis_prompt(&stats, &task_prompt, &notes, &best_files);
-            println!("[REVIEW-RUN] synthesizing with {model} ...");
-            let review = RunJudge::judge_synthesis(api_key.as_deref(), &model, prompt).await?;
-            RunJudge::validate(&review)?;
-            let md = format!(
-                "# Run review: {id}\n\nModel: {parent_model} task: {parent_task} judge: {model}\n\n## Statistics (deterministic)\n\n```\n{stats}\n```\n\n## Synthesis (LLM, advisory-only)\n\n### Strengths\n\n{}\n\n### Weaknesses\n\n{}\n\n### Conclusion\n\n{}\n",
-                review.good.iter().map(|g| format!("- {g}\n")).collect::<String>(),
-                review.bad.iter().map(|b| format!("- {b}\n")).collect::<String>(),
-                review.conclusion,
-            );
-            std::fs::write(&out_path, &md)?;
-            println!("wrote {}", out_path.display());
-        }
+        } => review_cmd::handle_review_run(run_id, runs_dir, model, api_key, force).await?,
 
         Commands::Portal {
             runs_dir,
@@ -1996,25 +1791,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Status { server, json } => {
-            let server = resolve_server_flag(&server);
-            let v = remote::get_json(&server, "/api/status").await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-            } else {
-                print!("{}", remote::format_status(&v));
-            }
-        }
+        Commands::Status { server, json } => main_queue::handle_status(server, json).await?,
 
-        Commands::Queue { server, json } => {
-            let server = resolve_server_flag(&server);
-            let v = remote::get_json(&server, "/api/queue").await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-            } else {
-                print!("{}", remote::format_queue(&v));
-            }
-        }
+        Commands::Queue { server, json } => main_queue::handle_queue(server, json).await?,
 
         Commands::Ps {
             server,
@@ -2024,25 +1803,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             status,
             limit,
             runs_dir,
-        } => {
-            let server = resolve_server_flag(&server);
-            // Both calls are read-only; the engine keeps running untouched.
-            let queue = remote::get_json(&server, "/api/queue").await?;
-            let runs = remote::get_json(&server, "/api/runs").await?;
-            let _ = runs_dir;
-            print!(
-                "{}",
-                remote::format_ps(
-                    &queue,
-                    &runs,
-                    model.as_deref(),
-                    task.as_deref(),
-                    effort.as_deref(),
-                    status.as_deref(),
-                    limit,
-                )
-            );
-        }
+        } => main_queue::handle_ps(server, model, task, effort, status, limit, runs_dir).await?,
 
         Commands::Enqueue {
             model,
@@ -2060,38 +1821,23 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             review_model,
             server,
         } => {
-            let server = resolve_server_flag(&server);
-            let body = remote::run_request(
-                &model,
-                &task.to_string(),
-                &effort,
+            main_queue::handle_enqueue(
+                model,
+                task,
+                effort,
                 max_turns,
                 budget_usd,
                 timeout_min,
-                api_key.as_deref(),
+                api_key,
                 eval_only,
                 trials,
                 extend_if_unstable,
                 max_trials,
                 no_save,
-                review_model.as_deref(),
-            );
-            let resp = remote::post_json(&server, "/api/queue", &body).await?;
-            let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-            if resp
-                .get("started")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                println!("enqueued {id}: engine idle, started immediately");
-            } else {
-                let pos = resp
-                    .get("position")
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p.to_string())
-                    .unwrap_or("-".into());
-                println!("enqueued {id} at position {pos}");
-            }
+                review_model,
+                server,
+            )
+            .await?
         }
 
         Commands::QueueExtend {
@@ -2104,55 +1850,24 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             results_dir,
             server,
         } => {
-            let server = resolve_server_flag(&server);
-            let pid = resolve_parent_id(&results_dir, &parent)?;
-            let body = remote::extend_body(
+            main_queue::handle_queue_extend(
+                parent,
                 trials,
                 max_turns,
                 budget_usd,
                 timeout_min,
-                eval_only.then_some(true),
-            );
-            // Server path-encodes cleanly (clean_run_id rejects slashes).
-            let resp =
-                remote::post_json(&server, &format!("/api/runs/{pid}/extend"), &body).await?;
-            if let Some(qid) = resp.get("queued").and_then(|v| v.as_str()) {
-                let pos = resp
-                    .get("position")
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p.to_string())
-                    .unwrap_or("-".into());
-                println!("queued {qid} (extend {pid} +{trials}) at position {pos}");
-            } else if let Some(started) = resp.get("started").and_then(|v| v.as_str()) {
-                println!("extend {started} started immediately");
-            } else {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            }
+                eval_only,
+                results_dir,
+                server,
+            )
+            .await?
         }
 
-        Commands::Dequeue { id, server } => {
-            let server = resolve_server_flag(&server);
-            println!(
-                "{}",
-                remote::delete_text(&server, &format!("/api/queue/{id}")).await?
-            );
-        }
+        Commands::Dequeue { id, server } => main_queue::handle_dequeue(id, server).await?,
 
-        Commands::QueueClear { server } => {
-            let server = resolve_server_flag(&server);
-            // Server only drops finished history; pending work is untouched.
-            println!("{}", remote::delete_text(&server, "/api/queue").await?);
-        }
+        Commands::QueueClear { server } => main_queue::handle_queue_clear(server).await?,
 
-        Commands::Stop { run, server } => {
-            let server = resolve_server_flag(&server);
-            let path = if run.trim().is_empty() {
-                "/api/run/stop".to_string()
-            } else {
-                format!("/api/run/stop?run={}", run.trim())
-            };
-            println!("{}", remote::post_empty(&server, &path).await?);
-        }
+        Commands::Stop { run, server } => main_queue::handle_stop(run, server).await?,
 
         Commands::Log {
             run: _,
@@ -2831,6 +2546,37 @@ mod tests {
         assert!(resolve_run_id(&s, "redis_m_aaa").is_err());
         assert!(resolve_run_id(&s, "wal_").is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Backfill grader provenance: the stored parent grader rides the
+    /// re-merge untouched (never a trial stamp, never the fresh score
+    /// stamp). Guards the 420/420 false-provenance incident.
+    #[test]
+    fn test_backfill_grader_round_trip() {
+        // Multi-trial: explicit param wins verbatim.
+        let merged = subdollarbench::report::BenchmarkRunResult::merge_subruns(
+            "qp",
+            vec![
+                test_result_with_pass_rate(100.0),
+                test_result_with_pass_rate(0.0),
+            ],
+            None,
+            Some("fp-witness".to_string()),
+        )
+        .unwrap();
+        assert_eq!(merged.graded_under.as_deref(), Some("fp-witness"));
+        // Honest None stays None (never derived from rules_version).
+        let merged2 = subdollarbench::report::BenchmarkRunResult::merge_subruns(
+            "qp2",
+            vec![
+                test_result_with_pass_rate(100.0),
+                test_result_with_pass_rate(0.0),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(merged2.graded_under, None);
     }
 
     #[tokio::test]

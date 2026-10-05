@@ -269,6 +269,11 @@ impl BenchmarkRunResult {
             return None;
         }
         if subruns.len() == 1 {
+            // Unified semantics (P@1/eff for ALL parents): the trial keeps
+            // its own pass_rate as headline, but the SCORE is recomputed as
+            // base_eff(100%) × P@1 — the same step 6 the n≥2 path runs. The
+            // old path returned the trial's pass_rate-scaled score, so a
+            // partial-credit n=1 (e.g. 66.7%) outscored a P@1=66.7% merge.
             let mut single = subruns.into_iter().next().unwrap();
             single.id = parent_id.to_string();
             let c = usize::from(single.pass_rate >= 100.0);
@@ -283,6 +288,26 @@ impl BenchmarkRunResult {
             single.pass_at_1_lo = Some(w_lo);
             single.pass_at_1_hi = Some(w_hi);
             single.stability = Some("stable".to_string());
+            // Recompute the score under unified semantics: base at 100%,
+            // scaled by P@1 (0 or 1 here). Keeps the trial's own cost,
+            // duration, tokens — only the score formula unifies.
+            let eff = single.effective_cost_usd.unwrap_or(single.total_cost_usd);
+            single.efficiency_score =
+                crate::cost::calculator::ModelPricing::calculate_efficiency_score(100.0, eff)
+                    * (p1 / 100.0);
+            single.throughput_score = single.throughput_score.map(|_| {
+                crate::cost::calculator::ModelPricing::calculate_throughput_score_for_task(
+                    100.0,
+                    eff,
+                    single.throughput_req_sec,
+                    single.reference_throughput_req_sec,
+                    Some(&single.task),
+                )
+                .unwrap_or(0.0)
+            });
+            if single.throughput_score == Some(0.0) {
+                single.throughput_score = None;
+            }
             return Some(single);
         }
 
@@ -1652,6 +1677,55 @@ mod tests {
             stability: None,
             frontier_fraction: None,
         }
+    }
+
+    #[test]
+    fn test_canonical_best_tie_break_pin() {
+        // Tie-break contract: pass rate first, then throughput else
+        // efficiency. Pinned because merge + review-run converge here —
+        // a silent change swaps which trial's workspace gets reviewed.
+        let mut a = stab_run(100.0, Some(50000.0));
+        a.id = "trial_a".to_string();
+        let mut b = stab_run(100.0, Some(60000.0));
+        b.id = "trial_b".to_string();
+        // Higher throughput wins the tied-100% pair regardless of order:
+        // max_by returns the LAST max, so callers must pass the same
+        // subruns order (documented on canonical_best).
+        assert_eq!(
+            BenchmarkRunResult::canonical_best(&[a.clone(), b.clone()]).map(|r| r.id.as_str()),
+            Some("trial_b")
+        );
+        // Pass rate dominates throughput.
+        let mut c = stab_run(50.0, Some(999999.0));
+        c.id = "trial_c".to_string();
+        assert_eq!(
+            BenchmarkRunResult::canonical_best(&[c.clone(), b.clone()]).map(|r| r.id.as_str()),
+            Some("trial_b")
+        );
+        // No throughput anywhere: falls back to efficiency_score.
+        let mut d = stab_run(100.0, None);
+        d.id = "trial_d".to_string();
+        d.efficiency_score = 10.0;
+        let mut e = stab_run(100.0, None);
+        e.id = "trial_e".to_string();
+        e.efficiency_score = 20.0;
+        assert_eq!(
+            BenchmarkRunResult::canonical_best(&[d, e]).map(|r| r.id.as_str()),
+            Some("trial_e")
+        );
+        // Empty: None.
+        assert!(BenchmarkRunResult::canonical_best(&[]).is_none());
+    }
+
+    #[test]
+    fn test_quarantine_filter_gate() {
+        // The gate exists even with an empty quarantine list (dns removal
+        // emptied it 2026-10-05): nothing quarantined, lookup is
+        // case-insensitive, and the list stays the single choke point.
+        assert!(!is_quarantined("redis"));
+        assert!(!is_quarantined("REDIS"));
+        assert!(!is_quarantined("dns"));
+        assert!(QUARANTINED_TASKS.is_empty());
     }
 
     #[test]

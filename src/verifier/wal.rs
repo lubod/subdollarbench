@@ -352,7 +352,11 @@ impl WalVerifier {
     /// `msg-{offset}` per index. Unit-tested against the 2000xoffset-0
     /// fixture (must fail) without a live server.
     pub fn verify_recovery_payloads(msgs: &[(u64, String)], min_msgs: usize) -> Result<(), String> {
-        if msgs.len() != min_msgs {
+        // At-least contract (prompt promises "zero acked-message loss", not
+        // "exactly N and nothing else"): a broker that durably persisted an
+        // extra un-acked message fails the old exact-count check. Extra
+        // messages are harmless; missing ones are data loss.
+        if msgs.len() < min_msgs {
             return Err(format!(
                 "Only {}/{} acked messages survived on `{RECOVERY_TOPIC}`",
                 msgs.len(),
@@ -529,6 +533,17 @@ mod tests {
     fn recovery_accepts_exact_replay() {
         let good: Vec<(u64, String)> = (0u64..2000).map(|i| (i, format!("msg-{}", i))).collect();
         assert!(WalVerifier::verify_recovery_payloads(&good, 2000).is_ok());
+    }
+
+    #[test]
+    fn recovery_accepts_extra_unacked_messages() {
+        // At-least contract: 2001 msgs against min 2000 (one extra, e.g. an
+        // un-acked write that survived) passes; the old exact-count check
+        // failed this durable broker.
+        let mut extra: Vec<(u64, String)> =
+            (0u64..2000).map(|i| (i, format!("msg-{}", i))).collect();
+        extra.push((2000, "msg-2000".to_string()));
+        assert!(WalVerifier::verify_recovery_payloads(&extra, 2000).is_ok());
     }
 
     #[test]

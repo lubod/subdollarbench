@@ -240,25 +240,12 @@ impl ComplianceChecker {
         false
     }
 
-    fn is_allowed_local_build_output(cmd_token: &str, daemon: &str) -> bool {
-        if !cmd_token.contains('/') {
-            return false;
-        }
-        let lower = cmd_token.to_lowercase();
-        let base = lower.split('/').next_back().unwrap_or(&lower);
-        if base != daemon {
-            return false;
-        }
-        for prefix in [
-            "/usr/", "/bin/", "/sbin/", "/etc/", "/opt/", "/snap/", "/lib/",
-        ] {
-            if lower.starts_with(prefix) {
-                return false;
-            }
-        }
-        true
-    }
-
+    // No path whitelist: any daemon basename match is a violation, wherever
+    // it lives. The old allowlist blessed `/tmp/redis-server`-style copies
+    // (proven bypass: curl a prebuilt onto any non-system path and run it).
+    // A candidate that builds from source never ships a file named
+    // `redis-server`/`nginx`/etc. — and the ELF vendor-signature scan below
+    // is the second layer for renamed binaries.
     fn check_command_segment(segment: &str) -> Option<String> {
         let raw_tokens: Vec<&str> = segment.split_whitespace().collect();
         if raw_tokens.is_empty() {
@@ -321,12 +308,11 @@ impl ComplianceChecker {
             ));
         }
 
-        // Check if the command itself is a forbidden daemon.
-        // Explicit non-system paths (e.g. /tmp/redis-server, ./redis-server,
-        // /workspace/..., /app/...) are the candidate's own build output and
-        // are allowed; bare names and system paths (/usr/bin/...) stay forbidden.
+        // Any forbidden daemon basename is a violation, whatever path
+        // prefixes it (bare `redis-server`, `/usr/bin/nginx`,
+        // `/tmp/redis-server`, `./build/redis-server` — all fail).
         for daemon in FORBIDDEN_DAEMONS {
-            if cmd_base == *daemon && !Self::is_allowed_local_build_output(&cmd_token, daemon) {
+            if cmd_base == *daemon {
                 return Some(format!("executes forbidden server daemon '{}'", daemon));
             }
         }
@@ -721,9 +707,7 @@ impl ComplianceChecker {
                                 let lower_first = first.to_lowercase();
                                 let base =
                                     lower_first.split('/').next_back().unwrap_or(&lower_first);
-                                if !Self::is_allowed_local_build_output(first, base)
-                                    && FORBIDDEN_DAEMONS.contains(&base)
-                                {
+                                if FORBIDDEN_DAEMONS.contains(&base) {
                                     violations.push(format!(
                                         "Dockerfile: specifies forbidden daemon '{}' in '{}'",
                                         base, line
@@ -993,8 +977,16 @@ mod tests {
         let temp_dir =
             std::env::temp_dir().join(format!("test_compliance_dockercmd_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
-        fs::write(temp_dir.join("Dockerfile"), "FROM golang:1.22-alpine\nRUN go build -o redis-server main.go\nCMD [\"./redis-server\"]\n").unwrap();
+        // Honest naming passes: a binary NOT named like a daemon is fine.
+        fs::write(
+            temp_dir.join("Dockerfile"),
+            "FROM golang:1.22-alpine\nRUN go build -o server main.go\nCMD [\"./server\"]\n",
+        )
+        .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
+        // Daemon basename fails whatever the path: bare, built-output, or
+        // absolute. No whitelist: `curl -o /tmp/redis-server` is byte-identical
+        // to `go build -o /tmp/redis-server` at scan time.
         fs::write(
             temp_dir.join("Dockerfile"),
             "FROM alpine\nCMD [\"redis-server\"]\n",
@@ -1003,6 +995,14 @@ mod tests {
         let res = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("redis-server"));
+        fs::write(
+            temp_dir.join("Dockerfile"),
+            "FROM golang:1.22-alpine\nRUN go build -o redis-server main.go\nCMD [\"./redis-server\"]\n",
+        )
+        .unwrap();
+        let res2 = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("redis-server"));
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1201,6 +1201,28 @@ mod tests {
         assert!(res_df_ep.unwrap_err().contains("nginx"));
         let _ = fs::remove_file(temp_dir.join("Dockerfile"));
 
+        // 14b. /tmp/redis-server copy (whitelist bypass, proven): any path
+        // carrying a daemon basename is a violation now.
+        fs::write(
+            temp_dir.join("start.sh"),
+            "#!/bin/bash\n/tmp/redis-server --port 6379\n",
+        )
+        .unwrap();
+        let res_tmp = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(res_tmp.is_err());
+        assert!(res_tmp.unwrap_err().contains("redis-server"));
+        let _ = fs::remove_file(temp_dir.join("start.sh"));
+
+        // 14c. $BIN indirection is NOT caught statically (documented residual:
+        // BIN=redis-server; $BIN — the value is invisible without execution).
+        // Pinned here so a future fix knows the gap: this MUST pass today.
+        fs::write(
+            temp_dir.join("start.sh"),
+            "#!/bin/bash\nBIN=redis-server\n$BIN --port 6379\n",
+        )
+        .unwrap();
+        let _ = fs::remove_file(temp_dir.join("start.sh"));
+
         // 15. Hidden dirs are SCANNED (a prebuilt server hides exactly
         // here): a forbidden import under .hidden/ must fail.
         let hidden = temp_dir.join(".hidden");
@@ -1378,19 +1400,29 @@ RUN apk add redis
             std::env::temp_dir().join(format!("test_compliance_ownbin_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
 
-        // Candidate builds its own Go server as /tmp/redis-server and execs it:
-        // explicit non-system paths are the candidate\x27s own artifact, not a cheat.
+        // No path whitelist (proven bypass: `curl -o /tmp/redis-server` is
+        // byte-identical to `go build -o /tmp/redis-server` at scan time).
+        // Honest candidates name their binary `server`/`app`, never a daemon.
+        // /tmp/redis-server "own build output": FAILS now.
         fs::write(
             temp_dir.join("start.sh"),
             "#!/bin/sh\ncd /workspace\ngo build -o /tmp/redis-server main.go\nexec /tmp/redis-server\n",
         )
         .unwrap();
-        assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
+        assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_err());
 
-        // Relative-path build output is equally legitimate.
+        // Relative-path build output named like a daemon: FAILS now.
         fs::write(
             temp_dir.join("start.sh"),
             "#!/bin/bash\ngo build -o ./redis-server .\n./redis-server --port 6379\n",
+        )
+        .unwrap();
+        assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_err());
+
+        // Honest naming still passes.
+        fs::write(
+            temp_dir.join("start.sh"),
+            "#!/bin/bash\ngo build -o ./server .\n./server --port 6379\n",
         )
         .unwrap();
         assert!(ComplianceChecker::check_no_frameworks(&temp_dir).is_ok());
