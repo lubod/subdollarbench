@@ -100,7 +100,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "./results")]
         results_dir: String,
 
-        /// Filter by task ('http', 'redis', 'dns', or 'all' for per-task + consolidated)
+        /// Filter by task ('http', 'redis', 'pdf', or 'all' for per-task + consolidated)
         #[arg(short, long, default_value = "all")]
         task: String,
     },
@@ -245,7 +245,7 @@ pub enum Commands {
 
     /// [operate] List recent runs (newest first; merged-away trials hidden)
     Runs {
-        /// Filter by task ('http', 'redis', 'dns', ...)
+        /// Filter by task ('http', 'redis', 'pdf', ...)
         #[arg(short, long)]
         task: Option<String>,
 
@@ -754,7 +754,7 @@ pub enum Commands {
     /// [analyze] Leaderboard rows from the engine (GET /api/leaderboard)
     #[command(hide = true)]
     Lboard {
-        /// Filter by task ('http', 'redis', 'dns', or 'all')
+        /// Filter by task ('http', 'redis', 'pdf', or 'all')
         #[arg(short, long, default_value = "all")]
         task: String,
 
@@ -897,9 +897,6 @@ pub enum SandboxCommands {
 pub enum TaskType {
     Redis,
     Http,
-    /// Retired 2026-09-30: parses (archived rows) but refuses to run.
-    #[value(hide = true)]
-    Dns,
     Pdf,
     Wal,
     Proxy,
@@ -912,7 +909,6 @@ impl TaskType {
         match self {
             TaskType::Redis => 6,
             TaskType::Http => 5,
-            TaskType::Dns => 6,
             TaskType::Pdf => 6,
             TaskType::Wal => 5,
             TaskType::Proxy => 5,
@@ -925,7 +921,6 @@ impl TaskType {
         match self {
             TaskType::Redis => 6379,
             TaskType::Http => 8080,
-            TaskType::Dns => 5353,
             TaskType::Pdf => 8090,
             TaskType::Wal => 6390,
             TaskType::Proxy => 8091,
@@ -934,78 +929,12 @@ impl TaskType {
         }
     }
 
-    pub fn is_udp(&self) -> bool {
-        matches!(self, TaskType::Dns)
-    }
-
-    /// Tasks withdrawn from scoring, with the reason.
-    ///
-    /// The variant, its serde name and `tasks/<task>/prompt.md` all stay:
-    /// archived results carry `"task": "dns"` and must keep parsing, and the
-    /// ruleset fingerprint hashes the prompt, so deleting either would break
-    /// `fingerprint()` (which panics on a missing graded file). Retirement is a
-    /// gate on *running* a task, not a deletion.
-    pub fn retired(&self) -> Option<&'static str> {
-        match self {
-            // Saturated: 5/5 runs at 100% pass rate, spread 0 across four
-            // models - it separates nobody. Two independent defects, and the
-            // second one is the reason no reference throughput was ever
-            // recorded for this task.
-            //
-            // (1) The verifier, not the prompt. Its six stages (handshake, A, A,
-            // TXT, NXDOMAIN, 800-query concurrency) are all satisfied by a
-            // hardcoded lookup table with correct 12-byte framing, so nothing
-            // rewards real DNS.
-            //
-            // (2) The reference cannot satisfy the candidate's own acceptance
-            // criterion. The spec is a MOCK resolver: the probe requires the
-            // literal answer 93.184.216.34 (verifier/dns.rs:216-219), a stale
-            // Akamai-era address, and returns None without it. The reference
-            // container is CoreDNS, a real forwarding recursive resolver, which
-            // returns the current addresses for example.com and is therefore
-            // scored None by construction. A candidate is rewarded for echoing
-            // a stale IP; the reference is penalised for being correct. This is
-            // why reference_throughput_req_sec is null on every archived dns
-            // row - the denominator was never measurable, not merely missing.
-            //
-            // Also: the forwarding stage is unprovable - the only unknown name
-            // given is under .invalid, which can never resolve, so 'forward and
-            // cache' is indistinguishable from an instant NXDOMAIN.
-            //
-            // To return it needs new verifier stages (CNAME, AAAA, compression
-            // pointers, TCP truncation) AND a spec that a correct resolver can
-            // satisfy, so a real reference has a denominator to be measured
-            // against.
-            TaskType::Dns => Some(
-                "retired 2026-09-30: saturated (5/5 at 100%, spread 0). The spec \
-                 is a mock resolver - it demands the literal answer 93.184.216.34 \
-                 - while the reference is CoreDNS, which correctly returns current \
-                 addresses and so is scored unmeasurable by construction; that is \
-                 why no dns reference throughput was ever recorded. The forwarding \
-                 stage is also unprovable: the only unknown name given is under \
-                 .invalid, which can never resolve. Needs new verifier stages \
-                 (CNAME, AAAA, compression pointers, TCP truncation) and a spec a \
-                 correct resolver can satisfy.",
-            ),
-            _ => None,
-        }
-    }
-
-    pub fn is_retired(&self) -> bool {
-        self.retired().is_some()
-    }
-
-    /// Name-to-task mapping with no retirement gate.
-    ///
-    /// `parse` deliberately rejects withdrawn tasks so nothing can run one.
-    /// Display needs the opposite: a retired task still has archived rows that
-    /// must render as withdrawn rather than disappear, so it needs the variant
-    /// without the check. Unknown names are `None` here.
+    /// Name-to-task mapping. Unknown names (including the removed `dns`
+    /// task) are `None`.
     pub fn from_name(s: &str) -> Option<Self> {
         Some(match s.to_lowercase().as_str() {
             "redis" => Self::Redis,
             "http" => Self::Http,
-            "dns" => Self::Dns,
             "pdf" => Self::Pdf,
             "wal" => Self::Wal,
             "proxy" => Self::Proxy,
@@ -1019,15 +948,10 @@ impl TaskType {
     ///
     /// Both the CLI and the queue engine resolve task names, and they used to
     /// carry separate `match` blocks — so any gate applied to one was bypassed
-    /// by the other, and the engine is the path a wave actually takes. The
-    /// retirement check lives here so neither can run a withdrawn task.
+    /// by the other, and the engine is the path a wave actually takes. Unknown
+    /// names (including the removed `dns` task) are an error here.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
-        let task = Self::from_name(s)
-            .ok_or_else(|| anyhow::anyhow!("unknown task '{}'", s.to_lowercase()))?;
-        if let Some(why) = task.retired() {
-            anyhow::bail!("task '{task}' is retired. {why}");
-        }
-        Ok(task)
+        Self::from_name(s).ok_or_else(|| anyhow::anyhow!("unknown task '{}'", s.to_lowercase()))
     }
 }
 
@@ -1036,7 +960,6 @@ impl std::fmt::Display for TaskType {
         match self {
             TaskType::Redis => write!(f, "redis"),
             TaskType::Http => write!(f, "http"),
-            TaskType::Dns => write!(f, "dns"),
             TaskType::Pdf => write!(f, "pdf"),
             TaskType::Wal => write!(f, "wal"),
             TaskType::Proxy => write!(f, "proxy"),
@@ -1091,52 +1014,29 @@ pub fn get_repo_root() -> PathBuf {
 mod tests {
     use super::*;
 
-    /// dns is retired: 5/5 at 100% pass rate, spread 0 across four models.
-    /// It must not be runnable, and the refusal must say why.
+    /// The dns task was removed 2026-10-05 (data archived): its name no
+    /// longer parses, and every live task parses to itself.
     #[test]
-    fn test_retired_task_is_gated() {
-        assert!(TaskType::Dns.is_retired());
+    fn test_removed_dns_task_does_not_parse() {
         let err = TaskType::parse("dns").unwrap_err().to_string();
         assert!(
-            err.contains("retired"),
-            "expected a retirement error, got: {err}"
+            err.contains("unknown task"),
+            "expected an unknown-task error, got: {err}"
         );
-        assert!(err.contains("saturated"), "error should say why: {err}");
+        assert!(TaskType::from_name("dns").is_none());
 
         for t in ["redis", "http", "pdf", "wal", "proxy", "pubsub", "binproto"] {
-            assert!(
-                !TaskType::parse(t).unwrap().is_retired(),
-                "{t} should be runnable"
-            );
+            assert!(TaskType::parse(t).is_ok(), "{t} should be runnable");
         }
         assert!(TaskType::parse("nope").is_err());
     }
 
-    /// Retirement is a gate on running, not a deletion. Archived manifests and
-    /// results carry `"task": "dns"` and must keep loading, and
-    /// GRADED_FILES still hashes `tasks/dns/prompt.md`, so the variant and its
-    /// serde name have to survive.
+    /// Every `TaskType` Display name must round-trip through `parse`.
     #[test]
-    fn test_retired_task_still_round_trips_as_data() {
-        let json = serde_json::to_string(&TaskType::Dns).unwrap();
-        assert_eq!(json, "\"dns\"");
-        let back: TaskType = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, TaskType::Dns);
-        assert!(back.is_retired());
-        assert_eq!(format!("{back}"), "dns");
-    }
-
-    /// The CLI arg is a clap `value_enum`, so clap deserializes `--task dns`
-    /// into a `TaskType` before any of our code runs. `TaskType::parse` alone
-    /// therefore cannot stop `run --task dns`; the gates live in the command
-    /// arms. This asserts the property those arms depend on, and is what would
-    /// catch a retired task being added without a `retired()` entry.
-    #[test]
-    fn test_every_task_is_either_retired_or_runnable() {
+    fn test_every_task_parses_to_itself() {
         for t in [
             TaskType::Redis,
             TaskType::Http,
-            TaskType::Dns,
             TaskType::Pdf,
             TaskType::Wal,
             TaskType::Proxy,
@@ -1144,41 +1044,18 @@ mod tests {
             TaskType::Binproto,
         ] {
             let name = t.to_string();
-            if t.is_retired() {
-                let err = TaskType::parse(&name).unwrap_err().to_string();
-                assert!(err.contains("retired"), "{name}: {err}");
-                assert!(err.len() > 40, "{name}: retirement reason must explain why");
-            } else {
-                assert!(TaskType::parse(&name).is_ok(), "{name} should be runnable");
-            }
+            assert_eq!(TaskType::parse(&name).unwrap(), t, "{name} should parse");
         }
-        // Exactly one task retired today; bump this when that changes so a
-        // silent addition has to be deliberate.
-        let retired: Vec<TaskType> = [
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Dns,
-            TaskType::Pdf,
-            TaskType::Wal,
-            TaskType::Proxy,
-            TaskType::Pubsub,
-            TaskType::Binproto,
-        ]
-        .into_iter()
-        .filter(|t| t.is_retired())
-        .collect();
-        assert_eq!(retired, vec![TaskType::Dns]);
     }
 
     #[test]
     fn test_task_type_display_and_serde() {
         assert_eq!(format!("{}", TaskType::Redis), "redis");
         assert_eq!(format!("{}", TaskType::Http), "http");
-        assert_eq!(format!("{}", TaskType::Dns), "dns");
+        assert_eq!(format!("{}", TaskType::Pdf), "pdf");
 
         assert_eq!(TaskType::Redis.total_stages(), 6);
         assert_eq!(TaskType::Http.total_stages(), 5);
-        assert_eq!(TaskType::Dns.total_stages(), 6);
         assert_eq!(TaskType::Pdf.total_stages(), 6);
         assert_eq!(TaskType::Wal.total_stages(), 5);
         assert_eq!(TaskType::Proxy.total_stages(), 5);
@@ -1187,22 +1064,12 @@ mod tests {
 
         assert_eq!(TaskType::Redis.default_port(), 6379);
         assert_eq!(TaskType::Http.default_port(), 8080);
-        assert_eq!(TaskType::Dns.default_port(), 5353);
         assert_eq!(TaskType::Binproto.default_port(), 6395);
-
-        assert!(!TaskType::Redis.is_udp());
-        assert!(!TaskType::Http.is_udp());
-        assert!(TaskType::Dns.is_udp());
 
         let json_redis = serde_json::to_string(&TaskType::Redis).unwrap();
         assert_eq!(json_redis, "\"redis\"");
         let de_redis: TaskType = serde_json::from_str(&json_redis).unwrap();
         assert_eq!(de_redis, TaskType::Redis);
-
-        let json_dns = serde_json::to_string(&TaskType::Dns).unwrap();
-        assert_eq!(json_dns, "\"dns\"");
-        let de_dns: TaskType = serde_json::from_str(&json_dns).unwrap();
-        assert_eq!(de_dns, TaskType::Dns);
 
         let json_http = serde_json::to_string(&TaskType::Http).unwrap();
         assert_eq!(json_http, "\"http\"");

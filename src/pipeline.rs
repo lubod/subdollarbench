@@ -27,7 +27,6 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::verifier::binproto::BinprotoVerifier;
 use crate::verifier::compliance::ComplianceChecker;
-use crate::verifier::dns::DnsVerifier;
 use crate::verifier::http::HttpVerifier;
 use crate::verifier::pdf::PdfVerifier;
 use crate::verifier::proxy::ProxyVerifier;
@@ -83,7 +82,7 @@ impl PipelineLogger for BufferingPipelineLogger {
 
 /// Rewrite candidate-local port mentions for a parallel worker, leaving
 /// in-network reference aliases untouched.
-/// - Skipped entirely: lines containing ref-redis/ref-http/ref-dns/upstream
+/// - Skipped entirely: lines containing ref-redis/ref-http/upstream
 ///   (fixed in-network names/ports, same for every worker).
 /// - Rewritten with word boundaries: localhost:PORT, 0.0.0.0:PORT, -p PORT,
 ///   port PORT, :PORT, exposes PORT. Bare-substring replace would corrupt
@@ -100,11 +99,7 @@ pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> S
         .lines()
         .map(|line| {
             let low = line.to_lowercase();
-            if low.contains("ref-redis")
-                || low.contains("ref-http")
-                || low.contains("ref-dns")
-                || low.contains("upstream")
-            {
+            if low.contains("ref-redis") || low.contains("ref-http") || low.contains("upstream") {
                 return line.to_string();
             }
             word_pat.replace_all(line, off.as_str()).to_string()
@@ -333,7 +328,7 @@ impl BenchmarkPipeline {
         // 1b. Create the run's private Docker network (reference aliases + agent attach)
         match sandbox.ensure_network() {
             Ok(()) => logger.log(&format!(
-                "[SETUP] Private run network '{}' ready (reference aliases: ref-redis / ref-http / ref-dns)",
+                "[SETUP] Private run network '{}' ready (reference aliases: ref-redis / ref-http)",
                 sandbox.network_name()
             )),
             Err(e) => {
@@ -405,16 +400,6 @@ impl BenchmarkPipeline {
                     ));
                 }
             }
-            TaskType::Dns => {
-                if let Err(e) = sandbox
-                    .start_reference_dns(crate::web::server::worker_port(5354, config.worker))
-                {
-                    logger.log(&format!(
-                        "[SETUP] Warning: reference DNS unavailable: {}",
-                        e
-                    ));
-                }
-            }
             TaskType::Pdf => {
                 logger.log(
                     "[SETUP] PDF task uses verifier-generated fixtures; no reference container.",
@@ -445,7 +430,7 @@ impl BenchmarkPipeline {
         // port; worker>0 cells substitute their offset port so agents build on
         // the ports their containers actually publish. Worker 0 is verbatim.
         // Targeted rule: skip lines mentioning in-network aliases
-        // (ref-redis/ref-http/ref-dns/upstreamN — fixed ports inside the run
+        // (ref-redis/ref-http/upstreamN — fixed ports inside the run
         // network, identical for every worker). Rewrite only candidate-local
         // references (localhost, 0.0.0.0, -p, bare port mentions) with word
         // boundaries so coincidental digit runs never match.
@@ -658,21 +643,19 @@ impl BenchmarkPipeline {
                 infra_error = true;
             }
 
-            // Proxy needs its upstream pool; DNS needs ref-dns. Both live
-            // on the private run network, which the candidate only joins here
-            // (default bridge has neither alias). Without this, DNS
-            // candidates hang in libc resolution of `ref-dns` past the 1.5s
-            // verifier timeout and fail stage 5 on transport, not logic.
-            // Redis and Http join too: their throughput is now measured with
-            // the bench client on this network, addressed by the `candidate`
-            // alias. Without the attach the alias never exists and the
-            // measurement fails silently. This also aligns the sandbox with the
-            // redis prompt, which already tells the model that a reference
-            // server is reachable at `ref-redis` on this network - previously
-            // unreachable, because the candidate launched on the default bridge.
+            // Proxy needs its upstream pool, which lives on the private run
+            // network the candidate only joins here (default bridge has
+            // neither alias). Redis and Http join too: their throughput is
+            // now measured with the bench client on this network, addressed
+            // by the `candidate` alias. Without the attach the alias never
+            // exists and the measurement fails silently. This also aligns the
+            // sandbox with the redis prompt, which already tells the model
+            // that a reference server is reachable at `ref-redis` on this
+            // network - previously unreachable, because the candidate launched
+            // on the default bridge.
             if matches!(
                 config.task,
-                TaskType::Proxy | TaskType::Dns | TaskType::Redis | TaskType::Http
+                TaskType::Proxy | TaskType::Redis | TaskType::Http
             ) {
                 if let Err(e) = sandbox.connect_candidate_to_network() {
                     logger.log(&format!(
@@ -688,12 +671,7 @@ impl BenchmarkPipeline {
                 "[SETUP] Waiting for server port {} to become ready (timeout: 25s)...",
                 port
             ));
-            let ready = if config.task == TaskType::Dns {
-                let verifier = DnsVerifier::new(port, Some(&verifier_seed));
-                verifier.wait_for_ready(25).await
-            } else {
-                sandbox.wait_for_port(port, 25).await
-            };
+            let ready = sandbox.wait_for_port(port, 25).await;
 
             if ready {
                 logger.log(&format!(
@@ -788,24 +766,6 @@ impl BenchmarkPipeline {
                 }
                 TaskType::Http => {
                     let verifier = HttpVerifier::new(port, Some(&verifier_seed));
-                    let summary = verifier.run_all().await;
-                    for s in &summary.stages {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
-                        logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
-                        ));
-                    }
-                    (
-                        summary.pass_rate,
-                        summary.passed_count,
-                        summary.total_stages,
-                        summary.stages,
-                    )
-                }
-                TaskType::Dns => {
-                    let verifier = DnsVerifier::new(port, Some(&verifier_seed));
                     let summary = verifier.run_all().await;
                     for s in &summary.stages {
                         let status_str = if s.passed { "PASS" } else { "FAIL" };
@@ -1198,29 +1158,6 @@ impl BenchmarkPipeline {
                                     "  [BENCH] live Nginx reference FAILED: {e:#}. \
                                      Throughput will be reported but NOT ranked."
                                 )),
-                            }
-                        }
-                    }
-                    TaskType::Dns => {
-                        let verifier = DnsVerifier::new(port, Some(&verifier_seed));
-                        if let Some(tp) = verifier.measure_throughput().await {
-                            logger.log(&format!("  Candidate Throughput: {:.0} queries/sec", tp));
-                            throughput = Some(tp);
-                        }
-                        if config.batch_reference.is_none() {
-                            // Live CoreDNS baseline on an ephemeral port: same
-                            // probe, same host load window as the candidate.
-                            logger.log(
-                                "[BENCH] Calibrating live CoreDNS baseline (pinned image, ephemeral port)...",
-                            );
-                            if let Some(ref_tp) =
-                                crate::bench::measure_dns_reference(&verifier_seed).await
-                            {
-                                logger.log(&format!(
-                                    "  Official Reference CoreDNS: {:.0} queries/sec",
-                                    ref_tp
-                                ));
-                                reference_throughput = Some(ref_tp);
                             }
                         }
                     }
@@ -1621,18 +1558,6 @@ impl BenchmarkPipeline {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_dns_candidate_joins_run_network() {
-        // Regression: the pre-verify attach must cover DNS (ref-dns lives on
-        // the private run network). If narrowed back to Proxy-only, stage 5
-        // fails on libc resolution timeout instead of candidate logic.
-        let src = include_str!("pipeline.rs");
-        assert!(
-            src.contains("TaskType::Proxy || config.task == TaskType::Dns"),
-            "DNS candidate must join the run network alongside Proxy"
-        );
-    }
-
     struct DummyLogger;
     impl PipelineLogger for DummyLogger {
         fn log(&self, _msg: &str) {}
@@ -1643,8 +1568,6 @@ mod tests {
         // Ref-alias lines untouched at any worker.
         let redis_ref = "redis-cli -h ref-redis -p 6379 <cmd>";
         assert_eq!(template_ports_for_worker(redis_ref, 6379, 2), redis_ref);
-        let dns_ref = "forward to `ref-dns`, port `53`";
-        assert_eq!(template_ports_for_worker(dns_ref, 5353, 1), dns_ref);
         let ups = "dial upstream1:80, mirrors 127.0.0.1:8101";
         assert_eq!(template_ports_for_worker(ups, 8091, 3), ups);
         // Candidate-local lines rewritten with word boundaries.

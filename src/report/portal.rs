@@ -95,10 +95,10 @@ pub struct ModelRollupRow {
 const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (DNS) are judged on pass spread alone; single-trial runs default to <em>stable</em>.</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens), falling back to API-only spend when compute metering is absent; avg cost/run is total divided by runs.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS scope:</strong> the verifier scores six MUST stages (header handshake, example.com A, localhost A, test TXT, NXDOMAIN-or-empty for unknown names, 800-query burst with at least 760 ID-matched); TTL values are parsed but never asserted, and forwarding/caching are SHOULD-have judge scope only.</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li><li><strong>Publish freeze:</strong> only runs graded at or after the 2026-09-26 anti-cheat fix are published (timestamp &ge; 2026-09-26T15:34:10Z); earlier rows were graded under a stricter rule that has since changed. Fingerprint allowlists alone are insufficient because graded content changed without a version bump.</li><li><strong>Integrity limits:</strong> egress/static anti-cheat blocklists are self-admitted; a DNS candidate forwarding to the reference is indistinguishable from a real resolver by design; binproto STREAM, proxy X-Forwarded-For, and pubsub 1,000-subscriber requirements are published as specified but verified at reduced scale; the LLM judge may review its own model family rows; the API key travels in the agent container env.</li></ul></section>"#;
 
 /// Rollup page appends the coverage-floor note to the shared methodology.
-const ROLLUP_FLOOR_NOTE_HTML: &str = r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 7 active tasks (dns retired 2026-09-30) and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
+const ROLLUP_FLOOR_NOTE_HTML: &str = r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 7 active tasks and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
 
 /// Publish floor for the public rollup: one row per model only with >= 6 of
-/// 8 tasks AND >= 18 total trials (avg 3/task). Thin-coverage rows (e.g. a
+/// 7 tasks AND >= 18 total trials (avg 3/task). Thin-coverage rows (e.g. a
 /// single-task probe) would otherwise top average-pass sorting on noise.
 pub const ROLLUP_MIN_TASKS: usize = 6;
 pub const ROLLUP_MIN_TRIALS: usize = 18;
@@ -505,14 +505,6 @@ const PORTAL_JS: &str = r#"
       refInfo: 'redis:alpine reference container on port 6380 (live-measured per batch; no fixed baseline)',
       benchTool: 'redis-benchmark -p 6379 -n 5000 -c 10 -t get,set -q'
     },
-    dns: {
-      name: 'RFC 1035 UDP DNS Server',
-      icon: '📡',
-      desc: 'Raw UDP DNS resolver handling RFC 1035 packet headers, query questions, standard flags (QR, Opcode, AA, RD, RA, RCODE), dynamic port listening, and A-record address resolution.',
-      stagesCount: 6,
-      refInfo: 'Retired 2026-09-30 (saturated, mock-resolver spec): archived rows report queries/s, unscored',
-      benchTool: 'UDP raw-socket sequential burst (200 queries)'
-    },
     wal: {
       name: 'TCP Write-Ahead Log',
       icon: '📓',
@@ -584,7 +576,6 @@ const PORTAL_JS: &str = r#"
     if (!tp) return 'N/A';
     const t = (task || '').toLowerCase();
     const unit = t === 'pdf' ? 'pages/s'
-      : t === 'dns' ? 'queries/s'
       : t === 'wal' ? 'msgs/s'
       : t === 'pubsub' ? 'deliveries/s'
       : t === 'binproto' ? 'ops/s'
@@ -947,7 +938,7 @@ const PORTAL_JS: &str = r#"
     return `
       <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span>📐</span>
-        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>HTTP/Proxy</strong> (Nginx, live), <strong>Redis</strong> (live). <strong>DNS</strong> (live CoreDNS where measured), <strong>PDF/WAL/PubSub</strong> timings are reported but unscored (--). DNS rejoined the global board 2026-09-27 after healthy fresh-wave cells. Ranking is server-side (P@1-lo, P@1, score, cost) — the old formula customizer is removed.</span>
+        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>HTTP/Proxy</strong> (Nginx, live), <strong>Redis</strong> (live). <strong>PDF/WAL/PubSub</strong> timings are reported but unscored (--). Ranking is server-side (P@1-lo, P@1, score, cost) — the old formula customizer is removed.</span>
       </div>
     `;
   }
@@ -967,8 +958,7 @@ const PORTAL_JS: &str = r#"
 
   // Cross-task rollup: one row per model+effort over all tasks.
   // Pooled P@1 = passing trials / all trials; cost/turns summed; avg% averaged.
-  // (DNS quarantine lifted 2026-09-27: fresh-wave dns cells healthy, e.g.
-  // muse-spark dns 100%/watch; backend QUARANTINED_TASKS already empty.)
+  // (Quarantine gate lives in the Rust scorer; the JS rollup mirrors it.)
   function aggregateModels() {
     // 1. Group runs by (model, effort, task) and pick canonical run (highest trials, latest timestamp)
     const canonical = {};
@@ -1185,9 +1175,9 @@ impl PortalExporter {
         let runs_path = Path::new(runs_dir);
         let mut results = LeaderboardManager::load_all(results_dir);
         results.truncate(keep);
-        // Retired tasks (dns 2026-09-30): archived in results//DB, never
-        // published per-run either. Explicit ?task=dns / --task dns still
-        // renders the withdrawn rows from the API/CLI.
+        // Quarantined tasks stay archived in results/DB but are never
+        // published per-run either. An explicit ?task=<name> still
+        // renders those rows from the API/CLI.
         let visible: Vec<_> = results
             .into_iter()
             .filter(|r| {
@@ -1267,8 +1257,8 @@ impl PortalExporter {
     /// above); the public portal is aggregated by design.
     pub fn export_rollup(results_dir: &str, out: &str, base_url: &str) -> Result<PortalSummary> {
         let results = LeaderboardManager::load_all(results_dir);
-        // Retired tasks (dns 2026-09-30) stay archived in results//DB but
-        // never publish: the rollup ranks comparable active tasks only.
+        // Quarantined tasks stay archived in results/DB but never publish:
+        // the rollup ranks comparable active tasks only.
         let results: Vec<_> = results
             .into_iter()
             .filter(|r| !crate::report::is_quarantined(&r.task))
@@ -1482,7 +1472,7 @@ impl PortalExporter {
                 p1 = r.p1, lo = r.p1_lo, hi = r.p1_hi,
                 w = (r.p1_hi - r.p1_lo).max(2.0),
             );
-            // Task dots: 7 active tasks (dns retired 2026-09-30), filled = covered.
+            // Task dots: 7 active tasks, filled = covered.
             let all_tasks = ["binproto", "http", "pdf", "proxy", "pubsub", "redis", "wal"];
             let mut dots = String::new();
             for t in all_tasks {
@@ -1762,10 +1752,6 @@ impl PortalExporter {
             .iter()
             .filter(|r| r.task.eq_ignore_ascii_case("redis"))
             .count();
-        let dns_n = results
-            .iter()
-            .filter(|r| r.task.eq_ignore_ascii_case("dns"))
-            .count();
         let pdf_n = results
             .iter()
             .filter(|r| r.task.eq_ignore_ascii_case("pdf"))
@@ -1908,14 +1894,13 @@ impl PortalExporter {
         };
 
         format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📡 DNS Server</div><div class=\"v\">{dns}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div><div class=\"card\"><div class=\"k\">📓 WAL Broker</div><div class=\"v\">{wal}</div></div><div class=\"card\"><div class=\"k\">🔀 Reverse Proxy</div><div class=\"v\">{proxy}</div></div><div class=\"card\"><div class=\"k\">📢 Pub/Sub Broker</div><div class=\"v\">{pubsub}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                                  <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>                          <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             {methodology}<script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div><div class=\"card\"><div class=\"k\">📓 WAL Broker</div><div class=\"v\">{wal}</div></div><div class=\"card\"><div class=\"k\">🔀 Reverse Proxy</div><div class=\"v\">{proxy}</div></div><div class=\"card\"><div class=\"k\">📢 Pub/Sub Broker</div><div class=\"v\">{pubsub}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                                  <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>                          <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             {methodology}<script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
             css = PORTAL_CSS,
             js = PORTAL_JS,
             n = results.len(),
             passed = passed_n,
             http = http_n,
             redis = redis_n,
-            dns = dns_n,
             pdf = pdf_n,
             wal = wal_n,
             proxy = proxy_n,
@@ -2620,7 +2605,6 @@ mod tests {
             rollup_parent(
                 "roll_c4",
                 "model-c",
-                // dns retired: fixtures use active tasks only.
                 "binproto",
                 100.0,
                 0.10,
@@ -2685,7 +2669,7 @@ mod tests {
         let thin = rollup_parent(
             "thin_1",
             "thin-model",
-            "dns",
+            "wal",
             100.0,
             0.05,
             Some(0.05),
@@ -2694,7 +2678,7 @@ mod tests {
         );
         // Covered model: 6 tasks x 3 trials = 18 trials.
         let mut parents = vec![thin];
-        for (i, task) in ["http", "redis", "dns", "pdf", "wal", "proxy"]
+        for (i, task) in ["http", "redis", "pdf", "wal", "proxy", "pubsub"]
             .iter()
             .enumerate()
         {

@@ -115,16 +115,11 @@ pub fn legacy_rules_version(timestamp: &str) -> &'static str {
     }
 }
 
-/// Tasks quarantined from cross-model ranking while their verifier is
-/// under investigation (see DNS stage-5 89% failure analysis). Ranked
-/// within-task only; excluded from the consolidated global board until
-/// cleared here.
-/// Retired tasks stay archived (rows parse, stamps verify) but never rank:
-/// excluded from the global board, the portal rollup, and the API default.
-/// `dns` retired 2026-09-30 (saturated + lenient verifier + unmeasurable
-/// mock-spec denominator); per-task `leaderboard --task dns` still renders
-/// the 5 archived rows with their withdrawal banner.
-pub const QUARANTINED_TASKS: &[&str] = &["dns"];
+/// Tasks quarantined from cross-model ranking while their verifier is under
+/// investigation. Ranked within-task only; excluded from the consolidated
+/// global board until cleared here. (Empty since the dns task was removed
+/// 2026-10-05; the gate stays so a future suspect task has a path.)
+pub const QUARANTINED_TASKS: &[&str] = &[];
 
 /// True when a task is quarantined from cross-model ranking.
 pub fn is_quarantined(task: &str) -> bool {
@@ -145,7 +140,7 @@ pub enum Stability {
 /// Rules: any pass-rate spread across trials -> Unstable; throughput
 /// CV > 25% -> Unstable (> 50% also flags a suspect measurement);
 /// CV 10-25% -> Watch; otherwise Stable. Throughput-free tasks
-/// (e.g. DNS) are judged on pass spread alone.
+/// are judged on pass spread alone.
 pub fn assess_stability(subruns: &[BenchmarkRunResult]) -> (Stability, String) {
     if subruns.len() < 2 {
         return (Stability::Stable, "single trial".to_string());
@@ -229,7 +224,7 @@ impl BenchmarkRunResult {
     /// grader stamp when it differs. Format: `scored` when grader == scorer
     /// (fresh runs), else `graded→scored`. The short label alone collides
     /// (8 content-distinct hashes sat under `2026-09-30.1`), and a re-score
-    /// must not launder grader provenance: a DNS row graded 09-27 under
+    /// must not launder grader provenance: a row graded 09-27 under
     /// pre-echo-zero verifiers that was re-scored under `.3` maths groups
     /// apart from rows both graded AND scored under `.3`. `legacy` marks
     /// rows too old to carry a stamp.
@@ -299,7 +294,7 @@ impl BenchmarkRunResult {
             .unwrap_or(&subruns[0]);
 
         // 3. Fair Throughput: median among passing trials, but only when a
-        // live/batch reference exists. Unanchored medians (dns/wal/pdf/pubsub
+        // live/batch reference exists. Unanchored medians (wal/pdf/pubsub
         // without refs) are reported per-trial, never scored.
         let has_ref = best.reference_throughput_req_sec.unwrap_or(0.0) > 0.0;
         // A drifted or unverified bracket means the denominator these trials
@@ -370,7 +365,7 @@ impl BenchmarkRunResult {
         // Unanchored tasks (no live/batch ref) keep fair_tp_score None:
         // reported, never ranked. A drifted bracket is unanchored for scoring
         // purposes — `fair_tp` (the candidate's own reading) stays reported.
-        // Denominator gate (Step 4): proxy/pdf/wal/pubsub/binproto/dns have
+        // Denominator gate (Step 4): proxy/pdf/wal/pubsub/binproto have
         // no valid throughput denominator. Archived rows predate the scorer
         // gate and may still carry a reference + score; reconsolidation must
         // heal them, not re-publish them. Scrub first, then let the scorer
@@ -587,7 +582,6 @@ impl LeaderboardManager {
     pub fn throughput_unit(task: &str) -> &'static str {
         match task.to_lowercase().as_str() {
             "pdf" => "pages/s",
-            "dns" => "queries/s",
             "wal" => "msgs/s",
             "pubsub" => "deliveries/s",
             "binproto" => "ops/s",
@@ -1206,30 +1200,21 @@ impl LeaderboardManager {
     }
 
     pub fn print_table(results: &[BenchmarkRunResult]) {
-        Self::print_table_with_title("Benchmark Leaderboard", results, None);
+        Self::print_table_with_title("Benchmark Leaderboard", results, false);
     }
 
-    /// `withdrawn` carries a retirement reason when the rows shown belong to a
-    /// task that has been pulled from scoring. The rows are still printed - the
-    /// archive keeps them - but they lose their ordinals, because a table that
-    /// medals a task every model passes is asserting a ranking that does not
-    /// exist.
-    pub fn print_table_with_title(
-        title: &str,
-        results: &[BenchmarkRunResult],
-        withdrawn: Option<&str>,
-    ) {
+    /// `archived`: the rows shown belong to a task pulled from scoring.
+    /// The rows are still printed - the archive keeps them - but they lose
+    /// their ordinals, because a table that medals a task every model passes
+    /// is asserting a ranking that does not exist.
+    pub fn print_table_with_title(title: &str, results: &[BenchmarkRunResult], archived: bool) {
         if results.is_empty() {
             println!("\n=== {} ===\nNo results to display.\n", title);
             return;
         }
 
-        if let Some(reason) = withdrawn {
+        if archived {
             println!("\n  ⛔ {} — WITHDRAWN FROM SCORING", title);
-            for line in reason.split(". ").filter(|l| !l.trim().is_empty()) {
-                println!("     {}", line.trim_end_matches('.'));
-                println!();
-            }
             println!("     No rank is shown: this task does not separate models.");
             println!("     Rows below are the archived record, retained for provenance.");
         }
@@ -1260,9 +1245,9 @@ impl LeaderboardManager {
             ]);
 
         for (idx, r) in results.iter().enumerate() {
-            let rank_str = match withdrawn {
-                Some(_) => "--".to_string(),
-                None => match idx {
+            let rank_str = match archived {
+                true => "--".to_string(),
+                false => match idx {
                     0 => "🥇 1".to_string(),
                     1 => "🥈 2".to_string(),
                     2 => "🥉 3".to_string(),
@@ -1393,7 +1378,7 @@ impl LeaderboardManager {
         // have to know to look at.
         let regimes: std::collections::BTreeSet<String> =
             results.iter().map(BenchmarkRunResult::rules_of).collect();
-        if regimes.len() > 1 && withdrawn.is_none() {
+        if regimes.len() > 1 && !archived {
             let list = regimes.iter().cloned().collect::<Vec<_>>().join(", ");
             println!(
                 "\n  ⚠️  This table ranks {} scoring regimes together ({list}).",
@@ -1480,12 +1465,9 @@ impl LeaderboardManager {
                 let title = match task.to_lowercase().as_str() {
                     "redis" => "⚡ Task: In-Memory Redis Server Leaderboard",
                     "http" => "🌐 Task: HTTP/1.1 Web Server Leaderboard",
-                    "dns" => "📡 Task: DNS Server Leaderboard",
                     _ => &format!("Task: {} Leaderboard", task),
                 };
-                let withdrawn = crate::config::TaskType::from_name(task)
-                    .and_then(|t| t.retired().map(String::from));
-                Self::print_table_with_title(title, &task_results, withdrawn.as_deref());
+                Self::print_table_with_title(title, &task_results, false);
             }
 
             // Quarantined tasks rank within-task only, never on the global board.
@@ -1513,7 +1495,7 @@ impl LeaderboardManager {
             Self::print_table_with_title(
                 "🏆 Consolidated Global Leaderboard (All Tasks)",
                 &global,
-                None,
+                false,
             );
         } else {
             let task_results: Vec<BenchmarkRunResult> = results
@@ -1528,12 +1510,9 @@ impl LeaderboardManager {
                 let title = match trimmed.to_lowercase().as_str() {
                     "redis" => "⚡ Task: In-Memory Redis Server Leaderboard",
                     "http" => "🌐 Task: HTTP/1.1 Web Server Leaderboard",
-                    "dns" => "📡 Task: DNS Server Leaderboard",
                     _ => &format!("Task: {} Leaderboard", trimmed),
                 };
-                let withdrawn = crate::config::TaskType::from_name(trimmed)
-                    .and_then(|t| t.retired().map(|r| r.to_string()));
-                Self::print_table_with_title(title, &task_results, withdrawn.as_deref());
+                Self::print_table_with_title(title, &task_results, false);
             }
         }
     }
@@ -1543,7 +1522,7 @@ impl LeaderboardManager {
 mod tests {
     use super::*;
     use crate::sandbox::docker::{
-        BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE,
+        BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE,
     };
 
     #[test]
@@ -1551,7 +1530,6 @@ mod tests {
         for img in [
             REF_REDIS_IMAGE,
             REF_NGINX_IMAGE,
-            REF_DNS_IMAGE,
             BENCH_REDIS_CLIENT_IMAGE,
             BENCH_WRK_IMAGE,
         ] {
@@ -1661,7 +1639,7 @@ mod tests {
             stab_run(100.0, Some(35600.0)),
         ];
         assert_eq!(assess_stability(&r).0, Stability::Stable);
-        // Deterministic partial pass (DNS-style) -> stable.
+        // Deterministic partial pass -> stable.
         let r = [
             stab_run(83.3, None),
             stab_run(83.3, None),
@@ -1705,7 +1683,7 @@ mod tests {
                 id: id.to_string(),
                 model: "test-model".to_string(),
                 // redis: an anchored task, so the fixture tests merge math
-                // rather than the retired-dns denominator scrub (pinned by
+                // rather than the denominator scrub (pinned by
                 // the gate test in cost/calculator.rs).
                 task: "redis".to_string(),
                 language: "Python".to_string(),
@@ -1931,7 +1909,7 @@ mod tests {
         let mk = |id: &str, pass: f64| BenchmarkRunResult {
             id: id.to_string(),
             model: "m".to_string(),
-            task: "dns".to_string(),
+            task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
             pass_rate: pass,
@@ -2516,7 +2494,7 @@ mod tests {
         let mk = |id: &str, pass: f64| BenchmarkRunResult {
             id: id.to_string(),
             model: "m".to_string(),
-            task: "dns".to_string(),
+            task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
             pass_rate: pass,

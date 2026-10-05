@@ -8,31 +8,6 @@ use std::process::Command;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-/// Live CoreDNS baseline on an ephemeral host port, probed with the same
-/// `measure_throughput` path as candidates. Starts the pinned CoreDNS image
-/// (forwarding Corefile like the trial oracle), warms up, measures, cleans up.
-/// Returns None instead of a constant so refless runs stay unscored.
-pub async fn measure_dns_reference(seed: &str) -> Option<f64> {
-    use crate::sandbox::docker::SandboxManager;
-    use crate::verifier::DnsVerifier;
-    let sandbox = SandboxManager::with_id(&format!("dnsref-{}", seed));
-    // Ephemeral port avoids colliding with trial refs or candidates.
-    let port: u16 = 15353 + (rand::random::<u16>() % 4000);
-    if sandbox.start_reference_dns(port).is_err() {
-        return None;
-    }
-    let v = DnsVerifier::new(port, Some(seed));
-    if !v.wait_for_ready(20).await {
-        sandbox.cleanup();
-        return None;
-    }
-    // Warmup window (discarded), then the scored measurement.
-    let _ = v.measure_throughput().await;
-    let tp = v.measure_throughput().await;
-    sandbox.cleanup();
-    tp
-}
-
 /// Load-test shape. Part of the measurement apparatus like BENCH_REPS:
 /// changing these moves every recorded denominator, so they are constants,
 /// not flags. `-q` keeps redis-benchmark output to the parseable summary
@@ -536,8 +511,7 @@ mod tests {
 
     #[test]
     fn test_ref_drifted_tolerance_is_per_task() {
-        // DNS carries a wider band (its denominator is RTT-bound, not
-        // work-bound). 70000 -> 80000 is +14.3%: clean at 0.25, drift at 0.10.
+        // 70000 -> 80000 is +14.3%: clean at 0.25, drift at 0.10.
         assert!(!ref_drifted_with_tol(70000.0, 80000.0, 0.25));
         assert!(ref_drifted_with_tol(70000.0, 80000.0, 0.10));
         // +5% is inside the default band and must stay clean, or every wave

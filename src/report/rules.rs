@@ -8,6 +8,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.6`: dns task removed (code + prompt + verifier deleted, data
+///   archived). `tasks/dns/prompt.md` + `src/verifier/dns.rs` leave
+///   GRADED_FILES with the two entries below; archived dns rows (plain
+///   `"task": "dns"` strings in results/DB) keep loading untouched — no
+///   `TaskType` variant is involved in row parsing.
 /// - `2026-10-03.5`: verifier pins (stricter gates, no leniency change to
 ///   honest rows). Proxy + HTTP: keep-alive (3 sequential 200s, one
 ///   connection). PDF: dynamic-content (distinct nonces, distinct bodies).
@@ -59,14 +64,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-/// Retired-task freeze: `tasks/dns/prompt.md` + `src/verifier/dns.rs` stay
-/// in GRADED_FILES (fingerprint panics on a missing graded file, and
-/// archived dns rows must keep verifying) but are FROZEN — no-edit policy.
-/// A retired task has no live grading path, yet any dns.rs touch would roll
-/// every stamp for all 7 live tasks. So: hands off both files; the next
-/// touch of either must move them OUT of GRADED_FILES (with a deliberate
-/// one-time bump) instead of editing in place.
-pub const RULES_VERSION: &str = "2026-10-03.5";
+pub const RULES_VERSION: &str = "2026-10-03.6";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
@@ -75,7 +73,6 @@ pub const RULES_VERSION: &str = "2026-10-03.5";
 /// scored by different maths carry the same stamp.
 const GRADED_FILES: &[&str] = &[
     "tasks/binproto/prompt.md",
-    "tasks/dns/prompt.md",
     "tasks/http/prompt.md",
     "tasks/pdf/prompt.md",
     "tasks/proxy/prompt.md",
@@ -84,7 +81,6 @@ const GRADED_FILES: &[&str] = &[
     "tasks/wal/prompt.md",
     "src/verifier/compliance.rs",
     "src/verifier/binproto.rs",
-    "src/verifier/dns.rs",
     "src/verifier/http.rs",
     "src/verifier/pdf.rs",
     "src/verifier/proxy.rs",

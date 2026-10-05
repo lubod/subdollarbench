@@ -451,7 +451,7 @@ pub fn test_queue_item(id: &str) -> QueuedRun {
         status: QueueStatus::Pending,
         kind: QueueKind::Run(RunRequest {
             model: "test-model".to_string(),
-            task: "dns".to_string(),
+            task: "wal".to_string(),
             api_key: None,
             budget_usd: 0.10,
             max_turns: 5,
@@ -1158,13 +1158,13 @@ pub struct LeaderboardQuery {
 async fn get_leaderboard(Query(query): Query<LeaderboardQuery>) -> Json<Vec<serde_json::Value>> {
     let r_dir = resolve_results_dir();
     let mut list = LeaderboardManager::load_all(r_dir.to_str().unwrap_or("./results"));
-    // Retired tasks (dns) are archived, not published: the default API
-    // omits them; explicit ?task=dns still renders the withdrawn rows.
-    let want_retired = query
+    // Quarantined tasks are archived, not published: the default API
+    // omits them; an explicit ?task=<name> still renders those rows.
+    let want_quarantined = query
         .task
         .as_deref()
         .is_some_and(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("all"));
-    if !want_retired {
+    if !want_quarantined {
         list.retain(|r| !is_quarantined(&r.task));
     }
     if let Some(task_filter) = query.task {
@@ -2268,8 +2268,8 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
     let task_type = match TaskType::parse(&data.task) {
         Ok(t) => t,
         Err(e) => {
-            // Covers unknown *and* retired tasks, so a grid file still listing
-            // `dns` cannot spend money on it through the engine.
+            // Covers unknown tasks (incl. the removed `dns`), so a grid file
+            // still listing one cannot spend money on it through the engine.
             finish_item(
                 &state,
                 &format!("[EXTEND-QUEUE] {queue_id}: {e}; skipping."),
@@ -2365,11 +2365,10 @@ async fn execute_extend_body(state: AppState, ext: ExtendRequest, queue_id: Stri
 }
 
 fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String>, worker: u8) {
-    // Every engine run funnels through here, so this is the one place that has
-    // to refuse a retired task: `RunRequest.task` is a String resolved by four
+    // Every engine run funnels through here, so this is the one place that
+    // refuses an unknown task: `RunRequest.task` is a String resolved by
     // separate match blocks further down (each defaulting an unknown task to
-    // Redis), none of which consult the retirement list. This is the path a
-    // wave actually takes, and the one that spends.
+    // Redis). This is the path a wave actually takes, and the one that spends.
     match TaskType::parse(&req.task) {
         Ok(_) => {}
         Err(e) => {
@@ -2437,7 +2436,6 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         let task_type_pre = match req.task.as_str() {
             "redis" => TaskType::Redis,
             "http" => TaskType::Http,
-            "dns" => TaskType::Dns,
             "pdf" => TaskType::Pdf,
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
@@ -2573,7 +2571,6 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         let task_type = match req.task.as_str() {
             "redis" => TaskType::Redis,
             "http" => TaskType::Http,
-            "dns" => TaskType::Dns,
             "pdf" => TaskType::Pdf,
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
@@ -2713,7 +2710,6 @@ async fn execute_run_body(state: AppState, req: RunRequest, queue_id: Option<Str
         let task_type_ext = match req.task.as_str() {
             "redis" => TaskType::Redis,
             "http" => TaskType::Http,
-            "dns" => TaskType::Dns,
             "pdf" => TaskType::Pdf,
             "wal" => TaskType::Wal,
             "proxy" => TaskType::Proxy,
@@ -3006,7 +3002,6 @@ async fn extend_parent_run(
     let task_type = match data.task.as_str() {
         "redis" => TaskType::Redis,
         "http" => TaskType::Http,
-        "dns" => TaskType::Dns,
         "pdf" => TaskType::Pdf,
         "wal" => TaskType::Wal,
         "proxy" => TaskType::Proxy,
@@ -3377,12 +3372,12 @@ async fn enqueue_run(
     }
     if !matches!(
         req.task.as_str(),
-        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
+        "redis" | "http" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
     ) {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             format!(
-                "Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, pubsub, or binproto",
+                "Unknown task '{}': expected redis, http, pdf, wal, proxy, pubsub, or binproto",
                 req.task
             ),
         )
@@ -3514,13 +3509,13 @@ async fn start_run(
 
     if !matches!(
         req.task.as_str(),
-        "redis" | "http" | "dns" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
+        "redis" | "http" | "pdf" | "wal" | "proxy" | "pubsub" | "binproto"
     ) {
         release_slot(&state, start_worker);
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             format!(
-                "Unknown task '{}': expected redis, http, dns, pdf, wal, proxy, pubsub, or binproto",
+                "Unknown task '{}': expected redis, http, pdf, wal, proxy, pubsub, or binproto",
                 req.task
             ),
         )
@@ -3759,7 +3754,7 @@ mod tests {
     fn queue_test_req() -> RunRequest {
         RunRequest {
             model: "test_model".to_string(),
-            task: "dns".to_string(),
+            task: "wal".to_string(),
             api_key: None,
             budget_usd: 0.10,
             max_turns: 5,
@@ -4146,8 +4141,8 @@ mod tests {
     /// On the default 4-slot grid four refused cells wedged the wave -
     /// `pump_queue` can never reclaim a slot nobody released - and
     /// `is_running` stayed true, so `/api/status` reported a phantom run
-    /// forever. `test_queue_item` already builds a `task: "dns"` request, which
-    /// is the refused shape.
+    /// forever. `test_queue_item` already builds a `task: "wal"` request; the
+    /// refusal under test comes from the unknown-task gate.
     #[tokio::test]
     async fn test_refused_run_releases_its_slot() {
         let state = create_test_state();
@@ -4157,9 +4152,10 @@ mod tests {
         // a whole iteration earlier, with a clearer message than a panic from
         // `expect`.
         for i in 0..(worker_count() + 1) {
-            let id = format!("q_dns_refuse_{i}");
+            let id = format!("q_unknown_refuse_{i}");
             let item = test_queue_item(&id);
-            let req = item.run_request().expect("fixture is a Run").clone();
+            let mut req = item.run_request().expect("fixture is a Run").clone();
+            req.task = "no-such-task".to_string();
             state.queue.lock().unwrap().push_back(item);
 
             // Dispatch exactly the way the queue does.
@@ -4204,7 +4200,7 @@ mod tests {
             .read()
             .unwrap()
             .iter()
-            .any(|l| l.contains("refusing run") && l.contains("retired"));
+            .any(|l| l.contains("refusing run") && l.contains("unknown task"));
         assert!(
             logged,
             "the refusal reason must reach the console, not just stderr"
@@ -5118,7 +5114,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), 200);
 
-        // 22. POST /api/run with runnable start.sh to test Docker candidate branch with DNS task
+        // 22. POST /api/run with runnable start.sh to test Docker candidate branch
         let ws_dir = resolve_workspace_dir();
         let _ = fs::create_dir_all(&ws_dir);
         fs::write(ws_dir.join("start.sh"), "#!/bin/sh\nexit 0\n").unwrap();
@@ -5130,7 +5126,7 @@ mod tests {
 
         let run_dns_req = RunRequest {
             model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
-            task: "dns".to_string(),
+            task: "wal".to_string(),
             api_key: None,
             budget_usd: 0.10,
             max_turns: 1,

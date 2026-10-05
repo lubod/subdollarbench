@@ -478,7 +478,7 @@ impl OmpRunner {
             ));
         }
 
-        // Attach to the run's private network (reference aliases ref-redis/ref-http/ref-dns)
+        // Attach to the run's private network (reference aliases ref-redis/ref-http)
         // when provided; fall back to the default bridge. The agent is never on the host
         // network, so host services stay unreachable from model-executed code.
         if let Some(net) = network {
@@ -507,7 +507,7 @@ impl OmpRunner {
         // (see `connect_candidate_to_network`), so for redis/http/pdf/binproto/
         // wal/pubsub the reference is unreachable: relaying to it is not
         // possible, and an earlier claim here that a socat forwarder would work
-        // was wrong. Only dns and proxy candidates join the run network, and
+        // was wrong. Only proxy candidates join the run network, and
         // there the reference is a functional input - forwarding is the task.
         //
         // Closing it needs a network-level rule, not configuration: the run
@@ -522,7 +522,7 @@ impl OmpRunner {
         // own ref probing bypasses the proxy. Harmless for the candidate, which
         // cannot resolve these names in the first place.
         // Both upper- and lower-case variants: pip/npm/go honor either.
-        let no_proxy = "ref-redis,ref-http,ref-dns,egress-proxy,localhost,127.0.0.1";
+        let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1";
         let egress_on = crate::sandbox::docker::egress_filter_enabled();
         if let Some(proxy_url) = (if egress_on { network } else { None })
             .and_then(|net| {
@@ -581,13 +581,6 @@ impl OmpRunner {
 `, `:1
 `, `$len
 `)."#,
-            ),
-            Some(crate::config::TaskType::Dns) => (
-                5353,
-                "dig @127.0.0.1 -p 5353 test.local",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built DNS servers (bind9, coredns, dnsmasq) are FORBIDDEN.
-- Build from raw UDP sockets on port 5353 handling RFC 1035 wire packets."#,
             ),
             Some(crate::config::TaskType::Http) => (
                 8080,
@@ -658,12 +651,6 @@ Content-Length: 0
                         6379,
                         "redis-cli -p 6379 ping",
                         r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw TCP sockets on port 6379 parsing RESP wire format."#,
-                    )
-                } else if prompt_lower.contains("dns") {
-                    (
-                        5353,
-                        "dig @127.0.0.1 -p 5353 test.local",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw UDP sockets on port 5353 handling RFC 1035 wire packets."#,
                     )
                 } else {
                     (

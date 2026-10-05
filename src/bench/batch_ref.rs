@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 use crate::bench::BenchmarkRunner;
 use crate::config::{get_repo_root, TaskType};
 use crate::sandbox::docker::{
-    SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_DNS_IMAGE, REF_NGINX_IMAGE, REF_PDF_IMAGE,
-    REF_REDIS_IMAGE,
+    SandboxManager, BENCH_REDIS_CLIENT_IMAGE, REF_NGINX_IMAGE, REF_PDF_IMAGE, REF_REDIS_IMAGE,
 };
 
 /// Batch-port assignments. Deliberately offset from the per-trial ref ports
@@ -28,11 +27,6 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
     match task {
         TaskType::Redis => Some(6389),
         TaskType::Http | TaskType::Proxy => Some(8089),
-        // DNS is retired (config.rs): no batch denominator. Trials keep
-        // their live per-trial refs for reporting; nothing here may mint a
-        // batch baseline for a withdrawn task.
-        // (`batch_ports_are_disjoint` + `test_batch_port_assignment` pin this.)
-        TaskType::Dns => None,
         // PDF batch ref: canonical extractor (REF_PDF_IMAGE). 8409, not 8289:
         // every other batch base ends in 89, so an 89-based port collides with
         // `8089 + 100*w` at w=2 — i.e. pdf@w0 and http/proxy@w2 both bind
@@ -59,7 +53,6 @@ pub fn reserved_ports() -> Vec<(String, u8, u16)> {
     for task in [
         TaskType::Redis,
         TaskType::Http,
-        TaskType::Dns,
         TaskType::Pdf,
         TaskType::Wal,
         TaskType::Proxy,
@@ -90,7 +83,7 @@ pub fn reserved_ports() -> Vec<(String, u8, u16)> {
     }
     // Per-trial reference containers are host-published next to their
     // candidate, and the proxy task dials a three-port upstream pool.
-    for base in [6380u16, 8081, 5354] {
+    for base in [6380u16, 8081] {
         bases.push((format!("ref/{base}"), "ref".to_string(), base));
     }
     for up in 8101u16..=8103 {
@@ -113,7 +106,6 @@ fn ref_image(task: &TaskType) -> &'static str {
     match task {
         TaskType::Redis => REF_REDIS_IMAGE,
         TaskType::Http | TaskType::Proxy => REF_NGINX_IMAGE,
-        TaskType::Dns => REF_DNS_IMAGE,
         TaskType::Pdf => REF_PDF_IMAGE,
         _ => "none",
     }
@@ -236,14 +228,11 @@ fn wait_http_ready_hostnet(port: u16) -> bool {
     false
 }
 
-/// Drift tolerance per task: forwarding resolvers (DNS: upstream RTT +
-/// cache-30) jitter past the generic 10% bracket on a quiet host
-/// (measured 9.1% pre/post spread, no load). Local refs stay at 10%.
-pub fn drift_threshold(task: &TaskType) -> f64 {
-    match task {
-        TaskType::Dns => 0.25,
-        _ => 0.10,
-    }
+/// Drift tolerance for the batch bracket: 10% pre/post spread on a quiet
+/// host. (The removed dns task carried a wider 0.25 band for upstream RTT +
+/// cache-30 jitter; no live task needs it.)
+pub fn drift_threshold(_task: &TaskType) -> f64 {
+    0.10
 }
 
 /// `net` is the run network and `alias` the addressable name of the server on
@@ -257,7 +246,7 @@ pub fn drift_threshold(task: &TaskType) -> f64 {
 /// path, alias and rep count as the candidate (`candidate` alias on the run
 /// network, median-of-BENCH_REPS under the host-global lock): the ratio is
 /// only meaningful when numerator and denominator share the apparatus.
-/// DNS/PDF cannot share it — no container speaks their protocol — so they use
+/// PDF cannot share it — no container speaks its protocol — so it uses
 /// the loopback path with the same rep/warmup discipline instead.
 async fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
     match task {
@@ -265,9 +254,6 @@ async fn measure(task: &TaskType, net: &str, port: u16) -> Result<f64> {
         TaskType::Http | TaskType::Proxy => {
             BenchmarkRunner::run_wrk_benchmark_async(net, "ref-http", 80).await
         }
-        // Retired (see batch_port): a batch denominator for DNS must never
-        // exist. Per-trial live refs still use measure_dns_reference().
-        TaskType::Dns => Err(anyhow!("dns is retired; no batch denominator")),
         TaskType::Pdf => measure_pdf_pages_per_sec(port),
         _ => Err(anyhow!("no external reference for {:?}", task)),
     }
@@ -1026,23 +1012,16 @@ mod tests {
     fn test_batch_port_assignment() {
         assert_eq!(batch_port(&TaskType::Redis), Some(6389));
         assert_eq!(batch_port(&TaskType::Http), Some(8089));
-        // Retired: no batch denominator may exist for DNS (Step 3).
-        assert_eq!(batch_port(&TaskType::Dns), None);
         assert_eq!(batch_port(&TaskType::Pdf), Some(8409));
         // Regression: every batch base used to end in 89, so pdf@w0 (8289) and
         // http/proxy@w2 (8089 + 200) bound the same port on the default 4-worker
         // grid. Two bases can only ever collide if they are congruent mod 100
         // *and* their difference / 100 fits inside the worker range — sharing a
         // low-order pair alone is harmless if the gap is wider than the fleet.
-        let bases = [
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Dns,
-            TaskType::Pdf,
-        ]
-        .iter()
-        .filter_map(batch_port)
-        .collect::<Vec<_>>();
+        let bases = [TaskType::Redis, TaskType::Http, TaskType::Pdf]
+            .iter()
+            .filter_map(batch_port)
+            .collect::<Vec<_>>();
         for (i, a) in bases.iter().enumerate() {
             for b in &bases[i + 1..] {
                 let gap = a.abs_diff(*b);

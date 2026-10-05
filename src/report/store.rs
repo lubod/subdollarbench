@@ -508,7 +508,7 @@ mod tests {
             status: QueueStatus::Pending,
             kind: QueueKind::Run(RunRequest {
                 model: "test-model".to_string(),
-                task: "dns".to_string(),
+                task: "wal".to_string(),
                 api_key: None,
                 budget_usd: 0.10,
                 max_turns: 5,
@@ -528,7 +528,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "run_id": run_id,
             "model": "test-model",
-            "task": "dns",
+            "task": "wal",
             "status": "passed",
             "language": "Go",
             "started_at": "2026-09-25T00:00:00Z",

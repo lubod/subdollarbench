@@ -65,7 +65,6 @@ pub fn egress_allowed(host: &str) -> bool {
         .iter()
         .any(|a| h == *a || h.ends_with(&format!(".{}", a)))
 }
-pub const REF_DNS_IMAGE: &str = "docker.io/coredns/coredns@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286";
 /// PDF reference: canonical extractor (extensions/pdf_reference.py).
 /// Pinned by image-ID digest (content-addressed; no registry needed):
 /// rebuild with `docker build -t pdf-ref:local .` in a dir containing the
@@ -90,12 +89,11 @@ pub const BENCH_WRK_IMAGE: &str = "docker.io/williamyeh/wrk@sha256:78adc0d9d51a9
 /// Fixed upstream ports for the proxy task (also baked into tasks/proxy/prompt.md).
 pub const PROXY_UPSTREAM_PORTS: [u16; 3] = [8101, 8102, 8103];
 
-/// Reference image for a task name ("redis"/"http"/"dns"/"pdf"), if it has one.
+/// Reference image for a task name ("redis"/"http"/"pdf"), if it has one.
 pub fn ref_image_for_task(task: &str) -> Option<&'static str> {
     match task {
         "redis" => Some(REF_REDIS_IMAGE),
         "http" => Some(REF_NGINX_IMAGE),
-        "dns" => Some(REF_DNS_IMAGE),
         "pdf" => Some(REF_PDF_IMAGE),
         _ => None,
     }
@@ -240,10 +238,6 @@ impl SandboxManager {
         format!("subdollar-ref-http-{}", self.instance_id)
     }
 
-    pub fn ref_dns_name(&self) -> String {
-        format!("subdollar-ref-dns-{}", self.instance_id)
-    }
-
     pub fn ref_pdf_name(&self) -> String {
         format!("subdollar-ref-pdf-{}", self.instance_id)
     }
@@ -277,8 +271,8 @@ impl SandboxManager {
 
     /// Idempotently create this run's private Docker network.
     ///
-    /// Reference containers join it under stable DNS aliases (`ref-redis`,
-    /// `ref-http`, `ref-dns`) and the OMP agent container is attached to it,
+    /// Reference containers join it under stable aliases (`ref-redis`,
+    /// `ref-http`) and the OMP agent container is attached to it,
     /// so the agent can probe ground truth by hostname while remaining
     /// isolated from host-network services.
     /// Process-wide mutex serializing Docker network create/prune.
@@ -629,56 +623,6 @@ impl SandboxManager {
         Ok(())
     }
 
-    pub fn start_reference_dns(&self, port: u16) -> Result<()> {
-        let name = self.ref_dns_name();
-        let net = self.network_name();
-        self.ensure_network()?;
-        info!(
-            "Starting reference DNS server in Docker on UDP port {} ({}, alias ref-dns on {})",
-            port, name, net
-        );
-        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-
-        // The stock coredns image defaults to the `whoami` plugin, which echoes the
-        // client's own address for every query instead of resolving. Mount a
-        // forwarding Corefile so the reference behaves like a real recursive
-        // resolver that the agent can inspect black-box.
-        let corefile = Self::coredns_corefile_path(&self.instance_id);
-        let _ = fs::write(
-            &corefile,
-            ".:53 {\n    errors\n    log\n    forward . /etc/resolv.conf\n    cache 30\n}\n",
-        );
-
-        let _ = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=ref-dns",
-                "--name",
-                &name,
-                "--network",
-                &net,
-                "--network-alias",
-                "ref-dns",
-                "--memory=512m",
-                "--cpus=1.0",
-                "-p",
-                &format!("127.0.0.1:{}:53/udp", port),
-                "-v",
-                &format!("{}:/Corefile:ro", corefile.display()),
-                REF_DNS_IMAGE,
-                "-conf",
-                "/Corefile",
-            ])
-            .output();
-
-        Ok(())
-    }
-
     /// Build the PDF reference image from the in-repo canonical source.
     /// Tag `pdf-ref:local` first (stable name for debugging), the digest
     /// const governs what actually runs. Fails loudly on build errors.
@@ -702,10 +646,6 @@ impl SandboxManager {
             ));
         }
         Ok(())
-    }
-
-    fn coredns_corefile_path(instance_id: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("subdollar-coredns-{}.corefile", instance_id))
     }
 
     /// Start the canonical PDF extractor reference (REF_PDF_IMAGE) on the
@@ -1330,7 +1270,6 @@ impl SandboxManager {
             self.candidate_container_name(),
             self.ref_redis_name(),
             self.ref_http_name(),
-            self.ref_dns_name(),
             self.ref_pdf_name(),
             self.egress_proxy_name(),
             self.agent_container_name(),
@@ -1500,8 +1439,7 @@ impl SandboxManager {
         // not-yet-attached window.
         // File cleanup is unconditional: the gated network rm above must
         // never swallow these (a kept live/young network still leaves
-        // stale coredns/upstream files otherwise).
-        let _ = fs::remove_file(Self::coredns_corefile_path(&self.instance_id));
+        // stale upstream files otherwise).
         for idx in 1..=8u8 {
             let _ = fs::remove_file(self.upstream_marker_path(idx));
         }
@@ -1571,7 +1509,6 @@ impl Drop for RunGuard {
 
 impl RunGuard {
     fn prune_files(m: &SandboxManager) {
-        let _ = fs::remove_file(SandboxManager::coredns_corefile_path(&m.instance_id));
         for idx in 1..=8u8 {
             let _ = fs::remove_file(m.upstream_marker_path(idx));
         }
@@ -1688,8 +1625,6 @@ mod tests {
         assert!(res_redis.is_ok());
         let res_http = sm.start_reference_http(59993);
         assert!(res_http.is_ok());
-        let res_dns = sm.start_reference_dns(59992);
-        assert!(res_dns.is_ok());
         sm.cleanup();
     }
 
@@ -2020,7 +1955,7 @@ mod tests {
         // owns that share; trial N's exit murdered the bracket through it).
         let pat = |id: &str| {
             format!(
-                "^subdollar-(candidate|ref-redis|ref-http|ref-dns|ref-pdf|omp-agent|egress|upstream[1-8])-{}($)",
+                "^subdollar-(candidate|ref-redis|ref-http|ref-pdf|omp-agent|egress|upstream[1-8])-{}($)",
                 id
             )
         };

@@ -15,8 +15,8 @@ use subdollarbench::report::{
     RunManifest, Stability,
 };
 use subdollarbench::verifier::{
-    BinprotoVerifier, DnsVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier,
-    RedisVerifier, WalVerifier,
+    BinprotoVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier,
+    WalVerifier,
 };
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
@@ -285,13 +285,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             extend_if_unstable,
             max_trials,
         } => {
-            // `task` is already a `TaskType` because the arg is a clap
-            // `value_enum`: clap deserialized `--task dns` before this match,
-            // so `TaskType::parse` never sees it. Gate at the point of use, or
-            // a retired task still spins up a batch reference and bills.
-            if let Some(why) = task.retired() {
-                anyhow::bail!("task '{task}' is retired. {why}");
-            }
             if queue {
                 let server = resolve_server_flag(&server);
                 // Engine path: identical payload to `enqueue`, so matrix
@@ -588,15 +581,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Eval { task, port } => {
-            // Same reason as the `run` arm: `task` is a `value_enum` field, so
-            // the retirement check has to happen here.
-            if let Some(why) = task.retired() {
-                anyhow::bail!("task '{task}' is retired. {why}");
-            }
             let p = port.unwrap_or(match task {
                 TaskType::Redis => 6379,
                 TaskType::Http => 8080,
-                TaskType::Dns => 5353,
                 TaskType::Pdf => 8090,
                 TaskType::Wal => 6390,
                 TaskType::Proxy => 8091,
@@ -615,14 +602,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
                 TaskType::Http => {
                     let v = HttpVerifier::new(p, None);
-                    let res = v.run_all().await;
-                    println!(
-                        "Pass rate: {:.1}% ({}/{})",
-                        res.pass_rate, res.passed_count, res.total_stages
-                    );
-                }
-                TaskType::Dns => {
-                    let v = DnsVerifier::new(p, None);
                     let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
@@ -1359,7 +1338,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         .unwrap_or_default()
                 })
             };
-            let best_files = RunJudge::collect_workspace(&Path::new(&runs_dir).join(&best_id));
+            let best_files =
+                RunJudge::collect_workspace(&Path::new(&runs_dir).join(&best_id).join("workspace"));
             println!(
                 "[REVIEW-RUN] canonical workspace: {best_id} ({} files)",
                 best_files.len()
@@ -1888,7 +1868,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     .args(["images", "--format", "{{.Repository}}"])
                     .output()?;
                 let repos = String::from_utf8_lossy(&out.stdout);
-                for img in ["subdollar-sandbox", "nginx", "coredns/coredns", "redis"] {
+                for img in ["subdollar-sandbox", "nginx", "redis"] {
                     if repos.lines().any(|l| l.trim() == img) {
                         println!("image {img:<18} ok");
                     } else {
@@ -1904,7 +1884,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     fail += 1;
                 }
             }
-            for port in [6379u16, 8080, 5353, 8090, 8091, 8092, 3000] {
+            for port in [6379u16, 8080, 8090, 8091, 8092, 3000] {
                 match std::net::TcpListener::bind(("127.0.0.1", port)) {
                     Ok(_) => {}
                     Err(_) => println!("port {port}:     in use (may collide with a live run)"),
@@ -2087,11 +2067,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             review_model,
             server,
         } => {
-            // `value_enum` again, so gate before the request goes out rather
-            // than relying on the engine cancelling the queue item.
-            if let Some(why) = task.retired() {
-                anyhow::bail!("task '{task}' is retired. {why}");
-            }
             let server = resolve_server_flag(&server);
             let body = remote::run_request(
                 &model,
@@ -2518,20 +2493,6 @@ mod tests {
             },
         };
         assert!(run_cli(cli_http).await.is_ok());
-
-        // dns is retired, so `eval` must now refuse it. This used to assert
-        // `is_ok()` - the test was pinning the behaviour retirement removed.
-        let cli_dns = Cli {
-            command: Commands::Eval {
-                task: TaskType::Dns,
-                port: Some(59999),
-            },
-        };
-        let err = run_cli(cli_dns).await.unwrap_err().to_string();
-        assert!(
-            err.contains("retired"),
-            "expected a retirement error, got: {err}"
-        );
     }
 
     #[tokio::test]

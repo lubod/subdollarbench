@@ -171,7 +171,7 @@ impl ModelPricing {
     ///   three-upstream pool — capped below 1.0 by construction.
     /// - pdf: the reference is our own slow parity oracle, expected SLOWER
     ///   than candidates — the ratio rewards distance from ourselves.
-    /// - wal/pubsub/binproto/dns: verifier-timed, no external reference.
+    /// - wal/pubsub/binproto: verifier-timed, no external reference.
     ///
     /// The pipeline already discards these denominators before scoring; this
     /// is the second gate so a future caller cannot re-mint a proxy/pdf
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn test_denominator_gate_proxy_pdf_unscored_despite_reference() {
         let eff = 0.05;
-        for task in ["proxy", "pdf", "wal", "pubsub", "binproto", "dns"] {
+        for task in ["proxy", "pdf", "wal", "pubsub", "binproto"] {
             assert_eq!(
                 ModelPricing::calculate_throughput_score_for_task(
                     100.0,
@@ -801,7 +801,7 @@ mod tests {
         assert!((tp_score.unwrap() - (score * 3.0)).abs() < 1e-3);
 
         // No live reference -> no score (refless tasks rank by P@1/cost).
-        for task in ["redis", "dns", "pdf", "wal", "proxy", "pubsub", "http"] {
+        for task in ["redis", "pdf", "wal", "proxy", "pubsub", "http"] {
             assert_eq!(
                 ModelPricing::calculate_throughput_score_for_task(
                     100.0,

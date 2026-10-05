@@ -757,7 +757,7 @@ mod tests {
         assert!(v["api_key"].is_null());
         let v2 = run_request(
             "m",
-            "dns",
+            "wal",
             "low",
             10,
             0.2,
@@ -825,10 +825,10 @@ mod tests {
     fn test_format_queue() {
         let v = serde_json::json!([
             {"id": "q1", "enqueued_at": "2026-09-22T00:00:00+00:00",
-             "status": "Done", "kind": {"Run": {"model": "m", "task": "dns", "effort": "high", "trials": 3}}},
+             "status": "Done", "kind": {"Run": {"model": "m", "task": "wal", "effort": "high", "trials": 3}}},
         ]);
         let s = format_queue(&v);
-        assert!(s.contains("q1") && s.contains("run m dns high x3"));
+        assert!(s.contains("q1") && s.contains("run m wal high x3"));
         assert!(format_queue(&serde_json::json!([])).contains("empty"));
     }
 
