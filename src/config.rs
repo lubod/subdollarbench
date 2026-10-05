@@ -112,6 +112,30 @@ pub enum Commands {
         results_dir: String,
     },
 
+    /// Synthesize a whole-run AI review: deterministic stats across all trials
+    /// (computed in code) + one judge call for code/architecture synthesis.
+    /// Advisory-only, never touches scores. Writes runs/<id>/run-review.md.
+    ReviewRun {
+        /// Parent run id (multi-trial parent, e.g. redis_..._w0)
+        run_id: String,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// Judge model for the synthesis
+        #[arg(long, default_value = "openrouter/meta/muse-spark-1.3-contributor")]
+        model: String,
+
+        /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
+        api_key: Option<String>,
+
+        /// Overwrite existing run-review.md
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+
     /// Export a static read-only portal (leaderboard + run pages) for VPS hosting
     RegenReviews {
         /// Regenerate LLM code reviews for existing runs with the current prompt

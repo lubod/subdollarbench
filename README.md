@@ -204,7 +204,14 @@ Parent rows aggregate **all** trials (pass or fail). The headline score is an
 expected-utility form — pass rate scaled by Pass@1, divided by the mean trial
 cost — i.e. the inverse of **cost per solved task**:
 
-$$\text{Efficiency Score} = \frac{\text{Pass Rate (\%)} \times \text{Pass@1} / 100}{\text{Mean Effective Cost (Cents)}}$$
+$$\text{Efficiency Score} = \frac{\text{Pass@1 (\%)}}{\text{Mean Effective Cost (Cents)}} = \frac{100 / (\text{cost per solved task in \$})}{100}$$
+
+Pure expected utility: the score of a 100%-at-that-cost run, scaled by the
+probability a single trial solves (Pass@1). Mean pass rate is reported
+alongside (headline Pass Rate column) but does NOT enter the score — it
+would double-count failure, since Pass@1 already prices it. (Pre-`.3` docs
+wrote pass% × P@1; the code always did P@1 alone — verified on mixed rows,
+e.g. qwen 55.6/0.1465 → 3.8 = P@1/eff.)
 
 Failed trials still burn API + compute, so the mean is over every trial, not
 just passing ones (since `2026-10-03.1`; the old passing-only mean understated

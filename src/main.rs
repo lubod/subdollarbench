@@ -1204,6 +1204,112 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 },
             );
         }
+        Commands::ReviewRun {
+            run_id,
+            runs_dir,
+            model,
+            api_key,
+            force,
+        } => {
+            use subdollarbench::report::RunJudge;
+            let id = resolve_run_id(&runs_dir, &run_id)?;
+            let rdir = Path::new(&runs_dir).join(&id);
+            let out_path = rdir.join("run-review.md");
+            if out_path.exists() && !force {
+                println!("run-review exists for {id} (use --force to regenerate)");
+                return Ok(());
+            }
+            // Parent result: results/<id>.json preferred, else reconstruct
+            // trial list from runs/<id>_trial* dirs.
+            let results_path = subdollarbench::config::get_repo_root()
+                .join("results")
+                .join(format!("{id}.json"));
+            type TrialRow = (String, f64, u32, u64, f64, f64);
+            let (parent_model, parent_task, trials): (String, String, Vec<TrialRow>) =
+                if let Ok(text) = std::fs::read_to_string(&results_path) {
+                    let v: serde_json::Value = serde_json::from_str(&text)?;
+                    let subs = v
+                        .get("subruns")
+                        .and_then(|s| s.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let t = subs
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.get("id")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("?")
+                                    .to_string(),
+                                s.get("pass_rate").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                                s.get("turns").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                                s.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                                s.get("total_cost_usd")
+                                    .and_then(|x| x.as_f64())
+                                    .unwrap_or(0.0),
+                                s.get("duration_seconds")
+                                    .and_then(|x| x.as_f64())
+                                    .unwrap_or(0.0),
+                            )
+                        })
+                        .collect();
+                    (
+                        v.get("model")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        v.get("task")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        t,
+                    )
+                } else {
+                    anyhow::bail!(
+                        "no results/{id}.json for {id}; run-review needs the merged parent"
+                    );
+                };
+            // Per-trial review conclusions (best-effort: missing files skipped).
+            let mut notes: Vec<(String, String)> = Vec::new();
+            for (tid, _, _, _, _, _) in &trials {
+                let rp = Path::new(&runs_dir).join(tid).join("review.json");
+                if let Ok(text) = std::fs::read_to_string(&rp) {
+                    if let Ok(rv) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let c = rv
+                            .get("conclusion")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !c.is_empty() {
+                            notes.push((tid.clone(), c));
+                        }
+                    }
+                }
+            }
+            let stats = RunJudge::run_stats_block(&id, &parent_model, &parent_task, &trials);
+            print!("{}", stats);
+            // Task prompt excerpt for grounding.
+            let task_prompt = std::fs::read_to_string(
+                subdollarbench::config::get_repo_root()
+                    .join("tasks")
+                    .join(&parent_task)
+                    .join("prompt.md"),
+            )
+            .unwrap_or_default();
+            let prompt = RunJudge::build_synthesis_prompt(&stats, &task_prompt, &notes);
+            println!("[REVIEW-RUN] synthesizing with {model} ...");
+            let review = RunJudge::judge_synthesis(api_key.as_deref(), &model, prompt).await?;
+            RunJudge::validate(&review)?;
+            let md = format!(
+                "# Run review: {id}\n\nModel: {parent_model} task: {parent_task} judge: {model}\n\n## Statistics (deterministic)\n\n```\n{stats}\n```\n\n## Synthesis (LLM, advisory-only)\n\n### Strengths\n\n{}\n\n### Weaknesses\n\n{}\n\n### Conclusion\n\n{}\n",
+                review.good.iter().map(|g| format!("- {g}\n")).collect::<String>(),
+                review.bad.iter().map(|b| format!("- {b}\n")).collect::<String>(),
+                review.conclusion,
+            );
+            std::fs::write(&out_path, &md)?;
+            println!("wrote {}", out_path.display());
+        }
+
         Commands::Portal {
             runs_dir,
             results_dir,

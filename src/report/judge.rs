@@ -316,6 +316,100 @@ impl RunJudge {
         }
         anyhow::bail!("judge did not return a valid review after retry")
     }
+    /// Whole-run synthesis: deterministic stats block (computed in code,
+    /// never hallucinated) + one judge call reserved for code/architecture
+    /// synthesis across the trial workspaces. Advisory-only, like trial
+    /// reviews: never touches scores, no regime impact.
+    pub fn run_stats_block(
+        run_id: &str,
+        model: &str,
+        task: &str,
+        trials: &[(String, f64, u32, u64, f64, f64)],
+    ) -> String {
+        // (trial_id, pass_rate, turns, tokens, cost_usd, duration_s)
+        let n = trials.len().max(1) as f64;
+        let passes = trials.iter().filter(|t| t.1 >= 100.0).count();
+        let mean_pass: f64 = trials.iter().map(|t| t.1).sum::<f64>() / n;
+        let mean_turns: f64 = trials.iter().map(|t| t.2 as f64).sum::<f64>() / n;
+        let mean_tokens: f64 = trials.iter().map(|t| t.3 as f64).sum::<f64>() / n;
+        let mean_cost: f64 = trials.iter().map(|t| t.4).sum::<f64>() / n;
+        let mean_dur: f64 = trials.iter().map(|t| t.5).sum::<f64>() / n;
+        let spread = trials
+            .iter()
+            .map(|t| t.1)
+            .fold((100.0_f64, 0.0_f64), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        let mut s = format!(
+            "RUN {run_id} model={model} task={task} trials={} passed={}/{} mean_pass={:.1}% (range {:.0}-{:.0}) mean_turns={:.0} mean_tokens={:.0} mean_cost=${:.4} mean_dur={:.0}s\n",
+            trials.len(),
+            passes,
+            trials.len(),
+            mean_pass,
+            spread.0,
+            spread.1,
+            mean_turns,
+            mean_tokens,
+            mean_cost,
+            mean_dur,
+        );
+        for t in trials {
+            s.push_str(&format!(
+                "  trial {} pass={:.0}% turns={} tokens={} cost=${:.4} dur={:.0}s\n",
+                t.0, t.1, t.2, t.3, t.4, t.5
+            ));
+        }
+        s
+    }
+
+    /// Synthesis prompt: architecture + failure-mode review across trials.
+    /// Numbers come from `run_stats_block` (deterministic); the judge reads
+    /// code, not spreadsheets.
+    pub fn build_synthesis_prompt(
+        stats: &str,
+        task_prompt: &str,
+        trial_notes: &[(String, String)],
+    ) -> String {
+        let mut p = String::new();
+        p.push_str("You are an expert systems-engineering reviewer synthesizing a multi-trial benchmark run. The statistics below are COMPUTED FACTS — do not recompute or restate numbers beyond naming them; focus your judgment on architecture, failure modes, and code quality across trials.\n");
+        p.push_str("Respond with a single JSON object and nothing else, exactly this shape:\n");
+        p.push_str(
+            "{\"good\": [\"...\", ...], \"bad\": [\"...\", ...], \"conclusion\": \"...\"}\n",
+        );
+        p.push_str("Rules: good plus bad must total exactly 9 bullets (any split, at least one of each), each bullet one or two sentences grounded in the code or the trial reviews, conclusion exactly three sentences. No markdown fences.\n\n");
+        p.push_str("## Run statistics (facts, do not recompute)\n");
+        p.push_str(stats);
+        p.push_str("\n## Task requirements (excerpt)\n");
+        p.push_str(
+            &task_prompt
+                .chars()
+                .take(MAX_PROMPT_CHARS)
+                .collect::<String>(),
+        );
+        p.push_str("\n\n## Per-trial review conclusions\n");
+        for (id, conclusion) in trial_notes {
+            p.push_str(&format!("### {}\n{}\n", id, conclusion));
+        }
+        p
+    }
+
+    /// One judge call for whole-run synthesis. Same transport as trial
+    /// reviews; returns the parsed ReviewJson.
+    pub async fn judge_synthesis(
+        api_key: Option<&str>,
+        review_model: &str,
+        prompt: String,
+    ) -> Result<ReviewJson> {
+        let key = api_key
+            .map(|k| k.to_string())
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        let (url, model) = Self::resolve_target(review_model)?;
+        if url.contains("openrouter.ai") && key.is_none() {
+            anyhow::bail!("judge needs an OpenRouter API key");
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(JUDGE_TIMEOUT_SECS))
+            .build()?;
+        Self::attempt(&client, &url, key.as_deref(), &model, prompt).await
+    }
 }
 
 #[cfg(test)]
