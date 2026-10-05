@@ -1042,7 +1042,6 @@
           <select id="task" onchange="onTaskChange(this.value)">
             <option value="redis">Redis (RESP Key-Value Clone)</option>
             <option value="http">HTTP/1.1 Web Server</option>
-            <option value="dns">Task 3: DNS Server (RFC 1035 UDP 5353)</option>
             <option value="pdf">PDF to Text Extractor (HTTP 8090)</option>
             <option value="wal">Durable Event Broker (TCP 6390)</option>
             <option value="proxy">Reverse Proxy & LB (HTTP 8091)</option>
@@ -1383,7 +1382,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <select id="promptTaskSelect" onchange="onTaskChange(this.value)" style="padding: 4px 10px; font-size: 0.78rem; font-weight: 600;">
                 <option value="redis">⚡ redis (In-Memory Redis Server)</option>
                 <option value="http">🌐 http (HTTP/1.1 Web Server)</option>
-                <option value="dns">📡 dns (RFC 1035 UDP 5353)</option>
                 <option value="pdf">📄 pdf (PDF to Text Extractor)</option>
                 <option value="wal">📓 wal (Durable Event Broker)</option>
                 <option value="proxy">🔀 proxy (Reverse Proxy & LB)</option>
@@ -2311,7 +2309,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     function formatThroughput(tp, task) {
       if (!tp) return 'N/A';
       const t = (task || '').toLowerCase();
-      const unit = t === 'pdf' ? 'pages/s' : (t === 'dns' ? 'queries/s' : 'req/s');
+      const unit = t === 'pdf' ? 'pages/s' : 'req/s';
       return `${Math.round(tp).toLocaleString()} ${unit}`;
     }
 

@@ -51,7 +51,7 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 
 2. **Dual-Tier Docker Isolation & Private Run Network:**
    - **OMP Agent Sandbox (`subdollar-sandbox`):** The LLM operates strictly inside an isolated Docker container with pre-installed toolchains (Rust, Go, Node, Python, Clang/GCC, Bun) and workspace volume mounting. The agent is attached to a **per-run user-defined Docker network** (`subdollar-net-<run_id>`) — never the host network — so loopback-bound host services (including the UI at its default `127.0.0.1` bind) are unreachable from model-executed code. Note: services deliberately exposed on `0.0.0.0` remain reachable via the bridge gateway, as from any container on the host.
-   - **Ground-Truth Reference:** A pinned reference server runs on the same private network under a stable DNS alias — `redis:alpine` as `ref-redis`, `nginx:alpine` as `ref-http` (redis/http tasks; dns retired 2026-09-30, its `coredns`/`ref-dns` path is dead code, see below). Batch-anchored tasks (redis, http) share one median denominator per batch with a pre/post drift bracket; per-trial live refs cover the rest. The agent issues black-box requests (e.g. `redis-cli -h ref-redis -p 6379` or `curl http://ref-http/`) to inspect actual protocol responses.
+   - **Ground-Truth Reference:** A pinned reference server runs on the same private network under a stable DNS alias — `redis:alpine` as `ref-redis`, `nginx:alpine` as `ref-http` (redis/http tasks; dns removed 2026-10-05, code+prompt+verifier deleted, data archived — see note). Batch-anchored tasks (redis, http) share one median denominator per batch with a pre/post drift bracket; per-trial live refs cover the rest. The agent issues black-box requests (e.g. `redis-cli -h ref-redis -p 6379` or `curl http://ref-http/`) to inspect actual protocol responses.
    - **Candidate Isolation (`subdollar-candidate-<run_id>`):** The generated code is compiled and launched in a clean run-scoped container, mapping candidate ports (6379 for Redis, 8080 for HTTP).
    - **Egress filter (`SDB_EGRESS_FILTER=1`, on in production):** the run network is created `--internal` and a per-run allowlist proxy sidecar (openrouter + language registries + github) is the agent's only route out. Raw sockets can still bypass proxy env (documented residual); the API key is readable in-container by design — use per-run capped OpenRouter keys to bound blast radius.
 
@@ -78,7 +78,7 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 | :--- | :--- | :--- |
 | **`redis`** | In-memory key-value database, RESP2 wire protocol (`PING`/`ECHO`, `SET`/`GET`/`DEL`/`EXISTS`, `SET ... PX` TTL, `INCR`/`DECR`) | `redis-benchmark`, batch-anchored denominator |
 | **`http`** | RFC 7230/7231 HTTP/1.1 server (`GET /`, 404, `GET /echo/{str}`, `GET /user-agent`, `POST`/`GET /files/{name}`) | `wrk`, batch-anchored denominator |
-| ~~**`dns`**~~ | RFC 1035 UDP server on 5353 — **retired 2026-09-30** (see note) | archived rows only, never ranked |
+| ~~**`dns`**~~ | RFC 1035 UDP server — **removed 2026-10-05** (code deleted, rows archived) | no longer present |
 | **`pdf`** | HTTP microservice on 8090 extracting text from binary PDF payloads (`POST /extract`) | reported per-trial, never scored |
 | **`wal`** | Durable append-only log on TCP 6390 (`PUB`/`SUB`, fsync before ack, `kill -9` recovery) | reported per-trial, never scored |
 | **`proxy`** | HTTP reverse proxy on 8091 (round-robin, keep-alive, `X-Forwarded-For`, failover) | reported per-trial, never scored |
@@ -88,20 +88,13 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 Only **redis** and **http** have a live reference denominator and therefore a
 Throughput Score. The other six tasks rank by Pass@1 / cost (efficiency only).
 
-> **DNS retired 2026-09-30.** Five archived rows (09-27–09-28) stay in
-> `results/`/DB with their original `graded_under` stamps and a `withdrawn`
-> banner wherever rendered, but are excluded from the portal export, the
-> global board, and the matrix gate. Reason: the task saturated at 5/5×100%
-> *and* the verifier was lenient — stages are satisfiable by a hard-coded
-> lookup table, the spec demands a stale mock IP (`93.184.216.34`) the real
-> CoreDNS reference correctly never returns (so no denominator was ever
-> measurable), and the forwarding stage is unprovable (only `.invalid`
-> names). The echo-zero hardening (2026-10-03.2) therefore re-grades nothing
-> already stored; a return needs new stages (CNAME, AAAA, compression,
-> TCP truncation) plus a spec a correct resolver can satisfy. The enum
-> variant, `tasks/dns/prompt.md`, and the verifier stay so archived rows
-> parse and `fingerprint()` (which panics on a missing graded file) keeps
-> working — they are dead for running, not deleted.
+> **DNS removed 2026-10-05** (retired 2026-09-30, then deleted). Five archived
+> rows (09-27–09-28) are preserved in
+> `provenance-witness/dns-archive-20261005.tar.gz`; result/DB strings load
+> without a variant. Rationale (retained for the record): saturated 5/5×100%
+> on a lenient verifier (hard-coded-table satisfiable), unmeasurable mock-spec
+> denominator (stale `93.184.216.34` vs correct CoreDNS), unprovable `.invalid`
+> forwarding stage.
 
 ---
 
@@ -161,7 +154,7 @@ cargo run --release -- run \
 Usage: subdollarbench run [OPTIONS] --model <MODEL>
 
   -m, --model <MODEL>            OpenRouter model ID (e.g. openrouter/google/gemini-2.5-flash)
-  -t, --task <TASK>              [default: redis] [possible values: redis, http, pdf, wal, proxy, pubsub, binproto] (`--task dns` parses for archived rows but refuses to run: retired 2026-09-30)
+  -t, --task <TASK>              [default: redis] [possible values: redis, http, pdf, wal, proxy, pubsub, binproto] (`--task dns` no longer parses: unknown task since removal 2026-10-05)
   -e, --effort <EFFORT>          (off, minimal, low, medium, high, xhigh, max) [default: high]
   -b, --budget-usd <BUDGET_USD>  Maximum cost budget in USD [default: 1]
       --max-turns <MAX_TURNS>    [default: 100]
@@ -181,7 +174,7 @@ cargo run --release -- eval --task redis --port 6379
 # Verify HTTP server on port 8080
 cargo run --release -- eval --task http --port 8080
 
-# dns retired 2026-09-30: eval --task dns refuses (archived rows only)
+# dns removed 2026-10-05: eval --task dns returns unknown-task error
 ```
 
 #### Inspect Leaderboard
