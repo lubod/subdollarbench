@@ -8,6 +8,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.7`: review-trust pins (stricter gates, no leniency change
+///   to honest rows). Shared `canonical_best()` (merge + review-run converge;
+///   fixes pass_rate-only divergence on tied 100%s). HTTP keep-alive now a
+///   real same-socket test (raw socket; the reqwest loop re-tested 200x3).
+///   Pricing badges (`[free]`, `[contrib]`, display-only). Review workspace
+///   reads trial `workspace/` (was truncated console.log) and skips *.log.
 /// - `2026-10-03.6`: dns task removed (code + prompt + verifier deleted, data
 ///   archived). `tasks/dns/prompt.md` + `src/verifier/dns.rs` leave
 ///   GRADED_FILES with the two entries below; archived dns rows (plain
@@ -64,7 +70,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-03.6";
+pub const RULES_VERSION: &str = "2026-10-03.7";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

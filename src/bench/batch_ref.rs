@@ -228,10 +228,10 @@ fn wait_http_ready_hostnet(port: u16) -> bool {
     false
 }
 
-/// Drift tolerance for the batch bracket: 10% pre/post spread on a quiet
-/// host. (The removed dns task carried a wider 0.25 band for upstream RTT +
-/// cache-30 jitter; no live task needs it.)
+/// Drift tolerance for the batch bracket: flat 10% pre/post spread.
+/// Takes the task for future per-task bands; all live tasks share one band.
 pub fn drift_threshold(_task: &TaskType) -> f64 {
+    let _ = _task;
     0.10
 }
 

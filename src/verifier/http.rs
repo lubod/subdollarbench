@@ -56,57 +56,127 @@ impl HttpVerifier {
 
     pub async fn test_stage1_root(&self) -> StageResult {
         let name = "Stage 1: GET / (Root 200 OK + keep-alive)".to_string();
-        let url = format!("http://127.0.0.1:{}/", self.target_port);
-        match self.client.get(&url).send().await {
-            Ok(resp) => {
-                if resp.status() != reqwest::StatusCode::OK {
-                    return StageResult {
-                        stage: 1,
-                        name,
-                        passed: false,
-                        error: Some(format!("Expected 200 OK, got {}", resp.status())),
-                    };
-                }
-            }
-            Err(e) => {
-                return StageResult {
-                    stage: 1,
-                    name,
-                    passed: false,
-                    error: Some(e.to_string()),
-                }
-            }
+        // Raw socket, not reqwest: pooling only reuses a connection after the
+        // body fully drains, and `Connection: close` silently reconnects —
+        // a reqwest loop re-tests "200×3", never same-socket reuse. 3
+        // sequential GETs on ONE `Connection: keep-alive` socket, 200s
+        // counted by framed boundaries. A close-per-request stub fails.
+        match Self::fetch_keepalive(self.target_port, 3).await {
+            Ok(3) => StageResult {
+                stage: 1,
+                name,
+                passed: true,
+                error: None,
+            },
+            Ok(n) => StageResult {
+                stage: 1,
+                name,
+                passed: false,
+                error: Some(format!(
+                    "keep-alive: {n}/3 sequential 200s on one connection"
+                )),
+            },
+            Err(e) => StageResult {
+                stage: 1,
+                name,
+                passed: false,
+                error: Some(format!("GET / via keep-alive: {}", e)),
+            },
         }
-        // Keep-alive: reqwest reuses the pooled connection; 3 sequential
-        // GETs must all 200. A stub that closes every connection (or
-        // answers once then hangs) fails here.
-        for i in 2..=3 {
-            match self.client.get(&url).send().await {
-                Ok(resp) if resp.status() == reqwest::StatusCode::OK => {}
-                Ok(resp) => {
-                    return StageResult {
-                        stage: 1,
-                        name,
-                        passed: false,
-                        error: Some(format!("keep-alive GET {} got {}", i, resp.status())),
+    }
+
+    /// 3 sequential `GET /` on one keep-alive socket, 200s by framed
+    /// Content-Length boundaries. Mirrors proxy.rs::fetch_keepalive.
+    async fn fetch_keepalive(port: u16, n: usize) -> Result<usize, String> {
+        use tokio::io::AsyncWriteExt;
+        let addr = format!("127.0.0.1:{}", port);
+        let conn = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("Connection timed out to {}", addr))?;
+        let mut stream = conn.map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+        let mut ok = 0;
+        for _ in 0..n {
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+                .await
+                .map_err(|e| format!("Write to {} failed: {}", addr, e))?;
+            let (status, complete) = Self::read_framed(&mut stream, &addr).await?;
+            if !complete {
+                return Err(format!("keep-alive response unframed from {}", addr));
+            }
+            if status != 200 {
+                return Err(format!("keep-alive GET got {}", status));
+            }
+            ok += 1;
+        }
+        Ok(ok)
+    }
+
+    /// Read one framed response: status + whether Content-Length is
+    /// satisfied (chunked accepted as framed). Minimal local framing —
+    /// proxy.rs owns the full parser; this stays dependency-free.
+    async fn read_framed(
+        stream: &mut tokio::net::TcpStream,
+        addr: &str,
+    ) -> Result<(u16, bool), String> {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(8) {
+                return Err(format!("keep-alive read from {} timed out", addr));
+            }
+            match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut tmp)).await {
+                Err(_) => return Err(format!("Read from {} timed out", addr)),
+                Ok(Err(e)) => return Err(format!("Read from {} failed: {}", addr, e)),
+                Ok(Ok(0)) => break,
+                Ok(Ok(m)) => {
+                    buf.extend_from_slice(&tmp[..m]);
+                    if let Some((status, len)) = Self::head_status(&buf) {
+                        if buf.len() >= len {
+                            return Ok((status, true));
+                        }
                     }
                 }
-                Err(e) => {
-                    return StageResult {
-                        stage: 1,
-                        name,
-                        passed: false,
-                        error: Some(format!("keep-alive GET {}: {}", i, e)),
-                    }
-                }
             }
         }
-        StageResult {
-            stage: 1,
-            name,
-            passed: true,
-            error: None,
+        let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
+        Ok((status, false))
+    }
+
+    /// Parse status + total framed length from a raw head. None while the
+    /// head is incomplete.
+    fn head_status(buf: &[u8]) -> Option<(u16, usize)> {
+        let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+        let head = std::str::from_utf8(&buf[..head_end]).ok()?;
+        let mut lines = head.lines();
+        let status_line = lines.next()?;
+        let mut parts = status_line.splitn(3, ' ');
+        parts.next()?;
+        let status: u16 = parts.next()?.parse().ok()?;
+        let mut len = head_end + 4;
+        let mut chunked = false;
+        for line in lines {
+            let (k, v) = line.split_once(':')?;
+            match k.trim().to_ascii_lowercase().as_str() {
+                "content-length" => len = head_end + 4 + v.trim().parse::<usize>().ok()?,
+                "transfer-encoding" if v.to_ascii_lowercase().contains("chunked") => chunked = true,
+                _ => {}
+            }
         }
+        if chunked {
+            // Framed when the terminal zero chunk is present.
+            let body = &buf[head_end + 4..];
+            return body
+                .windows(5)
+                .any(|w| w == b"0\r\n\r\n")
+                .then_some((status, buf.len()));
+        }
+        Some((status, len))
     }
 
     pub async fn test_stage2_not_found(&self) -> StageResult {

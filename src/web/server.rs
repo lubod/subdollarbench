@@ -5124,7 +5124,7 @@ mod tests {
             let _ = fs::set_permissions(ws_dir.join("start.sh"), fs::Permissions::from_mode(0o755));
         }
 
-        let run_dns_req = RunRequest {
+        let run_wal_req = RunRequest {
             model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
             task: "wal".to_string(),
             api_key: None,
@@ -5141,7 +5141,7 @@ mod tests {
         };
         let res = client
             .post(format!("{}/api/run", base))
-            .json(&run_dns_req)
+            .json(&run_wal_req)
             .send()
             .await
             .unwrap();

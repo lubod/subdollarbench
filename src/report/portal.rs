@@ -1491,7 +1491,11 @@ impl PortalExporter {
                  <td style=\"text-align:center;\">{stab}<br><span class=\"mut\">{ntrials}t/{nparents}r</span></td></tr>\n",
                 rank = rank,
                 model = Self::esc(&r.model),
-                short = Self::esc(LeaderboardManager::short_model_name(&r.model)),
+                short = [
+                    Self::esc(LeaderboardManager::short_model_name(&r.model)),
+                    Self::esc(LeaderboardManager::pricing_badge(&r.model)),
+                ]
+                .concat(),
                 tasks = Self::esc(&r.tasks.join(", ")),
                 dots = dots,
                 ntrials = r.n_trials,

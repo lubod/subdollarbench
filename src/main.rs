@@ -1306,29 +1306,22 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 &failures,
             );
             print!("{}", stats);
-            // Canonical best-trial workspace (same selection as the merge:
-            // highest pass rate, then highest score). The judge reads ONE
-            // codebase, capped at MAX_WORKSPACE_CHARS.
+            // Canonical best-trial workspace via the shared helper: the
+            // parent row deserializes into the typed struct (subruns carry
+            // full scores) so both callers converge on one rule. Fallback:
+            // best tuple by pass rate when the parent file is missing.
             let best_id: String = {
                 let rp2 = subdollarbench::config::get_repo_root()
                     .join("results")
                     .join(format!("{id}.json"));
                 let from_parent: Option<String> = std::fs::read_to_string(&rp2)
                     .ok()
-                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                    .and_then(|v| {
-                        v.get("subruns")?
-                            .as_array()?
-                            .iter()
-                            .max_by(|a, b| {
-                                let pa = a.get("pass_rate").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                                let pb = b.get("pass_rate").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                                pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
-                            })?
-                            .get("id")?
-                            .as_str()?
-                            .to_string()
-                            .into()
+                    .and_then(|t| {
+                        serde_json::from_str::<subdollarbench::report::BenchmarkRunResult>(&t).ok()
+                    })
+                    .and_then(|parent| {
+                        subdollarbench::report::BenchmarkRunResult::canonical_best(&parent.subruns)
+                            .map(|b| b.id.clone())
                     });
                 from_parent.unwrap_or_else(|| {
                     trials

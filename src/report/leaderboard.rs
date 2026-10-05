@@ -240,6 +240,25 @@ impl BenchmarkRunResult {
 
     /// Merges multiple subruns into a single consolidated BenchmarkRunResult
     /// with averaged metrics, while preserving the individual subrun records.
+    /// Canonical best trial: highest pass rate, then highest score
+    /// (throughput else efficiency). Single source of truth for the merge
+    /// AND review-run's workspace selection — previously they tie-broke
+    /// differently (pass_rate-only in review-run) and could read different
+    /// trials on tied 100%s. Note: max_by returns the LAST max on ties;
+    /// both callers iterate the same subruns order, so selections agree.
+    pub fn canonical_best(subruns: &[BenchmarkRunResult]) -> Option<&BenchmarkRunResult> {
+        subruns.iter().max_by(|a, b| {
+            a.pass_rate
+                .partial_cmp(&b.pass_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let s_a = a.throughput_score.unwrap_or(a.efficiency_score);
+                    let s_b = b.throughput_score.unwrap_or(b.efficiency_score);
+                    s_a.partial_cmp(&s_b).unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+    }
+
     pub fn merge_subruns(
         parent_id: &str,
         subruns: Vec<BenchmarkRunResult>,
@@ -277,21 +296,8 @@ impl BenchmarkRunResult {
         let pass_at_k = compute_pass_at_k(n, c, n) * 100.0;
         let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n as f64;
 
-        // 2. Select the canonical best trial for code workspace inspection
-        // (highest pass rate, then highest score)
-        let best = subruns
-            .iter()
-            .max_by(|a, b| {
-                a.pass_rate
-                    .partial_cmp(&b.pass_rate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        let s_a = a.throughput_score.unwrap_or(a.efficiency_score);
-                        let s_b = b.throughput_score.unwrap_or(b.efficiency_score);
-                        s_a.partial_cmp(&s_b).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            })
-            .unwrap_or(&subruns[0]);
+        // 2. Canonical best trial (shared helper: same trial review-run reads).
+        let best = Self::canonical_best(&subruns).unwrap_or(&subruns[0]);
 
         // 3. Fair Throughput: median among passing trials, but only when a
         // live/batch reference exists. Unanchored medians (wal/pdf/pubsub
@@ -1157,6 +1163,21 @@ impl LeaderboardManager {
         list
     }
 
+    /// Pricing-tier badge: `[free]` when the id is a known zero-price model,
+    /// `[contrib]` for contributor-discount tiers. Display-only: never touches
+    /// scores. The $0 API column measures host patience (compute floor), not
+    /// model efficiency — the badge says so at a glance.
+    pub fn pricing_badge(model: &str) -> &'static str {
+        let m = model.to_lowercase();
+        if m.contains("contributor") {
+            " [contrib]"
+        } else if m.contains("ling-3.1-flash") || m.contains("space-bunny") || m.contains(":free") {
+            " [free]"
+        } else {
+            ""
+        }
+    }
+
     pub fn short_model_name(model: &str) -> &str {
         model.rsplit('/').next().unwrap_or(model)
     }
@@ -1315,15 +1336,17 @@ impl LeaderboardManager {
 
             let (icon, model_color) = Self::get_model_cli_meta(&r.model);
             let short_model = Self::short_model_name(&r.model);
+            let badge = Self::pricing_badge(&r.model);
             let model_display = if !r.subruns.is_empty() {
                 format!(
-                    "{} {} [{} trials · Fair E[Score]]",
+                    "{} {}{} [{} trials · Fair E[Score]]",
                     icon,
                     short_model,
+                    badge,
                     r.subruns.len()
                 )
             } else {
-                format!("{} {}", icon, short_model)
+                format!("{} {}{}", icon, short_model, badge)
             };
             let savings_str = format!("{:.0}%", r.savings_percent);
             let eff_str = r.effort.clone().unwrap_or_else(|| "auto".to_string());
