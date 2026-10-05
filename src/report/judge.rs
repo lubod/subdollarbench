@@ -326,6 +326,19 @@ impl RunJudge {
         task: &str,
         trials: &[(String, f64, u32, u64, f64, f64)],
     ) -> String {
+        Self::run_stats_block_with_failures(run_id, model, task, trials, &[])
+    }
+
+    /// Same, plus deterministic per-trial failure reasons
+    /// (`failures[i]` = stage-error summary for `trials[i]`, empty when
+    /// passing). Grounded in trial manifests, never inferred.
+    pub fn run_stats_block_with_failures(
+        run_id: &str,
+        model: &str,
+        task: &str,
+        trials: &[(String, f64, u32, u64, f64, f64)],
+        failures: &[String],
+    ) -> String {
         // (trial_id, pass_rate, turns, tokens, cost_usd, duration_s)
         let n = trials.len().max(1) as f64;
         let passes = trials.iter().filter(|t| t.1 >= 100.0).count();
@@ -351,11 +364,16 @@ impl RunJudge {
             mean_cost,
             mean_dur,
         );
-        for t in trials {
+        for (i, t) in trials.iter().enumerate() {
             s.push_str(&format!(
                 "  trial {} pass={:.0}% turns={} tokens={} cost=${:.4} dur={:.0}s\n",
                 t.0, t.1, t.2, t.3, t.4, t.5
             ));
+            if let Some(f) = failures.get(i) {
+                if !f.is_empty() {
+                    s.push_str(&format!("    failures: {f}\n"));
+                }
+            }
         }
         s
     }
@@ -367,6 +385,7 @@ impl RunJudge {
         stats: &str,
         task_prompt: &str,
         trial_notes: &[(String, String)],
+        best_files: &[(String, String)],
     ) -> String {
         let mut p = String::new();
         p.push_str("You are an expert systems-engineering reviewer synthesizing a multi-trial benchmark run. The statistics below are COMPUTED FACTS — do not recompute or restate numbers beyond naming them; focus your judgment on architecture, failure modes, and code quality across trials.\n");
@@ -387,6 +406,14 @@ impl RunJudge {
         p.push_str("\n\n## Per-trial review conclusions\n");
         for (id, conclusion) in trial_notes {
             p.push_str(&format!("### {}\n{}\n", id, conclusion));
+        }
+        if !best_files.is_empty() {
+            p.push_str(
+                "\n## Canonical best-trial workspace (read the code, not just the reviews)\n",
+            );
+            for (name, content) in best_files {
+                p.push_str(&format!("### {}\n{}\n", name, content));
+            }
         }
         p
     }

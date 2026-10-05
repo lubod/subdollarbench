@@ -1270,8 +1270,41 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 };
             // Per-trial review conclusions (best-effort: missing files skipped).
+            // Plus deterministic failure reasons from trial manifests: failed
+            // stage names + errors, so cross-trial failure claims are grounded
+            // facts, not judge inference.
             let mut notes: Vec<(String, String)> = Vec::new();
+            let mut failures: Vec<String> = Vec::new();
             for (tid, _, _, _, _, _) in &trials {
+                let mp = Path::new(&runs_dir).join(tid).join("manifest.json");
+                let mut freasons = String::new();
+                if let Ok(mtext) = std::fs::read_to_string(&mp) {
+                    if let Ok(mv) = serde_json::from_str::<serde_json::Value>(&mtext) {
+                        if let Some(stages) = mv.get("stages").and_then(|s| s.as_array()) {
+                            let failed: Vec<String> = stages
+                                .iter()
+                                .filter(|s| {
+                                    s.get("passed") == Some(&serde_json::Value::Bool(false))
+                                })
+                                .map(|s| {
+                                    let nm = s.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                                    let er = s.get("error").and_then(|x| x.as_str()).unwrap_or("");
+                                    if er.is_empty() {
+                                        nm.to_string()
+                                    } else {
+                                        format!("{nm}: {er}")
+                                    }
+                                })
+                                .collect();
+                            freasons = failed.join("; ");
+                            if freasons.len() > 600 {
+                                freasons.truncate(600);
+                                freasons.push_str("...");
+                            }
+                        }
+                    }
+                }
+                failures.push(freasons);
                 let rp = Path::new(&runs_dir).join(tid).join("review.json");
                 if let Ok(text) = std::fs::read_to_string(&rp) {
                     if let Ok(rv) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -1286,8 +1319,51 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            let stats = RunJudge::run_stats_block(&id, &parent_model, &parent_task, &trials);
+            let stats = RunJudge::run_stats_block_with_failures(
+                &id,
+                &parent_model,
+                &parent_task,
+                &trials,
+                &failures,
+            );
             print!("{}", stats);
+            // Canonical best-trial workspace (same selection as the merge:
+            // highest pass rate, then highest score). The judge reads ONE
+            // codebase, capped at MAX_WORKSPACE_CHARS.
+            let best_id: String = {
+                let rp2 = subdollarbench::config::get_repo_root()
+                    .join("results")
+                    .join(format!("{id}.json"));
+                let from_parent: Option<String> = std::fs::read_to_string(&rp2)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|v| {
+                        v.get("subruns")?
+                            .as_array()?
+                            .iter()
+                            .max_by(|a, b| {
+                                let pa = a.get("pass_rate").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                let pb = b.get("pass_rate").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+                            })?
+                            .get("id")?
+                            .as_str()?
+                            .to_string()
+                            .into()
+                    });
+                from_parent.unwrap_or_else(|| {
+                    trials
+                        .iter()
+                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|t| t.0.clone())
+                        .unwrap_or_default()
+                })
+            };
+            let best_files = RunJudge::collect_workspace(&Path::new(&runs_dir).join(&best_id));
+            println!(
+                "[REVIEW-RUN] canonical workspace: {best_id} ({} files)",
+                best_files.len()
+            );
             // Task prompt excerpt for grounding.
             let task_prompt = std::fs::read_to_string(
                 subdollarbench::config::get_repo_root()
@@ -1296,7 +1372,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     .join("prompt.md"),
             )
             .unwrap_or_default();
-            let prompt = RunJudge::build_synthesis_prompt(&stats, &task_prompt, &notes);
+            let prompt =
+                RunJudge::build_synthesis_prompt(&stats, &task_prompt, &notes, &best_files);
             println!("[REVIEW-RUN] synthesizing with {model} ...");
             let review = RunJudge::judge_synthesis(api_key.as_deref(), &model, prompt).await?;
             RunJudge::validate(&review)?;
