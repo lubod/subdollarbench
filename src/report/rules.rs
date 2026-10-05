@@ -8,6 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-03.8`: cheat-surface closure (post-.7 verifier edits that
+///   shipped unbumped in 6dbbc15 — process miss, corrected here). Compliance
+///   path whitelist removed (any daemon basename fails, whatever the path;
+///   proven `/tmp/redis-server` bypass dead). WAL recovery exact-count to
+///   at-least (extra un-acked messages no longer fail a durable broker).
+///   Single-trial score unified to P@1/eff (n=1 partial-credit rows no longer
+///   outrank merges at the same P@1). Enqueue dedupe, CLI-extend drift
+///   stickiness, eval-seed randomization. No leniency change to honest rows.
 /// - `2026-10-03.7`: review-trust pins (stricter gates, no leniency change
 ///   to honest rows). Shared `canonical_best()` (merge + review-run converge;
 ///   fixes pass_rate-only divergence on tied 100%s). HTTP keep-alive now a
@@ -70,7 +78,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-03.7";
+pub const RULES_VERSION: &str = "2026-10-03.8";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
