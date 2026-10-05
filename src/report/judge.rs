@@ -87,10 +87,14 @@ impl RunJudge {
                 return;
             }
             let name = entry.file_name().to_string_lossy().to_string();
+            // *.log excluded: harness probe data (appendonly.log can be
+            // 200KB+ and eats the 24k budget ahead of real source — Bunny's
+            // report judged Dockerfile+README+truncated AOF, zero Go files).
             if name.starts_with('.')
                 || name == "target"
                 || name == "node_modules"
                 || name == "__pycache__"
+                || name.ends_with(".log")
             {
                 continue;
             }
