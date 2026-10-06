@@ -2083,6 +2083,19 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
 
+        Commands::Poison {
+            run,
+            cure,
+            runs_dir,
+            server,
+        } => {
+            let server = resolve_server_flag(&server);
+            let id = resolve_run_id(&runs_dir, &run)?;
+            let body = serde_json::json!({ "poisoned": !cure });
+            let v = remote::post_json(&server, &format!("/api/runs/{id}/poison"), &body).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
         Commands::Rm {
             run,
             yes,

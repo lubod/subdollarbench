@@ -9,6 +9,9 @@ use crate::report::archive::RunManifest;
 use crate::report::leaderboard::{format_duration, wilson_interval_95, LeaderboardManager};
 
 pub const PORTAL_HIDDEN_FILE: &str = ".portal_hidden";
+/// Infra-poison marker: trials died on 429/404/delisting, not model verdicts.
+/// Poisoned rows are excluded from EVERY board (internal + public) but kept for audit.
+pub const POISONED_FILE: &str = ".poisoned";
 
 fn clean_id(run_id: &str) -> Option<String> {
     let name = Path::new(run_id).file_name()?.to_str()?;
@@ -22,6 +25,15 @@ pub fn is_hidden(runs_dir: &Path, run_id: &str) -> bool {
     match clean_id(run_id) {
         Some(clean) => runs_dir.join(clean).join(PORTAL_HIDDEN_FILE).exists(),
         None => true,
+    }
+}
+
+/// True when a run was killed by infrastructure (rate-limit, delisting),
+/// never a statement about the model. Poisoned rows feed no aggregate.
+pub fn is_poisoned(runs_dir: &Path, run_id: &str) -> bool {
+    match clean_id(run_id) {
+        Some(clean) => runs_dir.join(clean).join(POISONED_FILE).exists(),
+        None => false,
     }
 }
 
@@ -63,6 +75,21 @@ pub fn set_hidden(runs_dir: &Path, run_id: &str, hidden: bool) -> anyhow::Result
         let _ = std::fs::remove_file(&flag);
     }
     Ok(hidden)
+}
+
+pub fn set_poisoned(runs_dir: &Path, run_id: &str, poisoned: bool) -> anyhow::Result<bool> {
+    let clean = clean_id(run_id).ok_or_else(|| anyhow::anyhow!("invalid run id"))?;
+    let dir = runs_dir.join(&clean);
+    if !dir.join("manifest.json").exists() {
+        anyhow::bail!("run not found");
+    }
+    let flag = dir.join(POISONED_FILE);
+    if poisoned {
+        std::fs::write(&flag, "poisoned\n")?;
+    } else {
+        let _ = std::fs::remove_file(&flag);
+    }
+    Ok(poisoned)
 }
 
 pub struct PortalSummary {
@@ -1182,6 +1209,7 @@ impl PortalExporter {
             .into_iter()
             .filter(|r| {
                 !is_hidden(runs_path, &r.id)
+                    && !is_poisoned(runs_path, &r.id)
                     && !r.id.starts_with("test_")
                     && !crate::report::is_quarantined(&r.task)
             })
@@ -1263,7 +1291,11 @@ impl PortalExporter {
         let runs_dir = crate::report::archive::RunArchiver::resolve_runs_dir();
         let results: Vec<_> = results
             .into_iter()
-            .filter(|r| !crate::report::is_quarantined(&r.task) && !is_hidden(&runs_dir, &r.id))
+            .filter(|r| {
+                !crate::report::is_quarantined(&r.task)
+                    && !is_hidden(&runs_dir, &r.id)
+                    && !is_poisoned(&runs_dir, &r.id)
+            })
             .collect();
         let pre_freeze = results.len();
         let fresh: Vec<_> = results

@@ -9,8 +9,8 @@ use super::server::{
     extend_parent_run, get_active_console, get_env, get_leaderboard, get_models, get_prompt,
     get_queue, get_run_detail, get_run_file, get_run_files, get_run_log, get_run_review, get_runs,
     get_sandbox_omp_status, get_status, pause_queue_handler, rebuild_portal, remove_queued_run,
-    resume_queue_handler, save_prompt, serve_index, set_run_portal_visibility, start_run, stop_run,
-    stream_logs, update_sandbox_omp, AppState,
+    resume_queue_handler, save_prompt, serve_index, set_run_poison, set_run_portal_visibility,
+    start_run, stop_run, stream_logs, update_sandbox_omp, AppState,
 };
 use axum::{
     response::Redirect,
@@ -48,6 +48,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/portal/", get(serve_portal_index))
         .route("/api/portal/rebuild", post(rebuild_portal))
         .route("/api/runs/:id/portal", post(set_run_portal_visibility))
+        .route("/api/runs/:id/poison", post(set_run_poison))
         .route("/api/runs/:id/extend", post(extend_parent_run))
         .route("/api/runs/:id/review", get(get_run_review))
         .route("/api/runs/:id", delete(delete_run))

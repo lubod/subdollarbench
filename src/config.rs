@@ -840,6 +840,24 @@ pub enum Commands {
         server: Option<String>,
     },
 
+    /// [maintain] Mark/unmark a run poisoned = infra-killed, feeds no board (POST /api/runs/:id/poison)
+    Poison {
+        /// Run id or unambiguous prefix (resolved locally)
+        run: String,
+
+        /// Cure instead of poison
+        #[arg(long, default_value_t = false)]
+        cure: bool,
+
+        /// Path to runs directory (for prefix resolution)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
+        #[arg(long)]
+        server: Option<String>,
+    },
+
     /// [maintain] Show or hide a run in the portal (POST /api/runs/:id/portal)
     Hide {
         /// Run id or unambiguous prefix (resolved locally)

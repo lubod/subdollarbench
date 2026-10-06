@@ -6,8 +6,9 @@
 
 use crate::config::TaskType;
 use crate::report::{
-    assess_stability, is_hidden, is_quarantined, set_hidden, BenchmarkRunResult, EnvironmentInfo,
-    FileInfo, LeaderboardManager, PortalExporter, RunArchiver, RunManifest, Stability, Store,
+    assess_stability, is_hidden, is_poisoned, is_quarantined, set_hidden, set_poisoned,
+    BenchmarkRunResult, EnvironmentInfo, FileInfo, LeaderboardManager, PortalExporter, RunArchiver,
+    RunManifest, Stability, Store,
 };
 use crate::sandbox::SandboxManager;
 use axum::{
@@ -777,6 +778,7 @@ pub(crate) async fn get_leaderboard(
             .map(|r| {
                 let mut v = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
                 v["portal_hidden"] = serde_json::Value::Bool(is_hidden(&runs_dir, &r.id));
+                v["poisoned"] = serde_json::Value::Bool(is_poisoned(&runs_dir, &r.id));
                 v
             })
             .collect(),
@@ -908,6 +910,8 @@ fn manifest_with_portal_flag(m: &RunManifest) -> serde_json::Value {
     let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
     v["portal_hidden"] =
         serde_json::Value::Bool(is_hidden(&RunArchiver::resolve_runs_dir(), &m.run_id));
+    v["poisoned"] =
+        serde_json::Value::Bool(is_poisoned(&RunArchiver::resolve_runs_dir(), &m.run_id));
     v
 }
 
@@ -971,6 +975,28 @@ pub(crate) async fn delete_run(
 #[derive(Debug, Deserialize)]
 pub struct PortalVisibilityRequest {
     pub hidden: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoisonRequest {
+    pub poisoned: bool,
+}
+
+pub(crate) async fn set_run_poison(
+    AxumPath(run_id): AxumPath<String>,
+    Json(payload): Json<PoisonRequest>,
+) -> Response {
+    let clean = match clean_run_id(&run_id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid run id").into_response(),
+    };
+    match set_poisoned(&RunArchiver::resolve_runs_dir(), &clean, payload.poisoned) {
+        Ok(poisoned) => {
+            refresh_portal();
+            Json(serde_json::json!({"run_id": clean, "poisoned": poisoned})).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, format!("cannot update run: {}", e)).into_response(),
+    }
 }
 
 pub(crate) async fn set_run_portal_visibility(
