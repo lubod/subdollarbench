@@ -1088,6 +1088,13 @@ impl LeaderboardManager {
             if n == 0 && r.subruns.is_empty() && r.id.contains("_trial") {
                 return false;
             }
+            // Legacy single-shot rows (no subruns, no trial count): unscored
+            // evidence, never a cell. Zero the score so no consumer can render
+            // a pass% for them; the canonical most-trials rule then keeps any
+            // real parent ahead, and a phantom-only group draws as empty.
+            if r.subruns.is_empty() && r.total_trials.is_none() {
+                return false;
+            }
             true
         });
         let cut = pre - list.len();
@@ -2280,14 +2287,14 @@ mod tests {
     }
 
     #[test]
-    fn test_finalize_filters_trial_junk_but_keeps_legacy_singles() {
+    fn test_finalize_filters_trial_junk_and_legacy_singles() {
         // Junk: loose `_trial` row with no subruns/count (killed-run debris).
         let junk = sample_junk_row("cell_trial3");
-        // Legacy single: same shape but bare id (pre-subrun format).
+        // Legacy single: same unscored shape but bare id (pre-subrun format).
+        // No subruns + no trial count = no evidence, never a cell.
         let legacy = sample_junk_row("legacy_single");
         let list = LeaderboardManager::finalize_results(vec![junk, legacy]);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "legacy_single");
+        assert!(list.is_empty());
     }
 
     fn sample_junk_row(id: &str) -> BenchmarkRunResult {
@@ -2368,7 +2375,7 @@ mod tests {
             rules_version: None,
             graded_under: None,
             subruns: Vec::new(),
-            total_trials: None,
+            total_trials: Some(1),
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
@@ -2409,7 +2416,7 @@ mod tests {
             rules_version: None,
             graded_under: None,
             subruns: Vec::new(),
-            total_trials: None,
+            total_trials: Some(1),
             pass_at_1: None,
             pass_at_k: None,
             avg_pass_rate: None,
@@ -2444,6 +2451,7 @@ mod tests {
             "cached_tokens": 800,
             "completion_tokens": 300,
             "total_cost_usd": 0.01,
+            "total_trials": 1,
             "savings_percent": 40.0,
             "efficiency_score": 100.0,
             "timestamp": "2026-09-04T12:00:00Z"

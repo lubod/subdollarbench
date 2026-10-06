@@ -2434,6 +2434,7 @@ mod tests {
             results_dir.join("demo_run_1.json"),
             serde_json::json!({
                 "id": "demo_run_1", "model": "m", "task": "http", "language": "Python",
+                "total_trials": 1,
                 "pass_rate": 100.0, "passed_stages": 5, "total_stages": 5,
                 "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1, "total_tokens": 2,
                 "total_cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 50.0,
