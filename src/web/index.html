@@ -938,6 +938,7 @@
           <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
           <button class="tab" onclick="switchTab('models')">Models</button>
           <button class="tab" onclick="switchTab('tasks')">Tasks</button>
+          <button class="tab" onclick="switchTab('matrix')">Matrix</button>
           <button class="tab" onclick="switchTab('formula')">Formula</button>
         </div>
         <!-- Setup Tab Panel (was sidebar) -->
@@ -1343,6 +1344,25 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             </table>
           </div>
           <p class="hint" style="font-size: 0.75rem;">Spread = max–min avg pass across models. Health flags verifier suspicion (identical low scores across models).</p>
+        </div>
+
+        <!-- Tab: Matrix (model x task x effort coverage) -->
+        <div id="tab-matrix" style="display: none; flex-direction: column; gap: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px;">
+            <span id="matrixCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
+            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => renderMatrix())">Refresh</button>
+          </div>
+          <div style="width: 100%; overflow-x: auto;">
+            <table class="responsive-runs-table">
+              <thead><tr id="matrixHeadRow">
+                <th>Model</th>
+              </tr></thead>
+              <tbody id="matrixTableBody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading matrix...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. Same-regime ranks only — mixed stamps never compare.</p>
         </div>
 
         <!-- Tab: Formula (weighted judge + live rank) -->
@@ -1784,6 +1804,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       document.getElementById('tab-leaderboard').style.display = 'none';
       document.getElementById('tab-models').style.display = 'none';
       document.getElementById('tab-tasks').style.display = 'none';
+      document.getElementById('tab-matrix').style.display = 'none';
       document.getElementById('tab-formula').style.display = 'none';
 
       const tabs = document.querySelectorAll('.tab');
@@ -1813,9 +1834,13 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         document.getElementById('tab-tasks').style.display = 'flex';
         if (tabs[6]) tabs[6].classList.add('active');
         ensureBoardData().then(() => renderTasks());
+      } else if (name === 'matrix') {
+        document.getElementById('tab-matrix').style.display = 'flex';
+        if (tabs[7]) tabs[7].classList.add('active');
+        ensureBoardData().then(() => renderMatrix());
       } else if (name === 'formula') {
         document.getElementById('tab-formula').style.display = 'flex';
-        if (tabs[7]) tabs[7].classList.add('active');
+        if (tabs[8]) tabs[8].classList.add('active');
         ensureBoardData().then(() => { initFormulaFromHash(); renderFormula(); });
       }
     }
@@ -2869,6 +2894,47 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const done = boardRows.length;
         wp.textContent = `Wave: ${done} result rows in store · queue ${q.Running} running / ${q.Pending} pending / ${q.Done} done`;
       }
+    }
+
+    function renderMatrix() {
+      const badge = document.getElementById('matrixCountBadge');
+      const head = document.getElementById('matrixHeadRow');
+      const tbody = document.getElementById('matrixTableBody');
+      if (!tbody || !head) return;
+      // Canonical per (model, effort, task): most trials wins, latest breaks ties.
+      const canon = {};
+      boardRows.forEach(r => {
+        if ((r.id || '').startsWith('test_')) return;
+        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}`;
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const ex = canon[key];
+        if (!ex || n > (ex.total_trials ?? 0)) canon[key] = r;
+      });
+      const models = [...new Set(Object.values(canon).map(r => r.model))].sort();
+      const tasks = ['redis', 'binproto', 'http', 'pdf', 'proxy', 'pubsub', 'wal'];
+      const efforts = [...new Set(Object.values(canon).map(r => r.effort || 'auto'))].sort();
+      head.innerHTML = '<th>Model</th>' + tasks.map(t => `<th>${escapeHtml(t)}</th>`).join('');
+      tbody.innerHTML = '';
+      models.forEach(m => {
+        efforts.forEach(eff => {
+          const has = tasks.some(t => canon[`${m}\u0001${eff}\u0001${t}`]);
+          if (!has) return;
+          const tr = document.createElement('tr');
+          let cells = `<td>${escapeHtml(shortModelName(m))} <span style="color:var(--text-muted);font-size:.72rem;">${escapeHtml(eff)}</span></td>`;
+          tasks.forEach(t => {
+            const r = canon[`${m}\u0001${eff}\u0001${t}`];
+            if (!r) { cells += '<td style="text-align:center;color:var(--text-muted);">—</td>'; return; }
+            const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
+            const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+            const bg = p1 >= 80 ? 'rgba(63,185,80,.15)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
+            const stamp = (r.rules_version || '').split('+')[0] || '';
+            cells += `<td style="text-align:center;background:${bg};" title="${escapeHtml(r.id || '')} · ${escapeHtml(stamp)}">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span></td>`;
+          });
+          tr.innerHTML = cells;
+          tbody.appendChild(tr);
+        });
+      });
+      if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks`;
     }
 
     function renderTasks() {
