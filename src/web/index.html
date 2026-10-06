@@ -956,6 +956,11 @@
           </label>
           <input type="password" id="apiKey" placeholder="sk-or-v1-..." />
           <span class="hint">Stored in your browser. Used to query models & run OMP.</span>
+          <label for="uiToken" style="margin-top:8px;">
+            <span>UI Token <span class="hint">(once per browser — unlocks Start/Queue/＋/Extend)</span></span>
+          </label>
+          <input type="password" id="uiToken" placeholder="from .env SDB_UI_TOKEN" autocomplete="off" />
+          <span class="hint">Stored in your browser. Sent as <code>Authorization: Bearer</code> on every mutating call.</span>
         </div>
 
         <!-- Model Filter & Selector -->
@@ -1452,6 +1457,13 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     if (savedKey) {
       document.getElementById('apiKey').value = savedKey;
     }
+    const savedUi = localStorage.getItem('sdb_ui_token');
+    if (savedUi) {
+      document.getElementById('uiToken').value = savedUi;
+    }
+    document.getElementById('uiToken').addEventListener('input', (e) => {
+      localStorage.setItem('sdb_ui_token', e.target.value.trim());
+    });
 
     document.getElementById('apiKey').addEventListener('input', (e) => {
       localStorage.setItem('openrouter_api_key', e.target.value.trim());
@@ -2391,7 +2403,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     async function stopWorker(shortId) {
       if (!confirm(`Stop cell ${shortId}? Other workers continue.`)) return;
-      const res = await fetch(`/api/run/stop?run=${encodeURIComponent(shortId)}`, { method: 'POST' });
+      const res = await fetch(`/api/run/stop?run=${encodeURIComponent(shortId)}`, { method: 'POST', headers: authHeaders() });
       if (!res.ok) alert('Stop failed');
       checkActiveRun();
     }
@@ -2518,6 +2530,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       try {
         const res = await fetch(`/api/prompt/${task}`, {
           method: 'POST',
+          headers: authHeaders(),
           body: content
         });
         if (res.ok) {
@@ -3362,7 +3375,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       try {
         const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/extend`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ trials: 3, queue: true })
         });
         const text = await res.text();
@@ -3728,7 +3741,7 @@ function copyRunId() {
       const next = !currentInspectRun.portal_hidden;
       const res = await fetch(`/api/runs/${encodeURIComponent(currentInspectRun.run_id)}/portal`, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: authHeaders({'Content-Type': 'application/json'}),
         body: JSON.stringify({hidden: next}),
       });
       if (!res.ok) { alert('Failed to update portal visibility'); return; }
@@ -3740,14 +3753,14 @@ function copyRunId() {
     async function deleteCurrentRun() {
       if (!currentInspectRun) return;
       if (!confirm(`Delete run "${currentInspectRun.run_id}" permanently (workspace, results, portal)?`)) return;
-      const res = await fetch(`/api/runs/${encodeURIComponent(currentInspectRun.run_id)}`, {method: 'DELETE'});
+      const res = await fetch(`/api/runs/${encodeURIComponent(currentInspectRun.run_id)}`, {method: 'DELETE', headers: authHeaders()});
       if (!res.ok) { alert('Failed to delete run: ' + await res.text()); return; }
       closeRunInspector();
       refreshAfterRunMutation();
     }
 
     async function rebuildPortalNow() {
-      const res = await fetch('/api/portal/rebuild', {method: 'POST'});
+      const res = await fetch('/api/portal/rebuild', {method: 'POST', headers: authHeaders()});
       if (!res.ok) { alert('Portal rebuild failed'); return; }
       const data = await res.json();
       alert(data.rollup ? 'Models summary rebuilt' : `Portal rebuilt (${data.run_count} runs)`);
@@ -3992,7 +4005,7 @@ function copyRunId() {
         stopBtnConsole.textContent = 'Stopping...';
       }
       try {
-        const res = await fetch('/api/run/stop', { method: 'POST' });
+        const res = await fetch('/api/run/stop', { method: 'POST', headers: authHeaders() });
         if (res.ok) {
           appendLog('[STOP] Benchmark cancellation requested by user.');
           stopElapsedTimer();
@@ -4108,7 +4121,7 @@ function copyRunId() {
       try {
         const res = await fetch('/api/queue', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(payload)
         });
         if (!res.ok) {
@@ -4122,6 +4135,13 @@ function copyRunId() {
       } catch (e) {
         alert(`Error queueing run: ${e.message}`);
       }
+    }
+
+    function authHeaders(extra) {
+      const h = Object.assign({}, extra);
+      const tok = ((document.getElementById('uiToken') || {}).value || '').trim();
+      if (tok) h['Authorization'] = `Bearer ${tok}`;
+      return h;
     }
 
     async function queueRerun(model, task, effort) {
@@ -4144,7 +4164,7 @@ function copyRunId() {
       try {
         const res = await fetch('/api/queue', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(payload)
         });
         if (!res.ok) { alert('Queue refused: ' + await res.text()); return; }
@@ -4184,12 +4204,12 @@ function copyRunId() {
     }
 
     async function removeQueued(id) {
-      await fetch(`/api/queue/${id}`, { method: 'DELETE' });
+      await fetch(`/api/queue/${id}`, { method: 'DELETE', headers: authHeaders() });
       refreshQueue();
     }
 
     async function clearFinishedQueue() {
-      await fetch('/api/queue', { method: 'DELETE' });
+      await fetch('/api/queue', { method: 'DELETE', headers: authHeaders() });
       refreshQueue();
     }
 
@@ -4214,7 +4234,7 @@ function copyRunId() {
       try {
         const res = await fetch('/api/run', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             model,
             task,
@@ -4354,7 +4374,7 @@ function copyRunId() {
         try {
           const res = await fetch('/api/sandbox/omp/update', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: authHeaders({'Content-Type': 'application/json'}),
             body: '{}'
           });
           if (!res.ok) {
@@ -4401,7 +4421,7 @@ function copyRunId() {
     }
 
     async function resumeQueue() {
-      const res = await fetch('/api/queue/resume', { method: 'POST' });
+      const res = await fetch('/api/queue/resume', { method: 'POST', headers: authHeaders() });
       if (res.ok) { checkBreaker(); refreshQueue(); }
       else alert('Resume failed');
     }
