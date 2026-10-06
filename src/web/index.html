@@ -2923,13 +2923,15 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           let cells = `<td>${escapeHtml(shortModelName(m))} <span style="color:var(--text-muted);font-size:.72rem;">${escapeHtml(eff)}</span></td>`;
           tasks.forEach(t => {
             const r = canon[`${m}\u0001${eff}\u0001${t}`];
-            if (!r) { cells += '<td style="text-align:center;color:var(--text-muted);">—</td>'; return; }
-            if (r.poisoned) { cells += '<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict">☠</td>'; return; }
+            if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}')" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
+            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click ＋ to rerun clean">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}')" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
+
             const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
             const n = r.total_trials ?? (r.subruns || []).length ?? 1;
             const bg = p1 >= 80 ? 'rgba(63,185,80,.15)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
             const stamp = (r.rules_version || '').split('+')[0] || '';
-            cells += `<td style="text-align:center;background:${bg};" title="${escapeHtml(r.id || '')} · ${escapeHtml(stamp)}">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span></td>`;
+            const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}')" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
+            cells += `<td style="text-align:center;background:${bg};" title="${escapeHtml(r.id || '')} · ${escapeHtml(stamp)}">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
           });
           tr.innerHTML = cells;
           tbody.appendChild(tr);
@@ -4120,6 +4122,36 @@ function copyRunId() {
       } catch (e) {
         alert(`Error queueing run: ${e.message}`);
       }
+    }
+
+    async function queueRerun(model, task, effort) {
+      const apiKey = (document.getElementById('apiKey') || {}).value || '';
+      if (!apiKey.trim()) {
+        alert('Paste your OpenRouter API Key in Setup first — reruns queue with your key.');
+        switchTab('setup');
+        return;
+      }
+      const payload = {
+        model, task, effort,
+        api_key: apiKey.trim(),
+        budget_usd: parseFloat((document.getElementById('budget') || {}).value) || 1.00,
+        max_turns: parseInt((document.getElementById('turns') || {}).value, 10) || 100,
+        timeout_min: parseInt((document.getElementById('timeout_min') || {}).value, 10) || 30,
+        trials: 9, eval_only: false,
+        extend_if_unstable: false, max_trials: 9,
+        review_model: (document.getElementById('reviewModel') || {}).value || null
+      };
+      try {
+        const res = await fetch('/api/queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) { alert('Queue refused: ' + await res.text()); return; }
+        const data = await res.json();
+        alert('Queued ' + data.id + ' (' + model.split('/').pop() + ' / ' + task + ' / ' + effort + ') — ' + (data.started ? 'started now' : 'position ' + (data.position ?? '?')));
+        ensureBoardData(true).then(() => renderMatrix());
+      } catch (e) { alert('Queue error: ' + e.message); }
     }
 
     async function refreshQueue() {
