@@ -2686,7 +2686,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const badge = document.getElementById('lbCountBadge');
       const tbody = document.getElementById('lbTableBody');
       const rows = (lbCache || []).filter(r => {
-        if (r.portal_hidden && !lbShowHidden) return false;
+        if ((r.portal_hidden || r.poisoned) && !lbShowHidden) return false;
         if (!lbFilter) return true;
         const text = `${r.model} ${r.task} ${r.effort || ''} ${r.stability || ''}`.toLowerCase();
         return text.includes(lbFilter);
@@ -2737,7 +2737,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(r.model)}" style="font-weight:600;color:${meta.color};font-size:0.88rem;">${escapeHtml(shortModelName(r.model))}</span></span>
             <span class="badge badge-info">${escapeHtml(r.task)}</span>
             <span class="badge badge-effort">effort: ${escapeHtml(r.effort || 'n/a')}</span>
-            ${r.portal_hidden ? '<span class="badge" style="background:#6e7681;color:#fff;">Hidden</span>' : ''}
+            ${r.poisoned ? '<span class="badge" style="background:#da3633;color:#fff;" title="Infra-killed: 429/404, not a model verdict">Poisoned</span>' : ''}            ${r.portal_hidden ? '<span class="badge" style="background:#6e7681;color:#fff;">Hidden</span>' : ''}
           </div></td>
           <td style="text-align:center;font-weight:700;">${Math.round(avg)}% / ${Math.round(p1)}%${ci}</td>
           <td style="text-align:center;">${n}× / ${stab}</td>
@@ -2791,7 +2791,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           fetch('/api/leaderboard?task=all').then(r => r.ok ? r.json() : []),
           fetch('/api/queue').then(r => r.ok ? r.json() : []).catch(() => []),
         ]);
-        boardRows = (lb || []).filter(r => !r.portal_hidden);
+        boardRows = (lb || []).filter(r => !r.portal_hidden && !r.poisoned);
         const c = { Running: 0, Pending: 0, Done: 0 };
         (q || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
         boardQueue = c;
@@ -2924,6 +2924,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           tasks.forEach(t => {
             const r = canon[`${m}\u0001${eff}\u0001${t}`];
             if (!r) { cells += '<td style="text-align:center;color:var(--text-muted);">—</td>'; return; }
+            if (r.poisoned) { cells += '<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict">☠</td>'; return; }
             const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
             const n = r.total_trials ?? (r.subruns || []).length ?? 1;
             const bg = p1 >= 80 ? 'rgba(63,185,80,.15)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
@@ -3118,7 +3119,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     function renderRuns() {
       const q = currentRunsFilter;
       const runs = allRunsCache.filter(r => {
-        if (r.portal_hidden && !showHiddenRuns) return false;
+        if ((r.portal_hidden || r.poisoned) && !showHiddenRuns) return false;
         if (!q) return true;
         const text = `${r.run_id} ${r.model} ${r.task} ${r.language} ${r.status} ${r.effort || ''}`.toLowerCase();
         return text.includes(q);
