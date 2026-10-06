@@ -1258,10 +1258,12 @@ impl PortalExporter {
     pub fn export_rollup(results_dir: &str, out: &str, base_url: &str) -> Result<PortalSummary> {
         let results = LeaderboardManager::load_all(results_dir);
         // Quarantined tasks stay archived in results/DB but never publish:
-        // the rollup ranks comparable active tasks only.
+        // the rollup ranks comparable active tasks only. Hidden runs likewise
+        // never feed public aggregates (matches the per-run export filter).
+        let runs_dir = crate::report::archive::RunArchiver::resolve_runs_dir();
         let results: Vec<_> = results
             .into_iter()
-            .filter(|r| !crate::report::is_quarantined(&r.task))
+            .filter(|r| !crate::report::is_quarantined(&r.task) && !is_hidden(&runs_dir, &r.id))
             .collect();
         let pre_freeze = results.len();
         let fresh: Vec<_> = results
