@@ -2176,7 +2176,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const cat = catFor(raw);
         if (cat === 'skip') continue;
         if (!showCodeDetails && cat === 'code') continue;
-        html += cat ? '<div class="ln ln-' + cat + '">' + escHtml(raw) + '</div>' : '<div class="ln">' + escHtml(raw) + '</div>';
+        const shown = raw.length > 4096 ? raw.slice(0, 4096) + '\n… (line truncated for display; full line in run console.log)' : raw;
+        html += cat ? '<div class="ln ln-' + cat + '">' + escHtml(shown) + '</div>' : '<div class="ln">' + escHtml(shown) + '</div>';
       }
       return html;
     }
@@ -2219,7 +2220,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       }
       const div = document.createElement('div');
       div.className = cat ? 'ln ln-' + cat : 'ln';
-      div.textContent = line;
+      div.textContent = line.length > 4096 ? line.slice(0, 4096) + '\n… (line truncated for display; full line in run console.log)' : line;
+      div.title = line.length > 4096 ? `${line.length.toLocaleString()} chars total` : '';
       term.appendChild(div);
       trimTerminal(term);
       scrollTerm();

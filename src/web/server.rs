@@ -1430,7 +1430,15 @@ pub(crate) async fn get_active_console(
         state.log_buffer.read().unwrap().clone()
     };
     let total = buf.len();
-    let cap = q.tail.unwrap_or(MAX_CONSOLE_LINES).min(total.max(1));
+    // Steady-state deltas (`since` without explicit tail) are capped small:
+    // agents emit 100KB+ single lines (tool payloads) and a 3000-line dump
+    // every 2s visibly thrashes the terminal. Cursor still jumps to total.
+    let default_cap = if q.since.is_some() {
+        200
+    } else {
+        MAX_CONSOLE_LINES
+    };
+    let cap = q.tail.unwrap_or(default_cap).min(total.max(1));
     let tail_start = total.saturating_sub(cap);
     let start = match q.since {
         // Unknown cursor (client counts rendered lines, server counts pushed
