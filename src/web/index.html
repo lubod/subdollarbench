@@ -1545,72 +1545,84 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       openRunInspectorModal();
       document.querySelector('.modal-dialog').classList.add('exploring');
       document.getElementById('modalInspectRunId').textContent = `${shortModelName(model)} · ${effort} · ${explorerCtx.harness}`;
-      renderExplorerTasks();
+      explorerCtx.expanded = { [explorerCtx.task]: true };
+      renderExplorerTree();
       selectExplorerTask(explorerCtx.task, true);
     }
     function exitExplorerMode() {
       explorerCtx = null;
       document.querySelector('.modal-dialog').classList.remove('exploring');
     }
-    function renderExplorerTasks() {
-      const box = document.getElementById('explorerTasks');
+
+
+
+    const explorerDetailCache = {};
+
+    function renderExplorerTree() {
+      const box = document.getElementById('explorerTree');
       const head = document.getElementById('explorerTasksHead');
       if (!box) return;
       const canon = explorerCanonByTask();
       const tasks = Object.keys(canon).sort();
-      if (head) head.textContent = `Tasks (${tasks.length}) — ${shortModelName(explorerCtx.model)} · ${explorerCtx.effort} · ${explorerCtx.harness}`;
+      if (!explorerCtx.expanded) explorerCtx.expanded = {};
+      if (head) head.textContent = `Tasks › trials (${tasks.length}) — ${shortModelName(explorerCtx.model)} · ${explorerCtx.effort} · ${explorerCtx.harness}`;
       box.innerHTML = tasks.map(tk => {
         const r = canon[tk];
         const p1 = Math.round(r.pass_at_1 ?? r.pass_rate ?? 0);
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const on = tk === explorerCtx.task;
-        return `<div class="explorer-row${on ? ' active' : ''}" data-task="${escapeHtml(tk)}" onclick="selectExplorerTask(this.dataset.task)">`
-          + `<span class="badge badge-info">${escapeHtml(tk)}</span> `
-          + `<b>${p1}%</b> <span style="color:var(--text-muted);">n=${n}</span></div>`;
+        const kids = ((r.subruns || []).slice()).sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
+        const open = !!explorerCtx.expanded[tk];
+        let html = `<div class="explorer-row${tk === explorerCtx.task ? ' active' : ''}" data-task="${escapeHtml(tk)}" onclick="selectExplorerTask(this.dataset.task)">`
+          + `<span>${open ? '▾' : '▸'}</span> <span class="badge badge-info">${escapeHtml(tk)}</span> `
+          + `<b>${p1}%</b> <span style="color:var(--text-muted);">n=${kids.length || (r.total_trials ?? 1)}</span></div>`;
+        if (open) {
+          html += kids.map(k => {
+            const on = k.id === explorerCtx.trialId;
+            const [txt, cls] = humanStatus(k.status, k.pass_rate);
+            const cost = (k.effective_cost_usd !== undefined && k.effective_cost_usd !== null) ? k.effective_cost_usd : (k.total_cost_usd || 0);
+            return `<div class="explorer-row explorer-trial${on ? ' active' : ''}" data-trial="${escapeHtml(k.id || '')}" onclick="selectExplorerTrial(this.dataset.trial)">`
+              + `<span style="font-family:monospace;color:var(--text-muted);">${escapeHtml((k.id || '').slice(-8))}</span> `
+              + `<span class="badge ${cls}">${escapeHtml(txt)}</span> `
+              + `<span>${Math.round(k.pass_rate || 0)}%</span> `
+              + `<span style="color:var(--text-muted);">$${Number(cost).toFixed(4)}</span></div>`;
+          }).join('') || `<div class="explorer-trial" style="font-size:0.72rem;color:var(--text-muted);">Single-trial row — see detail →</div>`;
+        }
+        return html;
       }).join('') || '<span style="color:var(--text-muted);font-size:0.76rem;">No tasks in this group.</span>';
     }
     function selectExplorerTask(task, autoTrial) {
       explorerCtx.task = task;
-      renderExplorerTasks();
+      if (!explorerCtx.expanded) explorerCtx.expanded = {};
+      explorerCtx.expanded[task] = !explorerCtx.expanded[task];
       const canon = explorerCanonByTask();
       const row = canon[task];
-      const head = document.getElementById('explorerTrialsHead');
-      const box = document.getElementById('explorerTrials');
-      const det = document.getElementById('explorerDetail');
-      if (!row || !box) return;
-      const kids = (row.subruns || []).slice().sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
-      if (head) head.textContent = `Trials (${kids.length}) — ${task}`;
-      if (!kids.length) {
-        box.innerHTML = '<span style="color:var(--text-muted);font-size:0.76rem;">Single-trial row (no subruns).</span>';
-        if (det) det.innerHTML = '<span style="color:var(--text-muted);font-size:0.76rem;">Select a trial.</span>';
-        explorerCtx.trialId = null;
-        renderExplorerTrialDetail(row, true);
+      const kids = ((row && row.subruns) || []).slice();
+      if (explorerCtx.expanded[task] && kids.length && autoTrial !== false) {
+        const best = kids.find(k => k.id === explorerCtx.trialId)
+          || kids.slice().sort((a, b) => (b.pass_rate || 0) - (a.pass_rate || 0))[0];
+        explorerCtx.trialId = best.id;
+        renderExplorerTree();
+        selectExplorerTrial(best.id);
         return;
       }
-      box.innerHTML = kids.map(k => {
-        const on = k.id === explorerCtx.trialId;
-        const [txt, cls] = humanStatus(k.status, k.pass_rate);
-        const cost = (k.effective_cost_usd !== undefined && k.effective_cost_usd !== null) ? k.effective_cost_usd : (k.total_cost_usd || 0);
-        return `<div class="explorer-row${on ? ' active' : ''}" data-trial="${escapeHtml(k.id || '')}" onclick="selectExplorerTrial(this.dataset.trial)">`
-          + `<span style="font-family:monospace;color:var(--text-muted);">${escapeHtml((k.id || '').slice(-8))}</span> `
-          + `<span class="badge ${cls}">${escapeHtml(txt)}</span> `
-          + `<span>${Math.round(k.pass_rate || 0)}%</span> `
-          + `<span style="color:var(--text-muted);">$${Number(cost).toFixed(4)}</span></div>`;
-      }).join('');
-      const best = kids.find(k => k.id === explorerCtx.trialId) || kids.slice().sort((a, b) => (b.pass_rate || 0) - (a.pass_rate || 0))[0];
-      if (autoTrial !== false) selectExplorerTrial(best.id);
+      if (!explorerCtx.expanded[task]) {
+        const det = document.getElementById('explorerDetail');
+        if (det) det.innerHTML = '<span style="color:var(--text-muted);font-size:0.76rem;">Select a trial.</span>';
+      } else if (!kids.length && row) {
+        renderExplorerTrialDetail(row, true);
+      }
+      renderExplorerTree();
     }
     function selectExplorerTrial(trialId) {
       explorerCtx.trialId = trialId;
-      document.querySelectorAll('#explorerTrials .explorer-row').forEach(el => {
-        el.classList.toggle('active', el.dataset.trial === trialId);
+      document.querySelectorAll('#explorerTree .explorer-row').forEach(el => {
+        if (el.dataset.trial) el.classList.toggle('active', el.dataset.trial === trialId);
       });
       const canon = explorerCanonByTask();
       const row = canon[explorerCtx.task];
       const t = ((row && row.subruns) || []).find(k => k.id === trialId) || row;
       renderExplorerTrialDetail(t, t === row);
     }
-    const explorerDetailCache = {};
+
     async function renderExplorerTrialDetail(t, isParent) {
       const det = document.getElementById('explorerDetail');
       if (!det || !t) return;
@@ -5056,12 +5068,8 @@ function copyRunId() {
 
       <div id="modalExplorer" style="flex: 1; min-height: 0; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
         <div class="explorer-col">
-          <div class="explorer-head" id="explorerTasksHead">Tasks</div>
-          <div class="explorer-list" id="explorerTasks"></div>
-        </div>
-        <div class="explorer-col">
-          <div class="explorer-head" id="explorerTrialsHead">Trials</div>
-          <div class="explorer-list" id="explorerTrials"></div>
+          <div class="explorer-head" id="explorerTasksHead">Tasks › trials</div>
+          <div class="explorer-list" id="explorerTree"></div>
         </div>
         <div class="explorer-col">
           <div class="explorer-head">Trial detail</div>
