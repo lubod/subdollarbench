@@ -622,6 +622,7 @@ pub struct ExtBatchOut {
 }
 /// Run one extension batch (fresh batch reference, suffix-numbered trial dirs).
 /// Shared by auto-extend and the extend endpoint; never touches the runner slot.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_extension_batch(
     tx: &broadcast::Sender<String>,
     log_buf: &Arc<RwLock<Vec<String>>>,
