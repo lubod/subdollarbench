@@ -719,6 +719,48 @@
       min-height: 0;
       overflow: hidden;
     }
+    /* Explorer mode (matrix drill-down): 3 panes replace the single-run
+       blocks (crumbs, verdict, KPIs, subruns, tabs, body). */
+    .exploring .modal-kpi-bar,
+    .exploring .modal-tabs-bar,
+    .exploring .modal-body,
+    .exploring #modalSubrunsSection,
+    .exploring #modalCrumbs,
+    .exploring #modalVerdictLine { display: none !important; }
+    #modalExplorer { display: none; }
+    .exploring #modalExplorer { display: flex; }
+    .explorer-col {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--border);
+    }
+    .explorer-col:last-child { border-right: none; flex: 1.4; }
+    .explorer-head {
+      padding: 8px 12px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .explorer-list { overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+    .explorer-row {
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.76rem;
+      border: 1px solid transparent;
+    }
+    .explorer-row:hover { background: #161b22; }
+    .explorer-row.active {
+      background: rgba(88, 166, 255, 0.12);
+      border-color: rgba(88, 166, 255, 0.35);
+    }
 
     /* Split Code Browser */
     .code-browser-split {
@@ -1476,6 +1518,118 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     let activeFamily = 'all';
     let currentInspectRun = null;
     let inspectCrumbTrail = [];
+    // Explorer (matrix drill-down) context: {model, effort, harness, task, trialId}
+    let explorerCtx = null;
+    function explorerGroupRows() {
+      if (!explorerCtx) return [];
+      const { model, effort, harness } = explorerCtx;
+      return boardRows.filter(r =>
+        (r.model || '') === model &&
+        (r.effort || 'auto') === effort &&
+        ((r.harness || 'omp').toLowerCase()) === (harness || 'omp') &&
+        !(r.id || '').startsWith('test_'));
+    }
+    function explorerCanonByTask() {
+      const canon = {};
+      for (const r of explorerGroupRows()) {
+        const task = (r.task || '').toLowerCase();
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const ex = canon[task];
+        if (!ex || n > (ex.total_trials ?? (ex.subruns || []).length ?? 1)) canon[task] = r;
+      }
+      return canon;
+    }
+    async function inspectMatrixCell(model, effort, task, harness) {
+      await ensureBoardData();
+      explorerCtx = { model, effort, harness: (harness || 'omp').toLowerCase(), task: (task || '').toLowerCase(), trialId: null };
+      openRunInspectorModal();
+      document.querySelector('.modal-dialog').classList.add('exploring');
+      document.getElementById('modalInspectRunId').textContent = `${shortModelName(model)} · ${effort} · ${explorerCtx.harness}`;
+      renderExplorerTasks();
+      selectExplorerTask(explorerCtx.task, true);
+    }
+    function exitExplorerMode() {
+      explorerCtx = null;
+      document.querySelector('.modal-dialog').classList.remove('exploring');
+    }
+    function renderExplorerTasks() {
+      const box = document.getElementById('explorerTasks');
+      const head = document.getElementById('explorerTasksHead');
+      if (!box) return;
+      const canon = explorerCanonByTask();
+      const tasks = Object.keys(canon).sort();
+      if (head) head.textContent = `Tasks (${tasks.length}) — ${shortModelName(explorerCtx.model)} · ${explorerCtx.effort} · ${explorerCtx.harness}`;
+      box.innerHTML = tasks.map(tk => {
+        const r = canon[tk];
+        const p1 = Math.round(r.pass_at_1 ?? r.pass_rate ?? 0);
+        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
+        const on = tk === explorerCtx.task;
+        return `<div class="explorer-row${on ? ' active' : ''}" data-task="${escapeHtml(tk)}" onclick="selectExplorerTask(this.dataset.task)">`
+          + `<span class="badge badge-info">${escapeHtml(tk)}</span> `
+          + `<b>${p1}%</b> <span style="color:var(--text-muted);">n=${n}</span></div>`;
+      }).join('') || '<span style="color:var(--text-muted);font-size:0.76rem;">No tasks in this group.</span>';
+    }
+    function selectExplorerTask(task, autoTrial) {
+      explorerCtx.task = task;
+      renderExplorerTasks();
+      const canon = explorerCanonByTask();
+      const row = canon[task];
+      const head = document.getElementById('explorerTrialsHead');
+      const box = document.getElementById('explorerTrials');
+      const det = document.getElementById('explorerDetail');
+      if (!row || !box) return;
+      const kids = (row.subruns || []).slice().sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
+      if (head) head.textContent = `Trials (${kids.length}) — ${task}`;
+      if (!kids.length) {
+        box.innerHTML = '<span style="color:var(--text-muted);font-size:0.76rem;">Single-trial row (no subruns).</span>';
+        if (det) det.innerHTML = '<span style="color:var(--text-muted);font-size:0.76rem;">Select a trial.</span>';
+        explorerCtx.trialId = null;
+        renderExplorerTrialDetail(row, true);
+        return;
+      }
+      box.innerHTML = kids.map(k => {
+        const on = k.id === explorerCtx.trialId;
+        const [txt, cls] = humanStatus(k.status, k.pass_rate);
+        const cost = (k.effective_cost_usd !== undefined && k.effective_cost_usd !== null) ? k.effective_cost_usd : (k.total_cost_usd || 0);
+        return `<div class="explorer-row${on ? ' active' : ''}" data-trial="${escapeHtml(k.id || '')}" onclick="selectExplorerTrial(this.dataset.trial)">`
+          + `<span style="font-family:monospace;color:var(--text-muted);">${escapeHtml((k.id || '').slice(-8))}</span> `
+          + `<span class="badge ${cls}">${escapeHtml(txt)}</span> `
+          + `<span>${Math.round(k.pass_rate || 0)}%</span> `
+          + `<span style="color:var(--text-muted);">$${Number(cost).toFixed(4)}</span></div>`;
+      }).join('');
+      const best = kids.find(k => k.id === explorerCtx.trialId) || kids.slice().sort((a, b) => (b.pass_rate || 0) - (a.pass_rate || 0))[0];
+      if (autoTrial !== false) selectExplorerTrial(best.id);
+    }
+    function selectExplorerTrial(trialId) {
+      explorerCtx.trialId = trialId;
+      document.querySelectorAll('#explorerTrials .explorer-row').forEach(el => {
+        el.classList.toggle('active', el.dataset.trial === trialId);
+      });
+      const canon = explorerCanonByTask();
+      const row = canon[explorerCtx.task];
+      const t = ((row && row.subruns) || []).find(k => k.id === trialId) || row;
+      renderExplorerTrialDetail(t, t === row);
+    }
+    function renderExplorerTrialDetail(t, isParent) {
+      const det = document.getElementById('explorerDetail');
+      if (!det || !t) return;
+      const [txt, cls] = humanStatus(t.status, t.pass_rate);
+      const cost = (t.effective_cost_usd !== undefined && t.effective_cost_usd !== null) ? t.effective_cost_usd : (t.total_cost_usd || 0);
+      const toks = t.total_tokens ?? ((t.prompt_tokens || 0) + (t.cached_tokens || 0) + (t.completion_tokens || 0));
+      let stages = '';
+      if (t.stages && t.stages.length) {
+        stages = '<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">STAGES</div>' + t.stages.map(s => {
+          const nm = escapeHtml(s.name || s.stage || 'stage');
+          const ok = !!s.passed;
+          return `<div style="font-size:0.74rem;padding:3px 0;"><span style="color:${ok ? 'var(--success)' : 'var(--danger)'};">${ok ? '✔' : '✕'}</span> ${nm}${s.error ? `<div style="color:var(--text-muted);font-size:0.7rem;">${escapeHtml(String(s.error).slice(0, 220))}</div>` : ''}</div>`;
+        }).join('');
+      }
+      det.innerHTML = `<div style="font-size:0.78rem;display:flex;flex-direction:column;gap:6px;">`
+        + `<div><b>${escapeHtml((t.id || '').slice(-24))}</b> <span class="badge ${cls}">${escapeHtml(txt)}</span>${isParent ? ' <span class="badge">parent row</span>' : ''}</div>`
+        + `<div style="color:var(--text-muted);">pass ${Math.round(t.pass_rate || 0)}% (${t.passed_stages ?? '?'}/${t.total_stages ?? '?'}) · $${Number(cost).toFixed(4)} · ${Number(toks || 0).toLocaleString()} tok · ${t.turns ?? '?'} turns · ${(t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-'}</div>`
+        + stages
+        + `<div style="display:flex;gap:6px;margin-top:4px;"><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(t.id || '')}')">Open full view</button></div></div>`;
+    }
     function renderCrumbs() {
       const box = document.getElementById('modalCrumbs');
       if (!box) return;
@@ -2991,7 +3145,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
             const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
             const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
-            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)}" onclick="inspectRun('${escapeHtml(r.id || '')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
+            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
           });
           tr.innerHTML = cells;
           tbody.appendChild(tr);
@@ -3354,6 +3508,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     async function loadInspectedRun(runId, opts) {
       openRunInspectorModal();
+      exitExplorerMode();
       renderCrumbs();
       document.getElementById('modalInspectRunId').textContent = runId;
       document.getElementById('modalInspectCodeViewer').textContent = 'Loading manifest and files...';
@@ -4800,6 +4955,20 @@ function copyRunId() {
         </div>
       </div>
 
+      <div id="modalExplorer" style="flex: 1; min-height: 0; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
+        <div class="explorer-col">
+          <div class="explorer-head" id="explorerTasksHead">Tasks</div>
+          <div class="explorer-list" id="explorerTasks"></div>
+        </div>
+        <div class="explorer-col">
+          <div class="explorer-head" id="explorerTrialsHead">Trials</div>
+          <div class="explorer-list" id="explorerTrials"></div>
+        </div>
+        <div class="explorer-col">
+          <div class="explorer-head">Trial detail</div>
+          <div class="explorer-list" id="explorerDetail"><span style="color:var(--text-muted);font-size:0.76rem;">Select a trial.</span></div>
+        </div>
+      </div>
       <div id="modalSubrunsSection" style="display: none; flex-direction: column; gap: 8px; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; max-height: 260px; overflow-y: auto; flex-shrink: 0;">
         <div style="font-size: 0.78rem; font-weight: 700; color: #d2a8ff;" id="modalSubrunsTitle">📦 Subruns</div>
         <div style="font-size: 0.7rem; color: var(--text-muted);">Trials below: click a row to drill in, tick two to compare, click a red matrix cell for that stage's trace.</div>
