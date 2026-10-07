@@ -715,6 +715,9 @@
     }
     .modal-pane.active {
       display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
     }
 
     /* Split Code Browser */
@@ -789,6 +792,7 @@
     }
     .code-pre-viewer {
       flex: 1;
+      min-height: 0;
       margin: 0;
       padding: 16px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -822,6 +826,7 @@
     }
     .trace-terminal {
       flex: 1;
+      min-height: 0;
       margin: 0;
       padding: 16px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -832,6 +837,15 @@
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-all;
+    }
+
+    @media (max-width: 760px) {
+      .modal-overlay { padding: 8px; }
+      .modal-dialog { height: 94vh; }
+      .code-browser-split { flex-direction: column; }
+      .code-sidebar { width: 100%; min-width: 0; max-width: none; max-height: 180px; border-right: none; border-bottom: 1px solid var(--border); }
+      .modal-kpi-bar { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); }
+      .modal-actions { flex-wrap: wrap; }
     }
 
     /* Stages Breakdown */
@@ -4612,7 +4626,7 @@ function copyRunId() {
         </div>
       </div>
 
-      <div id="modalSubrunsSection" style="display: none; flex-direction: column; gap: 8px; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px;">
+      <div id="modalSubrunsSection" style="display: none; flex-direction: column; gap: 8px; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; max-height: 260px; overflow-y: auto; flex-shrink: 0;">
         <div style="font-size: 0.78rem; font-weight: 700; color: #d2a8ff;" id="modalSubrunsTitle">📦 Subruns</div>
         <div id="modalSubrunsBody" style="display: flex; flex-direction: column; gap: 6px;"></div>
       </div>
@@ -4639,7 +4653,7 @@ function copyRunId() {
         </button>
       </div>
 
-      <div id="modalPane-compare" class="modal-pane">
+      <div id="modalPane-compare" class="modal-pane" style="overflow-y:auto;">
           <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:8px;">Trial-vs-trial diff (metrics + workspace). Select two trials below first.</div>
           <div id="modalCompareBody" style="font-size:0.78rem;"><span style="color:var(--text-muted);">No comparison yet — tick two trial checkboxes in the subruns section.</span></div>
         </div>
