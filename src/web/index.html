@@ -4687,9 +4687,19 @@ function copyRunId() {
         if (!res.ok) return;
         const q = await res.json();
         // paused = flag on server; infer via balance check only when needed.
-        // Cheap signal: any [BILLING] line in latest console tail.
-        const cres = await fetch('/api/console?tail=50');
-        const text = cres.ok ? await cres.text() : '';
+        // Cheap signal: any [BILLING] line in latest console tail — but no
+        // log traffic at all while logs are hidden; fall back to the status
+        // flag with a generic reason instead.
+        let text = '';
+        if (logsShown()) {
+          const cres = await fetch('/api/console?tail=50');
+          text = cres.ok ? await cres.text() : '';
+        } else {
+          try {
+            const sres = await fetch('/api/status');
+            if (sres.ok && (await sres.json()).queue_paused) text = '[BREAKER] Queue paused: billing (details in logs)';
+          } catch (e) { /* status already polled elsewhere; ignore */ }
+        }
         const banner = document.getElementById('breakerBanner');
         if (!banner) return;
         const m = text.match(/\[BREAKER\] Queue paused: ([^\n]+)/);

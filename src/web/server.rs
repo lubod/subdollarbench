@@ -1988,6 +1988,7 @@ pub(crate) async fn extend_parent_run(
             spec,
             ext_worker,
             &state_clone.worker_buffers,
+            &state_clone.worker_runs,
         )
         .await;
         if out.billing_tripped {

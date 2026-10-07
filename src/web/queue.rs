@@ -523,6 +523,7 @@ pub struct WebLogger {
     pub(crate) total_trials: u32,
     pub(crate) worker: u8,
     pub(crate) worker_bufs: Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
+    pub(crate) worker_runs: Arc<RwLock<std::collections::HashMap<u8, ActiveRunInfo>>>,
 }
 impl PipelineLogger for WebLogger {
     fn log(&self, msg: &str) {
@@ -574,8 +575,29 @@ impl PipelineLogger for WebLogger {
                     }
                 }
 
+                // Shared mirror (telemetry bar) AND the per-worker card
+                // source: cards froze at trial-start values because only the
+                // mirror was ever updated.
                 if let Ok(mut run_lock) = self.current_run.write() {
                     if let Some(ref mut info) = *run_lock {
+                        if let Some(t) = turns {
+                            info.turns = t;
+                        }
+                        if let Some(mt) = max_turns {
+                            info.max_turns = mt;
+                        }
+                        if let Some(s) = spent {
+                            info.cost_usd = s;
+                        }
+                        if let Some(tok) = tokens {
+                            info.tokens = tok;
+                        }
+                        info.subrun = subrun.or(Some(self.trial_idx));
+                        info.total_subruns = total_subruns.or(Some(self.total_trials));
+                    }
+                }
+                if let Ok(mut runs) = self.worker_runs.write() {
+                    if let Some(ref mut info) = runs.get_mut(&self.worker) {
                         if let Some(t) = turns {
                             info.turns = t;
                         }
@@ -632,6 +654,7 @@ pub async fn run_extension_batch(
     spec: ExtBatchSpec,
     worker: u8,
     worker_bufs: &Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
+    worker_runs: &Arc<RwLock<std::collections::HashMap<u8, ActiveRunInfo>>>,
 ) -> ExtBatchOut {
     let ext_batch_ref = if spec.count > 1 {
         // Per-bracket id: the extension's pre must pair with ITS post, not
@@ -718,6 +741,7 @@ pub async fn run_extension_batch(
             total_trials: spec.display_total,
             worker,
             worker_bufs: worker_bufs.clone(),
+            worker_runs: worker_runs.clone(),
         });
         logger.log(&format!(
             "[SUBRUN] ━━━ Starting Extension Subrun {} (Model: {}, Task: {}) ━━━",
@@ -1002,6 +1026,7 @@ pub async fn execute_extend_body(
         spec,
         worker,
         &state.worker_buffers,
+        &state.worker_runs,
     )
     .await;
     if out.billing_tripped {
@@ -1244,6 +1269,7 @@ pub async fn execute_run_body(
             total_trials,
             worker,
             worker_bufs: state.worker_buffers.clone(),
+            worker_runs: state.worker_runs.clone(),
         });
 
         if total_trials > 1 {
@@ -1464,6 +1490,7 @@ pub async fn execute_run_body(
                 },
                 worker,
                 &state.worker_buffers,
+                &state.worker_runs,
             )
             .await;
             if out.billing_tripped {
