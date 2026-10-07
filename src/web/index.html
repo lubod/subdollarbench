@@ -1453,6 +1453,42 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     let allModels = [];
     let activeFamily = 'all';
     let currentInspectRun = null;
+    let inspectCrumbTrail = [];
+    function renderCrumbs() {
+      const box = document.getElementById('modalCrumbs');
+      if (!box) return;
+      if (!inspectCrumbTrail.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = 'flex';
+      let html = '';
+      inspectCrumbTrail.forEach((id, i) => {
+        const last = i === inspectCrumbTrail.length - 1;
+        const short = escapeHtml(id.length > 34 ? id.slice(0, 20) + '…' + id.slice(-12) : id);
+        html += last
+          ? `<span style="color:#fff;font-weight:700;" title="${escapeHtml(id)}">${short}</span>`
+          : `<a href="#" style="color:var(--primary);" title="${escapeHtml(id)}" data-crumb="${i}" onclick="inspectCrumb(this.dataset.crumb); return false;">${short}</a><span>›</span>`;
+      });
+      if (inspectCrumbTrail.length > 1) {
+        html += `<button class="btn-secondary" style="padding:1px 9px;font-size:0.7rem;margin-left:auto;" onclick="inspectBack()">← Back</button>`;
+      }
+      box.innerHTML = html;
+    }
+    function inspectCrumb(i) {
+      const n = parseInt(i, 10);
+      if (isNaN(n) || n < 0 || n >= inspectCrumbTrail.length) return;
+      inspectCrumbTrail = inspectCrumbTrail.slice(0, n + 1);
+      loadInspectedRun(inspectCrumbTrail[n], {});
+    }
+    function inspectBack() {
+      if (inspectCrumbTrail.length < 2) return;
+      inspectCrumbTrail.pop();
+      loadInspectedRun(inspectCrumbTrail[inspectCrumbTrail.length - 1], {});
+    }
+    function inspectTrial(runId) {
+      const cur = inspectCrumbTrail.length ? inspectCrumbTrail[inspectCrumbTrail.length - 1] : null;
+      if (cur && cur !== runId) inspectCrumbTrail.push(runId);
+      else if (!cur) inspectCrumbTrail = [runId];
+      loadInspectedRun(runId, {});
+    }
 
     localStorage.removeItem('openrouter_api_key');
     const savedUi = localStorage.getItem('sdb_ui_token');
@@ -2713,8 +2749,11 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           : '<span style="color:var(--text-muted);">-</span>';
         const tr = document.createElement('tr');
         tr.style.borderLeft = `4px solid ${meta.color}`;
+        tr.style.cursor = 'pointer';
+        tr.title = `${r.id} — click to inspect`;
+        tr.onclick = (e) => { if (e.target.closest('button') || e.target.closest('a')) return; inspectRun(r.id); };
         tr.innerHTML = `
-          <td style="text-align:center;"><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-lbkey="${escapeHtml(key)}" onclick="toggleLbRow(this.dataset.lbkey)" title="${subs.length ? 'Show per-trial breakdown' : 'No trial detail'}">${open ? '▾' : '▸'}</button></td>
+          <td style="text-align:center;"><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-lbkey="${escapeHtml(key)}" onclick="event.stopPropagation();toggleLbRow(this.dataset.lbkey)" title="${subs.length ? 'Show per-trial breakdown' : 'No trial detail'}">${open ? '▾' : '▸'}</button></td>
           <td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
             <span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(r.model)}" style="font-weight:600;color:${meta.color};font-size:0.88rem;">${escapeHtml(shortModelName(r.model))}</span></span>
             <span class="badge badge-info">${escapeHtml(r.task)}</span>
@@ -3196,6 +3235,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const modal = document.getElementById('inspectModal');
       if (modal) modal.style.display = 'none';
       document.body.style.overflow = '';
+      inspectCrumbTrail = [];
+      renderCrumbs();
       currentInspectRun = null;
       currentInspectLogRaw = '';
       currentInspectFiles = [];
@@ -3218,7 +3259,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     });
 
     function switchModalTab(tabKey) {
-      const tabs = ['code', 'trace', 'stages', 'specs', 'review'];
+      const tabs = ['code', 'trace', 'stages', 'specs', 'review', 'compare'];
       tabs.forEach(k => {
         const btn = document.getElementById(`modalTabBtn-${k}`);
         const pane = document.getElementById(`modalPane-${k}`);
@@ -3275,8 +3316,17 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       }
     }
 
-    async function inspectRun(runId) {
+    // Entry from tables/cells: fresh trail. Trial drill-down uses
+    // inspectTrial (push), crumbs/back navigate without pushing.
+    // opts: {tab, filter} deep-links (stage-matrix red cells use it).
+    async function inspectRun(runId, opts) {
+      inspectCrumbTrail = [runId];
+      await loadInspectedRun(runId, opts || {});
+    }
+
+    async function loadInspectedRun(runId, opts) {
       openRunInspectorModal();
+      renderCrumbs();
       document.getElementById('modalInspectRunId').textContent = runId;
       document.getElementById('modalInspectCodeViewer').textContent = 'Loading manifest and files...';
       document.getElementById('modalInspectLogViewer').textContent = 'Loading execution trace...';
@@ -3348,7 +3398,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         }
 
         // Fetch captured execution trace (console.log)
-        fetchInspectLog(runId);
+        await fetchInspectLog(runId);
+        if (opts && opts.tab) switchModalTab(opts.tab);
+        if (opts && opts.filter) {
+          const fi = document.getElementById('modalTraceFilterInput');
+          if (fi) { fi.value = opts.filter; filterInspectLog(opts.filter); }
+        }
 
       } catch (e) {
         alert(`Failed to load run details: ${e.message}`);
@@ -3643,6 +3698,16 @@ function copyRunId() {
       refreshAfterRunMutation();
     }
 
+    function statusPill(status) {
+      const s = (status || 'unknown').toLowerCase();
+      const cls = s === 'completed' ? 'badge-pass'
+        : (s === 'failed_tests' || s === 'disqualified_cheat') ? 'badge-fail' : 'badge-info';
+      return `<span class="badge ${cls}">${escapeHtml(status || 'unknown')}</span>`;
+    }
+    function trialCost(t) {
+      const e = (t.effective_cost_usd !== undefined && t.effective_cost_usd !== null) ? t.effective_cost_usd : (t.total_cost_usd || 0);
+      return '$' + Number(e).toFixed(4);
+    }
     async function loadInspectSubruns(runId) {
       const section = document.getElementById('modalSubrunsSection');
       const body = document.getElementById('modalSubrunsBody');
@@ -3665,17 +3730,91 @@ function copyRunId() {
           const bb = (best.throughput_score !== undefined && best.throughput_score !== null) ? best.throughput_score : (best.efficiency_score || 0);
           if (k.pass_rate > best.pass_rate || (k.pass_rate === best.pass_rate && sb > bb)) best = k;
         }
-        title.textContent = `📦 ${kids.length} subruns (best: ${best.run_id.slice(-8)})`;
+        // Distribution strip: per-trial pass blocks + cost range + spread.
+        const costs = kids.map(k => (k.effective_cost_usd !== undefined && k.effective_cost_usd !== null) ? k.effective_cost_usd : (k.total_cost_usd || 0));
+        const los = kids.map(k => k.pass_rate || 0);
+        const spread = Math.max(...los) - Math.min(...los);
+        const blocks = kids.map(k => `<span title="${escapeHtml(k.run_id)}: ${Math.round(k.pass_rate || 0)}%" style="display:inline-block;width:14px;height:10px;border-radius:2px;background:${(k.pass_rate || 0) >= 100 ? 'var(--success)' : (k.pass_rate || 0) > 0 ? 'var(--warning)' : 'var(--danger)'};"></span>`).join('');
+        title.innerHTML = `📦 ${kids.length} subruns (best: ${escapeHtml(best.run_id.slice(-8))}) <span style="font-weight:400;">${blocks}</span><br><span style="font-weight:400;color:var(--text-muted);">pass spread ${Math.round(Math.min(...los))}–${Math.round(Math.max(...los))}% · cost $${Math.min(...costs).toFixed(4)}–$${Math.max(...costs).toFixed(4)}</span> <button class="btn-secondary" id="modalCompareBtn" style="padding:1px 9px;font-size:0.7rem;margin-left:8px;" onclick="compareCheckedTrials()" disabled>Compare selected</button>`;
+        // Trials × stages matrix: rows = trials, cols = stages, click a red
+        // cell to open that trial filtered to the failing stage.
+        const stageNames = [];
+        for (const k of kids) {
+          for (const s of (k.stages || [])) {
+            const nm = s.name || s.stage || ('stage ' + ((s.index ?? stageNames.length) + 1));
+            if (!stageNames.includes(nm)) stageNames.push(nm);
+          }
+        }
+        if (stageNames.length) {
+          const mx = document.createElement('div');
+          mx.style.cssText = 'overflow-x:auto;margin:2px 0 4px;';
+          let html = '<table style="border-collapse:collapse;font-size:0.7rem;"><tr><th style="text-align:left;padding:2px 6px;color:var(--text-muted);">trial \ stage</th>';
+          stageNames.forEach((nm, si) => { html += `<th style="padding:2px 6px;color:var(--text-muted);" title="${escapeHtml(nm)}">${si + 1}</th>`; });
+          html += '</tr>';
+          kids.forEach(k => {
+            const byName = {};
+            (k.stages || []).forEach(s => { byName[s.name || s.stage] = !!s.passed; });
+            html += `<tr><td style="padding:2px 6px;font-family:monospace;color:var(--text-muted);">${escapeHtml(k.run_id.slice(-8))}</td>`;
+            stageNames.forEach(nm => {
+              const v = byName[nm];
+              const bg = v === true ? 'rgba(63,185,80,.25)' : v === false ? 'rgba(248,81,73,.3)' : 'transparent';
+              const sym = v === true ? '✔' : v === false ? '✕' : '·';
+              html += `<td style="text-align:center;padding:2px 6px;background:${bg};cursor:${v === false ? 'pointer' : 'default'};" ${v === false ? `data-trial="${escapeHtml(k.run_id)}" data-stage="${escapeHtml(nm)}" onclick="inspectRun(this.dataset.trial, {tab:'trace', filter:this.dataset.stage})" title="${escapeHtml(k.run_id)} — ${escapeHtml(nm)} (click: trial trace filtered)"` : `title="${escapeHtml(nm)}"`}>${sym}</td>`;
+            });
+            html += '</tr>';
+          });
+          body.appendChild(mx);
+          mx.innerHTML = html;
+        }
         for (const k of kids) {
           const row = document.createElement('div');
           row.style.cssText = 'display: flex; align-items: center; gap: 10px; font-size: 0.76rem; padding: 5px 9px; border-radius: 4px; background: ' + (k.run_id === best.run_id ? 'rgba(210,168,255,0.08)' : 'transparent');
-          const badge = k.pass_rate === 100 ? `<span class="badge badge-pass">\u2714 100%</span>` : `<span class="badge badge-fail">\u2715 ${Math.round(k.pass_rate)}%</span>`;
-          const star = k.run_id === best.run_id ? ' \u2B50' : '';
-          row.innerHTML = `<span style="font-family: monospace; color: var(--text-muted);">${escapeHtml(k.run_id.slice(-14))}</span>${badge}<span style="color: var(--text-muted);">${escapeHtml(formatThroughput(k.throughput_req_sec, k.task))}</span><span style="margin-left: auto; display: flex; gap: 6px; align-items: center;"><span>${star}</span><button class="btn-secondary" style="padding: 2px 9px; font-size: 0.72rem;" data-rid="${escapeHtml(k.run_id)}" onclick="inspectRun(this.dataset.rid)">Inspect trial</button></span>`;
+          const badge = k.pass_rate === 100 ? `<span class="badge badge-pass">✔ 100%</span>` : `<span class="badge badge-fail">✕ ${Math.round(k.pass_rate)}%</span>`;
+          const star = k.run_id === best.run_id ? ' ⭐' : '';
+          const stages = `${k.passed_stages ?? '?'}/${k.total_stages ?? '?'}`;
+          const dur = (k.duration_seconds !== undefined && k.duration_seconds !== null) ? formatDuration(k.duration_seconds) : '-';
+          const turns = (k.turns !== undefined && k.turns !== null) ? `${k.turns}t` : '-';
+          row.innerHTML = `<input type="checkbox" class="cmp-check" data-rid="${escapeHtml(k.run_id)}" title="Select for compare" onchange="updateCompareBtn()" style="accent-color:var(--primary);"><span style="font-family: monospace; color: var(--text-muted);">${escapeHtml(k.run_id.slice(-14))}</span>${badge}${statusPill(k.status)}<span style="color: var(--text-muted);" title="Stages passed">🧪 ${stages}</span><span style="color: var(--text-muted);">${escapeHtml(formatThroughput(k.throughput_req_sec, k.task))}</span><span style="color: var(--text-muted);" title="Cost / turns / duration">${trialCost(k)} · ${turns} · ${dur}</span><span class="badge" title="Agent harness">harness: ${escapeHtml(k.harness || 'omp')}</span><span style="margin-left: auto; display: flex; gap: 6px; align-items: center;"><span>${star}</span><button class="btn-secondary" style="padding: 2px 9px; font-size: 0.72rem;" data-rid="${escapeHtml(k.run_id)}" onclick="inspectTrial(this.dataset.rid)">Inspect trial</button></span>`;
           body.appendChild(row);
         }
         section.style.display = 'flex';
       } catch (e) { /* subruns optional */ }
+    }
+    function updateCompareBtn() {
+      const btn = document.getElementById('modalCompareBtn');
+      if (!btn) return;
+      const n = document.querySelectorAll('#modalSubrunsBody .cmp-check:checked').length;
+      btn.disabled = n !== 2;
+      btn.textContent = n === 2 ? 'Compare selected (2)' : 'Compare selected';
+    }
+    async function compareCheckedTrials() {
+      const sel = [...document.querySelectorAll('#modalSubrunsBody .cmp-check:checked')].map(c => c.dataset.rid);
+      if (sel.length !== 2) return;
+      switchModalTab('compare');
+      const box = document.getElementById('modalCompareBody');
+      if (box) box.innerHTML = '<span style="color:var(--text-muted);">Loading comparison...</span>';
+      try {
+        const res = await fetch(`/api/compare?run_a=${encodeURIComponent(sel[0])}&run_b=${encodeURIComponent(sel[1])}`);
+        if (!res.ok) throw new Error(await res.text());
+        const c = await res.json();
+        const d = c.metric_diff || {};
+        const fmtD = (v, u) => `${v > 0 ? '+' : ''}${Number(v).toFixed(4)}${u || ''}`;
+        let html = `<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:0.76rem;margin-bottom:10px;">
+          <span class="badge badge-info">${escapeHtml(sel[0].slice(-14))} → ${escapeHtml(sel[1].slice(-14))}</span>
+          <span>pass: <b>${fmtD((c.run_b?.pass_rate ?? 0) - (c.run_a?.pass_rate ?? 0), '%')}</b></span>
+          <span>cost: <b>${fmtD(d.effective_cost_delta ?? d.cost_delta ?? 0, '$')}</b></span>
+          <span>tokens: <b>${(d.tokens_delta ?? 0) > 0 ? '+' : ''}${d.tokens_delta ?? 0}</b></span>
+          <span>duration: <b>${fmtD(d.duration_delta ?? 0, 's')}</b></span>
+        </div>`;
+        for (const f of (c.file_diffs || [])) {
+          if (f.status === 'identical') continue;
+          html += `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:0.78rem;"><b>${escapeHtml(f.path)}</b> <span style="color:var(--text-muted);">${escapeHtml(f.status)} (${f.lines_a}→${f.lines_b} lines)</span></summary><pre style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.72rem;max-height:320px;">${escapeHtml(f.diff || '(binary/unreadable)')}</pre></details>`;
+        }
+        if (!(c.file_diffs || []).some(f => f.status !== 'identical')) html += '<span style="color:var(--text-muted);">Workspaces identical; only metrics differ.</span>';
+        if (box) box.innerHTML = html;
+      } catch (e) {
+        if (box) box.innerHTML = `<span style="color:var(--danger);">Compare failed: ${escapeHtml(e.message)}</span>`;
+      }
     }
     async function loadInspectReview(runId) {
       const box = document.getElementById('modalInspectReviewBody');
@@ -4434,6 +4573,9 @@ function copyRunId() {
         </div>
       </div>
 
+      <!-- Breadcrumb: parent run › trial › … (Esc still closes all) -->
+      <div id="modalCrumbs" style="display:none;align-items:center;gap:6px;font-size:0.76rem;color:var(--text-muted);padding:6px 2px 0;flex-wrap:wrap;"></div>
+
       <!-- KPI Summary Bar -->
       <div class="modal-kpi-bar">
         <div class="kpi-chip">
@@ -4492,7 +4634,15 @@ function copyRunId() {
         <button class="modal-tab-btn" id="modalTabBtn-review" onclick="switchModalTab('review')">
           Review
         </button>
+        <button class="modal-tab-btn" id="modalTabBtn-compare" onclick="switchModalTab('compare')">
+          ⚖️ Compare
+        </button>
       </div>
+
+      <div id="modalPane-compare" class="modal-pane">
+          <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:8px;">Trial-vs-trial diff (metrics + workspace). Select two trials below first.</div>
+          <div id="modalCompareBody" style="font-size:0.78rem;"><span style="color:var(--text-muted);">No comparison yet — tick two trial checkboxes in the subruns section.</span></div>
+        </div>
 
       <!-- Modal Body Tab Panes -->
       <div class="modal-body">
