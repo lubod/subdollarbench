@@ -3273,7 +3273,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     });
 
     function switchModalTab(tabKey) {
-      const tabs = ['code', 'trace', 'stages', 'specs', 'review', 'compare'];
+      const tabs = ['code', 'trace', 'stages', 'env', 'json', 'judge', 'compare'];
       tabs.forEach(k => {
         const btn = document.getElementById(`modalTabBtn-${k}`);
         const pane = document.getElementById(`modalPane-${k}`);
@@ -3359,7 +3359,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
         const statusBadge = document.getElementById('modalInspectStatusBadge');
         const isCompleted = m.status === 'completed' || m.pass_rate === 100;
-        statusBadge.innerHTML = `<span class="badge ${isCompleted ? 'badge-pass' : 'badge-fail'}">${(m.status || 'unknown').toUpperCase()}</span>`;
+        const [hTxt, hCls] = humanStatus(m.status, m.pass_rate);
+        statusBadge.innerHTML = `<span class="badge ${hCls}">${escapeHtml(hTxt.toUpperCase())}</span>`;
+        document.getElementById('modalVerdictLine').innerHTML = verdictLine(m);
 
 
         // Populate KPI Strip
@@ -3712,11 +3714,36 @@ function copyRunId() {
       refreshAfterRunMutation();
     }
 
-    function statusPill(status) {
+    // Backend statuses translated to plain words. `completed` with 100%
+    // pass = passed; agent_* = the agent died (candidate may still have
+    // passed if it finished first); disqualified_cheat = name/behavior
+    // blocklist hit; infra_error = harness fault, not a model verdict.
+    function humanStatus(status, passRate) {
       const s = (status || 'unknown').toLowerCase();
-      const cls = s === 'completed' ? 'badge-pass'
-        : (s === 'failed_tests' || s === 'disqualified_cheat') ? 'badge-fail' : 'badge-info';
-      return `<span class="badge ${cls}">${escapeHtml(status || 'unknown')}</span>`;
+      if (s === 'completed' && (passRate ?? 0) >= 100) return ['Passed', 'badge-pass'];
+      if (s === 'completed') return ['Tests failed', 'badge-fail'];
+      if (s === 'failed_tests') return ['Tests failed', 'badge-fail'];
+      if (s === 'agent_failed' || s === 'agent_killed') return ['Agent died', 'badge-fail'];
+      if (s === 'disqualified_cheat') return ['Cheat-flagged', 'badge-fail'];
+      if (s === 'infra_error') return ['Harness fault', 'badge-info'];
+      return [status || 'unknown', 'badge-info'];
+    }
+    function statusPill(status, passRate) {
+      const [txt, cls] = humanStatus(status, passRate);
+      const hint = { 'Passed': 'All stages green', 'Tests failed': 'Verifier stages failed', 'Agent died': 'Agent exited before finishing (see trace tail)', 'Cheat-flagged': 'Forbidden framework/daemon/name detected', 'Harness fault': 'Infrastructure fault, not a model verdict' }[txt] || '';
+      return `<span class="badge ${cls}" title="${escapeHtml(hint)}">${escapeHtml(txt)}</span>`;
+    }
+    function verdictLine(m) {
+      const [txt] = humanStatus(m.status, m.pass_rate);
+      const parts = [];
+      if (txt === 'Passed') parts.push(`Passed ${m.passed_stages || 0}/${m.total_stages || 0} stages`);
+      else if (txt === 'Agent died') parts.push(`Agent died with ${m.passed_stages || 0}/${m.total_stages || 0} stages green`);
+      else parts.push(`${txt}: ${m.passed_stages || 0}/${m.total_stages || 0} stages green`);
+      const n = (m.subruns || []).length || (m.total_trials ?? 0);
+      if (n > 1) parts.push(`${n} trials`);
+      else if ((m.total_trials ?? 1) <= 1 && !(m.subruns || []).length) parts.push('single trial');
+      if (m.harness) parts.push(`harness ${m.harness}`);
+      return escapeHtml(parts.join(' · '));
     }
     function trialCost(t) {
       const e = (t.effective_cost_usd !== undefined && t.effective_cost_usd !== null) ? t.effective_cost_usd : (t.total_cost_usd || 0);
@@ -3788,7 +3815,7 @@ function copyRunId() {
           const stages = `${k.passed_stages ?? '?'}/${k.total_stages ?? '?'}`;
           const dur = (k.duration_seconds !== undefined && k.duration_seconds !== null) ? formatDuration(k.duration_seconds) : '-';
           const turns = (k.turns !== undefined && k.turns !== null) ? `${k.turns}t` : '-';
-          row.innerHTML = `<input type="checkbox" class="cmp-check" data-rid="${escapeHtml(k.run_id)}" title="Select for compare" onchange="updateCompareBtn()" style="accent-color:var(--primary);"><span style="font-family: monospace; color: var(--text-muted);">${escapeHtml(k.run_id.slice(-14))}</span>${badge}${statusPill(k.status)}<span style="color: var(--text-muted);" title="Stages passed">🧪 ${stages}</span><span style="color: var(--text-muted);">${escapeHtml(formatThroughput(k.throughput_req_sec, k.task))}</span><span style="color: var(--text-muted);" title="Cost / turns / duration">${trialCost(k)} · ${turns} · ${dur}</span><span class="badge" title="Agent harness">harness: ${escapeHtml(k.harness || 'omp')}</span><span style="margin-left: auto; display: flex; gap: 6px; align-items: center;"><span>${star}</span><button class="btn-secondary" style="padding: 2px 9px; font-size: 0.72rem;" data-rid="${escapeHtml(k.run_id)}" onclick="inspectTrial(this.dataset.rid)">Inspect trial</button></span>`;
+          row.innerHTML = `<input type="checkbox" class="cmp-check" data-rid="${escapeHtml(k.run_id)}" title="Select for compare" onchange="updateCompareBtn()" style="accent-color:var(--primary);"><span style="font-family: monospace; color: var(--text-muted);">${escapeHtml(k.run_id.slice(-14))}</span>${badge}${statusPill(k.status, k.pass_rate)}<span style="color: var(--text-muted);" title="Stages passed">🧪 ${stages}</span><span style="color: var(--text-muted);">${escapeHtml(formatThroughput(k.throughput_req_sec, k.task))}</span><span style="color: var(--text-muted);" title="Cost / turns / duration">${trialCost(k)} · ${turns} · ${dur}</span><span class="badge" title="Agent harness">harness: ${escapeHtml(k.harness || 'omp')}</span><span style="margin-left: auto; display: flex; gap: 6px; align-items: center;"><span>${star}</span><button class="btn-secondary" style="padding: 2px 9px; font-size: 0.72rem;" data-rid="${escapeHtml(k.run_id)}" onclick="inspectTrial(this.dataset.rid)">Inspect trial</button></span>`;
           body.appendChild(row);
         }
         section.style.display = 'flex';
@@ -3800,6 +3827,12 @@ function copyRunId() {
       const n = document.querySelectorAll('#modalSubrunsBody .cmp-check:checked').length;
       btn.disabled = n !== 2;
       btn.textContent = n === 2 ? 'Compare selected (2)' : 'Compare selected';
+      const tab = document.getElementById('modalTabBtn-compare');
+      if (tab) {
+        const wasActive = tab.classList.contains('active');
+        tab.style.display = n === 2 ? '' : 'none';
+        if (n !== 2 && wasActive) switchModalTab('code');
+      }
     }
     async function compareCheckedTrials() {
       const sel = [...document.querySelectorAll('#modalSubrunsBody .cmp-check:checked')].map(c => c.dataset.rid);
@@ -4590,37 +4623,39 @@ function copyRunId() {
       <!-- Breadcrumb: parent run › trial › … (Esc still closes all) -->
       <div id="modalCrumbs" style="display:none;align-items:center;gap:6px;font-size:0.76rem;color:var(--text-muted);padding:6px 2px 0;flex-wrap:wrap;"></div>
 
+      <div id="modalVerdictLine" style="font-size:0.82rem;color:var(--text-muted);padding:6px 2px 0;"></div>
+
       <!-- KPI Summary Bar -->
       <div class="modal-kpi-bar">
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="Pass@1 per cent of effective cost (throughput-adjusted where a live reference anchors it)">
           <div class="kpi-val" id="modalInspectScore" style="color: var(--primary);">-</div>
           <div class="kpi-lbl">Score / ¢</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="Share of verification stages passing (parents: mean across trials)">
           <div class="kpi-val" id="modalInspectPass">-</div>
           <div class="kpi-lbl">Pass Rate</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="API spend plus compute floor (time + tokens)">
           <div class="kpi-val" id="modalInspectCost" style="color: var(--accent);">-</div>
           <div class="kpi-lbl">Total Cost</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="Prompt / cached / completion tokens (completion includes reasoning)">
           <div class="kpi-val" id="modalInspectTokens">-</div>
           <div class="kpi-lbl">Tokens (P / C)</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="Measured rate; scored only for redis/http with a live reference">
           <div class="kpi-val" id="modalInspectThroughput" style="color: var(--success);">-</div>
           <div class="kpi-lbl">Throughput</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="End-to-end wall time for this run">
           <div class="kpi-val" id="modalInspectDuration">-</div>
           <div class="kpi-lbl">Wall Duration</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="Agent steps used of the max-turns budget">
           <div class="kpi-val" id="modalInspectTurns" style="color: var(--primary);">-</div>
           <div class="kpi-lbl">Turns Taken</div>
         </div>
-        <div class="kpi-chip">
+        <div class="kpi-chip" title="Requested reasoning effort (a request, not a guarantee) and task">
           <div class="kpi-val" id="modalInspectEffort" style="color: var(--warning);">-</div>
           <div class="kpi-lbl">Effort / Task</div>
         </div>
@@ -4628,6 +4663,7 @@ function copyRunId() {
 
       <div id="modalSubrunsSection" style="display: none; flex-direction: column; gap: 8px; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; max-height: 260px; overflow-y: auto; flex-shrink: 0;">
         <div style="font-size: 0.78rem; font-weight: 700; color: #d2a8ff;" id="modalSubrunsTitle">📦 Subruns</div>
+        <div style="font-size: 0.7rem; color: var(--text-muted);">Trials below: click a row to drill in, tick two to compare, click a red matrix cell for that stage's trace.</div>
         <div id="modalSubrunsBody" style="display: flex; flex-direction: column; gap: 6px;"></div>
       </div>
 
@@ -4642,13 +4678,16 @@ function copyRunId() {
         <button class="modal-tab-btn" id="modalTabBtn-stages" onclick="switchModalTab('stages')">
           🧪 Test Stages <span id="modalStagesCountBadge" class="badge badge-pass" style="font-size: 0.68rem; margin-left: 4px;">0/0</span>
         </button>
-        <button class="modal-tab-btn" id="modalTabBtn-specs" onclick="switchModalTab('specs')">
-          🖥️ Environment & Manifest
+        <button class="modal-tab-btn" id="modalTabBtn-env" onclick="switchModalTab('env')">
+          🖥️ Env
         </button>
-        <button class="modal-tab-btn" id="modalTabBtn-review" onclick="switchModalTab('review')">
-          Review
+        <button class="modal-tab-btn" id="modalTabBtn-json" onclick="switchModalTab('json')">
+          📄 JSON
         </button>
-        <button class="modal-tab-btn" id="modalTabBtn-compare" onclick="switchModalTab('compare')">
+        <button class="modal-tab-btn" id="modalTabBtn-judge" onclick="switchModalTab('judge')">
+          🧠 Judge <span style="font-size:0.65rem;color:var(--text-muted);">advisory</span>
+        </button>
+        <button class="modal-tab-btn" id="modalTabBtn-compare" style="display:none;" onclick="switchModalTab('compare')">
           ⚖️ Compare
         </button>
       </div>
@@ -4716,7 +4755,7 @@ function copyRunId() {
         </div>
 
         <!-- Pane 4: Environment Specs & Raw Manifest -->
-        <div id="modalPane-specs" class="modal-pane">
+        <div id="modalPane-env" class="modal-pane">
           <div class="manifest-container">
             <!-- Hardware Specs Box -->
             <div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 16px;">
@@ -4726,7 +4765,10 @@ function copyRunId() {
               </div>
               <div id="modalInspectEnvGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; font-size: 0.78rem;"></div>
             </div>
-
+          </div>
+        </div>
+        <div id="modalPane-json" class="modal-pane">
+          <div class="manifest-container">
             <!-- Raw Manifest JSON -->
             <div style="display: flex; flex-direction: column; gap: 8px; flex: 1;">
               <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -4738,7 +4780,8 @@ function copyRunId() {
           </div>
         </div>
       </div>
-        <div id="modalPane-review" class="modal-pane">
+        <div id="modalPane-judge" class="modal-pane">
+          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;">LLM code review — <b>advisory only, never affects scores</b>.</div>
           <div id="modalInspectReviewBody" style="display: flex; flex-direction: column; gap: 12px;"></div>
         </div>
     </div>
