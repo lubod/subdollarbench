@@ -505,25 +505,13 @@ impl UiServer {
 
         // Replay auto-dispatch (engine only; proxy never kicks).
         // Pending work that survived the restart runs without a manual kick.
-        // is_running starts false; the memory queue stays authoritative and
-        // the DB mirror is best-effort in kick_runner.
-        if proxy_mode {
-            println!("[QUEUE-DB] proxy mode: auto-dispatch disabled (engine owns it)");
-        }
+        // Fan out to every free slot: a single kick leaves SDB_WORKERS-1
+        // slots idle until the first completion (the wave then runs serially
+        // for a full trial before parallelizing). pump_queue claims one slot
+        // per call and returns false when full or dry, so loop until it stops.
         if !proxy_mode {
-            if let Some(first_id) = state
-                .queue
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|i| i.status == QueueStatus::Pending)
-                .map(|i| i.id.clone())
-            {
-                let kick_state = state.clone();
-                tokio::spawn(async move {
-                    kick_runner(&kick_state, &first_id).await;
-                });
-            }
+            let kick_state = state.clone();
+            tokio::spawn(async move { while pump_queue(&kick_state) {} });
         }
 
         // Periodic reconcile (60s): queue ghosts always; docker sweeps only
