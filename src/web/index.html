@@ -2915,14 +2915,16 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           tasks.forEach(t => {
             const r = canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`];
             if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
-            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click ＋ to rerun clean">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
+            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click the cell to inspect, ＋ to rerun clean" style="cursor:pointer;" onclick="inspectRun('${escapeHtml(r.id || '')}')">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
 
             const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
             const n = r.total_trials ?? (r.subruns || []).length ?? 1;
             const bg = p1 >= 80 ? 'rgba(63,185,80,.15)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
             const stamp = (r.rules_version || '').split('+')[0] || '';
-            const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
-            cells += `<td style="text-align:center;background:${bg};" title="${escapeHtml(r.id || '')} · ${escapeHtml(stamp)}">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
+            const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
+            const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
+            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
+            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)}" onclick="inspectRun('${escapeHtml(r.id || '')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
           });
           tr.innerHTML = cells;
           tbody.appendChild(tr);
