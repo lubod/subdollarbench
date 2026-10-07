@@ -931,15 +931,15 @@
       <!-- Main Display Tabs -->
       <main class="card">
         <div class="tabs">
-          <button class="tab active" onclick="switchTab('setup')">⚙️ Setup</button>
-          <button class="tab" onclick="switchTab('console')">Live Console</button>
-          <button class="tab" onclick="switchTab('traceability')">Traceability & Runs</button>
-          <button class="tab" onclick="switchTab('prompt')">Prompt Specification</button>
-          <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
-          <button class="tab" onclick="switchTab('models')">Models</button>
-          <button class="tab" onclick="switchTab('tasks')">Tasks</button>
-          <button class="tab" onclick="switchTab('matrix')">Matrix</button>
-          <button class="tab" onclick="switchTab('formula')">Formula</button>
+          <button class="tab active" data-tab="setup" onclick="switchTab('setup')">⚙️ Setup</button>
+          <button class="tab" data-tab="console" onclick="switchTab('console')">Live Console</button>
+          <button class="tab" data-tab="traceability" onclick="switchTab('traceability')">Traceability & Runs</button>
+          <button class="tab" data-tab="prompt" onclick="switchTab('prompt')">Prompt Specification</button>
+          <button class="tab" data-tab="leaderboard" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
+          <button class="tab" data-tab="models" onclick="switchTab('models')">Models</button>
+          <button class="tab" data-tab="tasks" onclick="switchTab('tasks')">Tasks</button>
+          <button class="tab" data-tab="matrix" onclick="switchTab('matrix')">Matrix</button>
+          <button class="tab" data-tab="formula" onclick="switchTab('formula')">Formula</button>
         </div>
         <!-- Setup Tab Panel (was sidebar) -->
       <div id="tab-setup" style="flex-direction: column; gap: 16px;">
@@ -948,14 +948,13 @@
           <span id="modelCountBadge" class="badge badge-pass" style="font-size: 0.7rem;">Loading models...</span>
         </h2>
 
-        <!-- API Key -->
+        <!-- Auth -->
         <div class="form-group">
-          <label for="apiKey">
-            <span>OpenRouter API Key</span>
+          <label>
+            <span>Auth</span>
             <button class="btn-secondary" onclick="fetchModels()">🔄 Refresh Models</button>
           </label>
-          <input type="password" id="apiKey" placeholder="sk-or-v1-..." />
-          <span class="hint">Stored in your browser. Used to query models & run OMP.</span>
+          <span class="hint">Runs bill the server <code>.env OPENROUTER_API_KEY</code> — no browser key needed.</span>
           <label for="uiToken" style="margin-top:8px;">
             <span>UI Token <span class="hint">(once per browser — unlocks Start/Queue/＋/Extend)</span></span>
           </label>
@@ -1452,11 +1451,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     let activeFamily = 'all';
     let currentInspectRun = null;
 
-    // Load saved API key
-    const savedKey = localStorage.getItem('openrouter_api_key');
-    if (savedKey) {
-      document.getElementById('apiKey').value = savedKey;
-    }
+    localStorage.removeItem('openrouter_api_key');
     const savedUi = localStorage.getItem('sdb_ui_token');
     if (savedUi) {
       document.getElementById('uiToken').value = savedUi;
@@ -1465,13 +1460,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       localStorage.setItem('sdb_ui_token', e.target.value.trim());
     });
 
-    document.getElementById('apiKey').addEventListener('input', (e) => {
-      localStorage.setItem('openrouter_api_key', e.target.value.trim());
-    });
-    document.getElementById('apiKey').addEventListener('change', (e) => {
-      localStorage.setItem('openrouter_api_key', e.target.value.trim());
-      fetchModels();
-    });
+
 
     function setEffort(val, btn) {
       if (val === 'auto' || val === 'default') val = 'high';
@@ -1647,17 +1636,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
 
     async function fetchModels() {
-      const apiKey = document.getElementById('apiKey').value.trim();
       const badge = document.getElementById('modelCountBadge');
       badge.textContent = 'Fetching models...';
       badge.className = 'badge badge-info';
 
       try {
-        const headers = {};
-        if (apiKey) {
-          headers['Authorization'] = `Bearer ${apiKey}`;
-        }
-        const res = await fetch('/api/models', { headers });
+        const res = await fetch('/api/models');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         allModels = await res.json();
         badge.textContent = `${allModels.length} models < $1.00`;
@@ -1819,40 +1803,40 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       document.getElementById('tab-matrix').style.display = 'none';
       document.getElementById('tab-formula').style.display = 'none';
 
-      const tabs = document.querySelectorAll('.tab');
+      const tabBtn = document.querySelector(`.tab[data-tab="${name}"]`);
       if (name === 'setup') {
         document.getElementById('tab-setup').style.display = 'flex';
-        if (tabs[0]) tabs[0].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
       } else if (name === 'console') {
         document.getElementById('tab-console').style.display = 'flex';
-        if (tabs[1]) tabs[1].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
       } else if (name === 'traceability') {
         document.getElementById('tab-traceability').style.display = 'flex';
-        if (tabs[2]) tabs[2].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         if (!allRunsCache || !allRunsCache.length) loadRuns();
       } else if (name === 'prompt') {
         document.getElementById('tab-prompt').style.display = 'flex';
-        if (tabs[3]) tabs[3].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         loadPrompt();
       } else if (name === 'leaderboard') {
         document.getElementById('tab-leaderboard').style.display = 'flex';
-        if (tabs[4]) tabs[4].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         if (!lbCache || !lbCache.length) loadLeaderboard();
       } else if (name === 'models') {
         document.getElementById('tab-models').style.display = 'flex';
-        if (tabs[5]) tabs[5].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         ensureBoardData().then(() => renderModels());
       } else if (name === 'tasks') {
         document.getElementById('tab-tasks').style.display = 'flex';
-        if (tabs[6]) tabs[6].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         ensureBoardData().then(() => renderTasks());
       } else if (name === 'matrix') {
         document.getElementById('tab-matrix').style.display = 'flex';
-        if (tabs[7]) tabs[7].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         ensureBoardData().then(() => renderMatrix());
       } else if (name === 'formula') {
         document.getElementById('tab-formula').style.display = 'flex';
-        if (tabs[8]) tabs[8].classList.add('active');
+        if (tabBtn) tabBtn.classList.add('active');
         ensureBoardData().then(() => { initFormulaFromHash(); renderFormula(); });
       }
     }
@@ -4100,7 +4084,7 @@ function copyRunId() {
         model: document.getElementById('model').value.trim(),
         task: document.getElementById('task').value,
         effort: document.getElementById('effortSelect').value,
-        api_key: document.getElementById('apiKey').value.trim() || null,
+        api_key: null, // server .env key bills the run
         budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
         max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
         timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 30,
@@ -4114,10 +4098,6 @@ function copyRunId() {
 
     async function enqueueRun() {
       const payload = buildRunPayload();
-      if (!payload.eval_only && !payload.api_key) {
-        alert('Please provide your OpenRouter API Key before queueing.');
-        return;
-      }
       try {
         const res = await fetch('/api/queue', {
           method: 'POST',
@@ -4145,15 +4125,15 @@ function copyRunId() {
     }
 
     async function queueRerun(model, task, effort) {
-      const apiKey = (document.getElementById('apiKey') || {}).value || '';
-      if (!apiKey.trim()) {
-        alert('Paste your OpenRouter API Key in Setup first — reruns queue with your key.');
+      const uiTok = ((document.getElementById('uiToken') || {}).value || '').trim();
+      if (!uiTok) {
+        alert('Paste the UI Token (from .env SDB_UI_TOKEN) in Setup first.');
         switchTab('setup');
         return;
       }
       const payload = {
         model, task, effort,
-        api_key: apiKey.trim(),
+        api_key: null, // server .env key bills the run
         budget_usd: parseFloat((document.getElementById('budget') || {}).value) || 1.00,
         max_turns: parseInt((document.getElementById('turns') || {}).value, 10) || 100,
         timeout_min: parseInt((document.getElementById('timeout_min') || {}).value, 10) || 30,
@@ -4214,7 +4194,6 @@ function copyRunId() {
     }
 
     async function startBenchmark() {
-      const apiKey = document.getElementById('apiKey').value.trim();
       const model = document.getElementById('model').value.trim();
       const effort = document.getElementById('effortSelect').value;
       const task = document.getElementById('task').value;
@@ -4223,11 +4202,6 @@ function copyRunId() {
       const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 30;
       const trials = parseInt(document.getElementById('trials').value, 10) || 9;
       const evalOnly = document.getElementById('evalOnly').checked;
-
-      if (!evalOnly && !apiKey) {
-        alert('Please provide your OpenRouter API Key before starting the benchmark.');
-        return;
-      }
 
       const startBtn = document.getElementById('startBtn');
       if (startBtn) startBtn.disabled = true;
@@ -4239,7 +4213,7 @@ function copyRunId() {
             model,
             task,
             effort,
-            api_key: apiKey || null,
+            api_key: null, // server .env key bills the run
             budget_usd: budget,
             max_turns: turns,
             timeout_min: timeoutMin,
