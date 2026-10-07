@@ -3255,17 +3255,47 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       }).sort((a, b) => b.spread - a.spread);
       if (badge) badge.textContent = `${list.length} tasks`;
       tbody.innerHTML = '';
+      window._tasksExpanded = window._tasksExpanded || {};
+      // trial lookup per task across canonical parents (embedded subruns).
+      const trialsByTask = {};
+      Object.values(canon).forEach(r => {
+        const tk = (r.task || '').toLowerCase();
+        const arr = trialsByTask[tk] = trialsByTask[tk] || [];
+        (r.subruns || []).forEach(s => arr.push({ trial: s, parent: r }));
+      });
       list.forEach(t => {
+        const open = !!window._tasksExpanded[t.task];
+        const tkids = trialsByTask[t.task] || [];
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td><span class="badge badge-info">${escapeHtml(t.task)}</span></td>
+          <td><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-task="${escapeHtml(t.task)}" onclick="toggleTasksRow(this.dataset.task)" title="${tkids.length ? 'Show trials' : 'No trial detail'}">${open ? '▾' : '▸'}</button> <span class="badge badge-info">${escapeHtml(t.task)}</span> <span style="color:var(--text-muted);font-size:.72rem;">${tkids.length} trials</span></td>
           <td style="text-align:center;">${t.n}</td>
           <td>${escapeHtml(t.best)} <span style="color:var(--text-muted);font-size:.75rem;">(${Math.round(t.bestAvg)}%)</span></td>
           <td style="text-align:center;">${Math.round(t.spread)}pp</td>
           <td style="text-align:center;">${Math.round(t.avg)}%</td>
           <td style="font-size:.75rem;">${escapeHtml(t.health)}</td>`;
         tbody.appendChild(tr);
+        if (open) {
+          const cr = document.createElement('tr');
+          const shown = tkids.slice(0, 200);
+          cr.innerHTML = `<td colspan="6" style="padding:6px 6px 6px 28px;background:rgba(0,0,0,0.2);">`
+            + `<div style="display:flex;gap:6px;flex-wrap:wrap;">`
+            + shown.map(({ trial: s, parent: r }) => {
+              const ok = (s.pass_rate || 0) >= 100;
+              const tip = `${s.id || ''} · ${r.model || ''} · ${r.effort || 'auto'} · harness ${r.harness || 'omp'} · ${Math.round(s.pass_rate || 0)}% (click to inspect)`;
+              return `<button class="btn-secondary" style="padding:2px 9px;font-size:0.7rem;border-color:${ok ? 'rgba(63,185,80,.4)' : 'rgba(248,81,73,.4)'};" data-trial="${escapeHtml(s.id || '')}" title="${escapeHtml(tip)}" onclick="inspectRun(this.dataset.trial)">${escapeHtml((s.id || '').slice(-8))} ${ok ? '✔' : '✕'}</button>`;
+            }).join('')
+            + (tkids.length > shown.length ? `<span style="color:var(--text-muted);font-size:0.72rem;">+${tkids.length - shown.length} more (open a parent run to page)</span>` : '')
+            + `</div></td>`;
+          tbody.appendChild(cr);
+        }
       });
+    }
+
+    function toggleTasksRow(task) {
+      window._tasksExpanded = window._tasksExpanded || {};
+      window._tasksExpanded[task] = !window._tasksExpanded[task];
+      renderTasks();
     }
 
     
