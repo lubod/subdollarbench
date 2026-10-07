@@ -940,7 +940,9 @@ pub(crate) async fn login(
         eprintln!("[LOGIN] failed attempt for user {:?}", body.user);
         return (StatusCode::UNAUTHORIZED, "bad credentials").into_response();
     }
-    let tok: String = (0..32).map(|_| format!("{:02x}", rand::random::<u8>())).collect();
+    let tok: String = (0..32)
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
+        .collect();
     if let Ok(mut set) = session_set().lock() {
         set.insert(tok.clone());
     }
@@ -993,6 +995,12 @@ pub(crate) async fn me(headers: HeaderMap) -> Response {
 }
 
 pub(crate) async fn csrf_guard(req: Request, next: middleware::Next) -> Response {
+    // Auth endpoints bootstrap trust: /api/login cannot present a session or
+    // bearer by definition (it mints them). CSRF check below still applies.
+    let path = req.uri().path().to_string();
+    if path == "/api/login" || path == "/api/logout" || path == "/api/me" {
+        return next.run(req).await;
+    }
     let mutating = matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
