@@ -4346,7 +4346,9 @@ function copyRunId() {
           }
           const r = (q.kind && q.kind.Run) || q.request || {};
           const modelShort = (r.model || '').split('/').pop();
-          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times; <span class="${pill}">${q.status}</span>${rm}</div>`;
+          const hh = r.harness || 'omp';
+          const harnesstag = ` <span class="badge ${hh === 'omp' ? '' : 'badge-effort'}" title="Agent harness">harness: ${escapeHtml(hh)}</span>`;
+          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times;${harnesstag} <span class="${pill}">${q.status}</span>${rm}</div>`;
         }).join('');
       } catch (e) { /* keep last state on transient errors */ }
     }
