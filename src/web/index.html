@@ -1245,7 +1245,7 @@
           </div>
           <div class="form-group">
             <label for="timeout_min">Timeout (min)</label>
-            <input type="number" id="timeout_min" value="30" min="1" max="120" />
+            <input type="number" id="timeout_min" value="120" min="0" max="480" title="Backstop only (0 = off); budget caps spend" />
           </div>
           <div class="form-group">
             <label for="trials" style="display: flex; justify-content: space-between; align-items: center;">
@@ -4620,7 +4620,7 @@ function copyRunId() {
         api_key: null, // server .env key bills the run
         budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
         max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
-        timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 30,
+        timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 120,
         trials: parseInt(document.getElementById('trials').value, 10) || 9,
         eval_only: document.getElementById('evalOnly').checked,
         extend_if_unstable: document.getElementById('extendUnstable').checked,
@@ -4708,7 +4708,7 @@ function copyRunId() {
         api_key: null, // server .env key bills the run
         budget_usd: parseFloat((document.getElementById('budget') || {}).value) || 1.00,
         max_turns: parseInt((document.getElementById('turns') || {}).value, 10) || 100,
-        timeout_min: parseInt((document.getElementById('timeout_min') || {}).value, 10) || 30,
+        timeout_min: parseInt((document.getElementById('timeout_min') || {}).value, 10) || 120,
         trials: 9, eval_only: false,
         extend_if_unstable: false, max_trials: 9,
         review_model: (document.getElementById('reviewModel') || {}).value || null
@@ -4781,7 +4781,7 @@ function copyRunId() {
       const task = document.getElementById('task').value;
       const budget = parseFloat(document.getElementById('budget').value) || 1.00;
       const turns = parseInt(document.getElementById('turns').value, 10) || 100;
-      const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 30;
+      const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 120;
       const trials = parseInt(document.getElementById('trials').value, 10) || 9;
       const evalOnly = document.getElementById('evalOnly').checked;
 

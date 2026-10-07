@@ -34,8 +34,8 @@ pub enum Commands {
         #[arg(short = 'b', long, default_value_t = 1.00)]
         budget_usd: f64,
 
-        /// Maximum execution time in minutes before stopping agent (e.g. 30 for 30m)
-        #[arg(long, default_value_t = 30)]
+        /// Maximum execution time in minutes before stopping agent (backstop only; cost is the real bound)
+        #[arg(long, default_value_t = 120)]
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
@@ -404,7 +404,7 @@ pub enum Commands {
         budget_usd: f64,
 
         /// Maximum execution time in minutes before stopping agent
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 120)]
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
@@ -559,7 +559,7 @@ pub enum Commands {
         budget_usd: f64,
 
         /// Maximum execution time in minutes
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 120)]
         timeout_min: u64,
 
         /// OpenRouter API Key (optional, defaults to OPENROUTER_API_KEY env var)
@@ -1180,7 +1180,7 @@ mod tests {
                 assert_eq!(effort, "high");
                 assert_eq!(budget_usd, 1.00);
                 assert_eq!(max_turns, 100);
-                assert_eq!(timeout_min, 30);
+                assert_eq!(timeout_min, 120);
                 assert!(!eval_only);
             }
             _ => panic!("Expected Run command"),

@@ -1598,7 +1598,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 harness.as_str(),
                                 100,
                                 1.0,
-                                30,
+                                120,
                                 None,
                                 false,
                                 trials,

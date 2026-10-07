@@ -73,8 +73,11 @@ pub fn default_budget() -> f64 {
     1.00
 }
 
+/// Backstop only: cost (budget_usd) is the real bound, so trials get
+/// room for 429 backoffs and slow reasoning. 0 disables the timeout.
+/// NOTE: keep in sync with CLI defaults (config.rs) and the GUI input.
 pub fn default_timeout_min() -> Option<u64> {
-    Some(30)
+    Some(120)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -996,7 +999,7 @@ pub async fn execute_extend_body(
         harness: data.harness.clone().unwrap_or_else(|| "omp".to_string()),
         max_turns: ext.max_turns.unwrap_or(100),
         budget_usd: ext.budget_usd.unwrap_or(1.0),
-        timeout_min: ext.timeout_min.unwrap_or(30),
+        timeout_min: ext.timeout_min.unwrap_or(120),
         api_key: ext.api_key.clone(),
         eval_only: ext.eval_only.unwrap_or(false),
         save_results: true,
@@ -1241,7 +1244,7 @@ pub async fn execute_run_body(
             subrun: Some(trial_idx),
             total_subruns: Some(total_trials),
             budget_usd: req.budget_usd,
-            timeout_min: req.timeout_min.unwrap_or(30),
+            timeout_min: req.timeout_min.unwrap_or(120),
             trials: total_trials,
             eval_only: req.eval_only,
             extend_if_unstable: req.extend_if_unstable,
@@ -1312,7 +1315,7 @@ pub async fn execute_run_body(
             harness: crate::config::Harness::parse(req.harness.as_deref().unwrap_or("omp")),
             max_turns: req.max_turns,
             budget_usd: req.budget_usd,
-            timeout_min: req.timeout_min.unwrap_or(30),
+            timeout_min: req.timeout_min.unwrap_or(120),
             api_key: req.api_key.clone(),
             workdir: work_path,
             eval_only: req.eval_only,
@@ -1478,7 +1481,7 @@ pub async fn execute_run_body(
                     harness: req.harness.clone().unwrap_or_else(|| "omp".to_string()),
                     max_turns: req.max_turns,
                     budget_usd: req.budget_usd,
-                    timeout_min: req.timeout_min.unwrap_or(30),
+                    timeout_min: req.timeout_min.unwrap_or(120),
                     api_key: req.api_key.clone(),
                     eval_only: req.eval_only,
                     save_results: req.save_results.unwrap_or(true),

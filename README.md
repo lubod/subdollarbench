@@ -169,7 +169,7 @@ Usage: subdollarbench run [OPTIONS] --model <MODEL>
       --harness <HARNESS>      Agent harness: omp | opencode [default: omp] (ranks never mix harnesses)
   -b, --budget-usd <BUDGET_USD>  Maximum cost budget in USD [default: 1]
       --max-turns <MAX_TURNS>    [default: 100]
-      --timeout-min <MINUTES>    [default: 30]
+      --timeout-min <MINUTES>    [default: 120] (backstop; budget caps spend)
       --trials <TRIALS>          Repeated trials for Pass@k (n=9 default; n=3 spans ±40pt) [default: 9]
       --extend-if-unstable       Keep adding trials in batches of 3 while unstable (requires --max-trials > --trials)
       --max-trials <MAX_TRIALS>  Trial cap incl. initial batch [default: 9]
