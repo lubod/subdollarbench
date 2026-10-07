@@ -4023,6 +4023,7 @@ function copyRunId() {
 
     async function fetchConsoleLogs(force = false) {
       if (isFetchingConsole) return;
+      if (!logsShown() && !force) return;
       isFetchingConsole = true;
       try {
         const term = document.getElementById('terminalOutput');
@@ -4078,6 +4079,10 @@ function copyRunId() {
     }
 
     function manualRefreshConsole() {
+      if (!logsShown()) {
+        localStorage.setItem('sdb_show_logs', '1');
+        applyLogsVisible();
+      }
       fetchConsoleLogs(true);
     }
     // Raw log stream is hidden by default (too much); worker cards +
@@ -4096,7 +4101,18 @@ function copyRunId() {
       const show = localStorage.getItem('sdb_show_logs') !== '1';
       localStorage.setItem('sdb_show_logs', show ? '1' : '0');
       applyLogsVisible();
-      if (show) fetchConsoleLogs(true);
+      if (show) {
+        const auto = document.getElementById('autoRefreshCheck');
+        if (auto && auto.checked) toggleAutoRefresh(true);
+        attachLogStream();
+        fetchConsoleLogs(true);
+      } else {
+        if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+        if (activeEventSource) {
+          try { activeEventSource.close(); } catch (e) {}
+          activeEventSource = null;
+        }
+      }
     }
 
     function toggleAutoRefresh(enabled) {
@@ -4130,6 +4146,7 @@ function copyRunId() {
     let lastStreamAttach = 0;
     function attachLogStream() {
       const now = Date.now();
+      if (!logsShown()) return;
       if (activeEventSource || now - lastStreamAttach < 5000) return;
       // GUI-proxy mode: /api/stream is a one-shot snapshot, not a live feed
       // (re-attaching replays it = duplicate terminal lines). The 2s poll
@@ -4540,7 +4557,8 @@ function copyRunId() {
     checkAuth().then(() => fetchModels());
     const initialSavedTask = localStorage.getItem('selected_benchmark_task') || 'redis';
     onTaskChange(initialSavedTask);
-    toggleAutoRefresh(true);
+    // Log traffic only when the log view is visible (default hidden).
+    if (logsShown()) toggleAutoRefresh(true);
 
     setRunsViewMode(currentRunsView);
     setPromptViewMode(currentPromptViewMode);
@@ -4699,6 +4717,7 @@ function copyRunId() {
     loadRuns();
     refreshQueue();
     applyLogsVisible();
+    if (!logsShown() && autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
     fetchOmpStatus();
     fetchOpencodeStatus();
     fetchIntegrity();
