@@ -507,6 +507,9 @@ mod tests {
             id: id.to_string(),
             enqueued_at: "2026-09-25T00:00:00Z".to_string(),
             status: QueueStatus::Pending,
+            note: None,
+            refusals: 0,
+            not_before: None,
             kind: QueueKind::Run(RunRequest {
                 model: "test-model".to_string(),
                 task: "wal".to_string(),

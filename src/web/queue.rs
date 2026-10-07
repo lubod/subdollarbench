@@ -116,6 +116,33 @@ pub struct QueuedRun {
     pub enqueued_at: String,
     pub status: QueueStatus,
     pub kind: QueueKind,
+    /// Last state note: refusal/finish reason, always set on terminal
+    /// transitions and on parked refusals. Surfaced in the UI queue rows
+    /// and the integrity report — a Done with no evidence and no reason
+    /// is the exact silence this field exists to prevent.
+    /// Memory-only (the DB mirror stores status timestamps, not the doc).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Kick-time refusal count. Refusals park as Pending with backoff
+    /// instead of Done; past MAX_REFUSALS the cell goes Done as
+    /// `refused-final` (loud, still a model non-result).
+    #[serde(default)]
+    pub refusals: u32,
+    /// Earliest retry time (RFC3339) after a parked refusal. Kick and pump
+    /// skip items still inside their backoff window.
+    #[serde(default)]
+    pub not_before: Option<String>,
+}
+
+/// Refusals before a cell is terminally refused instead of re-parked.
+pub const MAX_REFUSALS: u32 = 3;
+
+/// True when a Pending item may be dispatched now (backoff elapsed).
+pub fn dispatch_ready(item: &QueuedRun, now: &str) -> bool {
+    match item.not_before.as_deref() {
+        Some(nb) => now >= nb,
+        None => true,
+    }
 }
 impl QueuedRun {
     /// Back-compat accessor: pre-extend queue payloads deserialized with a
@@ -188,11 +215,14 @@ pub fn send_status(
     push_console_line(log_buf, line.clone());
     let _ = tx.send(line);
 }
-pub fn mark_queue_done(state: &AppState, queue_id: &str) {
+pub fn mark_queue_done(state: &AppState, queue_id: &str, reason: Option<&str>) {
     {
         let mut q = state.queue.lock().unwrap();
         if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
             item.status = QueueStatus::Done;
+            if let Some(r) = reason {
+                item.note = Some(r.to_string());
+            }
         }
     }
     let now = now_rfc3339();
@@ -203,6 +233,69 @@ pub fn mark_queue_done(state: &AppState, queue_id: &str) {
             store.update_queue_status(&qid, "Done", None, Some(&now)),
         );
     });
+}
+/// Park a refused cell back to Pending with reason + backoff instead of
+/// Done. Returns true when the cell went terminal (`refused-final`, past
+/// the cap). Every park logs loudly: refusals must be visible, never
+/// silent, and a parked cell keeps its queue position (no reorder).
+pub fn park_refused(state: &AppState, queue_id: &str, reason: &str) -> bool {
+    let now = now_rfc3339();
+    let (final_, note, wait_s) = {
+        let mut q = state.queue.lock().unwrap();
+        match q.iter_mut().find(|i| i.id == queue_id) {
+            None => return true,
+            Some(item) => {
+                item.refusals += 1;
+                if item.refusals > MAX_REFUSALS {
+                    item.status = QueueStatus::Done;
+                    let note = format!("refused-final ({} refusals): {}", item.refusals, reason);
+                    item.note = Some(note.clone());
+                    item.not_before = None;
+                    (true, note, 0)
+                } else {
+                    item.status = QueueStatus::Pending;
+                    let note = format!(
+                        "refused (attempt {}/{}): {}",
+                        item.refusals, MAX_REFUSALS, reason
+                    );
+                    item.note = Some(note.clone());
+                    (false, note, 60 * item.refusals as u64)
+                }
+            }
+        }
+    };
+    if final_ {
+        let qid = queue_id.to_string();
+        db_mirror(state, "mark refused-final", move |store| {
+            db_try(
+                &format!("mark {qid} Done"),
+                store.update_queue_status(&qid, "Done", None, Some(&now)),
+            );
+        });
+        send_status(
+            &state.log_sender,
+            &state.log_buffer,
+            format!("[QUEUE-REFUSED] {queue_id}: {note}; no more retries."),
+        );
+        return true;
+    }
+    // Backoff: not_before = now + 60s*refusals. RFC3339 string compare
+    // orders chronologically within one format, same trick as the publish
+    // freeze gate (portal.rs).
+    let not_before = chrono::Utc::now() + chrono::Duration::seconds(wait_s as i64);
+    {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(item) = q.iter_mut().find(|i| i.id == queue_id) {
+            item.not_before = Some(not_before.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true));
+        }
+    }
+    send_status(
+        &state.log_sender,
+        &state.log_buffer,
+        format!("[QUEUE-REFUSED] {queue_id}: {note}; retrying in {wait_s}s."),
+    );
+    pump_queue(state);
+    false
 }
 /// Replay durable queue rows into memory at startup. Running rows reset to
 /// Pending (the previous process died mid-dispatch); finished history is
@@ -250,7 +343,10 @@ pub fn reconcile_queue(state: &AppState) -> usize {
         .unwrap()
         .iter_mut()
         .filter(|i| ghosts.contains(&i.id))
-        .for_each(|i| i.status = QueueStatus::Cancelled);
+        .for_each(|i| {
+            i.status = QueueStatus::Cancelled;
+            i.note = Some("ghost: Running with no live worker; reaped".to_string());
+        });
     // DB mirror + console outside the lock: rusqlite is synchronous, and a
     // slow/blocked DB must never stall a status read (live: every API hung
     // with empty bodies while two trial bodies held the queue path busy).
@@ -279,6 +375,9 @@ pub fn test_queue_item(id: &str) -> QueuedRun {
         id: id.to_string(),
         enqueued_at: "2026-09-25T00:00:00Z".to_string(),
         status: QueueStatus::Pending,
+        note: None,
+        refusals: 0,
+        not_before: None,
         kind: QueueKind::Run(RunRequest {
             model: "test-model".to_string(),
             task: "wal".to_string(),
@@ -702,8 +801,9 @@ pub fn pump_queue(state: &AppState) -> bool {
     };
     let next = {
         let mut q = state.queue.lock().unwrap();
+        let now_sel = now_rfc3339();
         q.iter_mut()
-            .find(|i| i.status == QueueStatus::Pending)
+            .find(|i| i.status == QueueStatus::Pending && dispatch_ready(i, &now_sel))
             .map(|item| {
                 item.status = QueueStatus::Running;
                 (item.kind.clone(), item.id.clone())
@@ -760,7 +860,7 @@ pub async fn execute_extend_body(
     let tx = state.log_sender.clone();
     let log_buf = state.log_buffer.clone();
     let finish_item = |state: &AppState, note: &str| {
-        mark_queue_done(state, &queue_id);
+        mark_queue_done(state, &queue_id, Some(note));
         send_status(&tx, &log_buf, note.to_string());
     };
     let parent_path = crate::config::get_repo_root()
@@ -912,7 +1012,11 @@ pub async fn execute_extend_body(
             format!("[EXTEND-QUEUE] {queue_id}: all extension trials failed; parent untouched."),
         );
     }
-    mark_queue_done(&state, &queue_id);
+    mark_queue_done(
+        &state,
+        &queue_id,
+        Some("extend finished: all extension trials failed, parent untouched"),
+    );
     release_slot(&state, worker);
     if !pump_queue(&state) {
         send_status(&tx, &log_buf, "[DONE]".to_string());
@@ -933,9 +1037,9 @@ pub fn spawn_run_body(state: &AppState, req: RunRequest, queue_id: Option<String
             // only release_slot clears it when the last slot frees.
             let msg = format!("[QUEUE] refusing run: {e}");
             eprintln!("{msg}");
-            push_console_line(&state.log_buffer, msg);
+            push_console_line(&state.log_buffer, msg.clone());
             if let Some(id) = &queue_id {
-                mark_queue_done(state, id);
+                park_refused(state, id, &format!("unknown task ({e})"));
             }
             release_slot(state, worker);
             pump_queue(state);
@@ -1020,7 +1124,7 @@ pub async fn execute_run_body(
                         e
                     );
                     batch_log(&msg);
-                    send_status(&tx, &run_log_buf, msg);
+                    send_status(&tx, &run_log_buf, msg.clone());
                     // Mirror the normal exit (DONE block below): no parent
                     // row is produced, so the drain gate WILL fail on count
                     // until the cell is re-run. That is the loudness: never
@@ -1031,7 +1135,11 @@ pub async fn execute_run_body(
                     state.cancel_flags.lock().unwrap().remove(&parent_run_id);
                     release_slot(&state, worker);
                     if let Some(qid) = queue_id.clone() {
-                        mark_queue_done(&state, &qid);
+                        park_refused(
+                            &state,
+                            &qid,
+                            &format!("pdf batch reference unavailable ({msg})"),
+                        );
                     }
                     pump_queue(&state);
                     return;
@@ -1408,7 +1516,20 @@ pub async fn execute_run_body(
     state.cancel_flags.lock().unwrap().remove(&parent_run_id);
     release_slot(&state, worker);
     if let Some(qid) = queue_id {
-        mark_queue_done(&state, &qid);
+        // Evidence gate: a Done with zero trials is loud, never silent.
+        let reason = if subrun_results.is_empty() {
+            "DONE WITH ZERO TRIALS — no evidence produced".to_string()
+        } else {
+            format!("{passing_trials}/{total_trials} trials passing")
+        };
+        if subrun_results.is_empty() {
+            send_status(
+                &tx,
+                &run_log_buf,
+                format!("[QUEUE-EVIDENCE] {qid}: {reason}."),
+            );
+        }
+        mark_queue_done(&state, &qid, Some(&reason));
     }
     // Worker-slot handoff: freed slot + pump lets any free worker take next.
     if pump_queue(&state) {
@@ -1463,9 +1584,10 @@ pub async fn kick_runner(state: &AppState, want_id: &str) -> bool {
                 }
                 _ => {}
             }
+            let now_sel = now_rfc3339();
             let next = q
                 .iter_mut()
-                .find(|i| i.status == QueueStatus::Pending)
+                .find(|i| i.status == QueueStatus::Pending && dispatch_ready(i, &now_sel))
                 .map(|item| {
                     item.status = QueueStatus::Running;
                     (item.kind.clone(), item.id.clone())
@@ -1508,6 +1630,9 @@ pub fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
             id: id.clone(),
             enqueued_at: Utc::now().to_rfc3339(),
             status: QueueStatus::Pending,
+            note: None,
+            refusals: 0,
+            not_before: None,
             kind,
         });
         // Bound history: drop oldest finished entries past 100.

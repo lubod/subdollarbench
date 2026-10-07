@@ -6,12 +6,12 @@
 use super::portal_proxy::{serve_portal, serve_portal_index};
 use super::server::{
     balance_check_handler, clear_queue, compare_runs, csrf_guard, delete_run, enqueue_run,
-    extend_parent_run, get_active_console, get_env, get_leaderboard, get_models, get_prompt,
-    get_queue, get_run_detail, get_run_file, get_run_files, get_run_log, get_run_review, get_runs,
-    get_sandbox_omp_status, get_sandbox_opencode_status, get_status, login, logout, me,
-    pause_queue_handler, rebuild_portal, remove_queued_run, resume_queue_handler, save_prompt,
-    serve_index, serve_shared_js, set_run_poison, set_run_portal_visibility, start_run, stop_run,
-    stream_logs, update_sandbox_omp, AppState,
+    extend_parent_run, get_active_console, get_env, get_integrity, get_leaderboard, get_models,
+    get_prompt, get_queue, get_run_detail, get_run_file, get_run_files, get_run_log,
+    get_run_review, get_runs, get_sandbox_omp_status, get_sandbox_opencode_status, get_status,
+    login, logout, me, pause_queue_handler, rebuild_portal, remove_queued_run,
+    resume_queue_handler, save_prompt, serve_index, serve_shared_js, set_run_poison,
+    set_run_portal_visibility, start_run, stop_run, stream_logs, update_sandbox_omp, AppState,
 };
 use axum::{
     response::Redirect,
@@ -38,6 +38,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/balance/check", get(balance_check_handler))
         .route("/api/queue/:id", delete(remove_queued_run))
         .route("/api/compare", get(compare_runs))
+        .route("/api/integrity", get(get_integrity))
         .route("/api/stream", get(stream_logs))
         .route("/api/console", get(get_active_console))
         .route("/api/runs", get(get_runs))

@@ -43,12 +43,12 @@ pub use super::portal_proxy::{
 #[cfg(test)]
 pub use super::queue::test_queue_item;
 pub use super::queue::{
-    claim_slot, db_mirror, db_try, execute_extend_body, execute_run_body, kick_runner,
-    mark_queue_done, now_rfc3339, pause_queue, proxy_mutation, proxy_read, pump_queue,
-    push_console_line, push_queue_item, queue_seq_start, reconcile_queue, release_slot,
-    replay_queue, resume_queue, run_extension_batch, send_status, spawn_extend_body,
+    claim_slot, db_mirror, db_try, dispatch_ready, execute_extend_body, execute_run_body,
+    kick_runner, mark_queue_done, now_rfc3339, park_refused, pause_queue, proxy_mutation,
+    proxy_read, pump_queue, push_console_line, push_queue_item, queue_seq_start, reconcile_queue,
+    release_slot, replay_queue, resume_queue, run_extension_batch, send_status, spawn_extend_body,
     spawn_run_body, tempfile_mem_store, ExtBatchOut, ExtBatchSpec, ExtendRequest, QueueKind,
-    QueueStatus, QueuedRun, RunRequest, WebLogger, MAX_CONSOLE_LINES,
+    QueueStatus, QueuedRun, RunRequest, WebLogger, MAX_CONSOLE_LINES, MAX_REFUSALS,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1279,6 +1279,47 @@ pub(crate) async fn rebuild_portal() -> Response {
     }
 }
 
+/// Machine-readable trust summary: store-level orphan/junk counts plus
+/// live-queue refusal signals. `ok` is false when anything needs a human.
+/// Polled by the GUI header badge; same numbers as `migrate-check`.
+#[derive(Serialize)]
+pub(crate) struct IntegrityResponse {
+    pub ok: bool,
+    pub orphans: usize,
+    pub junk_parents: usize,
+    pub refused_final: usize,
+    pub pending_refused: usize,
+}
+
+pub(crate) async fn get_integrity(State(state): State<AppState>) -> Json<IntegrityResponse> {
+    let orphans = state.store.orphan_trial_count();
+    let junk = state.store.junk_parent_count();
+    let q = state.queue.lock().unwrap();
+    let refused_final = q
+        .iter()
+        .filter(|i| {
+            i.status == QueueStatus::Done
+                && i.note
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with("refused-final"))
+        })
+        .count();
+    let pending_refused = q
+        .iter()
+        .filter(|i| {
+            i.status == QueueStatus::Pending
+                && i.note.as_deref().is_some_and(|n| n.starts_with("refused"))
+        })
+        .count();
+    Json(IntegrityResponse {
+        ok: orphans == 0 && junk == 0 && refused_final == 0,
+        orphans,
+        junk_parents: junk,
+        refused_final,
+        pending_refused,
+    })
+}
+
 pub(crate) async fn get_runs(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     // DB-first (same pattern as load_all); FS fallback until migration.
     let from_db = state.store.load_run_manifests();
@@ -2415,6 +2456,63 @@ mod tests {
         assert!(!state.queue_paused.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn test_dispatch_ready_respects_backoff() {
+        let mut item = test_queue_item("qr");
+        assert!(dispatch_ready(&item, "2026-10-07T00:00:00Z"));
+        item.not_before = Some("2030-01-01T00:00:00Z".to_string());
+        assert!(!dispatch_ready(&item, "2026-10-07T00:00:00Z"));
+        assert!(dispatch_ready(&item, "2031-06-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn test_park_refused_parks_then_goes_final() {
+        let state = create_test_state();
+        let id = push_queue_item(&state, QueueKind::Run(queue_test_req()));
+        for n in 1..=MAX_REFUSALS {
+            assert!(
+                !park_refused(&state, &id, "load gate"),
+                "attempt {n} must park"
+            );
+            let q = state.queue.lock().unwrap();
+            let item = q.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(item.status, QueueStatus::Pending);
+            assert_eq!(item.refusals, n);
+            assert!(item
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains(&format!("attempt {n}/{MAX_REFUSALS}")));
+            assert!(item
+                .not_before
+                .as_deref()
+                .is_some_and(|nb| nb > "2026-01-01T00:00:00Z"));
+        }
+        assert!(
+            park_refused(&state, &id, "load gate"),
+            "past cap must go final"
+        );
+        let q = state.queue.lock().unwrap();
+        let item = q.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.status, QueueStatus::Done);
+        assert!(item
+            .note
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("refused-final"));
+    }
+
+    #[tokio::test]
+    async fn test_mark_done_records_reason() {
+        let state = create_test_state();
+        let id = push_queue_item(&state, QueueKind::Run(queue_test_req()));
+        mark_queue_done(&state, &id, Some("7/9 trials passing"));
+        let q = state.queue.lock().unwrap();
+        let item = q.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.status, QueueStatus::Done);
+        assert_eq!(item.note.as_deref(), Some("7/9 trials passing"));
+    }
+
     async fn test_queue_of(state: &AppState) -> Vec<QueuedRun> {
         let resp = get_queue(State(state.clone())).await;
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
@@ -2557,6 +2655,9 @@ mod tests {
             id: "q99".to_string(),
             enqueued_at: "2026-10-02T00:00:00Z".to_string(),
             status: QueueStatus::Running,
+            note: None,
+            refusals: 0,
+            not_before: None,
             kind: QueueKind::Run(queue_test_req()),
         });
         assert_eq!(reconcile_queue(&state), 1);
@@ -2575,6 +2676,9 @@ mod tests {
             id: "q100".to_string(),
             enqueued_at: "2026-10-02T00:00:00Z".to_string(),
             status: QueueStatus::Running,
+            note: None,
+            refusals: 0,
+            not_before: None,
             kind: QueueKind::Run(queue_test_req()),
         });
         assert_eq!(reconcile_queue(&state), 0);
@@ -2619,6 +2723,9 @@ mod tests {
                 id: id.to_string(),
                 enqueued_at: "2026-10-02T00:00:00Z".to_string(),
                 status: st,
+                note: None,
+                refusals: 0,
+                not_before: None,
                 kind: QueueKind::Run(queue_test_req()),
             });
         }
@@ -2665,6 +2772,9 @@ mod tests {
             id: qid.clone(),
             enqueued_at: "2026-10-02T00:00:00Z".to_string(),
             status: QueueStatus::Running,
+            note: None,
+            refusals: 0,
+            not_before: None,
             kind: QueueKind::Extend(ext.clone()),
         });
         (state, 0, ext, qid)
@@ -3258,6 +3368,9 @@ mod tests {
             id: "e1".to_string(),
             enqueued_at: "2026-09-25T00:00:00Z".to_string(),
             status: QueueStatus::Pending,
+            note: None,
+            refusals: 0,
+            not_before: None,
             kind: QueueKind::Extend(ExtendRequest {
                 parent_run_id: "p1".to_string(),
                 trials: 1,

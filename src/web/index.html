@@ -939,6 +939,10 @@
           <span class="status-dot" id="statusDot"></span>
           <span id="statusText">Ready</span>
         </div>
+        <div class="status-badge" id="integrityBadge" title="Trust summary: orphans, junk rows, refused cells">
+          <span class="status-dot" id="integrityDot" style="background: var(--primary);"></span>
+          <span id="integrityText">integrity: …</span>
+        </div>
       </div>
     </header>
 
@@ -4342,13 +4346,13 @@ function copyRunId() {
           if (q.kind && q.kind.Extend) {
             const e = q.kind.Extend;
             const short = (e.parent_run_id || '').slice(-14);
-            return `<div class="queue-row"><span class="badge">${q.id}</span> <span class="badge badge-effort">extend</span> ${escapeHtml(short)} · +${e.trials ?? '?'} trial(s) <span class="${pill}">${q.status}</span>${rm}</div>`;
+            return `<div class="queue-row"><span class="badge">${q.id}</span> <span class="badge badge-effort">extend</span> ${escapeHtml(short)} · +${e.trials ?? '?'} trial(s) <span class="${pill}" title="${escapeHtml(q.note || q.status)}">${q.status}</span>${rm}</div>`;
           }
           const r = (q.kind && q.kind.Run) || q.request || {};
           const modelShort = (r.model || '').split('/').pop();
           const hh = r.harness || 'omp';
           const harnesstag = ` <span class="badge ${hh === 'omp' ? '' : 'badge-effort'}" title="Agent harness">harness: ${escapeHtml(hh)}</span>`;
-          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times;${harnesstag} <span class="${pill}">${q.status}</span>${rm}</div>`;
+          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times;${harnesstag} <span class="${pill}" title="${escapeHtml(q.note || q.status)}">${q.status}</span>${rm}</div>`;
         }).join('');
       } catch (e) { /* keep last state on transient errors */ }
     }
@@ -4488,6 +4492,32 @@ function copyRunId() {
       } catch (e) { /* badge keeps last state on transient errors */ }
     }
 
+    async function fetchIntegrity() {
+      try {
+        const res = await fetch('/api/integrity');
+        if (!res.ok) return;
+        const st = await res.json();
+        const dot = document.getElementById('integrityDot');
+        const text = document.getElementById('integrityText');
+        const badge = document.getElementById('integrityBadge');
+        if (!dot || !text || !badge) return;
+        const parts = [];
+        if (st.orphans) parts.push(`${st.orphans} orphan trial(s)`);
+        if (st.junk_parents) parts.push(`${st.junk_parents} junk parent(s)`);
+        if (st.refused_final) parts.push(`${st.refused_final} refused-final cell(s)`);
+        if (st.pending_refused) parts.push(`${st.pending_refused} cell(s) in refusal backoff`);
+        if (st.ok) {
+          dot.style.background = 'var(--success)';
+          text.textContent = 'integrity: ok';
+          badge.title = 'Trust summary: no orphans, junk rows, or refused cells. Same numbers as migrate-check.';
+        } else {
+          dot.style.background = 'var(--danger)';
+          text.textContent = 'integrity: attention';
+          badge.title = 'Trust summary needs attention: ' + parts.join('; ') + '. See console log + runs for reasons.';
+        }
+      } catch (e) { /* badge keeps last state on transient errors */ }
+    }
+
     async function fetchOmpStatus() {
       try {
         const res = await fetch('/api/sandbox/omp');
@@ -4595,8 +4625,10 @@ function copyRunId() {
     refreshQueue();
     fetchOmpStatus();
     fetchOpencodeStatus();
+    fetchIntegrity();
     setInterval(fetchOmpStatus, 30000);
     setInterval(fetchOpencodeStatus, 300000);
+    setInterval(fetchIntegrity, 30000);
   </script>
   <!-- =========================================================================
        Run Inspector Modal Dialog
