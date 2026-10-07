@@ -1235,6 +1235,7 @@
               <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;">
                 <input type="checkbox" id="autoScrollCheck" checked> Auto-Scroll
               </label>
+              <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" id="logsToggleBtn" onclick="toggleLogsVisible()" title="Show/hide the raw log stream">🧾 Show logs</button>
               <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" onclick="manualRefreshConsole()">🔄 Refresh</button>
               <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" onclick="clearConsole()">Clear</button>
             </div>
@@ -2402,11 +2403,14 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <b>W${escapeHtml(String(wid))}</b>
           <span>${escapeHtml((r.model || '').split('/').pop() || '')} · ${escapeHtml(r.task || '')}</span>
           <span style="color:var(--text-muted);">trial ${r.subrun ?? '-'}/${r.total_subruns ?? '-'}</span>
-          <span style="font-family:monospace;">${r.turns ?? 0}/${r.max_turns ?? '?'} turns</span>
-          <span style="font-family:monospace;">$${Number(r.cost_usd ?? 0).toFixed(3)}</span>
+          <span style="font-family:monospace;" title="Turns used of max">${r.turns ?? 0}/${r.max_turns ?? '?'} turns</span>
+          <span style="font-family:monospace;" title="Spend so far">$${Number(r.cost_usd ?? 0).toFixed(4)}</span>
+          <span style="font-family:monospace;" title="Tokens used">${Number(r.tokens ?? 0).toLocaleString()} tok</span>
+          <span style="font-family:monospace;" title="Elapsed wall time">⏱️ <span class="wElapsed" data-started="${escapeHtml(r.started_at || '')}">-</span></span>
           <button class="btn-secondary" style="padding:1px 8px;font-size:0.7rem;" data-stop-run="${escapeHtml(short)}" title="Stop only this cell">stop</button>
         </div>`;
       }).join('');
+      tickWorkerElapsed();
       wireWorkerCardStops();
     }
 
@@ -3931,7 +3935,7 @@ function copyRunId() {
     }
     function renderConsoleWorkerTabs(workers) {
       const box = document.getElementById('consoleWorkerTabs');
-      if (!box) return;
+      if (!box || !logsShown()) { if (box) box.style.display = 'none'; return; }
       const ids = Object.keys(workers || {}).sort();
       // Keep the selected tab even after its worker finishes (buffer
       // persists until the slot is reused); drop nothing silently.
@@ -4076,6 +4080,24 @@ function copyRunId() {
     function manualRefreshConsole() {
       fetchConsoleLogs(true);
     }
+    // Raw log stream is hidden by default (too much); worker cards +
+    // telemetry carry the signal. Shown only on request, choice persists.
+    function logsShown() { return localStorage.getItem('sdb_show_logs') === '1'; }
+    function applyLogsVisible() {
+      const show = logsShown();
+      const term = document.getElementById('terminalOutput');
+      const tabs = document.getElementById('consoleWorkerTabs');
+      const btn = document.getElementById('logsToggleBtn');
+      if (term) term.style.display = show ? '' : 'none';
+      if (tabs) tabs.style.display = show ? 'flex' : 'none';
+      if (btn) btn.textContent = show ? '🧾 Hide logs' : '🧾 Show logs';
+    }
+    function toggleLogsVisible() {
+      const show = localStorage.getItem('sdb_show_logs') !== '1';
+      localStorage.setItem('sdb_show_logs', show ? '1' : '0');
+      applyLogsVisible();
+      if (show) fetchConsoleLogs(true);
+    }
 
     function toggleAutoRefresh(enabled) {
       if (autoRefreshTimer) {
@@ -4090,6 +4112,20 @@ function copyRunId() {
     }
 
     let activeEventSource = null;
+    function fmtElapsed(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+      const p = n => String(n).padStart(2, '0');
+      return (h > 0 ? h + ':' : '') + p(m) + ':' + p(ss);
+    }
+    function tickWorkerElapsed() {
+      const now = Date.now();
+      document.querySelectorAll('.wElapsed').forEach(el => {
+        const t = Date.parse(el.dataset.started || '');
+        el.textContent = isNaN(t) ? '-' : fmtElapsed(now - t);
+      });
+    }
+    setInterval(tickWorkerElapsed, 1000);
 
     let lastStreamAttach = 0;
     function attachLogStream() {
@@ -4662,6 +4698,7 @@ function copyRunId() {
     setInterval(() => { loadRuns(); }, 30000);
     loadRuns();
     refreshQueue();
+    applyLogsVisible();
     fetchOmpStatus();
     fetchOpencodeStatus();
     fetchIntegrity();
