@@ -189,6 +189,7 @@ pub fn run_request(
     model: &str,
     task: &str,
     effort: &str,
+    harness: &str,
     max_turns: u32,
     budget_usd: f64,
     timeout_min: u64,
@@ -204,6 +205,7 @@ pub fn run_request(
         "model": model,
         "task": task,
         "effort": effort,
+        "harness": harness,
         "max_turns": max_turns,
         "budget_usd": budget_usd,
         "timeout_min": timeout_min,
@@ -739,6 +741,7 @@ mod tests {
             "openrouter/m",
             "redis",
             "high",
+            "omp",
             100,
             1.0,
             30,
@@ -753,12 +756,14 @@ mod tests {
         assert_eq!(v["model"], "openrouter/m");
         assert_eq!(v["task"], "redis");
         assert_eq!(v["trials"], 9);
+        assert_eq!(v["harness"], "omp");
         assert_eq!(v["save_results"], true);
         assert!(v["api_key"].is_null());
         let v2 = run_request(
             "m",
             "wal",
             "low",
+            "opencode",
             10,
             0.2,
             5,
@@ -771,6 +776,7 @@ mod tests {
             Some("r"),
         );
         assert_eq!(v2["trials"], 1);
+        assert_eq!(v2["harness"], "opencode");
         assert_eq!(v2["save_results"], false);
         assert_eq!(v2["review_model"], "r");
     }

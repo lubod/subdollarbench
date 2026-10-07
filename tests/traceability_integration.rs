@@ -66,6 +66,7 @@ func main() {
         status: "completed".to_string(),
         language: "Go".to_string(),
         effort: Some("high".to_string()),
+        harness: None,
         started_at: "2026-09-04T12:00:00Z".to_string(),
         completed_at: "2026-09-04T12:01:15Z".to_string(),
         duration_seconds: 75.0,
@@ -108,6 +109,7 @@ func main() {
         seed: None,
         prompt_sha: None,
         omp_version: None,
+        harness_version: None,
     };
 
     let console_log = r#"[12:00:00] [INIT] Starting benchmark for google/gemini-2.5-flash on task 'redis'...

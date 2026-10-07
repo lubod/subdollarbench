@@ -564,104 +564,7 @@ impl OmpRunner {
             cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
         }
 
-        let (target_port, test_cmd, guidance_snippet) = match task {
-            Some(crate::config::TaskType::Pdf) => (
-                8090,
-                "curl -v http://localhost:8090/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Third-party PDF libraries (pypdf, pdfminer, fitz, lopdf, pdfcpu, etc.) and external CLI tools (pdftotext, mutool) are STRICTLY FORBIDDEN.
-- Build an RFC-compliant HTTP microservice on port 8090 using raw TCP sockets returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
-            ),
-            Some(crate::config::TaskType::Redis) => (
-                6379,
-                "redis-cli -p 6379 ping",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built Redis servers and client libraries are FORBIDDEN.
-- Build from raw TCP sockets on port 6379 parsing RESP wire format (`+PONG
-`, `:1
-`, `$len
-`)."#,
-            ),
-            Some(crate::config::TaskType::Http) => (
-                8080,
-                "curl -v http://localhost:8080/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Built-in HTTP modules and frameworks (`http.server`, `BaseHTTPRequestHandler`, `HTTPServer`, `net/http`, `flask`, `fastapi`, `express`) are STRICTLY FORBIDDEN and will result in automatic DISQUALIFICATION!
-- Python Raw Socket Skeleton:
-  ```python
-  import socket, os
-  os.makedirs('/tmp/files', exist_ok=True)
-  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-  s.bind(('0.0.0.0', 8080))
-  s.listen(128)
-  while True:
-      conn, addr = s.accept()
-      try:
-          data = conn.recv(4096).decode('utf-8', errors='ignore')
-          # Parse request and write HTTP response:
-          conn.sendall(b"HTTP/1.1 200 OK
-Content-Length: 0
-
-")
-      finally:
-          conn.close()
-  ```
-- Go: use `net.Listen("tcp", "0.0.0.0:8080")` and `net.Conn`. Do NOT use `net/http`.
-- Rust: use `std::net::TcpListener` or `tokio::net::TcpListener`."#,
-            ),
-            Some(crate::config::TaskType::Wal) => (
-                6390,
-                "printf 'PUB t hello\\n' | nc 127.0.0.1 6390",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built brokers (Kafka, NATS, Redis) are FORBIDDEN.
-- Build a durable append-only log on TCP 6390: PUB <topic> <payload> -> +OK <offset> (fsync before ack), SUB <topic> <offset> streams :<off> <payload> lines then +END. Persist under ./data and recover it after kill -9."#,
-            ),
-            Some(crate::config::TaskType::Proxy) => (
-                8091,
-                "curl http://upstream1/ ; curl -v http://localhost:8091/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Proxy frameworks/gateways (nginx, envoy, traefik libs) are FORBIDDEN; raw TCP sockets only.
-- Build an HTTP reverse proxy on 8091 over upstreams upstream1:80, upstream2:80, upstream3:80: round-robin, upstream keep-alive pooling, X-Forwarded-For injection, failover with zero dropped requests."#,
-            ),
-            Some(crate::config::TaskType::Pubsub) => (
-                8092,
-                "curl -v http://localhost:8092/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- WebSocket libraries (ws, gorilla, tungstenite) are FORBIDDEN; raw TCP sockets only.
-- Build an RFC 6455 broker on 8092: SHA-1 handshake, masked TEXT frames SUB <channel> / PUB <channel> <msg>, broadcast fan-out, ping/pong."#,
-            ),
-            Some(crate::config::TaskType::Binproto) => (
-                6395,
-                "python3 -c \"import struct,zlib;print(zlib.crc32(b'x'))\"",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- RPC frameworks (gRPC, Thrift, JSON-RPC libs) are FORBIDDEN; raw TCP sockets only.
-- Build an SDB1 binary RPC server on 6395: 16-byte BE header (magic SDB1, u16 seq, u8 opcode, u8 status-reserved-0, u32 len, u32 CRC32), opcodes PING/ECHO/PUT/GET/STREAM, CRC-mismatch -> ERR_BAD_CHECKSUM open, unknown op -> ERR_UNKNOWN_OP open, bad magic -> close."#,
-            ),
-            None => {
-                let prompt_lower = prompt.to_lowercase();
-                if prompt_lower.contains("pdf") {
-                    (
-                        8090,
-                        "curl -v http://localhost:8090/",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build an HTTP PDF microservice using raw TCP sockets on port 8090 returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
-                    )
-                } else if prompt_lower.contains("redis") {
-                    (
-                        6379,
-                        "redis-cli -p 6379 ping",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw TCP sockets on port 6379 parsing RESP wire format."#,
-                    )
-                } else {
-                    (
-                        8080,
-                        "curl -v http://localhost:8080/",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build using raw TCP sockets on port 8080."#,
-                    )
-                }
-            }
-        };
-
+        let (target_port, test_cmd, guidance_snippet) = Self::task_guidance(task, prompt);
         let effective_prompt = format!(
             "{}
 
@@ -1861,6 +1764,126 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 );
             }
         }
+    }
+}
+
+impl OmpRunner {
+    /// Per-task port, smoke-test command, and anti-cheat guidance snippet.
+    /// Shared by the OMP and OpenCode runners so both harnesses grade the
+    /// same task text and entrypoint contract.
+    pub fn task_guidance(
+        task: Option<crate::config::TaskType>,
+        prompt: &str,
+    ) -> (u16, &'static str, &'static str) {
+        match task {
+            Some(crate::config::TaskType::Pdf) => (
+                8090,
+                "curl -v http://localhost:8090/",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Third-party PDF libraries (pypdf, pdfminer, fitz, lopdf, pdfcpu, etc.) and external CLI tools (pdftotext, mutool) are STRICTLY FORBIDDEN.
+- Build an RFC-compliant HTTP microservice on port 8090 using raw TCP sockets returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
+            ),
+            Some(crate::config::TaskType::Redis) => (
+                6379,
+                "redis-cli -p 6379 ping",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Pre-built Redis servers and client libraries are FORBIDDEN.
+- Build from raw TCP sockets on port 6379 parsing RESP wire format (`+PONG
+`, `:1
+`, `$len
+`)."#,
+            ),
+            Some(crate::config::TaskType::Http) => (
+                8080,
+                "curl -v http://localhost:8080/",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Built-in HTTP modules and frameworks (`http.server`, `BaseHTTPRequestHandler`, `HTTPServer`, `net/http`, `flask`, `fastapi`, `express`) are STRICTLY FORBIDDEN and will result in automatic DISQUALIFICATION!
+- Python Raw Socket Skeleton:
+  ```python
+  import socket, os
+  os.makedirs('/tmp/files', exist_ok=True)
+  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+  s.bind(('0.0.0.0', 8080))
+  s.listen(128)
+  while True:
+      conn, addr = s.accept()
+      try:
+          data = conn.recv(4096).decode('utf-8', errors='ignore')
+          # Parse request and write HTTP response:
+          conn.sendall(b"HTTP/1.1 200 OK
+Content-Length: 0
+
+")
+      finally:
+          conn.close()
+  ```
+- Go: use `net.Listen("tcp", "0.0.0.0:8080")` and `net.Conn`. Do NOT use `net/http`.
+- Rust: use `std::net::TcpListener` or `tokio::net::TcpListener`."#,
+            ),
+            Some(crate::config::TaskType::Wal) => (
+                6390,
+                "printf 'PUB t hello\\n' | nc 127.0.0.1 6390",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Pre-built brokers (Kafka, NATS, Redis) are FORBIDDEN.
+- Build a durable append-only log on TCP 6390: PUB <topic> <payload> -> +OK <offset> (fsync before ack), SUB <topic> <offset> streams :<off> <payload> lines then +END. Persist under ./data and recover it after kill -9."#,
+            ),
+            Some(crate::config::TaskType::Proxy) => (
+                8091,
+                "curl http://upstream1/ ; curl -v http://localhost:8091/",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Proxy frameworks/gateways (nginx, envoy, traefik libs) are FORBIDDEN; raw TCP sockets only.
+- Build an HTTP reverse proxy on 8091 over upstreams upstream1:80, upstream2:80, upstream3:80: round-robin, upstream keep-alive pooling, X-Forwarded-For injection, failover with zero dropped requests."#,
+            ),
+            Some(crate::config::TaskType::Pubsub) => (
+                8092,
+                "curl -v http://localhost:8092/",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- WebSocket libraries (ws, gorilla, tungstenite) are FORBIDDEN; raw TCP sockets only.
+- Build an RFC 6455 broker on 8092: SHA-1 handshake, masked TEXT frames SUB <channel> / PUB <channel> <msg>, broadcast fan-out, ping/pong."#,
+            ),
+            Some(crate::config::TaskType::Binproto) => (
+                6395,
+                "python3 -c \"import struct,zlib;print(zlib.crc32(b'x'))\"",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- RPC frameworks (gRPC, Thrift, JSON-RPC libs) are FORBIDDEN; raw TCP sockets only.
+- Build an SDB1 binary RPC server on 6395: 16-byte BE header (magic SDB1, u16 seq, u8 opcode, u8 status-reserved-0, u32 len, u32 CRC32), opcodes PING/ECHO/PUT/GET/STREAM, CRC-mismatch -> ERR_BAD_CHECKSUM open, unknown op -> ERR_UNKNOWN_OP open, bad magic -> close."#,
+            ),
+            None => {
+                let prompt_lower = prompt.to_lowercase();
+                if prompt_lower.contains("pdf") {
+                    (
+                        8090,
+                        "curl -v http://localhost:8090/",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build an HTTP PDF microservice using raw TCP sockets on port 8090 returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
+                    )
+                } else if prompt_lower.contains("redis") {
+                    (
+                        6379,
+                        "redis-cli -p 6379 ping",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw TCP sockets on port 6379 parsing RESP wire format."#,
+                    )
+                } else {
+                    (
+                        8080,
+                        "curl -v http://localhost:8080/",
+                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build using raw TCP sockets on port 8080."#,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// `AgentRunner` dispatch: the pipeline calls runners through this trait so
+/// OMP and OpenCode stay interchangeable. Delegates to the inherent method
+/// (inherent resolution takes precedence, no recursion).
+impl crate::sandbox::AgentRunner for OmpRunner {
+    fn run_agent_with_logger<F>(spec: AgentRunSpec<'_>, log_fn: F) -> Result<OmpSessionStats>
+    where
+        F: FnMut(String) + Send + 'static,
+    {
+        Self::run_agent_with_logger(spec, log_fn)
     }
 }
 

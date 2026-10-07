@@ -12,7 +12,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Run an autonomous benchmark on a model using OMP harness
+    /// Run an autonomous benchmark on a model using an agent harness (omp | opencode)
     Run {
         /// Model identifier on OpenRouter (e.g. openrouter/google/gemini-2.5-flash)
         #[arg(short, long)]
@@ -26,7 +26,7 @@ pub enum Commands {
         #[arg(short = 'e', long, default_value = "high")]
         effort: String,
 
-        /// Maximum turns/steps allowed for OMP
+        /// Maximum turns/steps allowed for the agent
         #[arg(long, default_value_t = 100)]
         max_turns: u32,
 
@@ -77,9 +77,15 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         extend_if_unstable: bool,
 
+        /// Agent harness running the trial (omp | opencode). Ranks never
+        /// mix harnesses: compare within one harness.
+        #[arg(long, value_enum, default_value_t = Harness::Omp)]
+        harness: Harness,
+
         /// Trial cap for auto-extension (total, including the initial batch).
-        /// Seven: wave-v2 showed no verdict change 7v9 on 5/5 extended cells.
-        #[arg(long, default_value_t = 7)]
+        /// Nine: must be >= `trials` (9) or `--extend-if-unstable` is a no-op
+        /// (`max_total = max_trials.max(total_trials)` never grows).
+        #[arg(long, default_value_t = 9)]
         max_trials: u32,
     },
 
@@ -329,8 +335,8 @@ pub enum Commands {
         #[arg(long, default_value = "redis,proxy,pdf")]
         tasks: String,
 
-        /// Trials per cell
-        #[arg(long, default_value_t = 3)]
+        /// Trials per cell (9: Wilson intervals only interpretable at n>=9).
+        #[arg(long, default_value_t = 9)]
         trials: u32,
 
         /// Extra flags appended to every generated `run` command
@@ -353,8 +359,14 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         extend_if_unstable: bool,
 
-        /// Trial cap for auto-extension (enqueue mode; 7 per wave-v2 evidence).
-        #[arg(long, default_value_t = 7)]
+        /// Agent harness running the trial (omp | opencode). Ranks never
+        /// mix harnesses: compare within one harness.
+        #[arg(long, value_enum, default_value_t = Harness::Omp)]
+        harness: Harness,
+
+        /// Trial cap for auto-extension (enqueue mode; 9 = at least the
+        /// initial batch, so extension can grow).
+        #[arg(long, default_value_t = 9)]
         max_trials: u32,
 
         /// `ui` engine base URL (enqueue mode only).
@@ -383,7 +395,7 @@ pub enum Commands {
         #[arg(long)]
         effort: Option<String>,
 
-        /// Maximum turns/steps allowed for OMP
+        /// Maximum turns/steps allowed for the agent
         #[arg(long, default_value_t = 100)]
         max_turns: u32,
 
@@ -538,7 +550,7 @@ pub enum Commands {
         #[arg(short = 'e', long, default_value = "high")]
         effort: String,
 
-        /// Maximum turns/steps allowed for OMP
+        /// Maximum turns/steps allowed for the agent
         #[arg(long, default_value_t = 100)]
         max_turns: u32,
 
@@ -566,8 +578,14 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         extend_if_unstable: bool,
 
-        /// Trial cap for auto-extension (7 per wave-v2 evidence).
-        #[arg(long, default_value_t = 7)]
+        /// Agent harness running the trial (omp | opencode). Ranks never
+        /// mix harnesses: compare within one harness.
+        #[arg(long, value_enum, default_value_t = Harness::Omp)]
+        harness: Harness,
+
+        /// Trial cap for auto-extension (9 minimum so the default
+        /// `--trials 9` batch can still grow; cap > initial batch to extend).
+        #[arg(long, default_value_t = 9)]
         max_trials: u32,
 
         /// Do not save results or archive run artifacts to disk
@@ -987,6 +1005,40 @@ impl std::fmt::Display for TaskType {
     }
 }
 
+/// Agent harness running the trial: OMP (Oh My Pi, default) or OpenCode.
+/// Recorded on manifests/results; ranks never mix harnesses (same rule as
+/// effort: compare within one harness, see `validate_comparison_wave`).
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Harness {
+    Omp,
+    Opencode,
+}
+
+impl Harness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Harness::Omp => "omp",
+            Harness::Opencode => "opencode",
+        }
+    }
+
+    /// Parse queue/API/extend strings; unknown (incl. legacy blanks) falls
+    /// back to OMP so pre-harness rows keep grading as OMP rows.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "opencode" => Harness::Opencode,
+            _ => Harness::Omp,
+        }
+    }
+}
+
+impl std::fmt::Display for Harness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 pub fn get_repo_root() -> PathBuf {
     if let Ok(sdb_home) =
         std::env::var("SDB_HOME").or_else(|_| std::env::var("SUBDOLLAR_BENCH_HOME"))
@@ -1358,7 +1410,7 @@ mod tests {
                 assert!(models.contains("muse-spark"));
                 assert_eq!(efforts, "minimal,max");
                 assert_eq!(tasks, "redis,proxy,pdf");
-                assert_eq!(trials, 3);
+                assert_eq!(trials, 9);
                 assert_eq!(extra, "");
                 assert!(!per_effort_columns);
             }
@@ -1577,15 +1629,45 @@ mod tests {
     }
 
     #[test]
+    fn test_harness_parse_defaults_omp() {
+        assert_eq!(Harness::parse("opencode"), Harness::Opencode);
+        assert_eq!(Harness::parse("omp"), Harness::Omp);
+        assert_eq!(Harness::parse(""), Harness::Omp);
+        assert_eq!(Harness::parse("nope"), Harness::Omp);
+        assert_eq!(Harness::Omp.to_string(), "omp");
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "run",
+            "--model",
+            "m",
+            "--harness",
+            "opencode",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run { harness, .. } => assert_eq!(harness, Harness::Opencode),
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
     fn test_trials_default_nine() {
         let cli = Cli::try_parse_from(["subdollarbench", "run", "--model", "m", "--task", "redis"])
             .unwrap();
         match cli.command {
             Commands::Run {
-                trials, max_trials, ..
+                trials,
+                max_trials,
+                harness,
+                ..
             } => {
                 assert_eq!(trials, 9);
-                assert_eq!(max_trials, 7);
+                assert_eq!(max_trials, 9);
+                assert_eq!(harness, Harness::Omp);
+                assert!(
+                    max_trials >= trials,
+                    "max_trials ({max_trials}) must cover trials ({trials}) or extend is dead"
+                );
             }
             _ => panic!("Expected Run command"),
         }

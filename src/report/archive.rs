@@ -119,6 +119,12 @@ pub struct RunManifest {
     /// unlocks every future comparison).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omp_version: Option<String>,
+    /// Agent harness that ran this trial ("omp" | "opencode"; None = legacy OMP rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Harness version (OMP sandbox version or opencode pin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_version: Option<String>,
 }
 
 impl RunManifest {
@@ -440,6 +446,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Go".to_string(),
             effort: Some("high".to_string()),
+            harness: None,
             started_at: "2026-09-04T06:30:00Z".to_string(),
             completed_at: "2026-09-04T06:31:00Z".to_string(),
             duration_seconds: 60.0,
@@ -486,6 +493,7 @@ mod tests {
             seed: None,
             prompt_sha: None,
             omp_version: None,
+            harness_version: None,
             rules_version: None,
         };
 
@@ -605,6 +613,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             started_at: "2026-09-25T00:00:00Z".to_string(),
             completed_at: "2026-09-25T00:01:00Z".to_string(),
             duration_seconds: 1.0,
@@ -646,6 +655,7 @@ mod tests {
             seed: None,
             prompt_sha: None,
             omp_version: None,
+            harness_version: None,
             rules_version: None,
         };
         RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();

@@ -5,7 +5,7 @@ use colored::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use subdollarbench::config::{Cli, Commands, TaskType};
+use subdollarbench::config::{Cli, Commands, Harness, TaskType};
 use subdollarbench::pipeline::{
     BenchmarkConfig, BenchmarkPipeline, PipelineLogger, PipelineOutput,
 };
@@ -150,6 +150,7 @@ struct TrialBatchParams {
     model: String,
     task: TaskType,
     effort: String,
+    harness: Harness,
     max_turns: u32,
     budget_usd: f64,
     timeout_min: u64,
@@ -214,6 +215,7 @@ async fn run_trial_batch(
             model: p.model.clone(),
             task: p.task,
             effort: p.effort.clone(),
+            harness: p.harness,
             max_turns: p.max_turns,
             budget_usd: p.budget_usd,
             timeout_min: p.timeout_min,
@@ -274,6 +276,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             model,
             task,
             effort,
+            harness,
             max_turns,
             budget_usd,
             timeout_min,
@@ -296,6 +299,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     &model,
                     &task.to_string(),
                     &effort,
+                    harness.as_str(),
                     max_turns,
                     budget_usd,
                     timeout_min,
@@ -389,6 +393,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     model: model.clone(),
                     task,
                     effort: effort.clone(),
+                    harness,
                     max_turns,
                     budget_usd,
                     timeout_min,
@@ -512,6 +517,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 model: model.clone(),
                                 task,
                                 effort: effort.clone(),
+                                harness: Harness::Omp,
                                 max_turns,
                                 budget_usd,
                                 timeout_min,
@@ -1522,6 +1528,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             extend_if_unstable,
             max_trials,
             server,
+            harness,
         } => {
             let models: Vec<String> = models
                 .split(',')
@@ -1588,6 +1595,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 m,
                                 t,
                                 e,
+                                harness.as_str(),
                                 100,
                                 1.0,
                                 30,
@@ -1634,8 +1642,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             format!(" {}", extra.trim())
                         };
                         println!(
-                            "subdollarbench run --model {} --task {} --effort {} --trials {}{}",
-                            m, t, e, trials, ex
+                            "subdollarbench run --model {} --task {} --effort {} --harness {} --trials {}{}",
+                            m, t, e, harness, trials, ex
                         );
                     }
                 }
@@ -1755,6 +1763,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             let batch = run_trial_batch(
                 TrialBatchParams {
                     model: model.unwrap_or_else(|| merged.model.clone()),
+                    harness: Harness::parse(merged.harness.as_deref().unwrap_or("omp")),
                     task,
                     effort: effort.unwrap_or_else(|| {
                         merged.effort.clone().unwrap_or_else(|| "high".to_string())
@@ -1809,6 +1818,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             model,
             task,
             effort,
+            harness,
             max_turns,
             budget_usd,
             timeout_min,
@@ -1825,6 +1835,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 model,
                 task,
                 effort,
+                harness,
                 max_turns,
                 budget_usd,
                 timeout_min,
@@ -2151,6 +2162,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: Some("low".to_string()),
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -2234,6 +2246,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Python".to_string(),
             effort: Some("low".to_string()),
+            harness: None,
             started_at: "2026-09-04T12:00:00Z".to_string(),
             completed_at: "2026-09-04T12:01:00Z".to_string(),
             duration_seconds: 60.0,
@@ -2275,6 +2288,8 @@ mod tests {
             seed: None,
             prompt_sha: None,
             omp_version: None,
+            harness_version: None,
+
             rules_version: None,
         };
         fs::write(
@@ -2335,6 +2350,7 @@ mod tests {
                 model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
                 task: TaskType::Redis,
                 effort: "low".to_string(),
+                harness: Harness::Omp,
                 max_turns: 1,
                 budget_usd: 0.10,
                 timeout_min: 1,
@@ -2373,6 +2389,7 @@ mod tests {
                 model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
                 task: TaskType::Http,
                 effort: "low".to_string(),
+                harness: Harness::Omp,
                 max_turns: 1,
                 budget_usd: 0.10,
                 timeout_min: 1,
@@ -2406,6 +2423,7 @@ mod tests {
                 model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
                 task: TaskType::Redis,
                 effort: "low".to_string(),
+                harness: Harness::Omp,
                 max_turns: 1,
                 budget_usd: 0.10,
                 timeout_min: 1,

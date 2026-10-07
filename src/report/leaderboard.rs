@@ -15,6 +15,9 @@ pub struct BenchmarkRunResult {
     pub task: String,
     pub language: String,
     pub effort: Option<String>,
+    /// Agent harness ("omp" | "opencode"; None = legacy OMP rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     pub pass_rate: f64,
     pub passed_stages: u32,
     pub total_stages: u32,
@@ -207,6 +210,13 @@ impl BenchmarkRunResult {
         let hex = img.rsplit('@').next().unwrap_or(img);
         let hex = hex.strip_prefix("sha256:").unwrap_or(hex);
         hex.chars().take(12).collect()
+    }
+
+    /// Harness of a row; None = legacy pre-harness rows, graded as OMP.
+    /// Ranks never mix harnesses: frontier keys and the comparison-wave
+    /// validator both key on this alongside task + rules_version.
+    pub fn harness_of(r: &BenchmarkRunResult) -> &str {
+        r.harness.as_deref().unwrap_or("omp")
     }
 
     /// Measurement regime of a run: short image digest, `+drift` when the
@@ -481,6 +491,7 @@ impl BenchmarkRunResult {
             task: best.task.clone(),
             language: best.language.clone(),
             effort: best.effort.clone(),
+            harness: best.harness.clone(),
             pass_rate: headline_pass_rate,
             passed_stages: headline_passed_stages,
             total_stages: best.total_stages,
@@ -530,7 +541,7 @@ impl BenchmarkRunResult {
     /// answers "who is fastest" without moving the denominator across waves.
     pub fn recompute_frontier_fractions(results: &mut [BenchmarkRunResult]) {
         use std::collections::HashMap;
-        let mut best: HashMap<(String, String), f64> = HashMap::new();
+        let mut best: HashMap<(String, String, String), f64> = HashMap::new();
         for r in results.iter() {
             if r.subruns.is_empty() {
                 continue;
@@ -539,7 +550,11 @@ impl BenchmarkRunResult {
                 (Some(t), Some(rt)) if t > 0.0 && rt > 0.0 => t,
                 _ => continue,
             };
-            let key = (r.task.clone(), r.rules_version.clone().unwrap_or_default());
+            let key = (
+                r.task.clone(),
+                r.rules_version.clone().unwrap_or_default(),
+                Self::harness_of(r).to_string(),
+            );
             best.entry(key).and_modify(|b| *b = b.max(tp)).or_insert(tp);
         }
         for r in results.iter_mut() {
@@ -550,7 +565,11 @@ impl BenchmarkRunResult {
                     continue;
                 }
             };
-            let key = (r.task.clone(), r.rules_version.clone().unwrap_or_default());
+            let key = (
+                r.task.clone(),
+                r.rules_version.clone().unwrap_or_default(),
+                Self::harness_of(r).to_string(),
+            );
             r.frontier_fraction = best.get(&key).map(|b| {
                 if *b > 0.0 {
                     (tp / b).clamp(0.0, 1.0)
@@ -1600,6 +1619,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -1651,6 +1671,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: pass,
             passed_stages: 4,
             total_stages: 4,
@@ -1792,6 +1813,7 @@ mod tests {
                 task: "redis".to_string(),
                 language: "Python".to_string(),
                 effort: Some("auto".to_string()),
+                harness: None,
                 pass_rate: pass,
                 passed_stages: if pass >= 100.0 { 6 } else { 3 },
                 total_stages: 6,
@@ -1898,6 +1920,7 @@ mod tests {
             task: "proxy".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 5,
             total_stages: 5,
@@ -1948,6 +1971,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -2016,6 +2040,7 @@ mod tests {
             task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: pass,
             passed_stages: 6,
             total_stages: 6,
@@ -2074,6 +2099,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -2249,6 +2275,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: Some("auto".to_string()),
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -2304,6 +2331,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 0.0,
             passed_stages: 0,
             total_stages: 4,
@@ -2351,6 +2379,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Python".to_string(),
             effort: Some("low".to_string()),
+            harness: None,
             pass_rate: 50.0,
             passed_stages: 2,
             total_stages: 4,
@@ -2392,6 +2421,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: Some("high".to_string()),
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -2501,6 +2531,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,
@@ -2530,6 +2561,7 @@ mod tests {
                 task: "redis".to_string(),
                 language: "Go".to_string(),
                 effort: None,
+                harness: None,
                 pass_rate: 100.0,
                 passed_stages: 4,
                 total_stages: 4,
@@ -2602,6 +2634,7 @@ mod tests {
             task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: pass,
             passed_stages: 6,
             total_stages: 6,
@@ -2701,6 +2734,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
             total_stages: 4,

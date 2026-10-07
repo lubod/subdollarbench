@@ -58,11 +58,11 @@ pub fn default_trials() -> u32 {
     9
 }
 
-/// Auto-extend cap. Wave-v2 evidence: no verdict changed between 7
-/// and 9 trials on 5/5 extended cells (flap stayed flap) — 7 keeps the
-/// evidence, saves ~20% of extend spend.
+/// Auto-extend cap. Must be >= `default_trials()` (9): the queue computes
+/// `max_total = max_trials.max(total_trials)`, so a cap below the initial
+/// batch makes `--extend-if-unstable` a silent no-op.
 pub fn default_max_trials() -> u32 {
-    7
+    9
 }
 
 pub fn default_max_turns() -> u32 {
@@ -287,6 +287,7 @@ pub fn test_queue_item(id: &str) -> QueuedRun {
             max_turns: 5,
             eval_only: true,
             effort: Some("low".to_string()),
+            harness: None,
             timeout_min: Some(1),
             trials: 1,
             extend_if_unstable: false,
@@ -321,6 +322,9 @@ pub struct RunRequest {
     pub eval_only: bool,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Agent harness ("omp" | "opencode"); None/absent = omp (back-compat).
+    #[serde(default)]
+    pub harness: Option<String>,
     #[serde(default = "default_timeout_min")]
     pub timeout_min: Option<u64>,
     #[serde(default = "default_trials")]
@@ -354,6 +358,17 @@ pub async fn proxy_mutation(
         "DELETE" => client.delete(&url),
         _ => client.post(&url),
     };
+    // Server-to-server trust: browser sessions live in the GUI process
+    // memory only, so a forwarded cookie would never validate on the
+    // engine. The proxy authenticates with the shared SDB_UI_TOKEN both
+    // processes read from the same .env; the engine's bearer gate accepts
+    // it. Token-unset setups pass the engine gate anyway (CSRF-only).
+    if let Ok(tok) = std::env::var("SDB_UI_TOKEN") {
+        let tok = tok.trim().to_string();
+        if !tok.is_empty() {
+            rb = rb.header("Authorization", format!("Bearer {tok}"));
+        }
+    }
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -466,6 +481,7 @@ pub struct ExtBatchSpec {
     pub(crate) model: String,
     pub(crate) task: TaskType,
     pub(crate) effort: String,
+    pub(crate) harness: String,
     pub(crate) max_turns: u32,
     pub(crate) budget_usd: f64,
     pub(crate) timeout_min: u64,
@@ -588,6 +604,7 @@ pub async fn run_extension_batch(
             model: spec.model.clone(),
             task: spec.task,
             effort: spec.effort.clone(),
+            harness: crate::config::Harness::parse(&spec.harness),
             max_turns: spec.max_turns,
             budget_usd: spec.budget_usd,
             timeout_min: spec.timeout_min,
@@ -825,6 +842,7 @@ pub async fn execute_extend_body(
         model: data.model.clone(),
         task: task_type,
         effort: data.effort.clone().unwrap_or_else(|| "high".to_string()),
+        harness: data.harness.clone().unwrap_or_else(|| "omp".to_string()),
         max_turns: ext.max_turns.unwrap_or(100),
         budget_usd: ext.budget_usd.unwrap_or(1.0),
         timeout_min: ext.timeout_min.unwrap_or(30),
@@ -1125,6 +1143,7 @@ pub async fn execute_run_body(
             model: req.model.clone(),
             task: task_type,
             effort: effort_setting.clone(),
+            harness: crate::config::Harness::parse(req.harness.as_deref().unwrap_or("omp")),
             max_turns: req.max_turns,
             budget_usd: req.budget_usd,
             timeout_min: req.timeout_min.unwrap_or(30),
@@ -1290,6 +1309,7 @@ pub async fn execute_run_body(
                     model: req.model.clone(),
                     task: task_type_ext,
                     effort: effort_setting.clone(),
+                    harness: req.harness.clone().unwrap_or_else(|| "omp".to_string()),
                     max_turns: req.max_turns,
                     budget_usd: req.budget_usd,
                     timeout_min: req.timeout_min.unwrap_or(30),

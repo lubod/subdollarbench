@@ -23,8 +23,8 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -576,6 +576,18 @@ impl UiServer {
         if host == "0.0.0.0" || host == "127.0.0.1" {
             println!("   Local URL:  http://localhost:{}", port);
         }
+        if host == "0.0.0.0"
+            && std::env::var("SDB_UI_TOKEN")
+                .ok()
+                .filter(|t| !t.trim().is_empty())
+                .is_none()
+            && login_creds().is_none()
+        {
+            eprintln!(
+                "[SECURITY] binding 0.0.0.0 with no SDB_UI_TOKEN and no SDB_UI_USER/SDB_UI_PASS: \
+                 mutating endpoints are CSRF-only. Set SDB_UI_TOKEN (and SDB_UI_USER/SDB_UI_PASS) in .env (0600)."
+            );
+        }
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app).await?;
@@ -588,10 +600,10 @@ pub(crate) async fn serve_index() -> Html<&'static str> {
     Html(include_str!("index.html"))
 }
 
-pub(crate) async fn get_models(
-    headers: HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
-) -> Json<Vec<SubDollarModel>> {
+pub(crate) async fn get_models(headers: HeaderMap) -> Json<Vec<SubDollarModel>> {
+    // API key precedence: Authorization/x-api-key header, else server env.
+    // Query-param `?key=` is deliberately unsupported: URLs land in
+    // access logs, history, and CDN caches.
     let header_key = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -612,14 +624,11 @@ pub(crate) async fn get_models(
                 .map(|s| s.trim().to_string())
         });
 
-    let api_key = header_key
-        .filter(|k| !k.is_empty())
-        .or_else(|| {
-            std::env::var("OPENROUTER_API_KEY")
-                .ok()
-                .filter(|k| !k.trim().is_empty())
-        })
-        .or_else(|| params.get("key").filter(|k| !k.trim().is_empty()).cloned());
+    let api_key = header_key.filter(|k| !k.is_empty()).or_else(|| {
+        std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+    });
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -730,7 +739,7 @@ pub(crate) async fn get_prompt(AxumPath(task): AxumPath<String>) -> Result<Strin
 pub(crate) async fn save_prompt(
     AxumPath(task): AxumPath<String>,
     body: String,
-) -> Result<&'static str, StatusCode> {
+) -> Result<String, StatusCode> {
     validate_task_name(&task)?;
     // Test guard: the lifecycle test POSTs tasks/test_task/prompt.md as its
     // write probe. Unknown tasks must not sprout directories in the repo's
@@ -743,7 +752,18 @@ pub(crate) async fn save_prompt(
         let _ = fs::create_dir_all(parent);
     }
     match fs::write(path, body) {
-        Ok(_) => Ok("Prompt saved successfully"),
+        // Graded input changed: the caller must bump RULES_VERSION so the
+        // fingerprint stamp moves and cross-regime ranks stay gated.
+        Ok(_) => {
+            eprintln!(
+                "[PROMPT] tasks/{}/prompt.md overwritten via API — bump RULES_VERSION in src/report/rules.rs",
+                task
+            );
+            Ok(
+                "Prompt saved — bump RULES_VERSION in src/report/rules.rs to re-stamp grading"
+                    .to_string(),
+            )
+        }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -804,8 +824,48 @@ fn refresh_portal() {
 
 /// Same-origin guard for mutating endpoints. Browser navigations always
 /// attach Origin (or Referer for same-origin form/DELETE submissions);
-/// curl/CLI send neither and stay allowed. Loopback origins are always
-/// trusted; anything else is rejected as cross-site.
+/// curl/CLI send neither and stay allowed. Allowed when:
+/// (1) no Origin/Referer present, (2) Origin/Referer host is loopback, or
+/// (3) Origin/Referer host matches the Host (or X-Forwarded-Host) header,
+/// i.e. a legitimate same-origin fetch from a LAN IP, Tailnet name, or
+/// custom domain. Anything else is rejected as cross-site.
+fn origin_host_from_url(url: &str) -> String {
+    let authority = url
+        .split("://")
+        .last()
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .trim();
+    host_without_port(authority)
+}
+
+/// Host header (or X-Forwarded-Host entry) normalized for comparison:
+/// lowercased, port stripped, brackets stripped from IPv6 literals.
+fn host_without_port(authority: &str) -> String {
+    let a = authority.trim();
+    if let Some(rest) = a.strip_prefix('[') {
+        // [::1] or [::1]:3000 -> ::1
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_ascii_lowercase();
+        }
+    }
+    a.split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
 fn csrf_origin_allowed(headers: &HeaderMap) -> bool {
     let origin = headers
         .get(header::ORIGIN)
@@ -819,21 +879,32 @@ fn csrf_origin_allowed(headers: &HeaderMap) -> bool {
     if candidate.is_empty() {
         return true;
     }
-    let host = candidate
-        .split("://")
-        .last()
-        .unwrap_or(candidate)
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split('@')
-        .next_back()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
+    let origin_host = origin_host_from_url(candidate);
+    if origin_host.is_empty() {
+        return false;
+    }
+    if is_loopback_host(&origin_host) {
+        return true;
+    }
+    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        if host_without_port(host) == origin_host {
+            return true;
+        }
+    }
+    // Reverse-proxy deployments (Traefik): Host may be internal while the
+    // browser's Origin carries the external name. Trust the forwarded host
+    // only for an exact same-origin match, never as a bypass.
+    if let Some(xfh) = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+    {
+        for entry in xfh.split(',') {
+            if !entry.trim().is_empty() && host_without_port(entry) == origin_host {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn csrf_reject() -> Response {
@@ -1490,6 +1561,20 @@ pub(crate) async fn stop_run(
 pub(crate) async fn compare_runs(
     Query(query): Query<CompareQuery>,
 ) -> Result<Json<RunComparisonResponse>, Response> {
+    // Workspace joins below must not walk out of runs/: validate both ids
+    // with the same file_name guard the manifest path uses.
+    let clean_a = match clean_run_id(&query.run_a) {
+        Some(c) => c,
+        None => {
+            return Err((StatusCode::BAD_REQUEST, "invalid run_a id").into_response());
+        }
+    };
+    let clean_b = match clean_run_id(&query.run_b) {
+        Some(c) => c,
+        None => {
+            return Err((StatusCode::BAD_REQUEST, "invalid run_b id").into_response());
+        }
+    };
     let runs_dir = RunArchiver::resolve_runs_dir();
     let manifest_a = RunArchiver::get_run(&runs_dir, &query.run_a).ok_or_else(|| {
         (
@@ -1519,8 +1604,8 @@ pub(crate) async fn compare_runs(
         },
     };
 
-    let ws_a = runs_dir.join(&query.run_a).join("workspace");
-    let ws_b = runs_dir.join(&query.run_b).join("workspace");
+    let ws_a = runs_dir.join(&clean_a).join("workspace");
+    let ws_b = runs_dir.join(&clean_b).join("workspace");
 
     let files_a = if ws_a.exists() {
         RunArchiver::scan_workspace_files(&ws_a)
@@ -1763,6 +1848,7 @@ pub(crate) async fn extend_parent_run(
         model: data.model.clone(),
         task: task_type,
         effort: data.effort.clone().unwrap_or_else(|| "high".to_string()),
+        harness: data.harness.clone().unwrap_or_else(|| "omp".to_string()),
         max_turns: body.max_turns.unwrap_or(100),
         budget_usd: body.budget_usd.unwrap_or(1.0),
         timeout_min: body.timeout_min.unwrap_or(30),
@@ -2246,6 +2332,7 @@ mod tests {
             max_turns: 1,
             eval_only: false,
             effort: Some("high".to_string()),
+            harness: None,
             timeout_min: None,
             trials: 1,
             extend_if_unstable: false,
@@ -2369,6 +2456,7 @@ mod tests {
             max_turns: 5,
             eval_only: true,
             effort: Some("low".to_string()),
+            harness: None,
             timeout_min: Some(1),
             trials: 1,
             save_results: Some(false),
@@ -2978,6 +3066,39 @@ mod tests {
             "https://evil.example.com/pwn".parse().unwrap(),
         );
         assert!(!csrf_origin_allowed(&ref_evil));
+        // Same-origin on a non-loopback host (LAN IP, Tailnet, custom
+        // domain): Origin host matches Host header, so the matrix "+"
+        // POST /api/queue from http://192.168.x.x:3000 must pass.
+        let mut lan = HeaderMap::new();
+        lan.insert(header::ORIGIN, "http://192.168.1.10:3000".parse().unwrap());
+        lan.insert(header::HOST, "192.168.1.10:3000".parse().unwrap());
+        assert!(csrf_origin_allowed(&lan));
+        let mut lan_evil = HeaderMap::new();
+        lan_evil.insert(header::ORIGIN, "https://evil.example.com".parse().unwrap());
+        lan_evil.insert(header::HOST, "192.168.1.10:3000".parse().unwrap());
+        assert!(!csrf_origin_allowed(&lan_evil));
+        let mut domain = HeaderMap::new();
+        domain.insert(header::ORIGIN, "https://bench.example.com".parse().unwrap());
+        domain.insert(header::HOST, "bench.example.com".parse().unwrap());
+        assert!(csrf_origin_allowed(&domain));
+        // Referer variant of the same LAN same-origin case.
+        let mut lan_ref = HeaderMap::new();
+        lan_ref.insert(
+            header::REFERER,
+            "http://192.168.1.10:3000/".parse().unwrap(),
+        );
+        lan_ref.insert(header::HOST, "192.168.1.10:3000".parse().unwrap());
+        assert!(csrf_origin_allowed(&lan_ref));
+        // IPv6 loopback with brackets was previously misparsed by a naive
+        // split(':'); it must stay allowed.
+        let mut v6 = HeaderMap::new();
+        v6.insert(header::ORIGIN, "http://[::1]:3000".parse().unwrap());
+        assert!(csrf_origin_allowed(&v6));
+        // Host mismatch without loopback is still cross-site.
+        let mut mismatch = HeaderMap::new();
+        mismatch.insert(header::ORIGIN, "http://10.0.0.5:3000".parse().unwrap());
+        mismatch.insert(header::HOST, "192.168.1.10:3000".parse().unwrap());
+        assert!(!csrf_origin_allowed(&mismatch));
     }
 
     #[test]
@@ -3359,7 +3480,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
-        assert_eq!(res.text().await.unwrap(), "Prompt saved successfully");
+        assert!(
+            res.text().await.unwrap().contains("RULES_VERSION"),
+            "save_prompt must warn about the re-stamp"
+        );
 
         // 5b. GET /api/sandbox/omp
         let res = client
@@ -3470,6 +3594,7 @@ mod tests {
             max_turns: 5,
             eval_only: true,
             effort: Some("low".to_string()),
+            harness: None,
             timeout_min: Some(1),
             trials: 1,
             save_results: Some(false),
@@ -3511,6 +3636,7 @@ mod tests {
             max_turns: 1,
             eval_only: true,
             effort: Some("low".to_string()),
+            harness: None,
             timeout_min: Some(1),
             trials: 2,
             save_results: Some(false),
@@ -3583,6 +3709,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Rust".to_string(),
             effort: Some("low".to_string()),
+            harness: None,
             started_at: "2026-09-04T12:00:00Z".to_string(),
             completed_at: "2026-09-04T12:01:00Z".to_string(),
             duration_seconds: 60.0,
@@ -3624,6 +3751,8 @@ mod tests {
             seed: None,
             prompt_sha: None,
             omp_version: None,
+            harness_version: None,
+
             rules_version: None,
         };
         let manifest_b = RunManifest {
@@ -3633,6 +3762,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Rust".to_string(),
             effort: Some("high".to_string()),
+            harness: None,
             started_at: "2026-09-04T12:05:00Z".to_string(),
             completed_at: "2026-09-04T12:06:00Z".to_string(),
             duration_seconds: 50.0,
@@ -3674,6 +3804,8 @@ mod tests {
             seed: None,
             prompt_sha: None,
             omp_version: None,
+            harness_version: None,
+
             rules_version: None,
         };
 
@@ -3804,6 +3936,7 @@ mod tests {
             max_turns: 1,
             eval_only: true,
             effort: Some("low".to_string()),
+            harness: None,
             timeout_min: Some(1),
             trials: 1,
             save_results: Some(false),

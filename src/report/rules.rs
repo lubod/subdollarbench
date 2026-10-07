@@ -59,7 +59,7 @@ use std::hash::{Hash, Hasher};
 ///   burn API + compute, and failure is already priced by the Pass@1
 ///   multiplier — hiding failed spend double-counted success. Every mixed
 ///   parent row gets *more expensive* and its headline score drops; the
-///   score is now pass% x P@1 per mean trial cost = 1 / (cost per solved
+///   score is now P@1 per mean trial cost = 1 / (cost per solved
 ///   task). Results stamped `2026-09-30.1` or earlier are not comparable.
 /// - `2026-09-30.1`: effective cost charges cache-read tokens at
 ///   `COMPUTE_COST_CACHED_FRACTION` of the baseline instead of the full

@@ -27,6 +27,13 @@ RUN chown -R ubuntu:ubuntu /workspace
 ARG OMP_VERSION=18.4.2
 RUN npm install -g @oh-my-pi/pi-coding-agent@${OMP_VERSION}
 
+# Install OpenCode CLI (second agent harness, pinned — must match
+# OPENCODE_VERSION in src/sandbox/opencode.rs; bump together).
+# Same npm distribution as the host binary (@opencode/cli).
+ARG OPENCODE_VERSION=2.0.24
+RUN npm install -g @opencode/cli@${OPENCODE_VERSION} \
+    && chown -R ubuntu:ubuntu /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.npm /home/ubuntu/.cache 2>/dev/null; true
 USER ubuntu
+RUN opencode --version
 
 CMD ["/bin/bash"]

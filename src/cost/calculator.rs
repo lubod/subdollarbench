@@ -128,7 +128,8 @@ impl ModelPricing {
         api_cost_usd + Self::compute_cost(duration_seconds, total_tokens, cached_tokens)
     }
 
-    /// Calculates Engineering Efficiency Score (pts/¢): Pass Rate (%) / (Effective Cost in Cents)
+    /// Calculates Engineering Efficiency Score (pts/¢): Pass@1 (%) / (Effective Cost in Cents)
+    /// Expected utility: P@1 scales the 100%-at-that-cost score; mean pass rate is reported but does NOT enter the score.
     /// Proportional credit: a 98% run earns 98% of a 100% run's score at
     /// the same cost. (Pre-2026-09-24 scoring gated on strictly 100% and
     /// zeroed everything below; see RULES_VERSION history.)

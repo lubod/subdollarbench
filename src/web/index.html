@@ -1056,6 +1056,16 @@
           </select>
         </div>
 
+        <!-- Agent Harness -->
+        <div class="form-group">
+          <label for="harnessSelect">Agent Harness</label>
+          <select id="harnessSelect" style="margin-top: 4px;">
+            <option value="omp" selected>omp (Oh My Pi — default)</option>
+            <option value="opencode">opencode (OpenCode CLI — effort is request-only)</option>
+          </select>
+          <span class="hint">Ranks never mix harnesses: compare within one harness.</span>
+        </div>
+
         <!-- Task Selection -->
         <div class="form-group">
           <label for="task">Benchmark Task</label>
@@ -2104,6 +2114,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (line.startsWith('[STDERR]') || line.startsWith('[FAIL') || line.includes('FAILED')) return 'error';
       if (line.startsWith('[TOKENS]')) return 'tokens';
       if (line.startsWith('[OMP]')) return 'omp';
+      if (line.startsWith('[OPENCODE')) return 'omp';
       if (line.startsWith('[WARN') || line.startsWith('[LIMIT]') || line.startsWith('[STOP]')) return 'warn';
       if (/^\[(PIPELINE|SETUP|BENCH|DIAGNOSTICS|STATUS|EVAL|REVIVAL|MULTI-TRIAL|SUBRUN|DONE|LOCAL RUNNER|OMP)/.test(line)) return 'sec';
       if (line.startsWith('  | ') || line.startsWith('  | ...')) return 'code';
@@ -2740,7 +2751,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const eff = r.effective_cost_usd != null ? '$' + Number(r.effective_cost_usd).toFixed(4) : 'n/a';
         const rules = r.rules_version ? escapeHtml(String(r.rules_version).split('+')[0]) : '<span style="color:var(--text-muted);">legacy</span>';
         const when = r.timestamp ? escapeHtml(String(r.timestamp).slice(0, 16).replace('T', ' ')) : '-';
-        const key = `${r.model}\u0001${r.task}\u0001${r.effort || ''}`;
+        const key = `${r.model}\u0001${r.task}\u0001${r.effort || ''}\u0001${r.harness || 'omp'}`;
         const open = !!window._lbExpanded[key];
         const subs = r.subruns || [];
         const nPass = subs.filter(t => (t.pass_rate ?? 0) >= 100).length;
@@ -2755,6 +2766,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(r.model)}" style="font-weight:600;color:${meta.color};font-size:0.88rem;">${escapeHtml(shortModelName(r.model))}</span></span>
             <span class="badge badge-info">${escapeHtml(r.task)}</span>
             <span class="badge badge-effort">effort: ${escapeHtml(r.effort || 'n/a')}</span>
+            <span class="badge" title="Agent harness (ranks never mix harnesses)">harness: ${escapeHtml(r.harness || 'omp')}</span>
             ${r.poisoned ? '<span class="badge" style="background:#da3633;color:#fff;" title="Infra-killed: 429/404, not a model verdict">Poisoned</span>' : ''}            ${r.portal_hidden ? '<span class="badge" style="background:#6e7681;color:#fff;">Hidden</span>' : ''}
           </div></td>
           <td style="text-align:center;font-weight:700;">${Math.round(avg)}% / ${Math.round(p1)}%${ci}</td>
@@ -2825,7 +2837,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const canon = {};
       boardRows.forEach(r => {
         if ((r.id || '').startsWith('test_')) return;
-        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}`;
+        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}\u0001${(r.harness || 'omp').toLowerCase()}`;
         const n = r.total_trials ?? (r.subruns || []).length ?? 1;
         const ex = canon[key];
         const exN = ex ? (ex.total_trials ?? (ex.subruns || []).length ?? 1) : -1;
@@ -2914,6 +2926,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       }
     }
 
+    function docHarness(hh) {
+      if (hh === 'omp' || hh === 'opencode') return hh;
+      const el = document.getElementById('harnessSelect');
+      return ((el || {}).value || 'omp');
+    }
+
     function renderMatrix() {
       const badge = document.getElementById('matrixCountBadge');
       const head = document.getElementById('matrixHeadRow');
@@ -2923,7 +2941,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const canon = {};
       boardRows.forEach(r => {
         if ((r.id || '').startsWith('test_')) return;
-        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}`;
+        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}\u0001${(r.harness || 'omp').toLowerCase()}`;
         const n = r.total_trials ?? (r.subruns || []).length ?? 1;
         const ex = canon[key];
         if (!ex || n > (ex.total_trials ?? 0)) canon[key] = r;
@@ -2935,24 +2953,27 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       tbody.innerHTML = '';
       models.forEach(m => {
         efforts.forEach(eff => {
-          const has = tasks.some(t => canon[`${m}\u0001${eff}\u0001${t}`]);
-          if (!has) return;
+          const hhs = ['omp', 'opencode'].filter(hh => tasks.some(t => !!canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]));
+          if (!hhs.length) return;
+          hhs.forEach(hh => {
           const tr = document.createElement('tr');
-          let cells = `<td>${escapeHtml(shortModelName(m))} <span style="color:var(--text-muted);font-size:.72rem;">${escapeHtml(eff)}</span></td>`;
+          const htag = hh === 'omp' ? '' : ' ' + '<span class="badge badge-effort">opencode</span>';
+          let cells = `<td>${escapeHtml(shortModelName(m))} <span style="color:var(--text-muted);font-size:.72rem;">${escapeHtml(eff)}</span>${htag}</td>`;
           tasks.forEach(t => {
-            const r = canon[`${m}\u0001${eff}\u0001${t}`];
-            if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}')" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
-            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click ＋ to rerun clean">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}')" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
+            const r = canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`];
+            if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
+            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click ＋ to rerun clean">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
 
             const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
             const n = r.total_trials ?? (r.subruns || []).length ?? 1;
             const bg = p1 >= 80 ? 'rgba(63,185,80,.15)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
             const stamp = (r.rules_version || '').split('+')[0] || '';
-            const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}')" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
+            const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
             cells += `<td style="text-align:center;background:${bg};" title="${escapeHtml(r.id || '')} · ${escapeHtml(stamp)}">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
           });
           tr.innerHTML = cells;
           tbody.appendChild(tr);
+          });
         });
       });
       if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks`;
@@ -3181,7 +3202,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const safeTask = escapeHtml(r.task);
         const safeLanguage = escapeHtml(r.language);
         const safeEffort = escapeHtml(r.effort || 'high');
-        const effBadge = `<span class="badge badge-effort">effort: ${safeEffort}</span>`;
+        const effBadge = `<span class="badge badge-effort">effort: ${safeEffort}</span> <span class="badge" title="Agent harness (ranks never mix harnesses)">harness: ${escapeHtml(r.harness || 'omp')}</span>`;
         const pubBadge = r.portal_hidden 
           ? `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.72rem;padding:2px 8px;">Hidden</span>` 
           : `<span class="badge" style="background:#238636;color:#fff;font-size:0.72rem;padding:2px 8px;">Portal</span>`;
@@ -4105,6 +4126,7 @@ function copyRunId() {
         model: document.getElementById('model').value.trim(),
         task: document.getElementById('task').value,
         effort: document.getElementById('effortSelect').value,
+        harness: document.getElementById('harnessSelect').value || 'omp',
         api_key: null, // server .env key bills the run
         budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
         max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
@@ -4184,13 +4206,15 @@ function copyRunId() {
       return h;
     }
 
-    async function queueRerun(model, task, effort) {
+    async function queueRerun(model, task, effort, harness) {
       if (!authed && !(((document.getElementById('uiToken') || {}).value || '').trim())) {
         alert('Sign in first (or paste the UI Token in Setup).');
         return;
       }
+      const selHarness = ((document.getElementById('harnessSelect') || {}).value || 'omp');
       const payload = {
         model, task, effort,
+        harness: harness || selHarness,
         api_key: null, // server .env key bills the run
         budget_usd: parseFloat((document.getElementById('budget') || {}).value) || 1.00,
         max_turns: parseInt((document.getElementById('turns') || {}).value, 10) || 100,
@@ -4205,7 +4229,15 @@ function copyRunId() {
           headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(payload)
         });
-        if (!res.ok) { alert('Queue refused: ' + await res.text()); return; }
+        if (!res.ok) {
+          if (res.status === 401) {
+            authed = false;
+            alert('Not signed in (server restarts clear sessions) — sign in first (or paste the UI Token in Setup), then retry.');
+            checkAuth();
+            return;
+          }
+          alert('Queue refused: ' + await res.text()); return;
+        }
         const data = await res.json();
         alert('Queued ' + data.id + ' (' + model.split('/').pop() + ' / ' + task + ' / ' + effort + ') — ' + (data.started ? 'started now' : 'position ' + (data.position ?? '?')));
         ensureBoardData(true).then(() => renderMatrix());

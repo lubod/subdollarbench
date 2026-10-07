@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 use crate::bench::BenchmarkRunner;
-use crate::config::{get_repo_root, TaskType};
+use crate::config::{get_repo_root, Harness, TaskType};
 use crate::cost::ModelPricing;
 use crate::report::archive::{RunArchiver, RunManifest, RunTokenUsage};
 use crate::report::judge::RunJudge;
@@ -25,6 +25,8 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
     ]
 }
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
+use crate::sandbox::opencode::{OpenCodeRunner, OPENCODE_VERSION};
+use crate::sandbox::AgentRunner;
 use crate::verifier::binproto::BinprotoVerifier;
 use crate::verifier::compliance::ComplianceChecker;
 use crate::verifier::http::HttpVerifier;
@@ -122,6 +124,7 @@ pub struct BenchmarkConfig {
     pub model: String,
     pub task: TaskType,
     pub effort: String,
+    pub harness: Harness,
     pub max_turns: u32,
     pub budget_usd: f64,
     pub timeout_min: u64,
@@ -440,11 +443,15 @@ impl BenchmarkPipeline {
             template_ports_for_worker(&prompt_content, config.task.default_port(), config.worker)
         };
 
-        // 5. Run OMP Agent (unless eval_only)
+        // 5. Run agent harness (omp | opencode) unless eval_only.
+        let htag = match config.harness {
+            Harness::Omp => "OMP",
+            Harness::Opencode => "OPENCODE",
+        };
         let mut agent_failed = false;
         let (omp_stats, prompt_tokens, cached_tokens, completion_tokens) = if !config.eval_only {
             logger.log(&format!(
-                "[OMP] Spawning OMP agent inside isolated Docker sandbox with model '{}' (Effort: {})...",
+                "[{htag}] Spawning {htag} agent inside isolated Docker sandbox with model '{}' (Effort: {})...",
                 config.model, config.effort
             ));
 
@@ -478,6 +485,7 @@ impl BenchmarkPipeline {
             let cancel_flag_c = cancel_flag.clone();
             let cancel_flag_watcher = cancel_flag.clone();
             let sandbox_clone = SandboxManager::with_id(&run_id_c);
+            let harness = config.harness;
 
             let mut blocking_handle = tokio::task::spawn_blocking(move || {
                 let spec = AgentRunSpec {
@@ -492,9 +500,18 @@ impl BenchmarkPipeline {
                     run_id: Some(&run_id_c),
                     cancel_flag: cancel_flag_c,
                 };
-                OmpRunner::run_agent_with_logger(spec, move |line| {
-                    logger_sub.log(&line);
-                })
+                match harness {
+                    Harness::Omp => {
+                        <OmpRunner as AgentRunner>::run_agent_with_logger(spec, move |line| {
+                            logger_sub.log(&line);
+                        })
+                    }
+                    Harness::Opencode => {
+                        <OpenCodeRunner as AgentRunner>::run_agent_with_logger(spec, move |line| {
+                            logger_sub.log(&line);
+                        })
+                    }
+                }
             });
 
             let omp_res: Result<OmpSessionStats> = tokio::select! {
@@ -523,7 +540,7 @@ impl BenchmarkPipeline {
             match omp_res {
                 Ok(stats) => {
                     logger.log(&format!(
-                        "[OMP] Finished! Tokens: prompt={}, cached={}, completion={}",
+                        "[{htag}] Finished! Tokens: prompt={}, cached={}, completion={}",
                         stats.prompt_tokens, stats.cached_tokens, stats.completion_tokens
                     ));
                     let p = stats.prompt_tokens;
@@ -551,7 +568,7 @@ impl BenchmarkPipeline {
                 }
             }
         } else {
-            logger.log("[OMP] Skipped (--eval-only)");
+            logger.log(&format!("[{htag}] Skipped (--eval-only)"));
             (OmpSessionStats::default(), 0, 0, 0)
         };
 
@@ -1373,6 +1390,13 @@ impl BenchmarkPipeline {
                 })
             },
             omp_version: crate::sandbox::omp_updater::get_installed_sandbox_version(),
+            harness: Some(config.harness.to_string()),
+            harness_version: Some(match config.harness {
+                Harness::Omp => {
+                    crate::sandbox::omp_updater::get_installed_sandbox_version().unwrap_or_default()
+                }
+                Harness::Opencode => OPENCODE_VERSION.to_string(),
+            }),
             total_trials: None,
             pass_at_1: None,
             pass_at_1_lo: None,
@@ -1389,6 +1413,7 @@ impl BenchmarkPipeline {
             task: config.task.to_string(),
             language: lang,
             effort: Some(config.effort.clone()),
+            harness: Some(config.harness.to_string()),
             pass_rate,
             passed_stages,
             total_stages,
@@ -1600,6 +1625,7 @@ mod tests {
             review_model: None,
             batch_reference: None,
             worker: 0,
+            harness: Harness::Omp,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -1629,6 +1655,7 @@ mod tests {
             review_model: None,
             batch_reference: None,
             worker: 0,
+            harness: Harness::Omp,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);

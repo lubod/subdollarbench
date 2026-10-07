@@ -51,9 +51,11 @@ pub fn regime_of_version(r: &BenchmarkRunResult) -> String {
 }
 
 /// Report gate: refuse to rank a result set that mixes `rules_version`
-/// regimes, or where models bring mismatched effort sets to one wave.
-/// Identical multi-effort sets across every model are fine: that is the
-/// explicit per-effort-columns comparison (columns, never pooled).
+/// regimes, harnesses, or where models bring mismatched effort sets to one
+/// wave. Identical multi-effort sets across every model are fine: that is
+/// the explicit per-effort-columns comparison (columns, never pooled).
+/// Harnesses are always strict: no per-harness-columns mode exists, filter
+/// to one harness before comparing.
 pub fn validate_comparison_wave(results: &[BenchmarkRunResult]) -> anyhow::Result<()> {
     if results.is_empty() {
         return Ok(());
@@ -64,6 +66,16 @@ pub fn validate_comparison_wave(results: &[BenchmarkRunResult]) -> anyhow::Resul
             "matrix-report: refusing to compare runs across {} rules_version regimes ({}) — runs are only comparable within one rules_version; filter to a single regime before comparing",
             regimes.len(),
             regimes.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let harnesses: BTreeSet<String> = results
+        .iter()
+        .map(|r| BenchmarkRunResult::harness_of(r).to_string())
+        .collect();
+    if harnesses.len() > 1 {
+        anyhow::bail!(
+            "matrix-report: refusing to compare runs across harnesses ({}) — ranks never mix omp/opencode; filter to a single harness before comparing",
+            harnesses.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
     let mut per_model: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -113,6 +125,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Python".to_string(),
             effort: effort.map(|s| s.to_string()),
+            harness: None,
             pass_rate: 100.0,
             passed_stages: 5,
             total_stages: 5,
@@ -304,6 +317,28 @@ mod tests {
             msg.contains("model-a") && msg.contains("model-b"),
             "message: {msg}"
         );
+    }
+
+    #[test]
+    fn test_wave_mixed_harness_refused() {
+        let mut a = wave_run(
+            "a1",
+            "model-a",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        let mut b = wave_run(
+            "b1",
+            "model-b",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        a.harness = Some("omp".to_string());
+        b.harness = Some("opencode".to_string());
+        let err = validate_comparison_wave(&[a, b]).unwrap_err();
+        assert!(format!("{err:#}").contains("harness"));
     }
 
     #[test]

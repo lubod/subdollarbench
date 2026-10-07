@@ -101,6 +101,7 @@ pub struct PortalSummary {
 #[derive(Debug, Clone)]
 pub struct ModelRollupRow {
     pub model: String,
+    pub harness: String,
     pub n_tasks: usize,
     pub tasks: Vec<String>,
     pub n_parents: usize,
@@ -119,7 +120,7 @@ pub struct ModelRollupRow {
 
 /// Static publish-hygiene note rendered into both portal indexes (full +
 /// rollup). Short, factual, no per-run data.
-const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (DNS) are judged on pass spread alone; single-trial runs default to <em>stable</em>.</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens), falling back to API-only spend when compute metering is absent; avg cost/run is total divided by runs.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS scope:</strong> the verifier scores six MUST stages (header handshake, example.com A, localhost A, test TXT, NXDOMAIN-or-empty for unknown names, 800-query burst with at least 760 ID-matched); TTL values are parsed but never asserted, and forwarding/caching are SHOULD-have judge scope only.</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li><li><strong>Publish freeze:</strong> only runs graded at or after the 2026-09-26 anti-cheat fix are published (timestamp &ge; 2026-09-26T15:34:10Z); earlier rows were graded under a stricter rule that has since changed. Fingerprint allowlists alone are insufficient because graded content changed without a version bump.</li><li><strong>Integrity limits:</strong> egress/static anti-cheat blocklists are self-admitted; a DNS candidate forwarding to the reference is indistinguishable from a real resolver by design; binproto STREAM, proxy X-Forwarded-For, and pubsub 1,000-subscriber requirements are published as specified but verified at reduced scale; the LLM judge may review its own model family rows; the API key travels in the agent container env.</li></ul></section>"#;
+const PORTAL_METHODOLOGY_HTML: &str = r#"<section class="methodology" style="margin-top:2rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:8px;"><h2>Methodology &amp; limitations</h2><ul style="font-size:0.82rem;color:var(--mut);line-height:1.5;margin:0.4rem 0 0 1.1rem;"><li><strong>Ranking:</strong> runs rank by the Wilson 95% lower bound on the pass fraction (P@1), then the P@1 point estimate, then score — an n=3 1.00 never outranks an n=9 0.89 on thin evidence. The rollup sorts by average pass rate, ties broken by Wilson lower bound, then cost.</li><li><strong>Stability flags:</strong> any pass-rate spread across trials marks <em>unstable</em>; throughput CV &gt;25% marks <em>unstable</em> (&gt;50% flags a suspect measurement); CV 10–25% marks <em>watch</em>; otherwise <em>stable</em>. Throughput-free tasks (pdf/wal/proxy/pubsub/binproto) are judged on pass spread alone; single-trial runs default to <em>stable</em> (a 9x100% row can still read <em>unstable</em> on throughput CV alone).</li><li><strong>Infra failures count as failures:</strong> transport timeouts, DNS-resolution faults, and probe/container errors fail stages at 0% pass and are indistinguishable from model errors in scores; affected runs are not auto-excluded.</li><li><strong>Harness:</strong> trials record <code>harness</code> (<code>omp</code> | <code>opencode</code>) + version; ranks never mix harnesses — compare within one harness, like effort.</li><li><strong>Costs:</strong> total cost is the effective cost (API spend plus compute for run duration and tokens). Rows on free/contrib keys record $0.00 API and rank on the compute floor only &mdash; do not compare $0 rows against paid rows on cost.</li><li><strong>Comparability:</strong> runs are only comparable within one <code>rules_version</code> fingerprint (<code>legacy-pre-cheat</code> for 2026-09-17 and earlier, <code>legacy-cheat</code> from 2026-09-18); cross-fingerprint ranks mix rule sets.</li><li><strong>DNS removed 2026-10-05:</strong> retired task; five archived rows (09-27&ndash;09-28) preserved offline, no live verifier. Only <strong>redis/http</strong> carry a live reference denominator and a Throughput Score; pdf/wal/proxy/pubsub/binproto report rates unscored (--).</li><li><strong>Budget and keys:</strong> <code>budget_usd</code> caps live agent spend only and never gates cost accounting; the API key travels as env/flag into the runner and is never persisted in manifests, results, or the database.</li><li><strong>Publish freeze:</strong> only runs graded at or after the 2026-09-26 anti-cheat fix are published (timestamp &ge; 2026-09-26T15:34:10Z); earlier rows were graded under a stricter rule that has since changed. Fingerprint allowlists alone are insufficient because graded content changed without a version bump.</li><li><strong>Integrity limits:</strong> egress/static anti-cheat blocklists are self-admitted; a DNS candidate forwarding to the reference is indistinguishable from a real resolver by design; binproto STREAM, proxy X-Forwarded-For, and pubsub 1,000-subscriber requirements are published as specified but verified at reduced scale; the LLM judge may review its own model family rows; the API key travels in the agent container env.</li></ul></section>"#;
 
 /// Rollup page appends the coverage-floor note to the shared methodology.
 const ROLLUP_FLOOR_NOTE_HTML: &str = r#"<p style="font-size:0.82rem;color:var(--mut);">Rollup coverage floor: a model appears only with at least 6 of 7 active tasks and at least 18 total trials (avg 3/task); thinner coverage is excluded and logged at export.</p>"#;
@@ -965,7 +966,7 @@ const PORTAL_JS: &str = r#"
     return `
       <div style="margin-bottom: 12px; padding: 10px 14px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.78rem; color: var(--mut); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span>📐</span>
-        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>HTTP/Proxy</strong> (Nginx, live), <strong>Redis</strong> (live). <strong>PDF/WAL/PubSub</strong> timings are reported but unscored (--). Ranking is server-side (P@1-lo, P@1, score, cost) — the old formula customizer is removed.</span>
+        <span><strong>Scoring Regime:</strong> Throughput scores only where a live reference anchors them — <strong>redis/http</strong> only (live reference). <strong>PDF/WAL/Proxy/PubSub/Binproto</strong> timings are reported but unscored (--). Ranking is server-side (P@1-lo, P@1, score, cost) — the old formula customizer is removed.</span>
       </div>
     `;
   }
@@ -991,7 +992,7 @@ const PORTAL_JS: &str = r#"
     const canonical = {};
     for (const r of RUNS_DATA) {
       const task = (r.task || '').toLowerCase();
-      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task;
+      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task + '\u0001' + ((r.harness || 'omp').toLowerCase());
       const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
       const existing = canonical[key];
       if (!existing) {
@@ -1015,9 +1016,9 @@ const PORTAL_JS: &str = r#"
     // 2. Aggregate only canonical runs across tasks
     const groups = {};
     for (const r of Object.values(canonical)) {
-      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto');
+      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + ((r.harness || 'omp').toLowerCase());
       const g = groups[key] || (groups[key] = {
-        model: r.model || '?', effort: r.effort || 'auto',
+        model: r.model || '?', effort: r.effort || 'auto', harness: (r.harness || 'omp'),
         tasks: {}, nTrials: 0, nPass: 0, sumAvg: 0, nParents: 0,
         sumCost: 0, sumApiCost: 0, sumTurns: 0,
       });
@@ -1037,7 +1038,7 @@ const PORTAL_JS: &str = r#"
     const rows = Object.values(groups).map(g => {
       const [lo, hi] = wilson95(g.nPass, g.nTrials);
       return {
-        model: g.model, effort: g.effort,
+        model: g.model, effort: g.effort, harness: g.harness,
         nTasks: Object.keys(g.tasks).length,
         tasks: Object.keys(g.tasks).sort().join(', '),
         avgPct: g.sumAvg / Math.max(1, g.nParents),
@@ -1051,7 +1052,7 @@ const PORTAL_JS: &str = r#"
   }
 
   function modelsSortVal(r, col) {
-    if (col === 'model') return (r.model + ' ' + r.effort).toLowerCase();
+    if (col === 'model') return (r.model + ' ' + r.effort + ' ' + r.harness).toLowerCase();
     if (col === 'tasks') return r.nTasks;
     if (col === 'avg') return r.avgPct;
     if (col === 'cost') return r.cost;
@@ -1063,7 +1064,7 @@ const PORTAL_JS: &str = r#"
 
   function renderModelsView() {
     const q = (typeof searchQuery !== 'undefined' ? (searchQuery || '') : '').toLowerCase();
-    const rows = aggregateModels().filter(r => !q || ((r.model + ' ' + r.effort).toLowerCase().includes(q)));
+    const rows = aggregateModels().filter(r => !q || ((r.model + ' ' + r.effort + ' ' + r.harness).toLowerCase().includes(q)));
     rows.sort((a, b) => {
       const va = modelsSortVal(a, modelsSortCol);
       const vb = modelsSortVal(b, modelsSortCol);
@@ -1082,6 +1083,7 @@ const PORTAL_JS: &str = r#"
             <span style="font-weight: 600; color: ${meta.color};">${escapeHtml(shortModelName(r.model))}</span>
           </div>
           <span class="badge badge-effort">effort: ${escapeHtml(r.effort)}</span>
+            <span class="badge" title="Agent harness">harness: ${escapeHtml(r.harness || 'omp')}</span>
         </div></td>
         <td style="text-align: center;">${r.nTasks} <span style="font-size: 0.7rem; color: var(--mut);">${escapeHtml(r.tasks)}</span></td>
         <td style="text-align: center; font-weight: 700;">${r.avgPct.toFixed(0)}%</td>
@@ -1095,7 +1097,7 @@ const PORTAL_JS: &str = r#"
     const arrow = (c) => modelsSortCol === c ? (modelsSortDir === 1 ? ' ▲' : ' ▼') : '';
     return `
       <div style="margin-bottom: 10px; padding: 8px 12px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; font-size: 0.76rem; color: var(--mut);">
-        🏅 <strong>Cross-task rollup</strong>: one row per model+effort across all tasks. Ranked by pooled P@1 lower bound — the honest answer to "which cheap model codes best".
+        🏅 <strong>Cross-task rollup</strong>: one row per model+effort+harness across all tasks. Ranked by pooled P@1 lower bound — the honest answer to "which cheap model codes best".
       </div>
       <div class="table-wrap"><table>
         <thead><tr>
@@ -1322,7 +1324,7 @@ impl PortalExporter {
         })
     }
 
-    /// Aggregate parents into one row per model across all tasks.
+    /// Aggregate parents into one row per model+harness across all tasks.
     /// Step 1 (dedup): one canonical parent per (model, effort, task) —
     /// highest trial count wins, latest timestamp breaks ties — mirroring
     /// the `aggregateModels` cross-task rollup in PORTAL_JS. Step 2: group
@@ -1331,7 +1333,7 @@ impl PortalExporter {
         results: &[crate::report::leaderboard::BenchmarkRunResult],
     ) -> Vec<ModelRollupRow> {
         let mut canonical: HashMap<
-            (String, String, String),
+            (String, String, String, String),
             &crate::report::leaderboard::BenchmarkRunResult,
         > = HashMap::new();
         for r in results {
@@ -1343,6 +1345,7 @@ impl PortalExporter {
                 r.model.clone(),
                 r.effort.clone().unwrap_or_else(|| "auto".to_string()),
                 r.task.to_lowercase(),
+                crate::report::leaderboard::BenchmarkRunResult::harness_of(r).to_string(),
             );
             let n = r.total_trials.unwrap_or(r.subruns.len() as u32).max(1);
             let replace = match canonical.get(&key) {
@@ -1375,9 +1378,15 @@ impl PortalExporter {
                 _ => 0,
             }
         }
-        let mut groups: HashMap<String, Acc> = HashMap::new();
+        let mut groups: HashMap<(String, String), Acc> = HashMap::new();
         for r in canonical.into_values() {
-            let g = groups.entry(r.model.clone()).or_insert_with(|| Acc {
+            let g = groups
+                .entry((
+                    r.model.clone(),
+                    crate::report::leaderboard::BenchmarkRunResult::harness_of(r)
+                        .to_string(),
+                ))
+                .or_insert_with(|| Acc {
                 tasks: HashSet::new(),
                 n_parents: 0,
                 n_trials: 0,
@@ -1410,11 +1419,12 @@ impl PortalExporter {
 
         let mut rows: Vec<ModelRollupRow> = groups
             .into_iter()
-            .map(|(model, g)| {
+            .map(|((model, harness), g)| {
                 let (p1_lo, p1_hi) = wilson_interval_95(g.n_trials, g.n_pass);
                 let mut tasks: Vec<String> = g.tasks.into_iter().collect();
                 tasks.sort();
                 ModelRollupRow {
+                    harness,
                     n_tasks: tasks.len(),
                     tasks,
                     model,
@@ -1518,13 +1528,14 @@ impl PortalExporter {
             }
             trs.push_str(&format!(
                 "<tr class=\"mrow\"><td style=\"text-align:center;\">{rank}</td>\
-                 <td><span class=\"mname\" title=\"{model}\">{short}</span><br><span class=\"tdots\" title=\"{tasks}\">{dots}</span></td>\
+                 <td><span class=\"mname\" title=\"{model}\">{short}</span> <span class=\"badge badge-effort\">{harness}</span><br><span class=\"tdots\" title=\"{tasks}\">{dots}</span></td>\
                  <td class=\"bignum\">{avg:.0}<span class=\"pct\">%</span></td>\
                  <td>{ci_bar}<br><span class=\"mut\">{p1:.0}% ({lo:.0}-{hi:.0})</span></td>\
                  <td style=\"text-align:center;\" title=\"API ${total_api:.4} / effective ${total:.4}\"><b>${total_api:.2}</b><br><span class=\"mut\">${avg_api:.2}/run</span></td>\
                  <td style=\"text-align:center;\">{stab}<br><span class=\"mut\">{ntrials}t/{nparents}r</span></td></tr>\n",
                 rank = rank,
                 model = Self::esc(&r.model),
+                harness = Self::esc(&r.harness),
                 short = [
                     Self::esc(LeaderboardManager::short_model_name(&r.model)),
                     Self::esc(LeaderboardManager::pricing_badge(&r.model)),
@@ -2491,6 +2502,7 @@ mod tests {
             task: task.to_string(),
             language: "Python".to_string(),
             effort: Some("high".to_string()),
+            harness: None,
             pass_rate: pass,
             passed_stages: 5,
             total_stages: 5,

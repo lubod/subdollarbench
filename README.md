@@ -86,7 +86,7 @@ Instead of evaluating trivial single-function code snippets ([HumanEval](https:/
 | **`binproto`** | Binary length-prefixed RPC (SDB1) | reported per-trial, never scored |
 
 Only **redis** and **http** have a live reference denominator and therefore a
-Throughput Score. The other six tasks rank by Pass@1 / cost (efficiency only).
+Throughput Score. The other five tasks rank by Pass@1 / cost (efficiency only).
 
 > **DNS removed 2026-10-05** (retired 2026-09-30, then deleted). Five archived
 > rows (09-27–09-28) are preserved in
@@ -116,7 +116,7 @@ docker build -t subdollar-sandbox -f Dockerfile.sandbox .
 ```bash
 cargo run --release -- ui --port 3000
 ```
-> ⚠️ **Security Warning**: The Web UI does not enforce authentication. Always bind to loopback (`127.0.0.1`, default). Do not bind to `0.0.0.0` or expose the UI port on untrusted networks, as anyone with network access could trigger benchmark runs, spend your API credits, or modify task prompts.
+> ⚠️ **Security Warning**: The Web UI is CSRF-only without `SDB_UI_TOKEN`. Always bind to loopback (`127.0.0.1`, default). Binding `0.0.0.0` without `SDB_UI_TOKEN` (+ `SDB_UI_USER`/`SDB_UI_PASS`) now logs a `[SECURITY]` warning — see `.env.example` (0600). Anyone with network access could otherwise trigger runs, spend API credits, or edit task prompts (which requires a `RULES_VERSION` bump).
 
 Open `http://localhost:3000` in your browser. From the UI, you can:
 - Browse all models on OpenRouter priced below $1.00 / 1M tokens.
@@ -149,6 +149,16 @@ cargo run --release -- run \
   --budget-usd 0.50
 ```
 
+#### Agent Harnesses (omp | opencode)
+
+`--harness omp` (default) runs trials with the OMP agent; `--harness opencode`
+runs the same task text through the OpenCode CLI (`opencode run --auto`) in
+the same sandbox image, network, and verifier pipeline. Usage maps to cost
+stats as prompt=Σinput, completion=Σ(output+reasoning), cached=Σcache.read
+(`session export` shape). Effort is request-only under opencode (no thinking
+flag; recorded + hinted in-prompt). Free-tier test model:
+`opencode/ling-3.1-flash-free` (cost $0, effective cost = compute floor only).
+
 #### CLI Options Reference (from `run --help`; abbreviated)
 ```text
 Usage: subdollarbench run [OPTIONS] --model <MODEL>
@@ -156,12 +166,13 @@ Usage: subdollarbench run [OPTIONS] --model <MODEL>
   -m, --model <MODEL>            OpenRouter model ID (e.g. openrouter/google/gemini-2.5-flash)
   -t, --task <TASK>              [default: redis] [possible values: redis, http, pdf, wal, proxy, pubsub, binproto] (`--task dns` no longer parses: unknown task since removal 2026-10-05)
   -e, --effort <EFFORT>          (off, minimal, low, medium, high, xhigh, max) [default: high]
+      --harness <HARNESS>      Agent harness: omp | opencode [default: omp] (ranks never mix harnesses)
   -b, --budget-usd <BUDGET_USD>  Maximum cost budget in USD [default: 1]
       --max-turns <MAX_TURNS>    [default: 100]
       --timeout-min <MINUTES>    [default: 30]
       --trials <TRIALS>          Repeated trials for Pass@k (n=9 default; n=3 spans ±40pt) [default: 9]
-      --extend-if-unstable       Keep adding trials in batches of 3 while unstable
-      --max-trials <MAX_TRIALS>  Trial cap incl. initial batch [default: 7]
+      --extend-if-unstable       Keep adding trials in batches of 3 while unstable (requires --max-trials > --trials)
+      --max-trials <MAX_TRIALS>  Trial cap incl. initial batch [default: 9]
       --review-model <MODEL>     End-of-run code-review judge [default: openrouter/meta/muse-spark-1.3-contributor]
 ```
 
