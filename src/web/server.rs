@@ -45,10 +45,11 @@ pub use super::queue::test_queue_item;
 pub use super::queue::{
     claim_slot, db_mirror, db_try, dispatch_ready, execute_extend_body, execute_run_body,
     kick_runner, mark_queue_done, now_rfc3339, park_refused, pause_queue, proxy_mutation,
-    proxy_read, pump_queue, push_console_line, push_queue_item, queue_seq_start, reconcile_queue,
-    release_slot, replay_queue, resume_queue, run_extension_batch, send_status, spawn_extend_body,
-    spawn_run_body, tempfile_mem_store, ExtBatchOut, ExtBatchSpec, ExtendRequest, QueueKind,
-    QueueStatus, QueuedRun, RunRequest, WebLogger, MAX_CONSOLE_LINES, MAX_REFUSALS,
+    proxy_read, pump_queue, push_console_line, push_queue_item, push_worker_line, queue_seq_start,
+    reconcile_queue, release_slot, replay_queue, resume_queue, run_extension_batch, send_status,
+    spawn_extend_body, spawn_run_body, tempfile_mem_store, ExtBatchOut, ExtBatchSpec,
+    ExtendRequest, QueueKind, QueueStatus, QueuedRun, RunRequest, WebLogger, MAX_CONSOLE_LINES,
+    MAX_REFUSALS,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,6 +118,9 @@ pub struct AppState {
     pub running_slots: Arc<std::sync::Mutex<std::collections::HashSet<u8>>>,
     /// Per-worker live run info (worker -> ActiveRunInfo).
     pub worker_runs: Arc<RwLock<std::collections::HashMap<u8, ActiveRunInfo>>>,
+    /// Per-worker console buffers (worker -> lines). Backs the per-worker
+    /// console tabs; cleared when the worker slot is claimed fresh.
+    pub worker_buffers: Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
     /// Per-worker task handles (worker -> JoinHandle).
     pub worker_handles:
         Arc<std::sync::Mutex<std::collections::HashMap<u8, tokio::task::JoinHandle<()>>>>,
@@ -491,6 +495,7 @@ impl UiServer {
             queue_paused: Arc::new(AtomicBool::new(false)),
             running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            worker_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             worker_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             store,
@@ -1386,6 +1391,8 @@ pub(crate) async fn get_run_file(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConsoleQuery {
+    /// Worker id for a per-worker view. Absent = multiplexed all-workers view.
+    worker: Option<u8>,
     /// Max lines to return (newest). Defaults to the buffer cap.
     tail: Option<usize>,
     /// Lines the client already holds; returns only newer lines plus a
@@ -1408,7 +1415,20 @@ pub(crate) async fn get_active_console(
             return proxied;
         }
     }
-    let buf = state.log_buffer.read().unwrap();
+    // Per-worker view: one worker's lines only (see worker_buffers).
+    // Multiplexed all-view stays the default for back-compat. Unknown
+    // workers yield an empty body with total 0 (same as an empty buffer).
+    let buf: Vec<String> = if let Some(w) = q.worker {
+        state
+            .worker_buffers
+            .read()
+            .unwrap()
+            .get(&w)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        state.log_buffer.read().unwrap().clone()
+    };
     let total = buf.len();
     let cap = q.tail.unwrap_or(MAX_CONSOLE_LINES).min(total.max(1));
     let tail_start = total.saturating_sub(cap);
@@ -1971,6 +1991,7 @@ pub(crate) async fn extend_parent_run(
             },
             spec,
             ext_worker,
+            &state_clone.worker_buffers,
         )
         .await;
         if out.billing_tripped {
@@ -2513,6 +2534,61 @@ mod tests {
         assert_eq!(item.note.as_deref(), Some("7/9 trials passing"));
     }
 
+    #[tokio::test]
+    async fn test_worker_buffers_separate_lines_per_worker() {
+        // Two workers logging concurrently must not interleave or wipe:
+        // regression test for the shared-buffer trial-1 clear.
+        let state = create_test_state();
+        push_worker_line(&state.worker_buffers, 0, "w0-a".to_string());
+        push_worker_line(&state.worker_buffers, 1, "w1-a".to_string());
+        push_worker_line(&state.worker_buffers, 0, "w0-b".to_string());
+        let bufs = state.worker_buffers.read().unwrap();
+        assert_eq!(
+            bufs.get(&0).unwrap(),
+            &vec!["w0-a".to_string(), "w0-b".to_string()]
+        );
+        assert_eq!(bufs.get(&1).unwrap(), &vec!["w1-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_console_worker_param_serves_one_worker() {
+        use axum::extract::{Query, State};
+        let state = create_test_state();
+        push_worker_line(&state.worker_buffers, 0, "w0-line".to_string());
+        push_worker_line(&state.worker_buffers, 1, "w1-line".to_string());
+        push_console_line(&state.log_buffer, "w0-line".to_string());
+        push_console_line(&state.log_buffer, "w1-line".to_string());
+        let q = Query(ConsoleQuery {
+            worker: Some(1),
+            tail: None,
+            since: None,
+        });
+        let req = axum::extract::Request::builder()
+            .uri("/api/console")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = get_active_console(State(state.clone()), q, req).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains("w1-line"), "worker view must have w1 lines");
+        assert!(
+            !text.contains("w0-line"),
+            "worker view must not leak w0 lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_claim_slot_clears_worker_console() {
+        let state = create_test_state();
+        push_worker_line(&state.worker_buffers, 0, "stale".to_string());
+        let w = claim_slot(&state).expect("slot");
+        assert_eq!(w, 0);
+        assert!(state.worker_buffers.read().unwrap().get(&0).is_none());
+        release_slot(&state, w);
+    }
+
     async fn test_queue_of(state: &AppState) -> Vec<QueuedRun> {
         let resp = get_queue(State(state.clone())).await;
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
@@ -2536,6 +2612,7 @@ mod tests {
             queue_paused: Arc::new(AtomicBool::new(false)),
             running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            worker_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             worker_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             store: Arc::new(tempfile_mem_store()),

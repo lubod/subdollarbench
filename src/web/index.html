@@ -1222,6 +1222,9 @@
               </span>
               <span id="consoleSubrunBadge" class="badge" style="display: none; background: rgba(240,136,62,0.15); color: #f0883e; border: 1px solid rgba(240,136,62,0.3); font-size: 0.72rem; font-weight: 700;">Subrun 1/3</span>
             </div>
+          <div id="consoleWorkerTabs" style="display: none; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
+            <span class="hint" style="font-size: 0.72rem;">worker:</span>
+          </div>
             <div style="display: flex; gap: 10px; align-items: center;">
               <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Toggle preview of written code and tool arguments">
                 <input type="checkbox" id="codeDetailsCheck" checked onchange="toggleCodeDetails(this.checked)"> Code Details
@@ -2121,6 +2124,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       seenLineHashes.clear();
       seenLineOrder.length = 0;
       consoleKnownLines = 0;
+      consoleCursors = { all: 0 };
       consoleSynced = false;
     }
 
@@ -3912,6 +3916,33 @@ function copyRunId() {
     // only new rows instead of re-rendering the whole console each tick.
     let consoleKnownLines = 0;
     let consoleSynced = false;
+    // Per-worker console views: 'all' (multiplexed) or a worker id.
+    // Cursors are per-view: switching views re-syncs that view from scratch.
+    let consoleWorkerFilter = 'all';
+    let consoleCursors = { all: 0 };
+    function setConsoleWorkerFilter(f) {
+      consoleWorkerFilter = f;
+      if (!(f in consoleCursors)) consoleCursors[f] = 0;
+      consoleSynced = false;
+      reseedSeen([]);
+      fetchConsoleLogs(true);
+    }
+    function renderConsoleWorkerTabs(workers) {
+      const box = document.getElementById('consoleWorkerTabs');
+      if (!box) return;
+      const ids = Object.keys(workers || {}).sort();
+      // Keep the selected tab even after its worker finishes (buffer
+      // persists until the slot is reused); drop nothing silently.
+      const want = ['all', ...ids];
+      if (!want.includes(consoleWorkerFilter)) consoleWorkerFilter = 'all';
+      if (!ids.length && consoleWorkerFilter === 'all') { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = 'flex';
+      box.innerHTML = '<span class="hint" style="font-size: 0.72rem;">worker:</span>' + want.map(w => {
+        const label = w === 'all' ? 'All' : ('W' + w);
+        const on = w === consoleWorkerFilter;
+        return `<button class="btn-secondary" style="padding:2px 10px;font-size:0.72rem;${on ? 'border-color:var(--primary);color:#fff;' : ''}" onclick="setConsoleWorkerFilter('${w}')">${label}</button>`;
+      }).join('');
+    }
 
     // Max rendered rows in the terminal. The server caps its buffer at 3000;
     // the DOM keeps a smaller window (800) so long runs stay smooth.
@@ -3991,7 +4022,8 @@ function copyRunId() {
         const term = document.getElementById('terminalOutput');
         // Fresh snapshot (manual refresh or first paint): render capped tail.
         if (force || !consoleSynced) {
-          const res = await fetch('/api/console?tail=800');
+          const wq = consoleWorkerFilter === 'all' ? '' : `&worker=${encodeURIComponent(consoleWorkerFilter)}`;
+          const res = await fetch(`/api/console?tail=800${wq}`);
           if (res.ok) {
             const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
             const body = await res.text();
@@ -4003,12 +4035,14 @@ function copyRunId() {
               term.innerHTML = '';
             }
             consoleKnownLines = total;
+            consoleCursors[consoleWorkerFilter] = total;
             consoleSynced = true;
             scrollTerm();
           }
         } else {
           // Steady state: append only lines newer than the cursor.
-          const res = await fetch(`/api/console?since=${consoleKnownLines}`);
+          const wq = consoleWorkerFilter === 'all' ? '' : `&worker=${encodeURIComponent(consoleWorkerFilter)}`;
+          const res = await fetch(`/api/console?since=${consoleKnownLines}${wq}`);
           if (res.ok) {
             const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
             const text = await res.text();
@@ -4021,6 +4055,7 @@ function copyRunId() {
               appendConsoleLines(renderConsoleBody(term, text));
             }
             consoleKnownLines = total;
+            consoleCursors[consoleWorkerFilter] = total;
           }
         }
           const badge = document.getElementById('consolePulseBadge');
@@ -4083,6 +4118,7 @@ function copyRunId() {
           checkActiveRun();
           loadRuns();
         } else {
+          if (consoleWorkerFilter !== 'all') return;
           appendLog(event.data);
         }
       };
@@ -4149,6 +4185,7 @@ function copyRunId() {
           document.getElementById('statusText').textContent = 'Running';
           // Multi-worker: data.workers is {stringId: run} (JSON keys are
           // strings). Render one card per worker; legacy current_run first.
+          renderConsoleWorkerTabs(data.workers || {});
           if (data.workers && Object.keys(data.workers).length > 1) {
             renderWorkerCards(data.workers);
           } else {

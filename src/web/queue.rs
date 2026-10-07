@@ -490,6 +490,23 @@ pub async fn proxy_mutation(
 /// payloads, SSE replay on connect, and steady-state memory while a run
 /// streams. Full history stays in runs/<id>/console.log on disk.
 pub const MAX_CONSOLE_LINES: usize = 3000;
+/// Per-worker console cap: same bound as the shared buffer, each.
+pub const MAX_WORKER_CONSOLE_LINES: usize = 3000;
+/// Mirror one line into a worker's private buffer (bounded). Backs the
+/// per-worker console tabs; the shared buffer stays the multiplexed all-view.
+pub fn push_worker_line(
+    bufs: &Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
+    worker: u8,
+    line: String,
+) {
+    let mut m = bufs.write().unwrap();
+    let v = m.entry(worker).or_default();
+    v.push(line);
+    let over = v.len().saturating_sub(MAX_WORKER_CONSOLE_LINES);
+    if over > 0 {
+        v.drain(..over);
+    }
+}
 pub fn push_console_line(log_buf: &Arc<RwLock<Vec<String>>>, line: String) {
     let mut buf = log_buf.write().unwrap();
     buf.push(line);
@@ -504,6 +521,8 @@ pub struct WebLogger {
     pub(crate) current_run: Arc<RwLock<Option<ActiveRunInfo>>>,
     pub(crate) trial_idx: u32,
     pub(crate) total_trials: u32,
+    pub(crate) worker: u8,
+    pub(crate) worker_bufs: Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
 }
 impl PipelineLogger for WebLogger {
     fn log(&self, msg: &str) {
@@ -528,6 +547,7 @@ impl PipelineLogger for WebLogger {
 
             let formatted = format!("[{}] {}", ts, line_to_log);
             push_console_line(&self.log_buf, formatted.clone());
+            push_worker_line(&self.worker_bufs, self.worker, formatted.clone());
             let _ = self.tx.send(formatted);
         }
 
@@ -610,6 +630,7 @@ pub async fn run_extension_batch(
     batch_log: &(dyn Fn(&str) + Sync),
     spec: ExtBatchSpec,
     worker: u8,
+    worker_bufs: &Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
 ) -> ExtBatchOut {
     let ext_batch_ref = if spec.count > 1 {
         // Per-bracket id: the extension's pre must pair with ITS post, not
@@ -694,6 +715,8 @@ pub async fn run_extension_batch(
             current_run: current_run.clone(),
             trial_idx,
             total_trials: spec.display_total,
+            worker,
+            worker_bufs: worker_bufs.clone(),
         });
         logger.log(&format!(
             "[SUBRUN] ━━━ Starting Extension Subrun {} (Model: {}, Task: {}) ━━━",
@@ -772,6 +795,9 @@ pub fn claim_slot(state: &AppState) -> Option<u8> {
         if !slots.contains(&w) {
             slots.insert(w);
             state.is_running.store(true, Ordering::SeqCst);
+            // Fresh worker = fresh console view (stale lines from the
+            // previous occupant would read as the new run's output).
+            state.worker_buffers.write().unwrap().remove(&w);
             return Some(w);
         }
     }
@@ -974,6 +1000,7 @@ pub async fn execute_extend_body(
         },
         spec,
         worker,
+        &state.worker_buffers,
     )
     .await;
     if out.billing_tripped {
@@ -1202,7 +1229,9 @@ pub async fn execute_run_body(
             .insert(worker, live_info.clone());
         // Legacy mirror (lowest worker wins in get_status; single worker = exact).
         *state.current_run.write().unwrap() = Some(live_info);
-        if trial_idx == 1 {
+        // Fresh shared view only when this is the sole live worker:
+        // parallel workers used to wipe each other's trial-1 history.
+        if trial_idx == 1 && state.worker_runs.read().unwrap().len() <= 1 {
             state.log_buffer.write().unwrap().clear();
         }
 
@@ -1212,6 +1241,8 @@ pub async fn execute_run_body(
             current_run: state.current_run.clone(),
             trial_idx,
             total_trials,
+            worker,
+            worker_bufs: state.worker_buffers.clone(),
         });
 
         if total_trials > 1 {
@@ -1431,6 +1462,7 @@ pub async fn execute_run_body(
                     display_total: total_trials + add,
                 },
                 worker,
+                &state.worker_buffers,
             )
             .await;
             if out.billing_tripped {
