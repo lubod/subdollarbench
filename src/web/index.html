@@ -737,7 +737,53 @@
       min-height: 0;
       border-right: 1px solid var(--border);
     }
-    .explorer-col:last-child { border-right: none; flex: 1.4; }
+    .explorer-col:last-child { border-right: none; flex: 2.1; }
+    .xdet-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      gap: 6px;
+      margin: 8px 0;
+    }
+    .xdet-kpi {
+      background: #161b22;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 9px;
+    }
+    .xdet-kpi .k { font-size: 0.64rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .xdet-kpi .v { font-size: 0.86rem; font-weight: 700; color: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .xdet-sec {
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin: 10px 0 5px;
+      padding-bottom: 3px;
+      border-bottom: 1px solid var(--border);
+    }
+    .xdet-stage {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      font-size: 0.76rem;
+      padding: 5px 8px;
+      border-radius: 5px;
+    }
+    .xdet-stage:nth-child(odd) { background: rgba(255,255,255,0.02); }
+    .xdet-err {
+      color: var(--danger);
+      font-size: 0.7rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(248,81,73,0.07);
+      border: 1px solid rgba(248,81,73,0.25);
+      border-radius: 5px;
+      padding: 5px 8px;
+      margin: 3px 0 3px 24px;
+      max-height: 160px;
+      overflow-y: auto;
+    }
     .explorer-head {
       padding: 8px 12px;
       font-size: 0.72rem;
@@ -1629,36 +1675,40 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const tid = t.id || '';
       const [txt, cls] = humanStatus(t.status, t.pass_rate);
       const cost = (t.effective_cost_usd !== undefined && t.effective_cost_usd !== null) ? t.effective_cost_usd : (t.total_cost_usd || 0);
+      const api = t.total_cost_usd || 0;
       const toks = t.total_tokens ?? ((t.prompt_tokens || 0) + (t.cached_tokens || 0) + (t.completion_tokens || 0));
-      const eff = (t.efficiency_score ?? 0).toFixed(1);
-      const tp = (t.throughput_req_sec !== undefined && t.throughput_req_sec !== null) ? formatThroughput(t.throughput_req_sec, t.task) : '—';
+      const kpi = (k, v, title) => `<div class="xdet-kpi" ${title ? `title="${escapeHtml(title)}"` : ''}><div class="k">${k}</div><div class="v">${v}</div></div>`;
       let stages = '';
       if (t.stages && t.stages.length) {
-        stages = '<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">STAGES</div>' + t.stages.map(s => {
+        const fails = t.stages.filter(s => !s.passed).length;
+        stages = `<div class="xdet-sec">Stages — ${t.stages.length - fails}/${t.stages.length} green</div>` + t.stages.map(s => {
           const nm = escapeHtml(s.name || s.stage || 'stage');
           const ok = !!s.passed;
-          return `<div style="font-size:0.74rem;padding:4px 0;border-bottom:1px dashed rgba(255,255,255,0.06);"><span style="color:${ok ? 'var(--success)' : 'var(--danger)'};">${ok ? '✔' : '✕'}</span> ${nm}${s.error ? `<div style="color:var(--danger);font-size:0.7rem;white-space:pre-wrap;">${escapeHtml(String(s.error))}</div>` : ''}</div>`;
+          return `<div class="xdet-stage"><span style="color:${ok ? 'var(--success)' : 'var(--danger)'};font-weight:700;">${ok ? '✔' : '✕'}</span><span>${nm}</span></div>`
+            + (s.error ? `<div class="xdet-err">${escapeHtml(String(s.error))}</div>` : '');
         }).join('');
       } else {
-        stages = '<div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;">No stage detail on this row — open full view.</div>';
+        stages = `<div class="xdet-sec">Stages</div><div style="font-size:0.74rem;color:var(--text-muted);">No stage detail on this row — open full view.</div>`;
       }
-      det.innerHTML = `<div style="font-size:0.78rem;display:flex;flex-direction:column;gap:6px;" data-explorer-trial="${escapeHtml(tid)}">`
-        + `<div><b>${escapeHtml(tid.slice(-24))}</b> <span class="badge ${cls}">${escapeHtml(txt)}</span>${isParent ? ' <span class="badge">parent row</span>' : ''}</div>`
-        + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:0.74rem;color:var(--text-muted);">`
-        + `<span>pass <b style="color:#fff;">${Math.round(t.pass_rate || 0)}% (${t.passed_stages ?? '?'}/${t.total_stages ?? '?'})</b></span>`
-        + `<span>score <b style="color:#fff;">${eff}</b></span>`
-        + `<span>cost <b style="color:#fff;">$${Number(cost).toFixed(4)}</b></span>`
-        + `<span>tokens <b style="color:#fff;">${Number(toks || 0).toLocaleString()}</b></span>`
-        + `<span>turns <b style="color:#fff;">${t.turns ?? '?'}</b></span>`
-        + `<span>duration <b style="color:#fff;">${(t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-'}</b></span>`
-        + `<span>throughput <b style="color:#fff;">${escapeHtml(tp)}</b></span>`
-        + `<span>harness <b style="color:#fff;">${escapeHtml(t.harness || 'omp')}</b></span></div>`
+      det.innerHTML = `<div style="font-size:0.78rem;display:flex;flex-direction:column;">`
+        + `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px;">`
+        + `<b style="font-size:0.86rem;">${escapeHtml(tid.slice(-28))}</b> <span class="badge ${cls}">${escapeHtml(txt)}</span>${isParent ? ' <span class="badge">parent row</span>' : ''}`
+        + `<button class="btn-secondary" style="padding:1px 8px;font-size:0.68rem;margin-left:auto;" data-cp="${escapeHtml(tid)}" onclick="copyTextToClipboard(this.dataset.cp).then(() => copyButtonFeedback('explorerCpBtn', 'Copied!'))" id="explorerCpBtn" title="Copy full run id">📋</button></div>`
+        + `<div style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(t.model || '')} · ${escapeHtml(t.task || '')} · effort ${escapeHtml(t.effort || 'auto')} · harness ${escapeHtml(t.harness || 'omp')} · ${escapeHtml((t.timestamp || '').slice(0, 16).replace('T', ' '))}</div>`
+        + `<div class="xdet-grid">`
+        + kpi('Pass', `${Math.round(t.pass_rate || 0)}% <span style="font-size:0.68rem;color:var(--text-muted);">(${t.passed_stages ?? '?'}/${t.total_stages ?? '?'})</span>`, 'Share of verification stages passing')
+        + kpi('Score', (t.efficiency_score ?? 0).toFixed(1), 'Pass@1 per cent of effective cost')
+        + kpi('Cost', `$${Number(cost).toFixed(4)}`, `API $${Number(api).toFixed(4)} + compute $${Math.max(0, cost - api).toFixed(4)}`)
+        + kpi('Tokens', Number(toks || 0).toLocaleString(), `prompt ${t.prompt_tokens ?? 0} / cached ${t.cached_tokens ?? 0} / completion ${t.completion_tokens ?? 0}`)
+        + kpi('Turns', `${t.turns ?? '?'}`, 'Agent steps used')
+        + kpi('Duration', (t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-', 'End-to-end wall time')
+        + kpi('Throughput', (t.throughput_req_sec !== undefined && t.throughput_req_sec !== null) ? formatThroughput(t.throughput_req_sec, t.task) : '—', 'Measured rate; scored only for redis/http with a live reference')
+        + `</div>`
         + stages
-        + `<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">FILES <span id="explorerFilesNote" style="font-weight:400;"></span></div><div id="explorerFiles" style="font-size:0.74rem;"></div>`
+        + `<div class="xdet-sec">Files <span id="explorerFilesNote" style="font-weight:400;"></span></div><div id="explorerFiles" style="font-size:0.74rem;"></div>`
         + `<div id="explorerFileView" style="display:none;"><pre id="explorerFilePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:260px;white-space:pre;"></pre></div>`
-        + `<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">TRACE TAIL</div><pre id="explorerTracePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:200px;white-space:pre-wrap;">loading…</pre>`
-        + `<div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;"><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}')">Open full view</button><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}', {tab:'trace'})">Full trace</button></div></div>`;
-      // Files + trace tail load async (cached per trial).
+        + `<div class="xdet-sec">Trace tail</div><pre id="explorerTracePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:200px;white-space:pre-wrap;">loading…</pre>`
+        + `<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;"><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}')">Open full view</button><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}', {tab:'trace'})">Full trace</button></div></div>`;
       if (!explorerDetailCache[tid]) explorerDetailCache[tid] = {};
       const cached = explorerDetailCache[tid];
       const filesBox = document.getElementById('explorerFiles');
