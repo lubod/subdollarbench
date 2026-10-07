@@ -1054,6 +1054,54 @@
           </select>
         </div>
 
+        <details class="form-group" id="promptSection" open>
+          <summary style="font-weight: 600; cursor: pointer; font-size: 0.85rem;">📝 Task Spec <span class="hint">(follows this task — graded prompts, saving bumps rules)</span></summary>
+          <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px;">
+          <!-- Prompt Toolbar -->
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span class="hint" style="font-weight: 600; color: #fff;">Task Spec:</span>
+              <select id="promptTaskSelect" onchange="onTaskChange(this.value)" style="padding: 4px 10px; font-size: 0.78rem; font-weight: 600;">
+                <option value="redis">⚡ redis (In-Memory Redis Server)</option>
+                <option value="http">🌐 http (HTTP/1.1 Web Server)</option>
+                <option value="pdf">📄 pdf (PDF to Text Extractor)</option>
+                <option value="wal">📓 wal (Durable Event Broker)</option>
+                <option value="proxy">🔀 proxy (Reverse Proxy & LB)</option>
+                <option value="pubsub">📡 pubsub (WebSocket Fan-Out)</option>
+                <option value="binproto">🔩 binproto (Binary RPC SDB1)</option>
+              </select>
+              <span id="promptStatusIndicator" style="font-size: 0.72rem; color: var(--text-muted);"></span>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <!-- View mode toggle -->
+              <div style="display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
+                <button id="promptViewBtnPreview" class="btn-toggle active" onclick="setPromptViewMode('preview')">👁️ Formatted</button>
+                <button id="promptViewBtnEdit" class="btn-toggle" onclick="setPromptViewMode('edit')">✏️ Edit Raw</button>
+                <button id="promptViewBtnSplit" class="btn-toggle" onclick="setPromptViewMode('split')">◫ Split</button>
+              </div>
+              <button class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.76rem;" onclick="copyPromptMarkdown()">📋 Copy Markdown</button>
+              <button id="promptSaveBtn" class="btn btn-primary" style="padding: 5px 12px; font-size: 0.76rem;" onclick="savePrompt()">💾 Save Changes</button>
+            </div>
+          </div>
+
+          <!-- Formatted Preview Container -->
+          <div id="promptPreviewContainer" class="markdown-body" style="display: block;">
+            <div style="text-align: center; color: var(--text-muted); padding: 30px;">Loading prompt specification...</div>
+          </div>
+
+          <!-- Raw Editor Container -->
+          <div id="promptEditContainer" style="display: none; flex-direction: column; gap: 8px;">
+            <textarea id="promptEditor" oninput="onPromptEditorInput()" placeholder="Loading prompt specification..." style="min-height: 540px; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 1.5;"></textarea>
+          </div>
+
+          <!-- Split View Container -->
+          <div id="promptSplitContainer" style="display: none; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <textarea id="promptSplitEditor" oninput="onPromptSplitInput()" placeholder="Raw Markdown..." style="min-height: 540px; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.5;"></textarea>
+            <div id="promptSplitPreview" class="markdown-body" style="max-height: 560px;"></div>
+          </div>
+          </div>
+        </details>
+
         <!-- Budget, Turns, Timeout & Subruns -->
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
           <div class="form-group">
@@ -1108,55 +1156,7 @@
           <div id="queueList"><div class="hint">Empty — queue runs to run them hands-free.</div></div>
         </div>
 
-        <!-- Task Spec (prompt editor, inline) -->
-        <details class="form-group" id="promptSection" open>
-          <summary style="font-weight: 600; cursor: pointer; font-size: 0.85rem;">📝 Task Spec <span class="hint">(follows the task above — graded prompts, saving bumps rules)</span></summary>
-          <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px;">
-          <!-- Prompt Toolbar -->
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <span class="hint" style="font-weight: 600; color: #fff;">Task Spec:</span>
-              <select id="promptTaskSelect" onchange="onTaskChange(this.value)" style="padding: 4px 10px; font-size: 0.78rem; font-weight: 600;">
-                <option value="redis">⚡ redis (In-Memory Redis Server)</option>
-                <option value="http">🌐 http (HTTP/1.1 Web Server)</option>
-                <option value="pdf">📄 pdf (PDF to Text Extractor)</option>
-                <option value="wal">📓 wal (Durable Event Broker)</option>
-                <option value="proxy">🔀 proxy (Reverse Proxy & LB)</option>
-                <option value="pubsub">📡 pubsub (WebSocket Fan-Out)</option>
-                <option value="binproto">🔩 binproto (Binary RPC SDB1)</option>
-              </select>
-              <span id="promptStatusIndicator" style="font-size: 0.72rem; color: var(--text-muted);"></span>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <!-- View mode toggle -->
-              <div style="display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
-                <button id="promptViewBtnPreview" class="btn-toggle active" onclick="setPromptViewMode('preview')">👁️ Formatted</button>
-                <button id="promptViewBtnEdit" class="btn-toggle" onclick="setPromptViewMode('edit')">✏️ Edit Raw</button>
-                <button id="promptViewBtnSplit" class="btn-toggle" onclick="setPromptViewMode('split')">◫ Split</button>
               </div>
-              <button class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.76rem;" onclick="copyPromptMarkdown()">📋 Copy Markdown</button>
-              <button id="promptSaveBtn" class="btn btn-primary" style="padding: 5px 12px; font-size: 0.76rem;" onclick="savePrompt()">💾 Save Changes</button>
-            </div>
-          </div>
-
-          <!-- Formatted Preview Container -->
-          <div id="promptPreviewContainer" class="markdown-body" style="display: block;">
-            <div style="text-align: center; color: var(--text-muted); padding: 30px;">Loading prompt specification...</div>
-          </div>
-
-          <!-- Raw Editor Container -->
-          <div id="promptEditContainer" style="display: none; flex-direction: column; gap: 8px;">
-            <textarea id="promptEditor" oninput="onPromptEditorInput()" placeholder="Loading prompt specification..." style="min-height: 540px; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 1.5;"></textarea>
-          </div>
-
-          <!-- Split View Container -->
-          <div id="promptSplitContainer" style="display: none; grid-template-columns: 1fr 1fr; gap: 14px;">
-            <textarea id="promptSplitEditor" oninput="onPromptSplitInput()" placeholder="Raw Markdown..." style="min-height: 540px; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.5;"></textarea>
-            <div id="promptSplitPreview" class="markdown-body" style="max-height: 560px;"></div>
-          </div>
-          </div>
-        </details>
-      </div>
 
 
 
