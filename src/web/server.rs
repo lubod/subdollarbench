@@ -729,7 +729,16 @@ pub(crate) async fn get_models(headers: HeaderMap) -> Json<Vec<SubDollarModel>> 
                         .and_then(|r| r.default_enabled)
                         .unwrap_or(false);
 
-                if (prompt_p + comp_p) / 2.0 <= 1.0 && (prompt_p > 0.0 || comp_p > 0.0) {
+                // Free ($0/$0) models are the cheapest possible and must list:
+                // distinguish explicitly-free (pricing present, both zero)
+                // from unpriced (no pricing at all — still hidden).
+                let has_pricing = item
+                    .pricing
+                    .as_ref()
+                    .is_some_and(|p| p.prompt.is_some() || p.completion.is_some());
+                if (prompt_p + comp_p) / 2.0 <= 1.0
+                    && ((prompt_p > 0.0 || comp_p > 0.0) || has_pricing)
+                {
                     models.push(SubDollarModel {
                         id: item.id,
                         name: item.name,
