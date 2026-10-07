@@ -1383,19 +1383,18 @@ impl PortalExporter {
             let g = groups
                 .entry((
                     r.model.clone(),
-                    crate::report::leaderboard::BenchmarkRunResult::harness_of(r)
-                        .to_string(),
+                    crate::report::leaderboard::BenchmarkRunResult::harness_of(r).to_string(),
                 ))
                 .or_insert_with(|| Acc {
-                tasks: HashSet::new(),
-                n_parents: 0,
-                n_trials: 0,
-                n_pass: 0,
-                sum_avg: 0.0,
-                sum_cost: 0.0,
-                sum_api_cost: 0.0,
-                worst_stab: 0,
-            });
+                    tasks: HashSet::new(),
+                    n_parents: 0,
+                    n_trials: 0,
+                    n_pass: 0,
+                    sum_avg: 0.0,
+                    sum_cost: 0.0,
+                    sum_api_cost: 0.0,
+                    worst_stab: 0,
+                });
             g.tasks.insert(r.task.clone());
             let n = r.total_trials.unwrap_or(r.subruns.len() as u32).max(1) as usize;
             let c = if r.subruns.is_empty() {

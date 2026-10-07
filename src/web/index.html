@@ -2096,6 +2096,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     function clearConsole() {
       document.getElementById('terminalOutput').textContent = '';
+      seenLineHashes.clear();
+      seenLineOrder.length = 0;
       consoleKnownLines = 0;
       consoleSynced = false;
     }
@@ -2167,6 +2169,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
     function appendLog(line) {
       if (!line) return;
+      if (!isNewLine(line)) return;
       if (parseTelemetryLine(line)) {
         return;
       }
@@ -3876,14 +3879,48 @@ function copyRunId() {
     // Max rendered rows in the terminal. The server caps its buffer at 3000;
     // the DOM keeps a smaller window (800) so long runs stay smooth.
     const MAX_RENDERED_LINES = 800;
+    // Render dedup: two feeds write to this terminal (SSE appends live lines,
+    // the 2s poll appends deltas; in GUI-proxy mode /api/stream is a one-shot
+    // snapshot that reconnects and replays). Both paths check this set so a
+    // line renders once even when both feeds deliver it. Keyed by content
+    // hash; server lines carry timestamps so legit repeats stay distinct.
+    const seenLineHashes = new Set();
+    const seenLineOrder = [];
+    function lineHash(s) {
+      let h = 5381;
+      for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+      return h + ':' + s.length;
+    }
+    function isNewLine(line) {
+      const h = lineHash(line);
+      if (seenLineHashes.has(h)) return false;
+      seenLineHashes.add(h);
+      seenLineOrder.push(h);
+      if (seenLineOrder.length > 5000) seenLineHashes.delete(seenLineOrder.shift());
+      return true;
+    }
+    function reseedSeen(lines) {
+      seenLineHashes.clear();
+      seenLineOrder.length = 0;
+      for (const l of lines) {
+        const h = lineHash(l);
+        if (!seenLineHashes.has(h)) {
+          seenLineHashes.add(h);
+          seenLineOrder.push(h);
+        }
+      }
+      while (seenLineOrder.length > 5000) seenLineHashes.delete(seenLineOrder.shift());
+    }
     function trimTerminal(term) {
       let over = term.childElementCount - MAX_RENDERED_LINES;
       while (over-- > 0 && term.firstChild) term.removeChild(term.firstChild);
     }
     function appendConsoleLines(lines) {
+      const fresh = lines.filter(isNewLine);
+      if (!fresh.length) return;
       const term = document.getElementById('terminalOutput');
       const wrap = document.createElement('div');
-      wrap.innerHTML = renderLines(lines);
+      wrap.innerHTML = renderLines(fresh);
       // At most one WAITING line may exist in the DOM: drop all stale ones,
       // then let the batch's (single, collapsed) line append normally.
       const freshWaiting = wrap.querySelector('.ln-waiting');
@@ -3922,6 +3959,8 @@ function copyRunId() {
             const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
             const body = await res.text();
             if (body.trim()) {
+              const fresh = body.split('\n');
+              reseedSeen(fresh);
               term.innerHTML = renderLines(renderConsoleBody(term, body));
             } else {
               term.innerHTML = '';
@@ -3939,6 +3978,7 @@ function copyRunId() {
             // Server resends the capped tail when the cursor is stale
             // (trim/restart/desync): re-render, then resume deltas.
             if (text && total > 0 && total - consoleKnownLines > 800) {
+              reseedSeen(text.split('\n'));
               term.innerHTML = renderLines(renderConsoleBody(term, text));
             } else if (text.trim()) {
               appendConsoleLines(renderConsoleBody(term, text));

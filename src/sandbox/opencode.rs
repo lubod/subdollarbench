@@ -56,6 +56,72 @@ impl OpenCodeRunner {
         let _ = cost;
     }
 
+    /// Provider rate-limit signal on one `--format json` event or raw line.
+    /// Structured-only for digits: a bare 429 (token counts, toolCallIds)
+    /// must never match — only `status`/`code`-shaped 429s, `rate-limit`
+    /// type slugs, and explicit rate-limit phrases. Billing/auth (402/401)
+    /// never match here; those keep the immediate wave-pause path.
+    fn is_rate_limit_event(v: &serde_json::Value, raw: &str) -> bool {
+        fn walk(x: &serde_json::Value) -> bool {
+            match x {
+                serde_json::Value::String(s) => {
+                    let l = s.to_lowercase();
+                    l.contains("rate-limit")
+                        || l.contains("rate_limit")
+                        || l.contains("temporarily rate-limited")
+                }
+                serde_json::Value::Array(a) => a.iter().any(walk),
+                serde_json::Value::Object(m) => m.iter().any(|(k, val)| {
+                    let kl = k.to_lowercase();
+                    if (kl == "status" || kl == "code" || kl == "statuscode")
+                        && val.as_u64() == Some(429)
+                    {
+                        return true;
+                    }
+                    if kl == "type"
+                        && val
+                            .as_str()
+                            .map(|s| s.to_lowercase().contains("rate-limit"))
+                            .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                    walk(val)
+                }),
+                _ => false,
+            }
+        }
+        if walk(v) {
+            return true;
+        }
+        let l = raw.to_lowercase();
+        l.contains("rate limit")
+            || l.contains("rate-limit")
+            || l.contains("rate_limit")
+            || l.contains("too many requests")
+    }
+
+    /// Backoff before resume attempt `attempt` (0-based): 60s doubling,
+    /// capped at 15min. Sleeps in small slices so cancel/deadline break it.
+    fn backoff_sleep(attempt: u32, deadline: SystemTime, cancel: &Option<Arc<AtomicBool>>) -> bool {
+        let secs = (60u64.saturating_mul(1u64 << attempt.min(4))).min(900);
+        let slices = secs.saturating_mul(2);
+        for _ in 0..slices {
+            if SystemTime::now() > deadline {
+                return false;
+            }
+            if cancel
+                .as_ref()
+                .map(|f| f.load(Ordering::SeqCst))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        true
+    }
+
     fn cap_line(s: &str) -> String {
         const MAX: usize = 1500;
         if s.len() > MAX {
@@ -89,7 +155,7 @@ impl OpenCodeRunner {
 1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
 2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
 {}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
+3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing. Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
 4. **CONCISE REASONING**: Keep internal thoughts brief (< 150 words). Immediately invoke tools to write code and test it.
 5. **REASONING EFFORT REQUESTED**: {} (best-effort: honored by some models, ignored by others).
 "#,
@@ -98,6 +164,7 @@ impl OpenCodeRunner {
         let _ = std::fs::write(workdir.join("AGENTS.md"), content);
     }
 }
+
 
 impl crate::sandbox::AgentRunner for OpenCodeRunner {
     fn run_agent_with_logger<F>(spec: AgentRunSpec<'_>, mut log_fn: F) -> Result<OmpSessionStats>
@@ -155,7 +222,8 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         let (target_port, test_cmd, guidance_snippet) = OmpRunner::task_guidance(spec.task, prompt);
         let effort_note = format!("reasoning effort requested: {}", effort_level);
         let effective_prompt = format!(
-            "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.\n4. CONCISE REASONING: Keep internal thinking brief (< 150 words). Do not spend output tokens on exhaustive planning in thought blocks. Immediately invoke tools (`write`, `bash`, `read`) on turn 1 to start creating the server and verifying it.\n5. {}.\n==================================================",
+            "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
+   Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.\n4. CONCISE REASONING: Keep internal thinking brief (< 150 words). Do not spend output tokens on exhaustive planning in thought blocks. Immediately invoke tools (`write`, `bash`, `read`) on turn 1 to start creating the server and verifying it.\n5. {}.\n==================================================",
             prompt, guidance_snippet, target_port, test_cmd, effort_note
         );
         Self::write_agents_md(
@@ -170,105 +238,118 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // `openrouter/*` (OPENROUTER_API_KEY env) ids: identity mapping.
         let effective_model = model.to_string();
 
-        let mut cmd = Command::new("docker");
-        cmd.arg("run")
-            .arg("--rm")
-            .arg("--label")
-            .arg(format!("sdb.run={}", container_id))
-            .arg("--label")
-            .arg("sdb.role=opencode-agent")
-            .arg("--name")
-            .arg(&container_name)
-            .arg("--memory=3g")
-            .arg("--cpus=3.0")
-            .arg("--pids-limit=512")
-            .arg("--cap-drop=ALL")
-            .arg("--security-opt=no-new-privileges")
-            .arg("--add-host=host.docker.internal:host-gateway")
-            .arg("-v")
-            .arg(format!("{}:/workspace", canonical_workdir.display()))
-            .arg("-w")
-            .arg("/workspace")
-            .arg("-e")
-            .arg("HOME=/home/ubuntu");
-        // Stored Console auth (opencode.db) + config, mirroring OMP's
-        // `~/.omp` mount. Unique `--session` per run keeps trials apart.
-        let (cfg_dir, data_dir) = Self::host_opencode_dirs();
-        let _ = std::fs::create_dir_all(&cfg_dir);
-        let _ = std::fs::create_dir_all(&data_dir);
-        cmd.arg("-v").arg(format!(
-            "{}:/home/ubuntu/.config/opencode",
-            cfg_dir.display()
-        ));
-        cmd.arg("-v").arg(format!(
-            "{}:/home/ubuntu/.local/share/opencode",
-            data_dir.display()
-        ));
-
-        if let Some(net) = network {
-            cmd.arg("--network").arg(net);
-        } else {
-            cmd.arg("--network=bridge");
-        }
+        // Rebuilt per attempt: `Command` is consumed by spawn, and a
+        // resume re-launches the same session (same `--session` id makes
+        // opencode continue where the rate-limited attempt died).
         // Egress posture identical to OMP: proxy env when filtered,
-        // fail closed when the sidecar cannot start.
+        // fail closed when the sidecar cannot start. Resolved once here so
+        // resume attempts reuse the same sidecar instead of starting one
+        // per attempt.
         let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1";
         let egress_on = crate::sandbox::docker::egress_filter_enabled();
-        if let Some(proxy_url) = (if egress_on { network } else { None })
+        let proxy_url: Option<String> = (if egress_on { network } else { None })
             .and_then(|net| {
                 net.strip_prefix("subdollar-net-").map(|id| {
                     crate::sandbox::docker::SandboxManager::with_id(id).start_egress_proxy()
                 })
             })
-            .flatten()
-        {
-            for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-                cmd.arg("-e").arg(format!("{var}={proxy_url}"));
+            .flatten();
+        if proxy_url.is_none() && egress_on {
+            anyhow::bail!(
+                "egress filter is enabled but the allowlist proxy sidecar failed to start; \
+                 refusing to run the agent unfiltered"
+            );
+        }
+
+        let make_cmd = || {
+            let mut cmd = Command::new("docker");
+            cmd.arg("run")
+                .arg("--rm")
+                .arg("--label")
+                .arg(format!("sdb.run={}", container_id))
+                .arg("--label")
+                .arg("sdb.role=opencode-agent")
+                .arg("--name")
+                .arg(&container_name)
+                .arg("--memory=3g")
+                .arg("--cpus=3.0")
+                .arg("--pids-limit=512")
+                .arg("--cap-drop=ALL")
+                .arg("--security-opt=no-new-privileges")
+                .arg("--add-host=host.docker.internal:host-gateway")
+                .arg("-v")
+                .arg(format!("{}:/workspace", canonical_workdir.display()))
+                .arg("-w")
+                .arg("/workspace")
+                .arg("-e")
+                .arg("HOME=/home/ubuntu");
+            // Stored Console auth (opencode.db) + config, mirroring OMP's
+            // `~/.omp` mount. Unique `--session` per run keeps trials apart.
+            let (cfg_dir, data_dir) = Self::host_opencode_dirs();
+            let _ = std::fs::create_dir_all(&cfg_dir);
+            let _ = std::fs::create_dir_all(&data_dir);
+            cmd.arg("-v").arg(format!(
+                "{}:/home/ubuntu/.config/opencode",
+                cfg_dir.display()
+            ));
+            cmd.arg("-v").arg(format!(
+                "{}:/home/ubuntu/.local/share/opencode",
+                data_dir.display()
+            ));
+
+            if let Some(net) = network {
+                cmd.arg("--network").arg(net);
+            } else {
+                cmd.arg("--network=bridge");
+            }
+            if let Some(url) = proxy_url.clone() {
+                for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                    cmd.arg("-e").arg(format!("{var}={url}"));
+                }
             }
             for var in ["NO_PROXY", "no_proxy"] {
                 cmd.arg("-e").arg(format!("{var}={no_proxy}"));
             }
-        } else {
-            for var in ["NO_PROXY", "no_proxy"] {
-                cmd.arg("-e").arg(format!("{var}={no_proxy}"));
+            let effective_key = api_key
+                .map(|s| s.to_string())
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+            if let Some(ref key) = effective_key {
+                cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
             }
-            if egress_on {
-                anyhow::bail!(
-                    "egress filter is enabled but the allowlist proxy sidecar failed to start; \
-                     refusing to run the agent unfiltered"
-                );
+            if let Some(max_turns) = limits.max_turns {
+                cmd.arg("-e")
+                    .arg(format!("SDB_BENCH_MAX_TURNS={}", max_turns));
             }
-        }
 
-        let effective_key = api_key
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
-        if let Some(ref key) = effective_key {
-            cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
-        }
-        if let Some(max_turns) = limits.max_turns {
-            cmd.arg("-e")
-                .arg(format!("SDB_BENCH_MAX_TURNS={}", max_turns));
-        }
+            cmd.arg("subdollar-sandbox")
+                .arg("opencode")
+                .arg("run")
+                .arg("--standalone")
+                .arg("--format")
+                .arg("json")
+                .arg("--session")
+                .arg(&session_id)
+                .arg("--title")
+                .arg(format!("sdb-{}", container_id))
+                .arg("-m")
+                .arg(&effective_model)
+                .arg("--auto")
+                .arg(&effective_prompt);
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            cmd
+        };
 
-        cmd.arg("subdollar-sandbox")
-            .arg("opencode")
-            .arg("run")
-            .arg("--standalone")
-            .arg("--format")
-            .arg("json")
-            .arg("--session")
-            .arg(&session_id)
-            .arg("--title")
-            .arg(format!("sdb-{}", container_id))
-            .arg("-m")
-            .arg(&effective_model)
-            .arg("--auto")
-            .arg(&effective_prompt);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
+        // Resume loop: a provider rate-limit kills one `opencode run`
+        // process but not the trial. Relaunching with the same `--session`
+        // continues it; stats/turns/spend accumulate across attempts under
+        // the global limits. Billing/auth trips and hard limits never resume.
         let (tx, rx) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
+        let timeout = limits
+            .timeout_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(1800));
+        let deadline = start_time + timeout;
         let _ = tx.send(format!(
             "[TELEMETRY] turn=0 max_turns={} spent=0.000000 tokens=0",
             limits.max_turns.unwrap_or(0)
@@ -284,169 +365,20 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             effective_model, effort_level, container_id
         ));
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("Failed to spawn opencode in docker: {}", e))?;
-        let child_id = child.id();
-
-        // Reader: NDJSON `--format json` stream -> bench log protocol.
-        // step_start = turn, tool_use = [ACTION], text = [RESPONSE],
-        // step_finish = token/cost accumulation + [TELEMETRY].
+        // Stats accumulate across resume attempts under the global limits.
         let stats = Arc::new(std::sync::Mutex::new(OmpSessionStats::default()));
         let turns = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let spent = Arc::new(std::sync::Mutex::new(0.0f64));
         let limit_hit = Arc::new(AtomicBool::new(false));
         let limit_msg = Arc::new(std::sync::Mutex::new(None::<String>));
         let billing_tripped = Arc::new(AtomicBool::new(false));
-        if let Some(stdout) = child.stdout.take() {
-            let tx_o = tx.clone();
-            let stats_o = stats.clone();
-            let turns_o = turns.clone();
-            let spent_o = spent.clone();
-            let limit_hit_o = limit_hit.clone();
-            let limit_msg_o = limit_msg.clone();
-            let billing_o = billing_tripped.clone();
-            let running_o = running.clone();
-            let max_turns = limits.max_turns.unwrap_or(0);
-            let max_budget = limits.max_budget_usd.unwrap_or(f64::MAX);
-            let cname = container_name.clone();
-            std::thread::spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().map_while(Result::ok) {
-                    if !running_o.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let v: serde_json::Value = match serde_json::from_str(trimmed) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
-                            continue;
-                        }
-                    };
-                    let etype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    match etype {
-                        "step_start" => {
-                            let n = turns_o.fetch_add(1, Ordering::SeqCst) + 1;
-                            let _ = tx_o.send(format!("[LIVE] Turn {} started", n));
-                            if max_turns > 0 && n > max_turns {
-                                *limit_msg_o.lock().unwrap() =
-                                    Some(format!("max turns {} reached", max_turns));
-                                limit_hit_o.store(true, Ordering::SeqCst);
-                                running_o.store(false, Ordering::SeqCst);
-                                let _ = Command::new("docker").args(["rm", "-f", &cname]).output();
-                                break;
-                            }
-                        }
-                        "tool_use" => {
-                            let part = &v;
-                            let tool = part
-                                .pointer("/part/tool")
-                                .or_else(|| part.get("tool"))
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("tool");
-                            let _ =
-                                tx_o.send(format!("[ACTION] {} {}", tool, Self::cap_line(trimmed)));
-                        }
-                        "text" => {
-                            let text = v
-                                .pointer("/part/text")
-                                .or_else(|| v.get("text"))
-                                .and_then(|t| t.as_str())
-                                .unwrap_or(trimmed);
-                            if let Some(reason) =
-                                crate::sandbox::omp::classify_billing_error(trimmed)
-                                    .or_else(|| crate::sandbox::omp::classify_billing_error(text))
-                            {
-                                let _ = tx_o.send(format!("[BILLING] {}", reason));
-                                billing_o.store(true, Ordering::SeqCst);
-                            }
-                            let _ = tx_o.send(format!("[RESPONSE] {}", Self::cap_line(text)));
-                        }
-                        "step_finish" => {
-                            let tokens = v
-                                .pointer("/part/tokens")
-                                .or_else(|| v.get("tokens"))
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null);
-                            let cost = v
-                                .pointer("/part/cost")
-                                .or_else(|| v.get("cost"))
-                                .and_then(|c| c.as_f64())
-                                .unwrap_or(0.0);
-                            Self::add_step(&mut stats_o.lock().unwrap(), &tokens, cost);
-                            *spent_o.lock().unwrap() += cost;
-                            let st = stats_o.lock().unwrap().clone();
-                            let n = turns_o.load(Ordering::SeqCst);
-                            let total_tok =
-                                st.prompt_tokens + st.completion_tokens + st.cached_tokens;
-                            let _ = tx_o.send(format!(
-                                "[TELEMETRY] turn={} max_turns={} spent={:.6} tokens={}",
-                                n,
-                                max_turns,
-                                *spent_o.lock().unwrap(),
-                                total_tok
-                            ));
-                            if *spent_o.lock().unwrap() > max_budget {
-                                *limit_msg_o.lock().unwrap() =
-                                    Some(format!("budget ${:.2} exceeded", max_budget));
-                                limit_hit_o.store(true, Ordering::SeqCst);
-                                running_o.store(false, Ordering::SeqCst);
-                                let _ = Command::new("docker").args(["rm", "-f", &cname]).output();
-                                break;
-                            }
-                        }
-                        _ => {
-                            let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
-                        }
-                    }
-                }
-            });
-        }
-        // Drain stderr for billing phrases (provider errors surface there).
-        // Kept in full: the tail joins the failure message when the agent
-        // exits non-zero, so a dead trial names its cause (auth, 429, …)
-        // instead of the generic "exited non-zero" below.
-        let stderr_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        if let Some(stderr) = child.stderr.take() {
-            let tx_e = tx.clone();
-            let billing_e = billing_tripped.clone();
-            let tail_e = stderr_tail.clone();
-            std::thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    {
-                        let mut tail = tail_e.lock().unwrap();
-                        tail.push(trimmed.to_string());
-                        if tail.len() > 20 {
-                            tail.remove(0);
-                        }
-                    }
-                    if let Some(reason) = crate::sandbox::omp::classify_billing_error(trimmed) {
-                        let _ = tx_e.send(format!("[BILLING] {}", reason));
-                        billing_e.store(true, Ordering::SeqCst);
-                    }
-                }
-            });
-        }
 
         // Logger pump + timeout/cancel supervision (mirrors OMP structure).
-        // Drop our `tx`: reader threads hold their own clones, so the pump
-        // ends when they finish. Holding it here deadlocks pump join below
+        // One pump for all attempts; per-attempt readers hold tx clones.
+        // The main `tx` stays alive for per-attempt clones and is dropped
+        // at the very end: dropping it earlier deadlocks the final join
         // (rx never closes while a sender lives).
-        drop(tx);
-        let timeout = limits
-            .timeout_seconds
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(1800));
-        let deadline = start_time + timeout;
+        let retry_tx = tx.clone();
         let pump_running = running.clone();
         let pump_cancel = cancel_flag.clone();
         let pump_handle = std::thread::spawn(move || {
@@ -466,67 +398,337 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             }
         });
 
-        // Wait with timeout; kill the container on breach.
-        let waited = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => {
-                    let timed_out = SystemTime::now() > deadline;
-                    let cancelled = cancel_flag
-                        .as_ref()
-                        .map(|f| f.load(Ordering::SeqCst))
-                        .unwrap_or(false);
-                    if timed_out || cancelled || !running.load(Ordering::SeqCst) {
-                        let _ = Command::new("docker")
-                            .args(["rm", "-f", &container_name])
-                            .output();
-                        break None;
+        // Resume loop: a provider rate-limit kills one `opencode run`
+        // process but not the trial. Relaunching with the same `--session`
+        // continues it; stats/turns/spend accumulate across attempts under
+        // the global limits. Billing/auth trips and hard limits never resume.
+        const MAX_RESUMES: u32 = 5;
+        let mut attempt: u32 = 0;
+        let outcome: Result<OmpSessionStats> = loop {
+            let rate_limited = Arc::new(AtomicBool::new(false));
+            let attempt_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let mut child = make_cmd()
+                .spawn()
+                .map_err(|e| anyhow!("Failed to spawn opencode in docker: {}", e))?;
+
+            // Reader: NDJSON `--format json` stream -> bench log protocol.
+            // step_start = turn, tool_use = [ACTION], text = [RESPONSE],
+            // step_finish = token/cost accumulation + [TELEMETRY].
+            // A `type:"error"` event with a rate-limit shape sets the
+            // resume flag (handled in the `_` arm below).
+            let reader_handle = if let Some(stdout) = child.stdout.take() {
+                let tx_o = tx.clone();
+                let stats_o = stats.clone();
+                let turns_o = turns.clone();
+                let spent_o = spent.clone();
+                let limit_hit_o = limit_hit.clone();
+                let limit_msg_o = limit_msg.clone();
+                let billing_o = billing_tripped.clone();
+                let rate_o = rate_limited.clone();
+                let running_o = running.clone();
+                let max_turns = limits.max_turns.unwrap_or(0);
+                let max_budget = limits.max_budget_usd.unwrap_or(f64::MAX);
+                let cname = container_name.clone();
+                Some(std::thread::spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().map_while(Result::ok) {
+                        if !running_o.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
+                                continue;
+                            }
+                        };
+                        let etype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match etype {
+                            "step_start" => {
+                                let n = turns_o.fetch_add(1, Ordering::SeqCst) + 1;
+                                let _ = tx_o.send(format!("[LIVE] Turn {} started", n));
+                                if max_turns > 0 && n > max_turns {
+                                    *limit_msg_o.lock().unwrap() =
+                                        Some(format!("max turns {} reached", max_turns));
+                                    limit_hit_o.store(true, Ordering::SeqCst);
+                                    running_o.store(false, Ordering::SeqCst);
+                                    let _ =
+                                        Command::new("docker").args(["rm", "-f", &cname]).output();
+                                    break;
+                                }
+                            }
+                            "tool_use" => {
+                                let tool = v
+                                    .pointer("/part/tool")
+                                    .or_else(|| v.get("tool"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("tool");
+                                let _ = tx_o.send(format!(
+                                    "[ACTION] {} {}",
+                                    tool,
+                                    Self::cap_line(trimmed)
+                                ));
+                            }
+                            "text" => {
+                                let text = v
+                                    .pointer("/part/text")
+                                    .or_else(|| v.get("text"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or(trimmed);
+                                if let Some(reason) = crate::sandbox::omp::classify_billing_error(
+                                    trimmed,
+                                )
+                                .or_else(|| crate::sandbox::omp::classify_billing_error(text))
+                                {
+                                    let _ = tx_o.send(format!("[BILLING] {}", reason));
+                                    billing_o.store(true, Ordering::SeqCst);
+                                }
+                                if Self::is_rate_limit_event(&v, text) {
+                                    rate_o.store(true, Ordering::SeqCst);
+                                }
+                                let _ = tx_o.send(format!("[RESPONSE] {}", Self::cap_line(text)));
+                            }
+                            "step_finish" => {
+                                let tokens = v
+                                    .pointer("/part/tokens")
+                                    .or_else(|| v.get("tokens"))
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null);
+                                let cost = v
+                                    .pointer("/part/cost")
+                                    .or_else(|| v.get("cost"))
+                                    .and_then(|c| c.as_f64())
+                                    .unwrap_or(0.0);
+                                Self::add_step(&mut stats_o.lock().unwrap(), &tokens, cost);
+                                *spent_o.lock().unwrap() += cost;
+                                let st = stats_o.lock().unwrap().clone();
+                                let n = turns_o.load(Ordering::SeqCst);
+                                let total_tok =
+                                    st.prompt_tokens + st.completion_tokens + st.cached_tokens;
+                                let _ = tx_o.send(format!(
+                                    "[TELEMETRY] turn={} max_turns={} spent={:.6} tokens={}",
+                                    n,
+                                    max_turns,
+                                    *spent_o.lock().unwrap(),
+                                    total_tok
+                                ));
+                                if *spent_o.lock().unwrap() > max_budget {
+                                    *limit_msg_o.lock().unwrap() =
+                                        Some(format!("budget ${:.2} exceeded", max_budget));
+                                    limit_hit_o.store(true, Ordering::SeqCst);
+                                    running_o.store(false, Ordering::SeqCst);
+                                    let _ =
+                                        Command::new("docker").args(["rm", "-f", &cname]).output();
+                                    break;
+                                }
+                            }
+                            _ => {
+                                if Self::is_rate_limit_event(&v, trimmed) {
+                                    rate_o.store(true, Ordering::SeqCst);
+                                }
+                                let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
+                            }
+                        }
                     }
-                    std::thread::sleep(Duration::from_millis(200));
+                }))
+            } else {
+                None
+            };
+            // Drain stderr for billing phrases (provider errors surface
+            // there). The tail joins the failure message when the agent
+            // exits non-zero, so a dead trial names its cause (auth, 429, …)
+            // instead of a generic message.
+            let stderr_handle = if let Some(stderr) = child.stderr.take() {
+                let tx_e = tx.clone();
+                let billing_e = billing_tripped.clone();
+                let rate_e = rate_limited.clone();
+                let tail_e = attempt_tail.clone();
+                Some(std::thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        {
+                            let mut tail = tail_e.lock().unwrap();
+                            tail.push(trimmed.to_string());
+                            if tail.len() > 20 {
+                                tail.remove(0);
+                            }
+                        }
+                        if let Some(reason) = crate::sandbox::omp::classify_billing_error(trimmed) {
+                            let _ = tx_e.send(format!("[BILLING] {}", reason));
+                            billing_e.store(true, Ordering::SeqCst);
+                        }
+                        if Self::is_rate_limit_event(&serde_json::Value::Null, trimmed) {
+                            rate_e.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
+
+            // Wait with timeout; kill the container on breach.
+            let waited = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) => {
+                        let timed_out = SystemTime::now() > deadline;
+                        let cancelled = cancel_flag
+                            .as_ref()
+                            .map(|f| f.load(Ordering::SeqCst))
+                            .unwrap_or(false);
+                        if timed_out || cancelled || !running.load(Ordering::SeqCst) {
+                            let _ = Command::new("docker")
+                                .args(["rm", "-f", &container_name])
+                                .output();
+                            break None;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    Err(_) => break None,
                 }
-                Err(_) => break None,
+            };
+            let _ = child.wait();
+            if let Some(h) = reader_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_handle {
+                let _ = h.join();
+            }
+            // Name is freed for the relaunch (`--rm` auto-removes exited
+            // containers, but a killed one can linger briefly).
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &container_name])
+                .output();
+            if billing_tripped.load(Ordering::SeqCst) {
+                let st = stats.lock().unwrap().clone();
+                // Same envelope as OMP: queue.rs pauses the wave on "billing:".
+                break Err(anyhow::Error::new(OmpBillingError {
+                    reason:
+                        "opencode provider auth/billing tripped mid-session (see [BILLING] log)"
+                            .to_string(),
+                    partial_stats: st,
+                }));
+            }
+            let limited = limit_hit.load(Ordering::SeqCst);
+            let timed_out = SystemTime::now() > deadline;
+            let cancelled = cancel_flag
+                .as_ref()
+                .map(|f| f.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            let msg = limit_msg.lock().unwrap().clone().unwrap_or_default();
+            let st = stats.lock().unwrap().clone();
+            let tail = attempt_tail.lock().unwrap().join(" | ");
+            match waited {
+                Some(status) if status.success() && !limited => break Ok(st),
+                _ if limited || timed_out || cancelled => {
+                    break Err(anyhow!(OmpExecutionError {
+                        message: if limited {
+                            format!("opencode limit reached: {}", msg)
+                        } else if cancelled {
+                            "opencode run cancelled by user".to_string()
+                        } else {
+                            "opencode timeout reached".to_string()
+                        },
+                        partial_stats: st,
+                    }))
+                }
+                _ if rate_limited.load(Ordering::SeqCst) && attempt < MAX_RESUMES => {
+                    let wait_s = (60u64.saturating_mul(1u64 << attempt.min(4))).min(900);
+                    let _ = retry_tx.send(format!(
+                        "[RETRY] provider rate-limited (attempt {}/{}); backing off {}s then resuming session {}",
+                        attempt + 1,
+                        MAX_RESUMES + 1,
+                        wait_s,
+                        session_id
+                    ));
+                    if !Self::backoff_sleep(attempt, deadline, &cancel_flag) {
+                        break Err(anyhow!(OmpExecutionError {
+                            message: "opencode backoff interrupted (timeout/cancel)".to_string(),
+                            partial_stats: st,
+                        }));
+                    }
+                    attempt += 1;
+                    continue;
+                }
+                _ => {
+                    break Err(anyhow!(OmpExecutionError {
+                        message: {
+                            let code = waited
+                                .map(|s| {
+                                    s.code()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "signal".to_string())
+                                })
+                                .unwrap_or_else(|| "no-exit".to_string());
+                            match tail.is_empty() {
+                                true => format!(
+                                    "opencode agent exited (code {}) with no further detail",
+                                    code
+                                ),
+                                false => format!(
+                                    "opencode agent exited (code {}): {}",
+                                    code,
+                                    Self::cap_line(&tail)
+                                ),
+                            }
+                        },
+                        partial_stats: st,
+                    }))
+                }
             }
         };
         running.store(false, Ordering::SeqCst);
-        let _ = child.wait();
+        drop(tx);
+        drop(retry_tx);
         let _ = pump_handle.join();
         let _ = Command::new("docker")
             .args(["rm", "-f", &container_name])
             .output();
-        let _ = child_id;
 
         // AGENTS.md is runner-owned scaffolding, never candidate code.
         let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
 
-        if billing_tripped.load(Ordering::SeqCst) {
-            let st = stats.lock().unwrap().clone();
-            // Same envelope as OMP: queue.rs pauses the wave on "billing:".
-            return Err(anyhow::Error::new(OmpBillingError {
-                reason: "opencode provider auth/billing/rate-limit tripped mid-session (see [BILLING] log)"
-                    .to_string(),
-                partial_stats: st,
-            }));
-        }
-        let limited = limit_hit.load(Ordering::SeqCst);
-        let msg = limit_msg.lock().unwrap().clone().unwrap_or_default();
-        let st = stats.lock().unwrap().clone();
-        let tail = stderr_tail.lock().unwrap().join(" | ");
-        match waited {
-            Some(status) if status.success() && !limited => Ok(st),
-            _ => Err(anyhow!(OmpExecutionError {
-                message: if limited {
-                    format!("opencode limit reached: {}", msg)
-                } else if SystemTime::now() > deadline {
-                    "opencode timeout reached".to_string()
-                } else {
-                    let code = waited.map(|s| s.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string())).unwrap_or_else(|| "no-exit".to_string());
-                    match tail.is_empty() {
-                        true => format!("opencode agent exited (code {}) with no further detail", code),
-                        false => format!("opencode agent exited (code {}): {}", code, Self::cap_line(&tail)),
-                    }
-                },
-                partial_stats: st,
-            })),
-        }
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn test_rate_limit_detector() {
+        // Real 429 shape from the Novita shared pool.
+        let e = ev(r#"{"type":"error","error":{"type":"provider.rate-limit","status":429}}"#);
+        assert!(OpenCodeRunner::is_rate_limit_event(&e, ""));
+        // Bare digits never match: token counts, toolCallIds, line numbers.
+        let t = ev(r#"{"tokens":{"input":5390,"output":429}}"#);
+        assert!(!OpenCodeRunner::is_rate_limit_event(&t, ""));
+        // Billing/auth never match here (separate wave-pause path).
+        let b = ev(r#"{"error":{"code":402,"message":"Payment Required"}}"#);
+        assert!(!OpenCodeRunner::is_rate_limit_event(&b, ""));
+        let a = ev(r#"{"error":{"code":401,"message":"unauthorized key"}}"#);
+        assert!(!OpenCodeRunner::is_rate_limit_event(&a, ""));
+        // Raw-text phrases match; bare digits do not.
+        assert!(OpenCodeRunner::is_rate_limit_event(
+            &serde_json::Value::Null,
+            "provider rate-limited, retry shortly"
+        ));
+        assert!(!OpenCodeRunner::is_rate_limit_event(
+            &serde_json::Value::Null,
+            "output 429 tokens used"
+        ));
     }
 }

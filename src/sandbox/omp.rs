@@ -574,6 +574,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 2. RAW TCP SOCKETS ONLY (MANDATORY):
 {}
 3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
+   Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
 4. CONCISE REASONING: Keep internal thinking brief (< 150 words). Do not spend output tokens on exhaustive planning in thought blocks. Immediately invoke tools (`write`, `bash`, `read`) on turn 1 to start creating the server and verifying it.
 ==================================================",
             prompt, guidance_snippet, target_port, test_cmd
@@ -586,7 +587,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
 2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
 {}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
+3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing. Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
 4. **CONCISE REASONING**: Keep internal thoughts brief (< 150 words). Do not exhaust output tokens on lengthy mental planning loops. Immediately invoke tools to write code and test it.
 "#,
             guidance_snippet, target_port, test_cmd
