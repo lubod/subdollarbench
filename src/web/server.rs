@@ -131,6 +131,7 @@ pub struct AppState {
     pub store: Arc<Store>,
     /// Engine base URL in GUI-proxy mode (empty = single-process engine).
     pub engine_url: String,
+
     /// True when `bench.db` failed to open and the server fell back to a
     /// temp-dir DB (queue durability degraded); surfaced via /api/status.
     pub db_fallback: bool,
@@ -866,14 +867,129 @@ fn token_ok(headers: &HeaderMap, token: &str) -> bool {
 
 /// Constant-time compare so a local timing probe cannot walk the token.
 fn subtle_eq(a: &str, b: &str) -> bool {
+    // No early length return: fold over the longer side with zero-padding so
+    // password/user length is not observable via timing (LAN oracle otherwise).
     let (ab, bb) = (a.as_bytes(), b.as_bytes());
-    if ab.len() != bb.len() {
-        return false;
+    let n = ab.len().max(bb.len());
+    let mut acc = (ab.len() ^ bb.len()) as u8;
+    for i in 0..n {
+        let x = *ab.get(i).unwrap_or(&0);
+        let y = *bb.get(i).unwrap_or(&0);
+        acc |= x ^ y;
     }
-    ab.iter()
-        .zip(bb.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    acc == 0
+}
+
+/// Password envs for the GUI login. Both must be set; unset = login disabled
+/// (bearer/CSRF behavior unchanged). No defaults: no `admin/admin` footgun.
+fn login_creds() -> Option<(String, String)> {
+    let u = std::env::var("SDB_UI_USER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    let p = std::env::var("SDB_UI_PASS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    Some((u, p))
+}
+
+fn session_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn session_cookie(headers: &HeaderMap) -> bool {
+    let cookies = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Ok(set) = session_set().lock() else {
+        return false;
+    };
+    for part in cookies.split(';') {
+        let part = part.trim();
+        if let Some(tok) = part.strip_prefix("sdb_session=") {
+            if set.contains(tok.trim()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub user: String,
+    pub pass: String,
+}
+
+/// POST /api/login {user, pass}: 204 + HttpOnly session cookie on success,
+/// 401 otherwise. Rate-limiting: none (LAN tool); wrong passwords log.
+pub(crate) async fn login(
+    State(_state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> Response {
+    let Some((eu, ep)) = login_creds() else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "login disabled (set SDB_UI_USER + SDB_UI_PASS)",
+        )
+            .into_response();
+    };
+    if !subtle_eq(body.user.trim(), eu.trim()) || !subtle_eq(&body.pass, &ep) {
+        eprintln!("[LOGIN] failed attempt for user {:?}", body.user);
+        return (StatusCode::UNAUTHORIZED, "bad credentials").into_response();
+    }
+    let tok: String = (0..32).map(|_| format!("{:02x}", rand::random::<u8>())).collect();
+    if let Ok(mut set) = session_set().lock() {
+        set.insert(tok.clone());
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            format!("sdb_session={tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"),
+        )],
+    )
+        .into_response()
+}
+
+/// POST /api/logout: drop the session cookie server-side + clear client.
+pub(crate) async fn logout(State(_state): State<AppState>, headers: HeaderMap) -> Response {
+    let cookies = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if let Ok(mut set) = session_set().lock() {
+        for part in cookies.split(';') {
+            if let Some(tok) = part.trim().strip_prefix("sdb_session=") {
+                set.remove(tok.trim());
+            }
+        }
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            "sdb_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+        )],
+    )
+        .into_response()
+}
+
+/// GET /api/me: 200 {login: true, user} when authed (session or bearer),
+/// 401 otherwise. Lets the GUI render login form vs app without a probe POST.
+pub(crate) async fn me(headers: HeaderMap) -> Response {
+    let authed =
+        session_cookie(&headers) || ui_token().map(|t| token_ok(&headers, &t)).unwrap_or(false);
+    let login_enabled = login_creds().is_some();
+    if !authed {
+        return Json(serde_json::json!({"login": false, "login_required": login_enabled}))
+            .into_response();
+    }
+    let user = std::env::var("SDB_UI_USER").unwrap_or_default();
+    Json(serde_json::json!({"login": true, "user": user, "login_required": login_enabled}))
+        .into_response()
 }
 
 pub(crate) async fn csrf_guard(req: Request, next: middleware::Next) -> Response {
@@ -882,14 +998,29 @@ pub(crate) async fn csrf_guard(req: Request, next: middleware::Next) -> Response
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     );
     if mutating {
-        if let Some(token) = ui_token() {
-            if !token_ok(req.headers(), &token) {
+        // Session cookie (login) satisfies the token gate: the cookie is
+        // HttpOnly + SameSite=Strict, so unlike a readable token it cannot be
+        // exfiltrated by page JS — the server holds the secret, not the browser.
+        // Bearer still works (CLI + old flows); login disabled = old behavior.
+        let authed = session_cookie(req.headers())
+            || match ui_token() {
+                Some(token) => token_ok(req.headers(), &token),
+                None => true,
+            };
+        if !authed {
+            // Login configured but neither session nor bearer: point at login.
+            if login_creds().is_some() {
                 return (
                     axum::http::StatusCode::UNAUTHORIZED,
-                    "Missing or invalid UI token (Authorization: Bearer <SDB_UI_TOKEN>)",
+                    "login required (POST /api/login)",
                 )
                     .into_response();
             }
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Missing or invalid UI token (Authorization: Bearer <SDB_UI_TOKEN>)",
+            )
+                .into_response();
         }
         if !csrf_origin_allowed(req.headers()) {
             return csrf_reject();

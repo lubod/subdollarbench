@@ -928,8 +928,24 @@
       </div>
     </header>
 
+      <!-- Login gate (rendered only when SDB_UI_USER/PASS set and no session) -->
+      <div id="loginGate" style="display:none;max-width:420px;margin:8vh auto;padding:28px;" class="card">
+        <h2>🔐 SubDollarBench</h2>
+        <p class="hint">Sign in with the credentials from <code>.env</code> (<code>SDB_UI_USER</code> / <code>SDB_UI_PASS</code>).</p>
+        <div class="form-group">
+          <label for="loginUser">User</label>
+          <input type="text" id="loginUser" autocomplete="username" />
+        </div>
+        <div class="form-group">
+          <label for="loginPass">Password</label>
+          <input type="password" id="loginPass" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()" />
+        </div>
+        <div id="loginError" style="display:none;color:#da3633;font-size:.8rem;margin-bottom:8px;"></div>
+        <button class="btn" onclick="doLogin()" style="width:100%;">Sign in</button>
+      </div>
+
       <!-- Main Display Tabs -->
-      <main class="card">
+      <main class="card" id="appMain" style="display:none;">
         <div class="tabs">
           <button class="tab active" data-tab="setup" onclick="switchTab('setup')">⚙️ Setup</button>
           <button class="tab" data-tab="console" onclick="switchTab('console')">Live Console</button>
@@ -4122,6 +4138,45 @@ function copyRunId() {
       }
     }
 
+    let authed = false;
+    async function checkAuth() {
+      // /api/me is 200 always: {login, login_required}. Gate on login flag.
+      try {
+        const res = await fetch('/api/me');
+        if (res.ok) {
+          const me = await res.json();
+          if (me.login) { authed = true; showApp(); return true; }
+          if (!me.login_required) { authed = true; showApp(); return true; } // login disabled: open app
+        }
+      } catch (e) { /* offline: show gate, app reveals on retry */ }
+      authed = false;
+      document.getElementById('loginGate').style.display = 'block';
+      document.getElementById('appMain').style.display = 'none';
+      return false;
+    }
+    function showApp() {
+      document.getElementById('loginGate').style.display = 'none';
+      document.getElementById('appMain').style.display = '';
+    }
+    async function doLogin() {
+      const err = document.getElementById('loginError');
+      err.style.display = 'none';
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: document.getElementById('loginUser').value, pass: document.getElementById('loginPass').value })
+        });
+        if (!res.ok) { err.textContent = 'Bad credentials (' + res.status + ')'; err.style.display = 'block'; return; }
+        document.getElementById('loginPass').value = '';
+        authed = true; showApp();
+      } catch (e) { err.textContent = 'Login failed: ' + e.message; err.style.display = 'block'; }
+    }
+    async function doLogout() {
+      await fetch('/api/logout', { method: 'POST' });
+      authed = false; location.reload();
+    }
+
     function authHeaders(extra) {
       const h = Object.assign({}, extra);
       const tok = ((document.getElementById('uiToken') || {}).value || '').trim();
@@ -4130,10 +4185,8 @@ function copyRunId() {
     }
 
     async function queueRerun(model, task, effort) {
-      const uiTok = ((document.getElementById('uiToken') || {}).value || '').trim();
-      if (!uiTok) {
-        alert('Paste the UI Token (from .env SDB_UI_TOKEN) in Setup first.');
-        switchTab('setup');
+      if (!authed && !(((document.getElementById('uiToken') || {}).value || '').trim())) {
+        alert('Sign in first (or paste the UI Token in Setup).');
         return;
       }
       const payload = {
@@ -4293,7 +4346,7 @@ function copyRunId() {
       modelInput.addEventListener('input', (e) => updateEffortControlsForModel(e.target.value.trim(), { applyDefault: true }));
       modelInput.addEventListener('change', (e) => updateEffortControlsForModel(e.target.value.trim(), { applyDefault: true }));
     }
-    fetchModels();
+    checkAuth().then(() => fetchModels());
     const initialSavedTask = localStorage.getItem('selected_benchmark_task') || 'redis';
     onTaskChange(initialSavedTask);
     toggleAutoRefresh(true);
