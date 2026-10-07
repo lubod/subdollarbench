@@ -5,9 +5,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SubDollarBench — LLM Coding Benchmark</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #0d1117;
@@ -24,7 +21,7 @@
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
       background-color: var(--bg);
       color: var(--text);
       line-height: 1.5;
@@ -143,7 +140,7 @@
       border-color: var(--primary);
     }
     textarea {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.8rem;
       resize: vertical;
       min-height: 250px;
@@ -198,7 +195,7 @@
 
     /* Price tag */
     .price-pill {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.75rem;
       padding: 4px 8px;
       border-radius: 4px;
@@ -290,7 +287,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 16px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.8rem;
       color: #7ee787;
       min-height: 480px;
@@ -418,7 +415,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 12px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.78rem;
       color: #c9d1d9;
       max-height: 380px;
@@ -502,7 +499,7 @@
       background: rgba(110, 118, 129, 0.25);
       padding: 2px 6px;
       border-radius: 4px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.84em;
       color: #79c0ff;
     }
@@ -522,7 +519,7 @@
       align-items: center;
     }
     .markdown-body .md-code-lang {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.72rem;
       color: var(--text-muted);
       text-transform: uppercase;
@@ -546,7 +543,7 @@
       margin: 0;
       padding: 14px;
       overflow-x: auto;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.8rem;
       line-height: 1.5;
       color: #c9d1d9;
@@ -761,7 +758,7 @@
       color: var(--text-muted);
       transition: all 0.12s ease;
       user-select: none;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     .code-file-item:hover {
       background: #161b22;
@@ -794,7 +791,7 @@
       flex: 1;
       margin: 0;
       padding: 16px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.8rem;
       line-height: 1.5;
       color: #c9d1d9;
@@ -827,7 +824,7 @@
       flex: 1;
       margin: 0;
       padding: 16px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.78rem;
       line-height: 1.45;
       color: #7ee787;
@@ -888,7 +885,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 12px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.76rem;
       max-height: 480px;
       overflow-y: auto;
@@ -905,7 +902,6 @@
     .diff-line-add { background: rgba(63, 185, 80, 0.15); color: #7ee787; display: block; }
     .diff-line-del { background: rgba(248, 81, 73, 0.15); color: #ffa198; display: block; }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
   <div class="container">
@@ -920,6 +916,10 @@
         <div class="status-badge" id="ompStatusBadge" title="OMP Agent Sandbox Status" style="cursor: pointer;" onclick="checkOrUpdateOmp()">
           <span class="status-dot" id="ompDot" style="background: var(--primary);"></span>
           <span id="ompText">OMP: checking...</span>
+        </div>
+        <div class="status-badge" id="opencodeStatusBadge" title="OpenCode harness version (pinned in Dockerfile.sandbox)">
+          <span class="status-dot" id="opencodeDot" style="background: var(--primary);"></span>
+          <span id="opencodeText">opencode: checking...</span>
         </div>
         <div class="status-badge">
           <span class="status-dot" id="statusDot"></span>
@@ -954,7 +954,6 @@
           <button class="tab" data-tab="models" onclick="switchTab('models')">Models</button>
           <button class="tab" data-tab="tasks" onclick="switchTab('tasks')">Tasks</button>
           <button class="tab" data-tab="matrix" onclick="switchTab('matrix')">Matrix</button>
-          <button class="tab" data-tab="formula" onclick="switchTab('formula')">Formula</button>
         </div>
         <!-- Setup Tab Panel (was sidebar) -->
       <div id="tab-setup" style="flex-direction: column; gap: 16px;">
@@ -1117,12 +1116,12 @@
 
           <!-- Raw Editor Container -->
           <div id="promptEditContainer" style="display: none; flex-direction: column; gap: 8px;">
-            <textarea id="promptEditor" oninput="onPromptEditorInput()" placeholder="Loading prompt specification..." style="min-height: 540px; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 1.5;"></textarea>
+            <textarea id="promptEditor" oninput="onPromptEditorInput()" placeholder="Loading prompt specification..." style="min-height: 540px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5;"></textarea>
           </div>
 
           <!-- Split View Container -->
           <div id="promptSplitContainer" style="display: none; grid-template-columns: 1fr 1fr; gap: 14px;">
-            <textarea id="promptSplitEditor" oninput="onPromptSplitInput()" placeholder="Raw Markdown..." style="min-height: 540px; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.5;"></textarea>
+            <textarea id="promptSplitEditor" oninput="onPromptSplitInput()" placeholder="Raw Markdown..." style="min-height: 540px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; line-height: 1.5;"></textarea>
             <div id="promptSplitPreview" class="markdown-body" style="max-height: 560px;"></div>
           </div>
           </div>
@@ -1224,27 +1223,27 @@
           <div id="liveTelemetryBar" style="display: flex; gap: 14px; align-items: center; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 9px 15px; flex-wrap: wrap; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);">
             <div style="display: flex; align-items: center; gap: 7px;">
               <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">⏱️ Elapsed</span>
-              <span id="liveMetricElapsed" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #58a6ff; font-size: 1.05rem;">00:00</span>
+              <span id="liveMetricElapsed" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #58a6ff; font-size: 1.05rem;">00:00</span>
             </div>
             <div style="width: 1px; height: 18px; background: var(--border);"></div>
             <div id="liveMetricSubrunWrapper" style="display: flex; align-items: center; gap: 7px;">
               <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">🔁 Subrun</span>
-              <span id="liveMetricSubrun" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #f0883e; font-size: 1.05rem;">-</span>
+              <span id="liveMetricSubrun" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #f0883e; font-size: 1.05rem;">-</span>
             </div>
             <div style="width: 1px; height: 18px; background: var(--border);"></div>
             <div style="display: flex; align-items: center; gap: 7px;">
               <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">🔄 Turns</span>
-              <span id="liveMetricTurns" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #e3b341; font-size: 1.05rem;">0 / 100</span>
+              <span id="liveMetricTurns" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #e3b341; font-size: 1.05rem;">0 / 100</span>
             </div>
             <div style="width: 1px; height: 18px; background: var(--border);"></div>
             <div style="display: flex; align-items: center; gap: 7px;">
               <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">💰 Current Spent</span>
-              <span id="liveMetricSpent" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #3fb950; font-size: 1.05rem;">$0.0000</span>
+              <span id="liveMetricSpent" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #3fb950; font-size: 1.05rem;">$0.0000</span>
             </div>
             <div style="width: 1px; height: 18px; background: var(--border);"></div>
             <div style="display: flex; align-items: center; gap: 7px;">
               <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">⚡ Tokens</span>
-              <span id="liveMetricTokens" style="font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #bc8cff; font-size: 1.05rem;">0</span>
+              <span id="liveMetricTokens" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #bc8cff; font-size: 1.05rem;">0</span>
             </div>
             <div id="liveMetricStatusWrapper" style="margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 0.78rem;">
               <span id="liveMetricStatusDot" style="width: 9px; height: 9px; border-radius: 50%; background: #484f58; display: inline-block;"></span>
@@ -1443,39 +1442,13 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. Same-regime ranks only — mixed stamps never compare.</p>
         </div>
 
-        <!-- Tab: Formula (weighted judge + live rank) -->
-        <div id="tab-formula" style="display: none; flex-direction: column; gap: 16px;">
-          <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end;">
-            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-              <label style="font-size: 0.75rem;">Skill (P@1 lo)<br><input type="range" id="fwSkill" min="0" max="100" value="50" oninput="renderFormula()" style="width: 130px;"></label>
-              <label style="font-size: 0.75rem;">Cheap ($/pass)<br><input type="range" id="fwCost" min="0" max="100" value="20" oninput="renderFormula()" style="width: 130px;"></label>
-              <label style="font-size: 0.75rem;">Reliable (stability)<br><input type="range" id="fwStab" min="0" max="100" value="20" oninput="renderFormula()" style="width: 130px;"></label>
-              <label style="font-size: 0.75rem;">Evidence (trials)<br><input type="range" id="fwTr" min="0" max="100" value="10" oninput="renderFormula()" style="width: 130px;"></label>
-            </div>
-            <div style="display: flex; gap: 8px;">
-              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="setFormulaPreset(70,10,10,10)">Raw skill</button>
-              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="setFormulaPreset(20,60,10,10)">Budget</button>
-              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="setFormulaPreset(30,10,50,10)">Reliability</button>
-              <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="copyFormulaLink()">Copy link</button>
-            </div>
-          </div>
-          <div id="formulaText" style="font-family: monospace; font-size: 0.78rem; color: var(--text-muted);"></div>
-          <div style="width: 100%; overflow-x: auto;">
-            <table class="responsive-runs-table">
-              <thead><tr><th style="width: 4%;"></th><th>Model</th><th>Score</th><th>P@1 lo</th><th>$/pass</th><th>Stability</th><th>Trials</th></tr></thead>
-              <tbody id="formulaTableBody">
-                <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading...</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="hint" style="font-size: 0.75rem;">Weighted composite, renormalized live. Weights in URL hash (shareable). Published portal always ranks by P@1 lo alone.</p>
-        </div>
-
         <!-- Tab 3: Prompt Specification -->
       </main>
     </div>
   </div>
 
+  <script src="/static/shared.js"></script>
+  <!--__SHARED_JS__-->
   <script>
     let allModels = [];
     let activeFamily = 'all';
@@ -1830,7 +1803,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       document.getElementById('tab-models').style.display = 'none';
       document.getElementById('tab-tasks').style.display = 'none';
       document.getElementById('tab-matrix').style.display = 'none';
-      document.getElementById('tab-formula').style.display = 'none';
 
       const tabBtn = document.querySelector(`.tab[data-tab="${name}"]`);
       if (name === 'setup') {
@@ -1865,10 +1837,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         document.getElementById('tab-matrix').style.display = 'flex';
         if (tabBtn) tabBtn.classList.add('active');
         ensureBoardData().then(() => renderMatrix());
-      } else if (name === 'formula') {
-        document.getElementById('tab-formula').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        ensureBoardData().then(() => { initFormulaFromHash(); renderFormula(); });
       }
     }
 
@@ -2220,19 +2188,14 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     // Single choke point: every markdown render (prompts, SUMMARY, run reports)
     // is sanitized before hitting innerHTML, since content may originate from
     // third-party-submitted run archives or edited prompts.
+    // Local-only markdown: the marked CDN is gone (offline + no third
+    // party seeing prompts); renderMarkdownUnsafe covers GFM basics.
     function renderMarkdown(md) {
       return sanitizeHtml(renderMarkdownUnsafe(md));
     }
 
     function renderMarkdownUnsafe(md) {
       if (!md) return '';
-      if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-        try {
-          return marked.parse(md, { gfm: true, breaks: true });
-        } catch (e) {
-          console.warn('marked.parse error, using fallback:', e);
-        }
-      }
       let src = md.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
       const codeBlocks = [];
@@ -2362,22 +2325,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
 
     }
 
-    function formatThroughput(tp, task) {
-      if (!tp) return 'N/A';
-      const t = (task || '').toLowerCase();
-      const unit = t === 'pdf' ? 'pages/s' : 'req/s';
-      return `${Math.round(tp).toLocaleString()} ${unit}`;
-    }
 
-    function escapeHtml(str) {
-      if (str === null || str === undefined) return "";
-      return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-    }
+
+
 
     function renderWorkerCards(workers) {
       const box = document.getElementById('workerCards');
@@ -3026,71 +2976,15 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
     }
 
-    function formulaWeights() {
-      const g = id => Number((document.getElementById(id) || {}).value || 0);
-      const w = { skill: g('fwSkill'), cost: g('fwCost'), stab: g('fwStab'), tr: g('fwTr') };
-      const sum = w.skill + w.cost + w.stab + w.tr || 1;
-      return { skill: w.skill / sum, cost: w.cost / sum, stab: w.stab / sum, tr: w.tr / sum };
-    }
+    
 
-    function setFormulaPreset(a, b, c, d) {
-      document.getElementById('fwSkill').value = a; document.getElementById('fwCost').value = b;
-      document.getElementById('fwStab').value = c; document.getElementById('fwTr').value = d;
-      renderFormula();
-    }
+    
 
-    function initFormulaFromHash() {
-      try {
-        const h = new URLSearchParams(location.hash.slice(1));
-        if (h.get('fwSkill')) document.getElementById('fwSkill').value = h.get('fwSkill');
-        if (h.get('fwCost')) document.getElementById('fwCost').value = h.get('fwCost');
-        if (h.get('fwStab')) document.getElementById('fwStab').value = h.get('fwStab');
-        if (h.get('fwTr')) document.getElementById('fwTr').value = h.get('fwTr');
-      } catch (e) {}
-    }
+    
 
-    function copyFormulaLink() {
-      const w = formulaWeights();
-      const u = `${location.origin}${location.pathname}#fwSkill=${Math.round(w.skill * 100)}&fwCost=${Math.round(w.cost * 100)}&fwStab=${Math.round(w.stab * 100)}&fwTr=${Math.round(w.tr * 100)}`;
-      copyTextToClipboard(u).then(() => copyButtonFeedback('formulaCopyBtn', 'Copied!'));
-    }
+    
 
-    function renderFormula() {
-      const w = formulaWeights();
-      try {
-        history.replaceState(null, '', `#fwSkill=${Math.round(w.skill * 100)}&fwCost=${Math.round(w.cost * 100)}&fwStab=${Math.round(w.stab * 100)}&fwTr=${Math.round(w.tr * 100)}`);
-      } catch (e) {}
-      const ft = document.getElementById('formulaText');
-      if (ft) ft.textContent = `score = ${w.skill.toFixed(2)}·P@1lo/100 + ${w.cost.toFixed(2)}·(1−norm_cost) + ${w.stab.toFixed(2)}·stab + ${w.tr.toFixed(2)}·trials/9`;
-      const tbody = document.getElementById('formulaTableBody');
-      if (!tbody) return;
-      const rows = boardGroups();
-      // log-normalized cost: cheapest→1, priciest→0.
-      const cpps = rows.map(g => g.cpp ?? 1e9).filter(x => x < 1e8);
-      const lo = Math.min(...cpps, 0), hi = Math.max(...cpps, 1e-9);
-      const llo = Math.log10(lo + 1e-9), lhi = Math.log10(hi + 1e-9);
-      const scored = rows.map(g => {
-        const norm = g.cpp == null ? 0 : (lhi === llo ? 1 : 1 - (Math.log10(g.cpp + 1e-9) - llo) / (lhi - llo));
-        const stab = g.stabRank === 1 ? 1 : g.stabRank === 2 ? 0.6 : g.stabRank === 3 ? 0.2 : 0.4;
-        const score = w.skill * (g.p1lo / 100) + w.cost * norm + w.stab * stab + w.tr * Math.min(1, g.nTrials / 9);
-        return { g, score };
-      }).sort((a, b) => b.score - a.score);
-      tbody.innerHTML = '';
-      scored.forEach(({ g, score }, i) => {
-        const meta = getModelMeta(g.model);
-        const tr = document.createElement('tr');
-        tr.style.borderLeft = `4px solid ${meta.color}`;
-        tr.innerHTML = `
-          <td style="text-align:center;color:var(--text-muted);">${i + 1}</td>
-          <td><span style="font-weight:600;color:${meta.color};">${escapeHtml(shortModelName(g.model))}</span></td>
-          <td style="text-align:center;font-weight:700;">${score.toFixed(3)}</td>
-          <td style="text-align:center;">${Math.round(g.p1lo)}%</td>
-          <td style="text-align:center;">${g.cpp != null ? '$' + g.cpp.toFixed(4) : '-'}</td>
-          <td style="text-align:center;font-size:.75rem;">${stabBadge(g.stab)}</td>
-          <td style="text-align:center;">${g.nTrials}</td>`;
-        tbody.appendChild(tr);
-      });
-    }
+    
 
     function toggleLbRow(key) {
       window._lbExpanded = window._lbExpanded || {};
@@ -3107,58 +3001,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (v >= 1000) return (v / 1000).toFixed(1) + 'k/s';
       return Math.round(v) + '/s';
     }
-    function shortModelName(modelName) {
-      if (!modelName) return '';
-      return modelName.split('/').pop() || modelName;
-    }
 
-    function getModelMeta(modelName) {
-      const m = (modelName || '').toLowerCase();
-      if (m.includes('claude') || m.includes('anthropic')) {
-        return { family: 'Anthropic', icon: '✦', color: '#f27244', bg: 'rgba(242, 114, 68, 0.14)', border: 'rgba(242, 114, 68, 0.35)' };
-      }
-      if (m.includes('gpt') || m.includes('openai') || m.includes('o1') || m.includes('o3') || m.includes('o4')) {
-        return { family: 'OpenAI', icon: '✳️', color: '#10a37f', bg: 'rgba(16, 163, 127, 0.14)', border: 'rgba(16, 163, 127, 0.35)' };
-      }
-      if (m.includes('gemini') || m.includes('google')) {
-        return { family: 'Google', icon: '✨', color: '#4285f4', bg: 'rgba(66, 133, 244, 0.14)', border: 'rgba(66, 133, 244, 0.35)' };
-      }
-      if (m.includes('deepseek')) {
-        return { family: 'DeepSeek', icon: '🐋', color: '#0084ff', bg: 'rgba(0, 132, 255, 0.14)', border: 'rgba(0, 132, 255, 0.35)' };
-      }
-      if (m.includes('llama') || m.includes('meta')) {
-        return { family: 'Meta', icon: '🦙', color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.14)', border: 'rgba(139, 92, 246, 0.35)' };
-      }
-      if (m.includes('qwen')) {
-        return { family: 'Qwen', icon: '🔮', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.14)', border: 'rgba(168, 85, 247, 0.35)' };
-      }
-      if (m.includes('mistral') || m.includes('codestral') || m.includes('pixtral')) {
-        return { family: 'Mistral', icon: '🌪️', color: '#ff7000', bg: 'rgba(255, 112, 0, 0.14)', border: 'rgba(255, 112, 0, 0.35)' };
-      }
-      if (m.includes('minimax')) {
-        return { family: 'MiniMax', icon: '⚡', color: '#e11d48', bg: 'rgba(225, 29, 72, 0.14)', border: 'rgba(225, 29, 72, 0.35)' };
-      }
-      if (m.includes('nova') || m.includes('amazon')) {
-        return { family: 'Amazon', icon: '☀️', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)' };
-      }
-      if (m.includes('cohere') || m.includes('command')) {
-        return { family: 'Cohere', icon: '🌿', color: '#14b8a6', bg: 'rgba(20, 184, 166, 0.14)', border: 'rgba(20, 184, 166, 0.35)' };
-      }
-      let hash = 0;
-      for (let i = 0; i < m.length; i++) hash = (hash * 31 + m.charCodeAt(i)) & 0xffffffff;
-      const PALETTE = [
-        { color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.14)', border: 'rgba(6, 182, 212, 0.35)' },
-        { color: '#ec4899', bg: 'rgba(236, 72, 153, 0.14)', border: 'rgba(236, 72, 153, 0.35)' },
-        { color: '#84cc16', bg: 'rgba(132, 204, 22, 0.14)', border: 'rgba(132, 204, 22, 0.35)' },
-        { color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.14)', border: 'rgba(59, 130, 246, 0.35)' },
-        { color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.14)', border: 'rgba(244, 63, 94, 0.35)' },
-        { color: '#6366f1', bg: 'rgba(99, 102, 241, 0.14)', border: 'rgba(99, 102, 241, 0.35)' },
-        { color: '#10b981', bg: 'rgba(16, 185, 129, 0.14)', border: 'rgba(16, 185, 129, 0.35)' },
-        { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)' }
-      ];
-      const choice = PALETTE[Math.abs(hash) % PALETTE.length];
-      return { family: 'Other', icon: '🤖', color: choice.color, bg: choice.bg, border: choice.border };
-    }
+
+
 
     function renderRuns() {
       const q = currentRunsFilter;
@@ -3232,7 +3077,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                   <span class="badge badge-info">${safeTask}</span>
                   <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
                 </div>
-                <div style="display: flex; align-items: center; gap: 8px; font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;">
+                <div style="display: flex; align-items: center; gap: 8px; font-size: 0.72rem; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">
                   <span>${dateStr}</span>
                   <span>·</span>
                   <span title="${escapeHtml(r.run_id)}" style="cursor: pointer; text-decoration: underline dotted;" data-run-id="${escapeHtml(r.run_id)}" onclick="copySpecificText(this.dataset.runId, this, 'Copied ID!')">
@@ -3295,7 +3140,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                   <span class="badge badge-info">${safeTask}</span>
                   <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
                 </div>
-                <div style="font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 3px;">
+                <div style="font-size: 0.72rem; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 3px;">
                   ${dateStr} · <span title="${escapeHtml(r.run_id)}" style="cursor: pointer;" data-run-id="${escapeHtml(r.run_id)}" onclick="copySpecificText(this.dataset.runId, this, 'Copied!')">...${escapeHtml(shortId)} 📋</span> · ${durationStr}
                 </div>
               </div>
@@ -3646,7 +3491,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           const errBox = s.error ? `
             <div style="background: rgba(248, 81, 73, 0.1); border: 1px solid rgba(248, 81, 73, 0.3); border-radius: 4px; padding: 8px 12px; margin-top: 4px;">
               <div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600; margin-bottom: 2px;">FAILURE REASON:</div>
-              <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; color: var(--danger); white-space: pre-wrap;">${escapeHtml(s.error)}</div>
+              <div style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.76rem; color: var(--danger); white-space: pre-wrap;">${escapeHtml(s.error)}</div>
             </div>
           ` : '';
 
@@ -4021,6 +3866,10 @@ function copyRunId() {
     function attachLogStream() {
       const now = Date.now();
       if (activeEventSource || now - lastStreamAttach < 5000) return;
+      // GUI-proxy mode: /api/stream is a one-shot snapshot, not a live feed
+      // (re-attaching replays it = duplicate terminal lines). The 2s poll
+      // owns the terminal there; skip EventSource entirely.
+      if (window.__sdbProxy) return;
       lastStreamAttach = now;
       activeEventSource = new EventSource('/api/stream');
       const badge = document.getElementById('consolePulseBadge');
@@ -4100,6 +3949,7 @@ function copyRunId() {
         const res = await fetch('/api/status');
         if (!res.ok) return;
         const data = await res.json();
+        window.__sdbProxy = !!data.proxy;
         if (data.is_running) {
           const stopBtn = document.getElementById('stopBtn');
           if (stopBtn) stopBtn.style.display = 'block';
@@ -4427,6 +4277,27 @@ function copyRunId() {
     setPromptViewMode(currentPromptViewMode);
     checkActiveRun();
 
+    async function fetchOpencodeStatus() {
+      try {
+        const res = await fetch('/api/sandbox/opencode');
+        if (!res.ok) return;
+        const st = await res.json();
+        const dot = document.getElementById('opencodeDot');
+        const text = document.getElementById('opencodeText');
+        const badge = document.getElementById('opencodeStatusBadge');
+        if (!dot || !text || !badge) return;
+        if (!st.image_exists) {
+          dot.style.background = 'var(--danger)';
+          text.textContent = 'opencode: image missing';
+          badge.title = 'Docker image subdollar-sandbox missing.';
+        } else {
+          dot.style.background = 'var(--success)';
+          text.textContent = `opencode v${st.version || '?'} ✓`;
+          badge.title = `OpenCode harness v${st.version} (pinned in Dockerfile.sandbox; no auto-update).`;
+        }
+      } catch (e) { /* badge keeps last state on transient errors */ }
+    }
+
     async function fetchOmpStatus() {
       try {
         const res = await fetch('/api/sandbox/omp');
@@ -4533,7 +4404,9 @@ function copyRunId() {
     loadRuns();
     refreshQueue();
     fetchOmpStatus();
+    fetchOpencodeStatus();
     setInterval(fetchOmpStatus, 30000);
+    setInterval(fetchOpencodeStatus, 300000);
   </script>
   <!-- =========================================================================
        Run Inspector Modal Dialog
@@ -4545,7 +4418,7 @@ function copyRunId() {
         <div class="modal-title-area">
           <span style="font-size: 1.05rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px;">
             <span>🔍 Run Inspector:</span>
-            <span id="modalInspectRunId" style="color: var(--primary); font-family: 'JetBrains Mono', monospace; font-size: 0.95rem;"></span>
+            <span id="modalInspectRunId" style="color: var(--primary); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95rem;"></span>
           </span>
           <button id="modalCopyRunIdBtn" class="btn-secondary" style="padding: 2px 8px; font-size: 0.72rem;" onclick="copyRunId()">📋 Copy ID</button>
           <span id="modalInspectPortalBadge"></span>
@@ -4639,7 +4512,7 @@ function copyRunId() {
               <div class="code-main-header">
                 <div style="display: flex; align-items: center; gap: 10px; overflow: hidden;">
                   <span id="modalActiveFileIcon" style="font-size: 1rem;">📄</span>
-                  <span id="modalActiveFileName" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">(No file selected)</span>
+                  <span id="modalActiveFileName" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">(No file selected)</span>
                   <span id="modalActiveFileMeta" style="font-size: 0.72rem; color: var(--text-muted);"></span>
                 </div>
                 <button id="modalCopyCodeBtn" class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="copyInspectFile()">📋 Copy File</button>
@@ -4658,7 +4531,7 @@ function copyRunId() {
                 <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.72rem;" onclick="document.getElementById('modalTraceFilterInput').value=''; filterInspectLog('');">✕ Clear</button>
               </div>
               <div style="display: flex; align-items: center; gap: 8px;">
-                <span id="modalTraceLineCount" style="font-size: 0.74rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;">0 lines</span>
+                <span id="modalTraceLineCount" style="font-size: 0.74rem; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">0 lines</span>
                 <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.72rem;" onclick="scrollInspectLog(false)">⬆ Top</button>
                 <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.72rem;" onclick="scrollInspectLog(true)">⬇ Bottom</button>
                 <button id="modalCopyLogBtn" class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="copyInspectLog()">📋 Copy Full Trace</button>
@@ -4683,7 +4556,7 @@ function copyRunId() {
             <div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 16px;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
                 <h4 style="font-size: 0.85rem; font-weight: 600; color: #fff;">🖥️ Execution Environment & Hardware Baseline:</h4>
-                <span id="modalInspectGitCommit" style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--accent);"></span>
+                <span id="modalInspectGitCommit" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.75rem; color: var(--accent);"></span>
               </div>
               <div id="modalInspectEnvGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; font-size: 0.78rem;"></div>
             </div>

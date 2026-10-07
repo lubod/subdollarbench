@@ -153,6 +153,11 @@ pub struct StatusResponse {
     /// Billing circuit breaker: queue refuses new dispatch until resumed.
     #[serde(default)]
     pub queue_paused: bool,
+    /// GUI-proxy mode (engine owns dispatch): /api/stream there is a
+    /// one-shot snapshot, so the GUI must use the console poll as the live
+    /// path and skip EventSource entirely.
+    #[serde(default)]
+    pub proxy: bool,
 }
 
 pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
@@ -188,6 +193,7 @@ pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
         workers,
         db_fallback: state.db_fallback,
         queue_paused: state.queue_paused.load(Ordering::SeqCst),
+        proxy: !state.engine_url.is_empty(),
     })
     .into_response()
 }
@@ -596,8 +602,29 @@ impl UiServer {
     }
 }
 
-pub(crate) async fn serve_index() -> Html<&'static str> {
-    Html(include_str!("index.html"))
+/// Shared leaf JS (single source with the static portal, which inlines
+/// the same file at export). Served as its own route so the GUI keeps
+/// working when the page is cached; the portal inlines it instead.
+pub(crate) async fn serve_shared_js() -> Response {
+    (
+        [("content-type", "application/javascript; charset=utf-8")],
+        include_str!("shared.js"),
+    )
+        .into_response()
+}
+
+static INDEX_HTML: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// GUI shell with shared helpers inlined (offline single-file preserved).
+/// Shared fns live only in `shared.js`; `index.html` carries a placeholder.
+pub(crate) async fn serve_index() -> Html<String> {
+    let page = INDEX_HTML.get_or_init(|| {
+        include_str!("index.html").replace(
+            "<!--__SHARED_JS__-->",
+            &format!("<script>\n{}\n</script>", include_str!("shared.js")),
+        )
+    });
+    Html(page.clone())
 }
 
 pub(crate) async fn get_models(headers: HeaderMap) -> Json<Vec<SubDollarModel>> {
@@ -2290,6 +2317,19 @@ pub(crate) async fn stream_logs(
 #[derive(Debug, Deserialize)]
 pub struct UpdateOmpRequest {
     pub version: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OpencodeHarnessStatus {
+    pub version: String,
+    pub image_exists: bool,
+}
+
+pub(crate) async fn get_sandbox_opencode_status() -> Json<OpencodeHarnessStatus> {
+    Json(OpencodeHarnessStatus {
+        version: crate::sandbox::OPENCODE_VERSION.to_string(),
+        image_exists: crate::sandbox::omp_updater::check_image_exists(),
+    })
 }
 
 pub(crate) async fn get_sandbox_omp_status() -> Json<crate::sandbox::OmpVersionStatus> {

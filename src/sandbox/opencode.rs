@@ -165,7 +165,6 @@ impl OpenCodeRunner {
     }
 }
 
-
 impl crate::sandbox::AgentRunner for OpenCodeRunner {
     fn run_agent_with_logger<F>(spec: AgentRunSpec<'_>, mut log_fn: F) -> Result<OmpSessionStats>
     where

@@ -8,9 +8,10 @@ use super::server::{
     balance_check_handler, clear_queue, compare_runs, csrf_guard, delete_run, enqueue_run,
     extend_parent_run, get_active_console, get_env, get_leaderboard, get_models, get_prompt,
     get_queue, get_run_detail, get_run_file, get_run_files, get_run_log, get_run_review, get_runs,
-    get_sandbox_omp_status, get_status, login, logout, me, pause_queue_handler, rebuild_portal,
-    remove_queued_run, resume_queue_handler, save_prompt, serve_index, set_run_poison,
-    set_run_portal_visibility, start_run, stop_run, stream_logs, update_sandbox_omp, AppState,
+    get_sandbox_omp_status, get_sandbox_opencode_status, get_status, login, logout, me,
+    pause_queue_handler, rebuild_portal, remove_queued_run, resume_queue_handler, save_prompt,
+    serve_index, serve_shared_js, set_run_poison, set_run_portal_visibility, start_run, stop_run,
+    stream_logs, update_sandbox_omp, AppState,
 };
 use axum::{
     response::Redirect,
@@ -56,7 +57,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/runs/:id/review", get(get_run_review))
         .route("/api/runs/:id", delete(delete_run))
         .route("/portal/*path", get(serve_portal))
+        .route("/static/shared.js", get(serve_shared_js))
         .route("/api/sandbox/omp", get(get_sandbox_omp_status))
+        .route("/api/sandbox/opencode", get(get_sandbox_opencode_status))
         .route("/api/sandbox/omp/update", post(update_sandbox_omp))
         .route("/api/env", get(get_env))
         .route_layer(axum::middleware::from_fn(csrf_guard))
