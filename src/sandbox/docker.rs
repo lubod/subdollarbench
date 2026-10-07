@@ -921,7 +921,40 @@ impl SandboxManager {
     }
 
     /// Start the candidate server container with resource limits
+    /// Candidate containers run as arbitrary users (root, redis,
+    /// app-specific). The workspace is host-ubuntu-owned 644/755, so any
+    /// non-root candidate user gets EACCES on its own data files (measured:
+    /// `appendonly.log: permission denied` ×3 across 2 parents). Loosen to
+    /// a+rwX before launch: the candidate is fully isolated, so this grants
+    /// nothing beyond its sandbox. Symlinks skipped (never followed).
+    fn relax_workspace_perms(workdir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut stack = vec![workdir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_symlink() {
+                        continue;
+                    }
+                    if ft.is_dir() {
+                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o777));
+                        stack.push(path);
+                    } else {
+                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o666));
+                    }
+                }
+            }
+        }
+        let _ = fs::set_permissions(workdir, fs::Permissions::from_mode(0o777));
+    }
+
     pub fn start_candidate_in_docker(&self, workdir: &Path, port: u16) -> Result<()> {
+        Self::relax_workspace_perms(workdir);
         let name = self.candidate_container_name();
         info!(
             "Starting candidate server in isolated Docker container for port {} ({})",
@@ -1666,6 +1699,41 @@ mod tests {
             "expected PONG via ref-redis network alias, got: {:?}",
             stdout
         );
+    }
+
+    #[test]
+    fn test_relax_workspace_perms_opens_any_uid_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("test_relax_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("aof.log"), b"x").unwrap();
+        std::fs::set_permissions(sub.join("aof.log"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", sub.join("link")).ok();
+        SandboxManager::relax_workspace_perms(&base);
+        let fmode = std::fs::metadata(sub.join("aof.log"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            fmode, 0o666,
+            "data files must be world-writable (any candidate UID)"
+        );
+        let dmode = std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dmode, 0o777,
+            "dirs must be world-rwx (runtime file creation)"
+        );
+        // Symlink itself must survive untouched (never followed into).
+        assert!(std::fs::symlink_metadata(sub.join("link"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
