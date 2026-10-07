@@ -2075,9 +2075,11 @@ pub(crate) async fn enqueue_run(
         )
             .into_response());
     }
-    // Dedupe: an identical PENDING cell (model+task+effort+trials+budget)
-    // returns the existing id instead of double-spend. Running cells are
-    // never deduped (different attempt, different spend). `req` IS the
+    // Dedupe: an identical PENDING cell
+    // (model+task+effort+harness+trials+budget) returns the existing id
+    // instead of double-spend. Harness is in the key: omp and opencode
+    // cells are different attempts, never interchangeable. Running cells
+    // are never deduped (different attempt, different spend). `req` IS the
     // RunRequest here; the enum wraps at push time below.
     {
         let rr = &req;
@@ -2092,6 +2094,7 @@ pub(crate) async fn enqueue_run(
                     o.model == rr.model
                         && o.task == rr.task
                         && o.effort == rr.effort
+                        && o.harness == rr.harness
                         && o.trials == rr.trials
                         && (o.budget_usd - rr.budget_usd).abs() < 1e-9
                 }
@@ -3013,6 +3016,26 @@ mod tests {
             ida,
             "different budget must get its own id"
         );
+        // A DISTINCT cell (different harness) enqueues separately too —
+        // omp and opencode cells are different attempts, never folded.
+        let mut req4 = queue_test_req();
+        req4.harness = Some("opencode".to_string());
+        let e = enqueue_run(State(state.clone()), Json(req4))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(e.get("deduped"), None);
+        assert_ne!(
+            e["id"].as_str().unwrap(),
+            ida,
+            "different harness must get its own id"
+        );
+        assert!(remove_queued_run(
+            State(state.clone()),
+            AxumPath(e["id"].as_str().unwrap().to_string())
+        )
+        .await
+        .is_ok());
         assert!(remove_queued_run(
             State(state.clone()),
             AxumPath(d["id"].as_str().unwrap().to_string())
