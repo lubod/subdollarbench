@@ -1610,25 +1610,94 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const t = ((row && row.subruns) || []).find(k => k.id === trialId) || row;
       renderExplorerTrialDetail(t, t === row);
     }
-    function renderExplorerTrialDetail(t, isParent) {
+    const explorerDetailCache = {};
+    async function renderExplorerTrialDetail(t, isParent) {
       const det = document.getElementById('explorerDetail');
       if (!det || !t) return;
+      const tid = t.id || '';
       const [txt, cls] = humanStatus(t.status, t.pass_rate);
       const cost = (t.effective_cost_usd !== undefined && t.effective_cost_usd !== null) ? t.effective_cost_usd : (t.total_cost_usd || 0);
       const toks = t.total_tokens ?? ((t.prompt_tokens || 0) + (t.cached_tokens || 0) + (t.completion_tokens || 0));
+      const eff = (t.efficiency_score ?? 0).toFixed(1);
+      const tp = (t.throughput_req_sec !== undefined && t.throughput_req_sec !== null) ? formatThroughput(t.throughput_req_sec, t.task) : '—';
       let stages = '';
       if (t.stages && t.stages.length) {
         stages = '<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">STAGES</div>' + t.stages.map(s => {
           const nm = escapeHtml(s.name || s.stage || 'stage');
           const ok = !!s.passed;
-          return `<div style="font-size:0.74rem;padding:3px 0;"><span style="color:${ok ? 'var(--success)' : 'var(--danger)'};">${ok ? '✔' : '✕'}</span> ${nm}${s.error ? `<div style="color:var(--text-muted);font-size:0.7rem;">${escapeHtml(String(s.error).slice(0, 220))}</div>` : ''}</div>`;
+          return `<div style="font-size:0.74rem;padding:4px 0;border-bottom:1px dashed rgba(255,255,255,0.06);"><span style="color:${ok ? 'var(--success)' : 'var(--danger)'};">${ok ? '✔' : '✕'}</span> ${nm}${s.error ? `<div style="color:var(--danger);font-size:0.7rem;white-space:pre-wrap;">${escapeHtml(String(s.error))}</div>` : ''}</div>`;
         }).join('');
+      } else {
+        stages = '<div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;">No stage detail on this row — open full view.</div>';
       }
-      det.innerHTML = `<div style="font-size:0.78rem;display:flex;flex-direction:column;gap:6px;">`
-        + `<div><b>${escapeHtml((t.id || '').slice(-24))}</b> <span class="badge ${cls}">${escapeHtml(txt)}</span>${isParent ? ' <span class="badge">parent row</span>' : ''}</div>`
-        + `<div style="color:var(--text-muted);">pass ${Math.round(t.pass_rate || 0)}% (${t.passed_stages ?? '?'}/${t.total_stages ?? '?'}) · $${Number(cost).toFixed(4)} · ${Number(toks || 0).toLocaleString()} tok · ${t.turns ?? '?'} turns · ${(t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-'}</div>`
+      det.innerHTML = `<div style="font-size:0.78rem;display:flex;flex-direction:column;gap:6px;" data-explorer-trial="${escapeHtml(tid)}">`
+        + `<div><b>${escapeHtml(tid.slice(-24))}</b> <span class="badge ${cls}">${escapeHtml(txt)}</span>${isParent ? ' <span class="badge">parent row</span>' : ''}</div>`
+        + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:0.74rem;color:var(--text-muted);">`
+        + `<span>pass <b style="color:#fff;">${Math.round(t.pass_rate || 0)}% (${t.passed_stages ?? '?'}/${t.total_stages ?? '?'})</b></span>`
+        + `<span>score <b style="color:#fff;">${eff}</b></span>`
+        + `<span>cost <b style="color:#fff;">$${Number(cost).toFixed(4)}</b></span>`
+        + `<span>tokens <b style="color:#fff;">${Number(toks || 0).toLocaleString()}</b></span>`
+        + `<span>turns <b style="color:#fff;">${t.turns ?? '?'}</b></span>`
+        + `<span>duration <b style="color:#fff;">${(t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-'}</b></span>`
+        + `<span>throughput <b style="color:#fff;">${escapeHtml(tp)}</b></span>`
+        + `<span>harness <b style="color:#fff;">${escapeHtml(t.harness || 'omp')}</b></span></div>`
         + stages
-        + `<div style="display:flex;gap:6px;margin-top:4px;"><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(t.id || '')}')">Open full view</button></div></div>`;
+        + `<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">FILES <span id="explorerFilesNote" style="font-weight:400;"></span></div><div id="explorerFiles" style="font-size:0.74rem;"></div>`
+        + `<div id="explorerFileView" style="display:none;"><pre id="explorerFilePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:260px;white-space:pre;"></pre></div>`
+        + `<div style="font-size:0.72rem;font-weight:700;color:var(--text-muted);margin:8px 0 4px;">TRACE TAIL</div><pre id="explorerTracePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:200px;white-space:pre-wrap;">loading…</pre>`
+        + `<div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;"><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}')">Open full view</button><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}', {tab:'trace'})">Full trace</button></div></div>`;
+      // Files + trace tail load async (cached per trial).
+      if (!explorerDetailCache[tid]) explorerDetailCache[tid] = {};
+      const cached = explorerDetailCache[tid];
+      const filesBox = document.getElementById('explorerFiles');
+      const renderFiles = (files) => {
+        if (!filesBox || !document.body.contains(filesBox)) return;
+        if (!explorerCtx || explorerCtx.trialId !== tid) return;
+        filesBox.innerHTML = (files || []).map(f => `<div class="explorer-row" data-f="${escapeHtml(f.name || f)}" onclick="selectExplorerFile('${escapeHtml(tid)}', this.dataset.f)" style="padding:3px 8px;">${escapeHtml(f.name || f)}</div>`).join('') || '<span style="color:var(--text-muted);">No workspace files.</span>';
+        const note = document.getElementById('explorerFilesNote');
+        if (note) note.textContent = `(${(files || []).length})`;
+      };
+      if (cached.files) { renderFiles(cached.files); }
+      else {
+        fetch(`/api/runs/${encodeURIComponent(tid)}/files`).then(r => r.ok ? r.json() : []).then(f => {
+          cached.files = f; renderFiles(f);
+        }).catch(() => { cached.files = []; renderFiles([]); });
+      }
+      const tracePre = document.getElementById('explorerTracePre');
+      const renderTrace = (txt) => {
+        if (!tracePre || !document.body.contains(tracePre)) return;
+        if (!explorerCtx || explorerCtx.trialId !== tid) return;
+        const lines = String(txt || '').split('\n');
+        tracePre.textContent = lines.slice(-80).join('\n') + (lines.length > 80 ? `\n… (${lines.length - 80} earlier lines in full view)` : '');
+      };
+      if (cached.trace !== undefined) { renderTrace(cached.trace); }
+      else {
+        fetch(`/api/runs/${encodeURIComponent(tid)}/log`).then(r => r.ok ? r.text() : '').then(tx => {
+          cached.trace = tx; renderTrace(tx);
+        }).catch(() => { cached.trace = ''; renderTrace(''); });
+      }
+    }
+    async function selectExplorerFile(trialId, filename) {
+      const pre = document.getElementById('explorerFilePre');
+      const wrap = document.getElementById('explorerFileView');
+      if (!pre || !wrap) return;
+      document.querySelectorAll('#explorerFiles .explorer-row').forEach(el => {
+        el.classList.toggle('active', el.dataset.f === filename);
+      });
+      if (!explorerDetailCache[trialId]) explorerDetailCache[trialId] = {};
+      const cached = explorerDetailCache[trialId];
+      if (cached['file:' + filename] !== undefined) {
+        pre.textContent = cached['file:' + filename];
+      } else {
+        pre.textContent = 'loading…';
+        try {
+          const res = await fetch(`/api/runs/${encodeURIComponent(trialId)}/file?file=${encodeURIComponent(filename)}`);
+          const txt = res.ok ? await res.text() : '(unreadable)';
+          cached['file:' + filename] = txt;
+          if (explorerCtx && explorerCtx.trialId === trialId) pre.textContent = txt;
+        } catch (e) { pre.textContent = '(fetch failed)'; }
+      }
+      wrap.style.display = '';
     }
     function renderCrumbs() {
       const box = document.getElementById('modalCrumbs');
