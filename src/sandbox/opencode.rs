@@ -131,6 +131,22 @@ impl OpenCodeRunner {
         }
     }
 
+    /// OpenRouter-only policy: the bench standardizes on `openrouter/*` ids
+    /// so spend, rate limits, and capped run keys behave identically across
+    /// harnesses. Console-routed ids (`opencode/*`, incl. `-free`) fail here
+    /// before a trial burns (free tier 403s headless under `--standalone`).
+    fn resolve_model_id(model: &str) -> Result<String> {
+        let m = model.trim();
+        if m.starts_with("openrouter/") {
+            Ok(m.to_string())
+        } else {
+            Err(anyhow!(
+                "opencode harness is OpenRouter-only: model '{}' rejected                  (use openrouter/<provider>/<model>; opencode/* ids route via                  Console, whose free tier 403s headless runs)",
+                m
+            ))
+        }
+    }
+
     /// Host dirs holding stored Console auth (opencode.db) + config.
     /// Mounted into the sandbox like OMP's `~/.omp` mount. Per-run
     /// `--session` ids keep concurrent runs apart in the shared db.
@@ -183,6 +199,8 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             cancel_flag,
         } = spec;
         let effort_level = effort.unwrap_or("high").trim().to_string();
+        // Fail fast on non-OpenRouter ids: no container, no spend, no session.
+        let effective_model = Self::resolve_model_id(model)?;
 
         let start_time = SystemTime::now();
         let container_id = run_id.unwrap_or("run").replace(
@@ -233,9 +251,8 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             &effort_level,
         );
 
-        // opencode accepts both `opencode/*` (stored Console auth) and
-        // `openrouter/*` (OPENROUTER_API_KEY env) ids: identity mapping.
-        let effective_model = model.to_string();
+        // Model id validated above (OpenRouter-only); passed through
+        // untouched so provider/model/variant strings keep working.
 
         // Rebuilt per attempt: `Command` is consumed by spawn, and a
         // resume re-launches the same session (same `--session` id makes
@@ -705,6 +722,25 @@ mod tests {
 
     fn ev(s: &str) -> serde_json::Value {
         serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn test_openrouter_only_guard() {
+        assert_eq!(
+            OpenCodeRunner::resolve_model_id("openrouter/inclusionai/ling-3.1-flash").unwrap(),
+            "openrouter/inclusionai/ling-3.1-flash"
+        );
+        for bad in [
+            "opencode/ling-3.1-flash-free",
+            "anthropic/claude-x",
+            "",
+            "  ",
+        ] {
+            let err = OpenCodeRunner::resolve_model_id(bad)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("OpenRouter-only"), "unexpected: {err}");
+        }
     }
 
     #[test]
