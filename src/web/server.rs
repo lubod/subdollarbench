@@ -544,6 +544,13 @@ impl UiServer {
                             ),
                         );
                     }
+                    // Idle engine with ready work must not sit still: backoff
+                    // expiry (parked refusals) and replayed pendings have no
+                    // other trigger. pump claims one slot per call; the loop
+                    // fills every free worker, no-op when dry or paused.
+                    if !sweep.queue_paused.load(Ordering::SeqCst) {
+                        while pump_queue(&sweep) {}
+                    }
                 }
             });
         }
