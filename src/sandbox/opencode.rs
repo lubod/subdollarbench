@@ -125,7 +125,10 @@ impl OpenCodeRunner {
     fn cap_line(s: &str) -> String {
         const MAX: usize = 1500;
         if s.len() > MAX {
-            format!("{}…[truncated]", &s[..MAX])
+            // Byte slicing can split a multi-byte char (CJK/emoji) and
+            // panic the reader thread; floor to a char boundary instead.
+            let idx = s.floor_char_boundary(MAX);
+            format!("{}…[truncated]", &s[..idx])
         } else {
             s.to_string()
         }
@@ -722,6 +725,17 @@ mod tests {
 
     fn ev(s: &str) -> serde_json::Value {
         serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn test_cap_line_never_splits_utf8() {
+        // CJK + emoji straddling the cut point must not panic the thread.
+        let s = "a".repeat(1498) + "你好🌍";
+        let out = OpenCodeRunner::cap_line(&s);
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.len() <= 1500 + "…[truncated]".len());
+        // Short strings pass through untouched.
+        assert_eq!(OpenCodeRunner::cap_line("hi"), "hi");
     }
 
     #[test]

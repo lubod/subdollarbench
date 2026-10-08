@@ -1412,11 +1412,56 @@ impl SandboxManager {
     /// Reap orphan *containers*: labeled containers whose network is gone
     /// (or which outlived their run: crashed engine, killed process, test
     /// scaffolding without Drop). Only containers whose sdb.run network no
+    /// Running containers older than this whose run matches no live cell
+    /// are abandoned (engine restarts orphan them while their network
+    /// survives, deadlocking the old stopped&&net_gone rule: 140 leaked).
+    /// Below the age they are left alone even when unmatched (kill -9 crash
+    /// windows, slow starts).
+    pub const MAX_RUNNING_ORPHAN_AGE_SECS: u64 = 3 * 3600;
+
+    /// True when a container label belongs to a live run: stems match after
+    /// stripping trial/batchref/extend suffixes (`..._w0` stems
+    /// `..._w0_trial1` and `..._w0_batchref`), or either side prefixes the
+    /// other as a fallback.
+    pub fn run_matches_live(label: &str, live_ids: &std::collections::HashSet<String>) -> bool {
+        fn stem(s: &str) -> &str {
+            let mut s = s;
+            loop {
+                let cut = s
+                    .rfind("_trial")
+                    .filter(|&i| s[i + 6..].chars().all(|c| c.is_ascii_digit()))
+                    .or_else(|| s.rfind("_batchref").filter(|&i| i + 9 == s.len()))
+                    .or_else(|| {
+                        s.rfind("_ext")
+                            .filter(|&i| s[i + 4..].chars().all(|c| c.is_ascii_digit()))
+                    });
+                match cut {
+                    Some(i) => s = &s[..i],
+                    None => return s,
+                }
+            }
+        }
+        let ls = stem(label);
+        live_ids.iter().any(|id| {
+            let s = stem(id);
+            ls == s || ls.starts_with(s) || s.starts_with(ls)
+        })
+    }
+
     /// longer exists AND which are not running a live trial: selected by
     /// label, filtered to subdollar-* names, never by bare timestamp.
     /// Returns the reaped count. Fail-closed: any inspect error keeps the
     /// container (a live cell's container always has its network present).
     pub fn reap_orphan_containers() -> usize {
+        Self::reap_orphan_containers_except(&std::collections::HashSet::new())
+    }
+
+    /// Same as [`Self::reap_orphan_containers`], plus an age gate for
+    /// RUNNING orphans: running past MAX_RUNNING_ORPHAN_AGE_SECS with no
+    /// live match is abandoned, not busy — force-remove so its network can
+    /// prune next. Anything live, young, stopped-with-network, or
+    /// unparseable is kept.
+    pub fn reap_orphan_containers_except(live_ids: &std::collections::HashSet<String>) -> usize {
         let ls = Command::new("docker")
             .args(["ps", "-a", "-q", "--filter", "label=sdb.run"])
             .output();
@@ -1431,7 +1476,7 @@ impl SandboxManager {
                     "inspect",
                     id,
                     "--format",
-                    "{{.Name}} {{.State.Running}} {{index .Config.Labels \"sdb.run\"}}",
+                    "{{.Name}} {{.State.Running}} {{index .Config.Labels \"sdb.run\"}} {{.Created}}",
                 ])
                 .output();
             let text = match detail {
@@ -1443,6 +1488,7 @@ impl SandboxManager {
                 continue;
             }
             let (name, running, run) = (parts[0], parts[1], parts[2]);
+            let created = parts.get(3).copied().unwrap_or("");
             // Only our names; never foreign containers that happen to share
             // a label key.
             if !name.contains("subdollar-") && !name.contains("guardprobe-") {
@@ -1465,9 +1511,37 @@ impl SandboxManager {
                 if rm.map(|o| o.status.success()).unwrap_or(false) {
                     reaped += 1;
                 }
+                continue;
+            }
+            // Running but ancient and unmatched: abandoned by a dead engine,
+            // never coming back. Live matches always survive regardless of age
+            // (a 9-trial cell legitimately runs for hours).
+            if !stopped && !Self::run_matches_live(run, live_ids) {
+                let age_ok = Self::container_created_secs(created).is_some_and(|ts| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|now| {
+                            now.as_secs().saturating_sub(ts) > Self::MAX_RUNNING_ORPHAN_AGE_SECS
+                        })
+                        .unwrap_or(false)
+                });
+                if age_ok {
+                    let rm = Command::new("docker").args(["rm", "-f", id]).output();
+                    if rm.map(|o| o.status.success()).unwrap_or(false) {
+                        reaped += 1;
+                    }
+                }
             }
         }
         reaped
+    }
+
+    /// Parse `docker inspect .Created` (RFC3339) to epoch seconds.
+    /// None when unparseable (fail closed: never stale).
+    pub fn container_created_secs(created: &str) -> Option<u64> {
+        chrono::DateTime::parse_from_rfc3339(created)
+            .ok()
+            .map(|dt| dt.timestamp() as u64)
     }
 
     /// Legacy path, kept for Drop + tests. New code prefers RunGuard
@@ -1576,6 +1650,46 @@ impl Drop for SandboxManager {
         if self.needs_cleanup.load(Ordering::SeqCst) {
             self.cleanup();
         }
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::SandboxManager;
+    use std::collections::HashSet;
+
+    fn live(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_run_matches_live_covers_trial_parent_batchref() {
+        let live = live(&["pdf_model_123_w0_trial3", "redis_m_1_w0"]);
+        // Exact, parent-prefix, and batchref-suffix stems all match.
+        assert!(SandboxManager::run_matches_live(
+            "pdf_model_123_w0_trial3",
+            &live
+        ));
+        assert!(SandboxManager::run_matches_live("pdf_model_123_w0", &live));
+        assert!(SandboxManager::run_matches_live(
+            "pdf_model_123_w0_batchref",
+            &live
+        ));
+        // Unrelated runs never match, however similar the prefix.
+        assert!(!SandboxManager::run_matches_live(
+            "pdf_other_9_w0_trial1",
+            &live
+        ));
+        assert!(!SandboxManager::run_matches_live("unrelated", &live));
+    }
+
+    #[test]
+    fn test_created_secs_parses_inspect_format() {
+        // docker inspect .Created layout.
+        let ts = SandboxManager::container_created_secs("2026-10-06T06:13:10.123456789Z");
+        assert!(ts.is_some_and(|t| t > 1_700_000_000));
+        assert!(SandboxManager::container_created_secs("not-a-date").is_none());
+        assert!(SandboxManager::container_created_secs("").is_none());
     }
 }
 

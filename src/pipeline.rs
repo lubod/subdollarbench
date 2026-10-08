@@ -684,11 +684,23 @@ impl BenchmarkPipeline {
                 }
             }
 
-            logger.log(&format!(
-                "[SETUP] Waiting for server port {} to become ready (timeout: 25s)...",
-                port
-            ));
-            let ready = sandbox.wait_for_port(port, 25).await;
+            // A candidate that never started (infra_error latched above) gets
+            // no 25s port wait and no doomed stages: transport failures are
+            // already proven. Stages still record as failed below so scoring
+            // shape is unchanged; only the wasted wait is skipped.
+            let ready = if infra_error {
+                logger.log(&format!(
+                    "[SETUP] Candidate never started; skipping port {} wait (stages will fail fast on transport).",
+                    port
+                ));
+                false
+            } else {
+                logger.log(&format!(
+                    "[SETUP] Waiting for server port {} to become ready (timeout: 25s)...",
+                    port
+                ));
+                sandbox.wait_for_port(port, 25).await
+            };
 
             if ready {
                 logger.log(&format!(

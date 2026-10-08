@@ -98,49 +98,82 @@ impl EnvironmentInfo {
         "Unknown".to_string()
     }
 
+    /// Cargo home for the login shell that owns the repo. Systemd runs
+    /// as `ubuntu` with a minimal PATH, so `rustc` alone resolves nothing;
+    /// the old code fell back to `su - ubuntu`, which fails as non-root and
+    /// floods auth.log while recording rust_version "N/A". Probe explicit
+    /// paths instead — no privilege escalation involved.
+    fn cargo_bin(name: &str) -> String {
+        let rel = format!(".cargo/bin/{name}");
+        for base in [
+            std::env::var("HOME").unwrap_or_default(),
+            "/home/ubuntu".to_string(),
+        ] {
+            if base.is_empty() {
+                continue;
+            }
+            let p = std::path::Path::new(&base).join(&rel);
+            if p.is_file() {
+                return p.to_string_lossy().to_string();
+            }
+        }
+        name.to_string()
+    }
+
     fn detect_rust() -> String {
         let direct = Self::cmd_output("rustc", &["--version"]);
         if direct != "N/A" && !direct.is_empty() {
             direct
         } else {
-            Self::cmd_output_su("rustc --version")
+            Self::cmd_output(&Self::cargo_bin("rustc"), &["--version"])
         }
     }
 
     fn detect_git_commit() -> String {
         let out = Self::cmd_output("git", &["rev-parse", "--short", "HEAD"]);
         if out != "N/A" && !out.is_empty() {
-            out
-        } else {
-            let repo = crate::config::get_repo_root();
-            Self::cmd_output_su(&format!(
-                "cd {} && git rev-parse --short HEAD",
-                repo.display()
-            ))
+            return out;
+        }
+        // Same no-su discipline: run git in-process with the repo as cwd.
+        let repo = crate::config::get_repo_root();
+        match Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&repo)
+            .output()
+        {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if o.status.success() && !s.is_empty() {
+                    s
+                } else {
+                    "N/A".to_string()
+                }
+            }
+            Err(_) => "N/A".to_string(),
         }
     }
 
     fn detect_git_branch() -> String {
         let out = Self::cmd_output("git", &["rev-parse", "--abbrev-ref", "HEAD"]);
         if out != "N/A" && !out.is_empty() {
-            out
-        } else {
-            let repo = crate::config::get_repo_root();
-            Self::cmd_output_su(&format!(
-                "cd {} && git rev-parse --abbrev-ref HEAD",
-                repo.display()
-            ))
+            return out;
         }
-    }
-
-    fn cmd_output_su(cmd: &str) -> String {
-        if let Ok(output) = Command::new("su").args(["-", "ubuntu", "-c", cmd]).output() {
-            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s;
+        let repo = crate::config::get_repo_root();
+        match Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&repo)
+            .output()
+        {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if o.status.success() && !s.is_empty() {
+                    s
+                } else {
+                    "N/A".to_string()
+                }
             }
+            Err(_) => "N/A".to_string(),
         }
-        "N/A".to_string()
     }
 
     fn cmd_output(cmd: &str, args: &[&str]) -> String {
@@ -232,10 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_output_su() {
-        let out = EnvironmentInfo::cmd_output_su("echo hello_su");
-        assert!(out == "hello_su" || out == "N/A");
-        let empty = EnvironmentInfo::cmd_output_su("true");
-        assert!(empty.is_empty() || empty == "N/A");
+    fn test_no_privilege_escalation_paths() {
+        // Regression: detection must never shell out to `su` (PAM flood
+        // as non-root + "N/A" manifests). Explicit cargo-bin probing only.
+        let p = EnvironmentInfo::cargo_bin("rustc");
+        assert!(p.ends_with(".cargo/bin/rustc") || p == "rustc");
+        let r = EnvironmentInfo::detect_rust();
+        assert!(!r.is_empty() && r != "N/A", "host has rustc: {r}");
+        assert!(!EnvironmentInfo::detect_git_commit().is_empty());
     }
 }

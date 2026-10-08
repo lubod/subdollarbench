@@ -882,6 +882,26 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         set
     }
 
+    /// True when the open session FD no longer tracks the path: the FD
+    /// is unlinked (nlink 0 after an atomic rename) or the path now points
+    /// at a different inode. Either means the agent rotated the file and
+    /// further reads would EOF-spin on a dead inode.
+    #[cfg(unix)]
+    fn session_disconnected(fd: &File, path: &std::path::Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let fd_meta = match fd.metadata() {
+            Ok(m) => m,
+            Err(_) => return true,
+        };
+        if fd_meta.nlink() == 0 {
+            return true;
+        }
+        match std::fs::metadata(path) {
+            Ok(disk) => disk.ino() != fd_meta.ino(),
+            Err(_) => true,
+        }
+    }
+
     fn tail_session_file(ctx: TailSessionContext) {
         // Only this run's own subdirectory. Scanning the shared parent lets a
         // concurrent run's session be adopted as this run's own.
@@ -924,6 +944,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         let mut reader = BufReader::new(file);
         let mut line_buf = String::new();
+        let mut lines_seen: u64 = 0;
 
         let mut last_activity = std::time::Instant::now();
         let mut last_heartbeat = std::time::Instant::now();
@@ -937,6 +958,40 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             line_buf.clear();
             match reader.read_line(&mut line_buf) {
                 Ok(0) => {
+                    // OMP rotates the session file atomically (temp + rename):
+                    // our already-open FD then points at an unlinked inode and
+                    // reads EOF forever — turn counting stalls and max_turns
+                    // never fires (measured: 167 turns vs a 100 cap). Reopen
+                    // only on proven disconnect (nlink 0 or inode changed);
+                    // transient emptiness keeps the old fast path.
+                    #[cfg(unix)]
+                    {
+                        if Self::session_disconnected(reader.get_ref(), &session_path) {
+                            if let Ok(new_file) = File::open(&session_path) {
+                                let mut new_reader = BufReader::new(new_file);
+                                let mut skipped: u64 = 0;
+                                let mut skip_buf = String::new();
+                                // Skip already-counted lines so a copy-rotate
+                                // never double-counts turns (over-counting is
+                                // still safer than a bypassed limit, and a
+                                // compacted file simply yields fewer lines).
+                                while skipped < lines_seen {
+                                    skip_buf.clear();
+                                    match new_reader.read_line(&mut skip_buf) {
+                                        Ok(0) => break,
+                                        Ok(_) => skipped += 1,
+                                        Err(_) => break,
+                                    }
+                                }
+                                reader = new_reader;
+                                let _ = ctx.tx.send(format!(
+                                    "[TAIL] session file rotated; resumed at line {}",
+                                    skipped
+                                ));
+                                continue;
+                            }
+                        }
+                    }
                     let cur_turns = ctx.turn_counter.load(Ordering::SeqCst);
                     let max_t = ctx.limits.max_turns.unwrap_or(0);
                     let elapsed = last_activity.elapsed().as_secs();
@@ -957,6 +1012,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                     thread::sleep(Duration::from_millis(150));
                 }
                 Ok(_) => {
+                    lines_seen += 1;
                     last_activity = std::time::Instant::now();
                     if line_buf.ends_with('\n') {
                         // Billing tripwire: provider 402/401/429 must pause the
@@ -1888,6 +1944,48 @@ impl crate::sandbox::AgentRunner for OmpRunner {
     }
 }
 
+#[cfg(test)]
+mod session_disconnect_tests {
+    use super::OmpRunner;
+    use std::fs::File;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("sdb_disc_{}_{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn test_connected_file_is_not_disconnected() {
+        let p = tmp("live");
+        std::fs::write(&p, "line\n").unwrap();
+        let fd = File::open(&p).unwrap();
+        assert!(!OmpRunner::session_disconnected(&fd, &p));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_atomic_rename_registers_disconnect() {
+        // OMP's rotate pattern: write temp, rename over the live path.
+        let live = tmp("rot_live");
+        let next = tmp("rot_next");
+        std::fs::write(&live, "old\n").unwrap();
+        let fd = File::open(&live).unwrap();
+        std::fs::write(&next, "old\nnew\n").unwrap();
+        std::fs::rename(&next, &live).unwrap();
+        assert!(OmpRunner::session_disconnected(&fd, &live));
+        let _ = std::fs::remove_file(&live);
+    }
+
+    #[test]
+    fn test_unlinked_path_registers_disconnect() {
+        let p = tmp("gone");
+        std::fs::write(&p, "x\n").unwrap();
+        let fd = File::open(&p).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        assert!(OmpRunner::session_disconnected(&fd, &p));
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

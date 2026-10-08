@@ -533,7 +533,10 @@ impl UiServer {
                     if busy {
                         continue;
                     }
-                    let orphans = crate::sandbox::docker::SandboxManager::reap_orphan_containers();
+                    let orphans =
+                        crate::sandbox::docker::SandboxManager::reap_orphan_containers_except(
+                            &live_run_ids(&sweep),
+                        );
                     crate::sandbox::docker::SandboxManager::prune_labeled_networks();
                     if ghosts + orphans > 0 {
                         send_status(
@@ -557,13 +560,34 @@ impl UiServer {
 
         let app = Self::build_app(state);
 
+        /// Run ids that must never be reaped: dispatched worker runs plus queued
+        /// parent ids (cancel flags are keyed by parent). Trial, parent, and
+        /// `<id>_batchref` labels all stem-match these (see run_matches_live).
+        pub(crate) fn live_run_ids(state: &AppState) -> std::collections::HashSet<String> {
+            let mut ids = std::collections::HashSet::new();
+            for info in state.worker_runs.read().unwrap().values() {
+                ids.insert(info.run_id.clone());
+            }
+            for key in state.cancel_flags.lock().unwrap().keys() {
+                ids.insert(key.clone());
+            }
+            ids
+        }
+
         // Startup reconcile: label-filtered docker sweep (orphan containers
         // + stale labeled nets) BEFORE auto-dispatch replays the queue, so a
         // restarted engine never binds a port held by its own corpse.
         // prune_stale_networks (name-filter, age-gated) stays as belt for
         // pre-label legacy nets; prune_labeled_networks covers labeled ones.
         {
-            let stale_containers = crate::sandbox::docker::SandboxManager::reap_orphan_containers();
+            // Fresh process: nothing can be live here (any containers belong
+            // to the dead previous engine), so the empty live set lets the
+            // age gate reap ancient running orphans too. Restart-while-old-
+            // still-dying is serialized by systemd stop-before-start.
+            let stale_containers =
+                crate::sandbox::docker::SandboxManager::reap_orphan_containers_except(
+                    &std::collections::HashSet::new(),
+                );
             if stale_containers > 0 {
                 println!("[RECONCILE] reaped {stale_containers} orphan container(s) at startup");
             }
