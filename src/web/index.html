@@ -3262,8 +3262,16 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           if (!hhs.length) return;
           hhs.forEach(hh => {
           const tr = document.createElement('tr');
-          const htag = hh === 'omp' ? '' : ' ' + '<span class="badge badge-effort">opencode</span>';
-          let cells = `<td>${escapeHtml(shortModelName(m))} <span style="color:var(--text-muted);font-size:.72rem;">${escapeHtml(eff)}</span>${htag}</td>`;
+          const htag = `<span class="badge ${hh === 'omp' ? 'badge-info' : 'badge-effort'}" title="Agent harness (ranks never mix harnesses)">harness: ${hh}</span>`;
+          const stampRow = tasks.map(t => canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]).find(Boolean);
+          const stamp = stampRow ? String(stampRow.rules_version || 'legacy').split('+')[0] : '';
+          const wave = stampRow ? String(stampRow.timestamp || '').slice(5, 16).replace('T', ' ') : '';
+          let cells = `<td><div style="display:flex;flex-direction:column;gap:2px;">`
+            + `<span style="font-weight:700;">${escapeHtml(shortModelName(m))}</span>`
+            + `<span style="font-size:.7rem;color:var(--text-muted);">effort: ${escapeHtml(eff)}</span>`
+            + `${htag}`
+            + (stamp ? `<span style="font-size:.68rem;color:var(--text-muted);" title="Rules stamp + wave time">${escapeHtml(stamp)} · ${escapeHtml(wave)}</span>` : '')
+            + `</div></td>`;
           tasks.forEach(t => {
             const r = canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`];
             if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
