@@ -1127,42 +1127,43 @@ pub(crate) async fn me(headers: HeaderMap) -> Response {
 
 pub(crate) async fn csrf_guard(req: Request, next: middleware::Next) -> Response {
     // Auth endpoints bootstrap trust: /api/login cannot present a session or
-    // bearer by definition (it mints them). CSRF check below still applies.
+    // bearer by definition (it mints them), but CSRF origin verification
+    // must still protect /api/login and /api/logout from cross-origin forging.
     let path = req.uri().path().to_string();
-    if path == "/api/login" || path == "/api/logout" || path == "/api/me" {
-        return next.run(req).await;
-    }
+    let is_auth_bootstrap = path == "/api/login" || path == "/api/logout" || path == "/api/me";
     let mutating = matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     );
     if mutating {
-        // Session cookie (login) satisfies the token gate: the cookie is
-        // HttpOnly + SameSite=Strict, so unlike a readable token it cannot be
-        // exfiltrated by page JS — the server holds the secret, not the browser.
-        // Bearer still works (CLI + old flows); login disabled = old behavior.
-        let authed = session_cookie(req.headers())
-            || match ui_token() {
-                Some(token) => token_ok(req.headers(), &token),
-                None => true,
-            };
-        if !authed {
-            // Login configured but neither session nor bearer: point at login.
-            if login_creds().is_some() {
+        if !csrf_origin_allowed(req.headers()) {
+            return csrf_reject();
+        }
+        if !is_auth_bootstrap {
+            // Session cookie (login) satisfies the token gate: the cookie is
+            // HttpOnly + SameSite=Strict, so unlike a readable token it cannot be
+            // exfiltrated by page JS — the server holds the secret, not the browser.
+            // Bearer still works (CLI + old flows); login disabled = old behavior.
+            let authed = session_cookie(req.headers())
+                || match ui_token() {
+                    Some(token) => token_ok(req.headers(), &token),
+                    None => true,
+                };
+            if !authed {
+                // Login configured but neither session nor bearer: point at login.
+                if login_creds().is_some() {
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "login required (POST /api/login)",
+                    )
+                        .into_response();
+                }
                 return (
                     axum::http::StatusCode::UNAUTHORIZED,
-                    "login required (POST /api/login)",
+                    "Missing or invalid UI token (Authorization: Bearer <SDB_UI_TOKEN>)",
                 )
                     .into_response();
             }
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Missing or invalid UI token (Authorization: Bearer <SDB_UI_TOKEN>)",
-            )
-                .into_response();
-        }
-        if !csrf_origin_allowed(req.headers()) {
-            return csrf_reject();
         }
     }
     next.run(req).await
