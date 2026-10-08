@@ -924,9 +924,11 @@ impl SandboxManager {
     /// Candidate containers run as arbitrary users (root, redis,
     /// app-specific). The workspace is host-ubuntu-owned 644/755, so any
     /// non-root candidate user gets EACCES on its own data files (measured:
-    /// `appendonly.log: permission denied` ×3 across 2 parents). Loosen to
-    /// a+rwX before launch: the candidate is fully isolated, so this grants
-    /// nothing beyond its sandbox. Symlinks skipped (never followed).
+    /// `appendonly.log: permission denied` ×3 across 2 parents). Loosen
+    /// before launch: OR the permission bits (never strip), so executables
+    /// keep +x (a forced 0666 broke `./sdb-redis` exec) while every UID
+    /// gains rwX. The candidate is fully isolated, so this grants nothing
+    /// beyond its sandbox. Symlinks skipped (never followed).
     fn relax_workspace_perms(workdir: &Path) {
         use std::os::unix::fs::PermissionsExt;
         let mut stack = vec![workdir.to_path_buf()];
@@ -942,15 +944,36 @@ impl SandboxManager {
                         continue;
                     }
                     if ft.is_dir() {
-                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o777));
+                        let mode = path
+                            .metadata()
+                            .map(|m| {
+                                use std::os::unix::fs::PermissionsExt;
+                                m.permissions().mode() | 0o777
+                            })
+                            .unwrap_or(0o777);
+                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(mode));
                         stack.push(path);
                     } else {
-                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o666));
+                        let mode = path
+                            .metadata()
+                            .map(|m| {
+                                use std::os::unix::fs::PermissionsExt;
+                                m.permissions().mode() | 0o666
+                            })
+                            .unwrap_or(0o666);
+                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(mode));
                     }
                 }
             }
         }
-        let _ = fs::set_permissions(workdir, fs::Permissions::from_mode(0o777));
+        let mode = workdir
+            .metadata()
+            .map(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() | 0o777
+            })
+            .unwrap_or(0o777);
+        let _ = fs::set_permissions(workdir, fs::Permissions::from_mode(mode));
     }
 
     pub fn start_candidate_in_docker(&self, workdir: &Path, port: u16) -> Result<()> {
@@ -1714,6 +1737,8 @@ mod tests {
         std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("/etc/hostname", sub.join("link")).ok();
+        std::fs::write(sub.join("exec.sh"), b"x").ok();
+        std::fs::set_permissions(sub.join("exec.sh"), std::fs::Permissions::from_mode(0o755)).ok();
         SandboxManager::relax_workspace_perms(&base);
         let fmode = std::fs::metadata(sub.join("aof.log"))
             .unwrap()
@@ -1723,6 +1748,15 @@ mod tests {
         assert_eq!(
             fmode, 0o666,
             "data files must be world-writable (any candidate UID)"
+        );
+        let xmode = std::fs::metadata(sub.join("exec.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            xmode, 0o777,
+            "executables must keep +x while gaining rw (forced 0666 broke exec)"
         );
         let dmode = std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777;
         assert_eq!(
