@@ -499,6 +499,7 @@ mod tests {
             task: "test-task".to_string(),
             language: "rust".to_string(),
             effort: Some("low".to_string()),
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,

@@ -162,10 +162,23 @@ impl OpenCodeRunner {
     fn snapshot_stats(
         stats: &std::sync::Mutex<OmpSessionStats>,
         turns: &std::sync::atomic::AtomicU32,
+        effort_effective: Option<String>,
     ) -> OmpSessionStats {
         let mut st = stats.lock().unwrap().clone();
         st.steps_taken = turns.load(Ordering::SeqCst);
+        st.effort_effective = effort_effective;
         st
+    }
+
+    /// Effective effort label for the manifest: the `#variant` that ran, or
+    /// `prose-only` when no variant mapped (other levels) or resolution
+    /// fell back. Mirrors OMP's session-negotiated level on the other
+    /// harness: requested effort lives on the row, this says what ran.
+    fn resolve_effort_effective(variant_id: &Option<String>, disabled: bool) -> String {
+        match (variant_id, disabled) {
+            (Some(v), false) => format!("#{v}"),
+            _ => "prose-only".to_string(),
+        }
     }
 
     /// Map benchmark effort to an OpenCode model `#variant` (machine-level
@@ -825,7 +838,14 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .args(["rm", "-f", &container_name])
                 .output();
             if billing_tripped.load(Ordering::SeqCst) {
-                let st = Self::snapshot_stats(&stats, &turns);
+                let st = Self::snapshot_stats(
+                    &stats,
+                    &turns,
+                    Some(Self::resolve_effort_effective(
+                        &variant_id,
+                        variant_disabled.load(Ordering::SeqCst),
+                    )),
+                );
                 // Same envelope as OMP: queue.rs pauses the wave on "billing:".
                 break Err(anyhow::Error::new(OmpBillingError {
                     reason:
@@ -841,7 +861,14 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .map(|f| f.load(Ordering::SeqCst))
                 .unwrap_or(false);
             let msg = limit_msg.lock().unwrap().clone().unwrap_or_default();
-            let st = Self::snapshot_stats(&stats, &turns);
+            let st = Self::snapshot_stats(
+                &stats,
+                &turns,
+                Some(Self::resolve_effort_effective(
+                    &variant_id,
+                    variant_disabled.load(Ordering::SeqCst),
+                )),
+            );
             let tail = attempt_tail.lock().unwrap().join(" | ");
             match waited {
                 Some(status) if status.success() && !limited => {
@@ -1006,16 +1033,41 @@ mod tests {
         let stats = std::sync::Mutex::new(OmpSessionStats::default());
         let turns = std::sync::atomic::AtomicU32::new(0);
         assert_eq!(
-            OpenCodeRunner::snapshot_stats(&stats, &turns).steps_taken,
+            OpenCodeRunner::snapshot_stats(&stats, &turns, None).steps_taken,
             0
         );
         turns.fetch_add(1, Ordering::SeqCst);
         turns.fetch_add(1, Ordering::SeqCst);
-        let st = OpenCodeRunner::snapshot_stats(&stats, &turns);
+        let st = OpenCodeRunner::snapshot_stats(&stats, &turns, Some("#max".to_string()));
         assert_eq!(
             st.steps_taken, 2,
             "reader-thread turns must reach the manifest"
         );
+        assert_eq!(
+            st.effort_effective.as_deref(),
+            Some("#max"),
+            "effective effort must ride the same snapshot"
+        );
+    }
+
+    #[test]
+    fn test_resolve_effort_effective_labels_what_ran() {
+        use OpenCodeRunner as R;
+        assert_eq!(
+            R::resolve_effort_effective(&Some("max".to_string()), false),
+            "#max"
+        );
+        assert_eq!(
+            R::resolve_effort_effective(&Some("high".to_string()), false),
+            "#high"
+        );
+        // Fallback or unmapped levels: prose-only, honestly labeled.
+        assert_eq!(
+            R::resolve_effort_effective(&Some("max".to_string()), true),
+            "prose-only"
+        );
+        assert_eq!(R::resolve_effort_effective(&None, true), "prose-only");
+        assert_eq!(R::resolve_effort_effective(&None, false), "prose-only");
     }
 
     #[test]

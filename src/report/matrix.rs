@@ -140,6 +140,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Python".to_string(),
             effort: effort.map(|s| s.to_string()),
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,

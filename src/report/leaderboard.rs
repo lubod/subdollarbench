@@ -15,6 +15,10 @@ pub struct BenchmarkRunResult {
     pub task: String,
     pub language: String,
     pub effort: Option<String>,
+    /// Effective effort (see RunManifest): unanimous trials agree or
+    /// "mixed" — same rule as cost_source/graded_under.
+    #[serde(default)]
+    pub effort_effective: Option<String>,
     /// Trial/parent verdict status (`completed`, `failed_tests`,
     /// `disqualified_cheat`, ...). None = legacy rows predating the field.
     /// Boards exclude `disqualified_cheat` (a cheat is not a measurement);
@@ -165,6 +169,21 @@ fn merge_cost_source(subruns: &[BenchmarkRunResult]) -> Option<String> {
     if subruns
         .iter()
         .all(|s| s.cost_source.as_deref() == Some(first.as_str()))
+    {
+        Some(first)
+    } else {
+        Some("mixed".to_string())
+    }
+}
+
+/// Unanimous effective effort across trials, else "mixed" — same rule as
+/// cost_source. A parent whose trials ran at different effective levels
+/// (e.g. a variant fallback mid-cell) has no single effort story.
+fn merge_effort_effective(subruns: &[BenchmarkRunResult]) -> Option<String> {
+    let first = subruns.first()?.effort_effective.clone()?;
+    if subruns
+        .iter()
+        .all(|s| s.effort_effective.as_deref() == Some(first.as_str()))
     {
         Some(first)
     } else {
@@ -555,6 +574,7 @@ impl BenchmarkRunResult {
             // Cost provenance: unanimous trials agree on the source; a mix
             // says so rather than picking one verdict's story.
             cost_source: merge_cost_source(&subruns),
+            effort_effective: merge_effort_effective(&subruns),
             cost_formula_usd: merge_cost_formula(&subruns),
             effective_cost_usd: Some(fair_eff_cost_usd),
             duration_seconds: fair_dur,
@@ -1706,6 +1726,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -1761,6 +1782,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: pass,
@@ -1906,6 +1928,7 @@ mod tests {
                 task: "redis".to_string(),
                 language: "Python".to_string(),
                 effort: Some("auto".to_string()),
+                effort_effective: None,
                 status: None,
                 harness: None,
                 pass_rate: pass,
@@ -2016,6 +2039,7 @@ mod tests {
             task: "proxy".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -2070,6 +2094,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -2142,6 +2167,7 @@ mod tests {
             task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: pass,
@@ -2204,6 +2230,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -2383,6 +2410,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: Some("auto".to_string()),
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -2442,6 +2470,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 0.0,
@@ -2493,6 +2522,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Python".to_string(),
             effort: Some("low".to_string()),
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 50.0,
@@ -2538,6 +2568,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: Some("high".to_string()),
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -2651,6 +2682,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: status.map(|s| s.to_string()),
             harness: None,
             pass_rate: 100.0,
@@ -2706,6 +2738,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,
@@ -2739,6 +2772,7 @@ mod tests {
                 task: "redis".to_string(),
                 language: "Go".to_string(),
                 effort: None,
+                effort_effective: None,
                 harness: None,
                 status: None,
                 pass_rate: 100.0,
@@ -2815,6 +2849,7 @@ mod tests {
             task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: pass,
@@ -2918,6 +2953,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: 100.0,

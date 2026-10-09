@@ -66,6 +66,7 @@ func main() {
         status: "completed".to_string(),
         language: "Go".to_string(),
         effort: Some("high".to_string()),
+        effort_effective: None,
         harness: None,
         started_at: "2026-09-04T12:00:00Z".to_string(),
         completed_at: "2026-09-04T12:01:15Z".to_string(),

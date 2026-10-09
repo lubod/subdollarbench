@@ -16,7 +16,7 @@
   - [x] 2b. CLI wiring + docs
 - [ ] 3. Robustness probes → differential oracle (weeks, flake discipline)
   - [x] 3a. Malformed-frame + slow-close probes, unscored first (redis/http)
-  - [x] 3b. Differential oracle vs reference on seeded random traffic (redis/http)
+  - [x] 3b. Differential oracle vs reference on seeded random traffic (redis-only by design; nginx implements none of the task routes)
   - [ ] 3c. Promote to scoring only with zero-flake evidence; version bump per change
 - [ ] 4. Breadth wave (needs spend approval)
   - [x] 4a. Verified 2026-10-09 against live OpenRouter catalog.

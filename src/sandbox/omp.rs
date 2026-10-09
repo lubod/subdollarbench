@@ -37,6 +37,12 @@ pub struct OmpSessionStats {
     pub cached_tokens: u64,
     pub total_tokens: u64,
     pub steps_taken: u32,
+    /// Effective effort as negotiated, harness-interpreted: OMP records the
+    /// session's `thinking_level_change` value (CLI downgrades included);
+    /// OpenCode records `#<variant>` or `prose-only`. Requested effort
+    /// lives on the manifest/row `effort` field; this one says what ran.
+    /// None = unknown (no session file, pre-field row).
+    pub effort_effective: Option<String>,
 }
 
 /// Embedded spike extension: bench anti-cheat policy, turn budget steer,
@@ -1720,9 +1726,17 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         let mut completion_tokens = 0u64;
         let mut cached_tokens = 0u64;
         let mut steps = 0u32;
+        // Last negotiated thinking level wins: the session records the
+        // EFFECTIVE level (CLI downgrades included), which is what ran.
+        let mut thinking_effective: Option<String> = None;
 
         for line in content.lines() {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("thinking_level_change") {
+                    if let Some(lvl) = v.get("thinkingLevel").and_then(|l| l.as_str()) {
+                        thinking_effective = Some(lvl.to_string());
+                    }
+                }
                 let is_assistant =
                     v.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant");
                 let is_test_usage = v.pointer("/message/role").is_none()
@@ -1770,6 +1784,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             cached_tokens,
             total_tokens: prompt_tokens + cached_tokens + completion_tokens,
             steps_taken: steps,
+            effort_effective: thinking_effective,
         })
     }
     pub fn fallback_extract_files_from_session(session_path: &Path, workdir: &Path) {
@@ -2317,11 +2332,28 @@ mod tests {
         assert_eq!(stats.cached_tokens, 2000);
         assert_eq!(stats.total_tokens, 6850);
         assert_eq!(stats.steps_taken, 2);
+        assert_eq!(stats.effort_effective, None);
         assert!(OmpRunner::extract_latest_session_stats(None).is_err());
 
         let found = OmpRunner::find_newest_session_file_across(std::slice::from_ref(&temp_dir));
         assert_eq!(found, Some(session_file));
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_extract_session_stats_reads_negotiated_thinking_level() {
+        // The session's thinking_level_change is the source of truth for
+        // what ran (CLI downgrades included); last event wins.
+        let temp_dir = std::env::temp_dir().join(format!("test_omp_think_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let session_file = temp_dir.join("s.jsonl");
+        let content = "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"high\"}\n{\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":10,\"output\":5}}}\n{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"max\"}\n";
+        std::fs::write(&session_file, content).unwrap();
+        let stats = OmpRunner::extract_latest_session_stats(Some(&session_file)).unwrap();
+        assert_eq!(stats.effort_effective.as_deref(), Some("max"));
+        assert_eq!(stats.steps_taken, 1);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 

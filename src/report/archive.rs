@@ -36,6 +36,12 @@ pub struct RunManifest {
     pub language: String,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Effective effort as negotiated (harness-interpreted): OMP records
+    /// the session's thinking level (CLI downgrades included), OpenCode
+    /// records `#<variant>` or `prose-only`. Requested effort is `effort`;
+    /// this says what ran. None = unknown (pre-field row, no session).
+    #[serde(default)]
+    pub effort_effective: Option<String>,
     pub started_at: String,
     pub completed_at: String,
     pub duration_seconds: f64,
@@ -474,6 +480,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Go".to_string(),
             effort: Some("high".to_string()),
+            effort_effective: None,
             harness: None,
             started_at: "2026-09-04T06:30:00Z".to_string(),
             completed_at: "2026-09-04T06:31:00Z".to_string(),
@@ -646,6 +653,7 @@ mod tests {
             status: "completed".to_string(),
             language: "Go".to_string(),
             effort: None,
+            effort_effective: None,
             harness: None,
             started_at: "2026-09-25T00:00:00Z".to_string(),
             completed_at: "2026-09-25T00:01:00Z".to_string(),

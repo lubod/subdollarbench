@@ -2471,6 +2471,7 @@ mod tests {
             task: task.to_string(),
             language: "Python".to_string(),
             effort: Some("high".to_string()),
+            effort_effective: None,
             status: None,
             harness: None,
             pass_rate: pass,
