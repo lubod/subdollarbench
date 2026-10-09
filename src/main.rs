@@ -1121,6 +1121,29 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
+        Commands::AnnotateCutoff { runs_dir, yes } => {
+            let rep =
+                subdollarbench::report::run_cutoff_annotate(std::path::Path::new(&runs_dir), yes)?;
+            println!(
+                "annotate-cutoff{}: scanned {} manifests; flag {} trial(s), {} db row(s); {} billing-shaped near-miss(es) excluded; {} warning(s)",
+                if yes { "" } else { " (dry-run)" },
+                rep.manifests_scanned,
+                rep.annotated.len(),
+                rep.db_annotated,
+                rep.skipped_billing,
+                rep.warnings.len(),
+            );
+            for line in &rep.annotated {
+                println!("  + {line}");
+            }
+            for line in &rep.warnings {
+                println!("  ! {line}");
+            }
+            if !yes {
+                println!("  (dry run: nothing written; re-run with --yes to apply)");
+            }
+        }
+
         Commands::Repair {
             results_dir,
             runs_dir,
@@ -2585,6 +2608,7 @@ mod tests {
             throughput_score: Some(66.6),
             files: Vec::new(),
             canary_echoed: None,
+            cutoff_turn1: None,
             env: None,
             git_commit: None,
             total_trials: None,

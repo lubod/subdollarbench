@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod canary;
 pub mod cost_annotate;
+pub mod cutoff_annotate;
 pub mod environment;
 pub mod judge;
 pub mod leaderboard;
@@ -13,6 +14,7 @@ pub mod store;
 pub use archive::{FileInfo, RunArchiver, RunManifest, RunTokenUsage};
 pub use canary::{all_canaries, canary_footer, canary_guid, scan_workspace_for_canary};
 pub use cost_annotate::{run_cost_annotate, CostAnnotateReport};
+pub use cutoff_annotate::{run_cutoff_annotate, CutoffAnnotateReport};
 pub use environment::EnvironmentInfo;
 pub use judge::{ReviewJson, RunJudge};
 pub use leaderboard::{assess_stability, BenchmarkRunResult, LeaderboardManager, Stability};

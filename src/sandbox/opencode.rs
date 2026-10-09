@@ -252,7 +252,7 @@ impl OpenCodeRunner {
     /// Workspace holds candidate content: entrypoint files or anything else
     /// the agent wrote. AGENTS.md is ours (written pre-launch), never
     /// counts. Bounded walk so a pathological tree can't stall the check.
-    fn workspace_has_content(dir: &std::path::Path) -> bool {
+    pub(crate) fn workspace_has_content(dir: &std::path::Path) -> bool {
         if dir.join("start.sh").is_file() || dir.join("Dockerfile").is_file() {
             return true;
         }

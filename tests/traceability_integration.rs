@@ -97,6 +97,7 @@ func main() {
         throughput_score: Some(944.0),
         files: scanned,
         canary_echoed: None,
+        cutoff_turn1: None,
         env: None,
         git_commit: None,
         total_trials: None,

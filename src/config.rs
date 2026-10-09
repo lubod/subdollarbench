@@ -508,6 +508,22 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [maintain] Cutoff annotation: flags accepted turn-1 reasoning
+    /// cutoffs (clean exit, zero tool calls, empty workspace) with
+    /// `cutoff_turn1: true` on trial manifests + bench.db runs rows.
+    /// Annotation only — scores, costs, parents, and results JSON are
+    /// untouched (nothing numeric changes). Repeatable after any wave;
+    /// dry run by default, --yes writes.
+    AnnotateCutoff {
+        /// Path to runs directory (must be the canonical repo runs/)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// Actually rewrite files (without it, only prints the plan)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
     /// [analyze] Re-verify an archived candidate workspace without any LLM
     /// call: rebuilds/reruns runs/<id>/workspace in an isolated container
     /// and runs the verifier. Bails while the engine is live (port safety).

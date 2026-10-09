@@ -88,26 +88,26 @@ path. Retry machinery would guard a hypothetical, so it was cut.
 
 ## E. RULES bump `.3` + docs
 
-- [ ] E1. `RULES_VERSION` → `2026-10-09.3`, history entry: "machine
+- [x] E1. `RULES_VERSION` → `2026-10-09.3`, history entry: "machine
   effort parity (opencode `--variant`, OMP attempt-fallback) + cutoff
   recovery (D). Prompt templates unchanged; archived rows comparable."
   Telemetry (A) and annotation (F) explicitly out of bump scope.
-- [ ] E2. `docs/DECISIONS.md` #9: harness-relative effort semantics,
+- [x] E2. `docs/DECISIONS.md` #9: harness-relative effort semantics,
   attempt-then-fallback on both harnesses, recovery-over-reclassification,
   2-recovery cap rationale.
-- [ ] E3. Fingerprint note: composed prompts (prose + variant + flag)
+- [x] E3. (fingerprint gap recorded in .3 history entry) Fingerprint note: composed prompts (prose + variant + flag)
   are not hashed — only templates are. Record the gap; bump carries it.
 
 ## F. Annotate archived cutoff trials (no rescoring, dry-run default)
 
-- [ ] F1. `annotate-cutoff [--yes]` CLI (repair/cost-annotate idiom):
+- [x] F1. (26 trials flagged; exact 1:1 overlap with session-derived pure list) `annotate-cutoff [--yes]` CLI (repair/cost-annotate idiom):
   map the 26 pure-signature sessions (`user → reasoning-only
   finish:length → idle`, session id embeds run id) to trial manifests;
   set `cutoff_turn1: true` (new `Option<bool>`, serde default) on trial
   manifests + bench.db `runs` rows. Scores, costs, parents untouched.
-- [ ] F2. Idempotence + dry-run-first verification; backup `bench.db`
+- [x] F2. (backup bench.db.bak-cutoff-20261009; idempotent re-run = 0) Idempotence + dry-run-first verification; backup `bench.db`
   before `--yes` (precedent: `bench.db.bak-*`).
-- [ ] F3. Unit tests: signature matcher (pure-cutoff vs cheat-DQ with
+- [x] F3. (incl. billing-tag vs raw-shape exclusion; shared-tempdir flake fixed + documented) Unit tests: signature matcher (pure-cutoff vs cheat-DQ with
   tools vs genuine failure); null-vs-absent field handling.
 
 ## G. Deploy + effect check

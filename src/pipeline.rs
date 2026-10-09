@@ -1460,6 +1460,9 @@ impl BenchmarkPipeline {
             throughput_score,
             files: scanned_files,
             canary_echoed: (!canary_hits.is_empty()).then_some(canary_hits),
+            // No live cutoff recording: annotate-cutoff flags accepted
+            // cutoffs post-hoc, uniformly for old and new rows.
+            cutoff_turn1: None,
             env: None,
             git_commit: None,
             rules_version: Some(crate::report::rules_fingerprint()),

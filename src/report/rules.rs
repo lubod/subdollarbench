@@ -8,6 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-09.3`: machine effort parity + cutoff recovery. OMP passes
+///   `--thinking=<requested>` unclamped (the CLI downgrades unsupported
+///   levels itself — measured, no HTTP 400 on this path); OpenCode maps
+///   benchmark effort to model `#variant` (native `reasoning.effort`,
+///   per-trial config, prose fallback + one prose-only retry on
+///   resolution failure). Turn-1 reasoning cutoffs (exit 0, 0 tools, empty
+///   workspace) resume the same session with a tool-first nudge, cap 2 —
+///   recovery over reclassification, so no archived row is rescored.
+///   Turn-telemetry fix and cutoff annotation ride along with no grading
+///   impact. NOTE: the fingerprint hashes prompt templates, verifiers and
+///   scoring — not the composed per-trial prompt (prose + variant + flag)
+///   or the resume policy — so this stamp bump carries those; rows stamped
+///   `2026-10-09.2` or earlier are not comparable without `backfill --yes`.
 /// - `2026-10-09.2`: canary markers in every graded prompt (1c). Each
 ///   `tasks/*/prompt.md` carries a frozen per-task GUID; the archived
 ///   workspace is scanned for echoes and the finding recorded on the row
@@ -98,7 +111,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-09.2";
+pub const RULES_VERSION: &str = "2026-10-09.3";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

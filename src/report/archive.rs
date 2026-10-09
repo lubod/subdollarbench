@@ -95,6 +95,14 @@ pub struct RunManifest {
     /// never a verdict. `None` = clean scan or pre-canary row.
     #[serde(default)]
     pub canary_echoed: Option<Vec<(String, String)>>,
+    /// Turn-1 reasoning cutoff accepted: the trial exited clean with zero
+    /// tool calls and an empty workspace (model thought itself into
+    /// `finish: length` before acting). Advisory annotation, never a
+    /// rescoring — the 0% stands. Set post-hoc by `annotate-cutoff`
+    /// (repeatable after any wave, old and new rows alike); never written
+    /// live by the pipeline. `None` = not a cutoff or not yet scanned.
+    #[serde(default)]
+    pub cutoff_turn1: Option<bool>,
     #[serde(default)]
     pub env: Option<EnvironmentInfo>,
     #[serde(default)]
@@ -502,6 +510,7 @@ mod tests {
             throughput_score: Some(907.0),
             files: scanned,
             canary_echoed: None,
+            cutoff_turn1: None,
             env: None,
             git_commit: None,
             total_trials: None,
@@ -668,6 +677,7 @@ mod tests {
             throughput_score: None,
             files: vec![],
             canary_echoed: None,
+            cutoff_turn1: None,
             env: None,
             git_commit: None,
             total_trials: None,

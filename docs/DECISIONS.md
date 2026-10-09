@@ -62,3 +62,25 @@ re-deriving published numbers is a grading decision, needs its own review.
 An unconfirmable price (catalog miss) leaves the row alone rather than
 pricing it from the offline fallback, which would relabel genuinely free
 rows as paid. Ref: `src/cost/calculator.rs`, `src/report/cost_annotate.rs`.
+
+## 9. Machine effort on both harnesses + recovery over reclassification (2026-10-09.3)
+Effort is harness-relative by construction (`max` = most the path
+supports; ranks never mix harnesses). OMP drives it through the
+`--thinking` machine flag; its runner-side max→high pre-clamp was removed
+after live probes proved the CLI downgrades unsupported levels itself
+(`thinkingLevel: "high"` recorded, exit 0, no HTTP 400) — the downgrade is
+now surfaced as `[THINKING]` next to the requested level instead of
+silently pre-applied. OpenCode maps effort to model `#variant`
+(`-m provider/model#variant`, per-trial `OPENCODE_CONFIG_CONTENT`
+definitions), which the openrouter package forwards as native
+`reasoning.effort`; prose stays as fallback, and a variant-resolution
+failure retries once prose-only (instant, zero-spend, bounded by flag).
+Turn-1 reasoning cutoffs (exit 0 + 0 tools + empty workspace) resume the
+same session with a tool-first nudge, cap 2 per trial — recovery converts
+dead trials into scored ones, while retroactive reclassification of the 26
+archived cutoff rows was rejected (verdict-honesty rule: the model
+disobeyed explicit tool/concision directives, so the 0% stands; history
+gets annotated, never rescored). Turn-telemetry fix (steps_taken
+propagation, 171/171 opencode rows read 0) rides along with no grading
+impact. Ref: `src/sandbox/opencode.rs`, `src/sandbox/omp.rs`,
+`TODO_EFFORT.md`.
