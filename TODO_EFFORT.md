@@ -177,3 +177,37 @@ path. Retry machinery would guard a hypothetical, so it was cut.
 
 Order: A → B+C+D (any order, one branch each or stacked) → E → F →
 G1 → G2 → H (H1 anytime; H4 on approval).
+
+## I. Fresh ideal wave (2026-10-09, RUNNING) + deep analysis plan
+
+Pre-wave ops (all verified): full archive to
+`~/bench-archive/2026-10-09-pre-wipe/` (db 84/519/613 identical, 613/613
+manifests, 84/84 results, spot-reads pass); wiped bench.db + runs/ +
+results/ to zero (migrate-check clean, API 0 rows); rebuilt release
+(RULES .3 + effective-effort fields) and restarted engine+gui on an idle
+engine with 30s notice. portal/ left live (public board keeps old data
+until the wave lands — do NOT regen/push an empty board).
+
+Wave spec (user-approved): `openrouter/inclusionai/ling-3.1-flash` × 7
+tasks × {low,high,max} × {omp,opencode} × 9 trials = 42 cells / 378
+trials, uniform (no extend-if-unstable), enqueued q1–q42 (~17:11Z).
+First wave on the new binary: machine variants, cutoff recovery,
+turn telemetry, effective-effort recording, live robustness probes.
+Model spend $0 (catalog-free); review judge (muse-spark default) ≈ $2
+total across the wave. ETA ≈ 22h on 4 workers (@ ~14 min/trial).
+
+Deep-analysis plan (runs when the wave drains):
+- [ ] J1. Boards per (task, effort, harness) with Wilson CIs; IQR spreads.
+- [ ] J2. Variant effect, properly powered: #max vs prose reasoning
+  volumes + outcomes (n=9, not n=1); dose-response low/high/max.
+- [ ] J3. Recovery incidence: cutoff count, recovery count, post-recovery
+  scores; cutoff_turn1 rate by effort × harness.
+- [ ] J4. Effective-vs-requested audit (first real data for the new field):
+  OMP downgrades, OpenCode fallbacks, "mixed" parents.
+- [ ] J5. Failure taxonomy (5a): stage-level failure profile, DQ/cheat
+  count, packaging faults, infra incidents (incl. q51 workspace case).
+- [ ] J6. Cost anatomy: $0 API + compute floor per cell; review total.
+- [ ] J7. Cross-harness side-by-side (never pooled): same-cell deltas.
+- [ ] J8. Probe data on fresh trials: Robust1/differential promotion
+  evidence toward the 3c threshold; Robust2 policy input.
+- [ ] J9. Regen + push portal on landed data; paper inputs (5b/5c).
