@@ -30,8 +30,11 @@ pub const OPENCODE_VERSION: &str = "2.0.24";
 /// - per-step `step_finish` events carry `{tokens:{input,output,reasoning,
 ///   cache:{read,write}}, cost}`, summed here into `OmpSessionStats`;
 /// - sessions isolate by explicit `--session <run_id>` (+ per-run workdir);
-/// - effort is request-only: `run` has no thinking flag, models report
-///   `variant:"default"` — recorded + hinted in-prompt, never enforced.
+/// - effort is machine-level first: benchmark effort maps to a model
+///   `#variant` (`-m provider/model#variant`, defined per-trial via
+///   `OPENCODE_CONFIG_CONTENT`) which the openrouter package forwards as
+///   native `reasoning.effort`; prose effort line stays as fallback, and a
+///   variant-resolution failure retries prose-only (today's behavior).
 pub struct OpenCodeRunner;
 
 impl OpenCodeRunner {
@@ -150,6 +153,77 @@ impl OpenCodeRunner {
         }
     }
 
+    /// Snapshot stats for return: the reader thread counts turns in `turns`
+    /// (one per `step_start` event) while token/cost accumulate in `stats`.
+    /// Both must merge here — every exit path below returns this snapshot.
+    /// Without the merge, `steps_taken` stays at its default 0 and every
+    /// OpenCode manifest records `turns: 0` (measured 171/171 rows; OMP
+    /// sets the field, so the defect is harness-correlated, not data).
+    fn snapshot_stats(
+        stats: &std::sync::Mutex<OmpSessionStats>,
+        turns: &std::sync::atomic::AtomicU32,
+    ) -> OmpSessionStats {
+        let mut st = stats.lock().unwrap().clone();
+        st.steps_taken = turns.load(Ordering::SeqCst);
+        st
+    }
+
+    /// Map benchmark effort to an OpenCode model `#variant` (machine-level
+    /// reasoning control, mirroring OMP's `--thinking` flag). Only the wave
+    /// vocabulary (low/high/max, plus the empty/default/auto alias for
+    /// high) gets variants; other levels stay prose-only (today's behavior)
+    /// rather than risking unknown-variant failures on untested levels.
+    fn variant_for_effort(effort: &str) -> Option<String> {
+        match effort.trim().to_lowercase().as_str() {
+            "low" | "high" | "max" => Some(effort.trim().to_lowercase()),
+            "" | "default" | "auto" => Some("high".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Inline `OPENCODE_CONFIG_CONTENT` defining low/high/max variants for
+    /// one OpenRouter model. Default catalog variants do NOT cover our
+    /// models (measured live: `#max` on ling-3.1-flash errors
+    /// `provider.no-route: Variant unavailable`), so each trial carries its
+    /// own definitions. Shape mirrors what the openrouter provider package
+    /// generates internally for effort variants (`settings.reasoning.effort`
+    /// = OpenRouter's native reasoning parameter). Env-passed so no config
+    /// files pollute the candidate workspace.
+    fn variant_config_json(model_bare: &str) -> String {
+        serde_json::json!({
+            "providers": {
+                "openrouter": {
+                    "models": {
+                        model_bare: {
+                            "variants": [
+                                {"id": "low", "settings": {"reasoning": {"effort": "low"}}},
+                                {"id": "high", "settings": {"reasoning": {"effort": "high"}}},
+                                {"id": "max", "settings": {"reasoning": {"effort": "max"}}}
+                            ]
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    /// Client-side variant-resolution failure: instant, zero-spend, retryable
+    /// without the suffix (prose-only effort = today's behavior). Real shape
+    /// captured from a live probe — distinct from rate-limit (429 shapes)
+    /// and billing (401/402) events, which must keep their own paths.
+    fn is_variant_unavailable_event(v: &serde_json::Value) -> bool {
+        let t = v
+            .pointer("/error/type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let msg = v
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        t == "provider.no-route" && msg.contains("Variant unavailable")
+    }
+
     /// Host dirs holding stored Console auth (opencode.db) + config.
     /// Mounted into the sandbox like OMP's `~/.omp` mount. Per-run
     /// `--session` ids keep concurrent runs apart in the shared db.
@@ -202,6 +276,13 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             cancel_flag,
         } = spec;
         let effort_level = effort.unwrap_or("high").trim().to_string();
+        // Machine-level effort: `#variant` is active unless resolution fails
+        // (variant_failed, set by the reader on provider.no-route), in which
+        // case the loop disables it once and retries prose-only. Declared
+        // here because make_cmd (below) already needs the disabled flag.
+        let variant_id = Self::variant_for_effort(&effort_level);
+        let variant_failed = Arc::new(AtomicBool::new(false));
+        let variant_disabled = Arc::new(AtomicBool::new(variant_id.is_none()));
         // Fail fast on non-OpenRouter ids: no container, no spend, no session.
         let effective_model = Self::resolve_model_id(model)?;
 
@@ -335,6 +416,18 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             if let Some(ref key) = effective_key {
                 cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
             }
+            // Per-trial variant definitions so `#variant` resolves for our
+            // models (default catalog lacks them). Env-passed: no config
+            // files in the candidate workspace.
+            if variant_id.is_some() {
+                let bare = effective_model
+                    .strip_prefix("openrouter/")
+                    .unwrap_or(&effective_model);
+                cmd.arg("-e").arg(format!(
+                    "OPENCODE_CONFIG_CONTENT={}",
+                    Self::variant_config_json(bare)
+                ));
+            }
             if let Some(max_turns) = limits.max_turns {
                 cmd.arg("-e")
                     .arg(format!("SDB_BENCH_MAX_TURNS={}", max_turns));
@@ -351,7 +444,14 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .arg("--title")
                 .arg(format!("sdb-{}", container_id))
                 .arg("-m")
-                .arg(&effective_model)
+                .arg(if variant_disabled.load(Ordering::SeqCst) {
+                    effective_model.clone()
+                } else {
+                    match &variant_id {
+                        Some(v) => format!("{effective_model}#{v}"),
+                        None => effective_model.clone(),
+                    }
+                })
                 .arg("--auto")
                 .arg(&effective_prompt);
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -439,6 +539,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 let tx_o = tx.clone();
                 let stats_o = stats.clone();
                 let turns_o = turns.clone();
+                let variant_failed_o = variant_failed.clone();
                 let spent_o = spent.clone();
                 let limit_hit_o = limit_hit.clone();
                 let limit_msg_o = limit_msg.clone();
@@ -546,6 +647,13 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 }
                             }
                             _ => {
+                                if Self::is_variant_unavailable_event(&v) {
+                                    variant_failed_o.store(true, Ordering::SeqCst);
+                                    let _ = tx_o.send(
+                                        "[VARIANT] model variant unavailable; will retry prose-only"
+                                            .to_string(),
+                                    );
+                                }
                                 if Self::is_rate_limit_event(&v, trimmed) {
                                     rate_o.store(true, Ordering::SeqCst);
                                 }
@@ -627,7 +735,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .args(["rm", "-f", &container_name])
                 .output();
             if billing_tripped.load(Ordering::SeqCst) {
-                let st = stats.lock().unwrap().clone();
+                let st = Self::snapshot_stats(&stats, &turns);
                 // Same envelope as OMP: queue.rs pauses the wave on "billing:".
                 break Err(anyhow::Error::new(OmpBillingError {
                     reason:
@@ -643,7 +751,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .map(|f| f.load(Ordering::SeqCst))
                 .unwrap_or(false);
             let msg = limit_msg.lock().unwrap().clone().unwrap_or_default();
-            let st = stats.lock().unwrap().clone();
+            let st = Self::snapshot_stats(&stats, &turns);
             let tail = attempt_tail.lock().unwrap().join(" | ");
             match waited {
                 Some(status) if status.success() && !limited => break Ok(st),
@@ -664,6 +772,21 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                         },
                         partial_stats: st,
                     }))
+                }
+                _ if variant_failed.load(Ordering::SeqCst)
+                    && !variant_disabled.load(Ordering::SeqCst) =>
+                {
+                    // Client-side variant-resolution failure: instant and
+                    // zero-spend. Retry once without the `#suffix`
+                    // (prose-only effort = today's behavior). The disabled
+                    // flag bounds this to a single extra attempt; the retry
+                    // is deterministic to proceed (plain `-m` resolves).
+                    variant_disabled.store(true, Ordering::SeqCst);
+                    let _ = retry_tx.send(
+                        "[VARIANT] variant unavailable; resuming prose-only (no #suffix)"
+                            .to_string(),
+                    );
+                    continue;
                 }
                 _ if rate_limited.load(Ordering::SeqCst) && attempt < MAX_RESUMES => {
                     let wait_s = (60u64.saturating_mul(1u64 << attempt.min(4))).min(900);
@@ -761,6 +884,97 @@ mod tests {
                 .to_string();
             assert!(err.contains("OpenRouter-only"), "unexpected: {err}");
         }
+    }
+
+    #[test]
+    fn test_snapshot_stats_carries_turns_to_steps_taken() {
+        // Regression: 171/171 OpenCode manifests recorded turns: 0 because
+        // the step_start counter never reached the returned stats (OMP sets
+        // the field, so the defect was harness-correlated, not data).
+        let stats = std::sync::Mutex::new(OmpSessionStats::default());
+        let turns = std::sync::atomic::AtomicU32::new(0);
+        assert_eq!(
+            OpenCodeRunner::snapshot_stats(&stats, &turns).steps_taken,
+            0
+        );
+        turns.fetch_add(1, Ordering::SeqCst);
+        turns.fetch_add(1, Ordering::SeqCst);
+        let st = OpenCodeRunner::snapshot_stats(&stats, &turns);
+        assert_eq!(
+            st.steps_taken, 2,
+            "reader-thread turns must reach the manifest"
+        );
+    }
+
+    #[test]
+    fn test_variant_for_effort_maps_wave_vocabulary() {
+        // Only low/high/max (+ the high aliases) get machine variants;
+        // anything else stays prose-only rather than risking unknown-variant
+        // failures on untested levels.
+        for (eff, want) in [
+            ("low", Some("low")),
+            ("high", Some("high")),
+            ("max", Some("max")),
+            ("HIGH", Some("high")),
+            ("  max  ", Some("max")),
+            ("", Some("high")),
+            ("default", Some("high")),
+            ("auto", Some("high")),
+        ] {
+            assert_eq!(
+                OpenCodeRunner::variant_for_effort(eff).as_deref(),
+                want,
+                "effort {eff:?}"
+            );
+        }
+        for eff in ["minimal", "medium", "xhigh", "off", "ultra"] {
+            assert_eq!(
+                OpenCodeRunner::variant_for_effort(eff),
+                None,
+                "effort {eff:?} must stay prose-only"
+            );
+        }
+    }
+
+    #[test]
+    fn test_variant_config_defines_machine_effort() {
+        let cfg: serde_json::Value = serde_json::from_str(&OpenCodeRunner::variant_config_json(
+            "inclusionai/ling-3.1-flash",
+        ))
+        .unwrap();
+        // Slashes in model ids defeat naive JSON pointers; index directly.
+        let arr = cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]
+            ["variants"]
+            .as_array()
+            .expect("three effort variants");
+        assert_eq!(arr.len(), 3);
+        for (id, effort) in [("low", "low"), ("high", "high"), ("max", "max")] {
+            let v = arr.iter().find(|v| v["id"] == id).expect("variant {id}");
+            assert_eq!(
+                v["settings"]["reasoning"]["effort"], effort,
+                "variant {id} must set native reasoning effort"
+            );
+        }
+    }
+
+    #[test]
+    fn test_variant_unavailable_event_matches_only_that_shape() {
+        // Exact shape captured from a live probe: instant, zero-spend,
+        // retryable prose-only.
+        let e = ev(
+            r#"{"type":"error","timestamp":1791556519670,"sessionID":"ses_x","error":{"type":"provider.no-route","message":"Variant unavailable for openrouter/inclusionai/ling-3.1-flash: max"}}"#,
+        );
+        assert!(OpenCodeRunner::is_variant_unavailable_event(&e));
+        // Rate-limit, billing, and ordinary events must keep their paths.
+        let r = ev(r#"{"type":"error","error":{"type":"provider.rate-limit","status":429}}"#);
+        assert!(!OpenCodeRunner::is_variant_unavailable_event(&r));
+        let b = ev(r#"{"error":{"code":402,"message":"Payment Required"}}"#);
+        assert!(!OpenCodeRunner::is_variant_unavailable_event(&b));
+        let t = ev(r#"{"type":"text","part":{"type":"text","text":"hi"}}"#);
+        assert!(!OpenCodeRunner::is_variant_unavailable_event(&t));
+        assert!(!OpenCodeRunner::is_variant_unavailable_event(
+            &serde_json::Value::Null
+        ));
     }
 
     #[test]

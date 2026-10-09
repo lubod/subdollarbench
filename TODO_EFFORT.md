@@ -15,36 +15,43 @@ Decisions already taken (not re-litigated here):
 
 ## A. Turn telemetry fix (no RULES bump — display-only field)
 
-- [ ] A1. Copy `turns` into `st.steps_taken` on all 4 return paths in
+- [x] A1. Copy `turns` into `st.steps_taken` on all 4 return paths in
   `src/sandbox/opencode.rs` (billing-Err ~632, success-Ok ~649,
   limit-Ok ~656, timeout/cancel-Err ~659/678/687). Scope confirmed:
   171/171 opencode manifests read `turns: 0` vs 0/441 omp.
-- [ ] A2. Unit test: synthetic `step_start` event stream →
+- [x] A2. Unit test: synthetic `step_start` event stream →
   assert `steps_taken` propagated on Ok and on Err partial_stats.
-- [ ] A3. `cargo test --lib`, `fmt`, `clippy -D warnings`.
+- [x] A3. `cargo test --lib`, `fmt`, `clippy -D warnings`.
 
 ## B. OpenCode machine effort: `--variant` wiring
 
-- [ ] B1. Zero-spend introspection: in the sandbox image, list the
-  openrouter provider catalog variants (`opencode models`-equivalent) for
-  `inclusionai/ling-3.1-flash`; record which of
-  off/minimal/low/medium/high/xhigh/max resolve vs error.
-- [ ] B2. Per-trial `OPENCODE_CONFIG_CONTENT` generation in
-  `src/sandbox/opencode.rs`: define variants for the openrouter provider
-  mapping each level → `reasoningEffort` (off→none, minimal→minimal,
-  low→low, medium→medium, high→high, xhigh→xhigh, max→max). Model-ID form
-  (prefixed vs bare) resolved with the same suffix matching as
-  `fetch_openrouter_model_pricing`. Passed via `-e` like
-  `OPENROUTER_API_KEY` today. Prose effort line stays untouched.
-- [ ] B3. Add `.arg("--variant").arg(effort)` next to `-m` in `make_cmd`;
+- [x] B1. Zero-spend introspection (static, host CLI 2.0.26 binary):
+  `-m` accepts `provider/model#variant`; the `openrouter` provider package
+  maps effort variants → native `settings: {reasoning: {effort}}`
+  (OpenRouter's own reasoning parameter — NOT ignored), and
+  budget-tokens variants → `reasoning: {max_tokens}`. Default variants
+  auto-generate when the catalog model lacks explicit ones. So `#max`
+  should resolve without custom config; live resolution check is B2b.
+  NOTE: host CLI is 2.0.26, sandbox pins 2.0.24 — re-verify in image at G2.
+- [x] B2. (B2a proven live $0; B2b wired unconditionally — default catalog lacks our models; B2c prose untouched by design) Wire `#variant`: append `#<effort>` to `-m` in `make_cmd`
+  (effort vocabulary low/high/max + minimal/medium/xhigh/off mapped to
+  same-named variants; `""|default|auto` → `#high` matching OMP).
+  a. Live resolution check first ($0 on ling-3.1-flash): trivial run with
+     `#max`; resolution error = unavailable (zero spend either way).
+  b. `OPENCODE_CONFIG_CONTENT` custom variants only if B2a fails or a
+     level is missing (binary shows auto-generation should cover us).
+  c. Prose effort line stays untouched (belt-and-braces).
+- [x] B3. Add `.arg("--variant").arg(effort)` next to `-m` in `make_cmd`;
   unknown-variant resolution error → fall back to no-variant (prose-only)
   + log line. Never fail the trial on variant config.
-- [ ] B4. Forwarding check: if the openai-compatible package ignores
-  `reasoningEffort` (docs warn options "may be ignored"), fall back to
-  raw `body` passthrough `{"reasoning": {"effort": ...}}` (OpenRouter
-  native dialect). Effect verified by reasoning-token volumes (§G),
-  not by absence of error.
-- [ ] B5. Unit tests: variant-config JSON shape per effort level;
+- [ ] B4. Forwarding check: binary evidence says the openrouter package
+  forwards effort natively, but verify EFFECT not just resolution —
+  reasoning-token volumes must move across variants on the same prompt
+  (G2 canary). If inert, raw `body` passthrough
+  `{"reasoning": {"effort": ...}}` is the backup. Investigate-option:
+  `budget_tokens` variants (`reasoning.max_tokens`) as a hard cap on
+  runaway thought — semantics of cap-hit unclear, do not ship blind.
+- [x] B5. Unit tests: variant-config JSON shape per effort level;
   fallback path on resolution error. Full suite + fmt + clippy.
 
 ## C. OMP attempt-then-fallback (replaces blanket pre-clamp)
