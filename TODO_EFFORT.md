@@ -112,9 +112,9 @@ path. Retry machinery would guard a hypothetical, so it was cut.
 
 ## G. Deploy + effect check
 
-- [ ] G1. [GATE: idle + 30s notice] Release build, restart
+- [x] G1. (release restart, integrity clean, idle before+after) [GATE: idle + 30s notice] Release build, restart
   engine+gui, integrity clean, `migrate-check` clean.
-- [ ] G2. [GATE: micro-spend ~1 trial] Single max-effort OpenCode trial
+- [ ] G2. RUNNING as q51 (redis/max/opencode/ling, 1 trial, enqueued 2026-10-09 ~14:54Z). Early signal healthy: turn-1 text brief, immediate `write` tool, no cutoff. Verdict pending completion: variant recorded? reasoning volumes vs prose baseline? recovery exercised? [GATE: micro-spend ~1 trial] Single max-effort OpenCode trial
   as canary: assert `--variant` accepted (no resolution error) and
   reasoning-token volume moves vs prose-only baseline. If forwarding is
   inert → B4 body-passthrough path before any wave.

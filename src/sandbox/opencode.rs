@@ -559,8 +559,14 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             limits.max_budget_usd.unwrap_or(0.0)
         ));
         let _ = tx.send(format!(
-            "[OPENCODE-PROMPT] model={} effort={} (request-only) cwd=/workspace session={}",
-            effective_model, effort_level, container_id
+            "[OPENCODE-PROMPT] model={} effort={} ({}) cwd=/workspace session={}",
+            effective_model,
+            effort_level,
+            variant_id
+                .as_ref()
+                .map(|v| format!("machine variant #{v}"))
+                .unwrap_or_else(|| "prose-only".to_string()),
+            container_id
         ));
 
         // Stats accumulate across resume attempts under the global limits.
