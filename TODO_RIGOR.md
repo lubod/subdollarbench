@@ -10,7 +10,7 @@
        `cost-annotate` backfilled `cost_formula_usd` onto the 144 archived
        muse-spark rows that recorded $0.00 from counter lag — annotation only,
        no score rewrites. Board verified: 17/17 muse rows now paid.
-  - [ ] 1c. Canary string in all prompt templates + workspace seeds (pending idle — prompt edits contaminate running trials)
+  - [x] 1c. Canary GUIDs in all 7 prompt templates + advisory workspace echo scan (RULES 2026-10-09.2)
 - [ ] 2. `replay <run_id>` (day)
   - [x] 2a. Build archived workspace + run verifier, no API key (reuse `eval` path)
   - [x] 2b. CLI wiring + docs
@@ -35,7 +35,14 @@
 Rules: grading changes bump RULES_VERSION + fingerprint; no per-wave
 protocol mutations (regime fragmentation); engine idle for deploys.
 
-Deployed: NO — engine running q50 (restart would kill trials). Ship 1a+1b with 1c at idle.
+Deployed: YES (2026-10-09, engine idle window). Release restart of engine+gui
+services clean; integrity 0 orphans/0 junk; repo portal regenerated
+(17 paid / 57 free after cost-annotate).
 
-Slice 2 e2e validation pending idle (engine running q50; replay refuses while live by design).
-Slice 1c canary pending idle (prompt edits would contaminate running trials).
+Slice 2 e2e validated on a real archived run (muse-spark redis trial9):
+compliance re-check PASS, differential oracle PASS against ref-redis,
+verdict MATCH (100% = archived 100%). NOTE: no archived run carries
+robustness data yet — the wave finished before 3a shipped, so this replay
+is the first recorded probe evidence (Robust1 PASS, Robust2 FAIL: slow
+frame got "$-1" where a bulk was expected). 3c promotion still wants
+several flake-free rows.
