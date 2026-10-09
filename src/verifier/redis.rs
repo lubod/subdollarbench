@@ -291,6 +291,120 @@ impl RedisVerifier {
             Err(_) => fail("slow-frame reply timed out".to_string()),
         }
     }
+    /// Advisory differential oracle (NOT scored): replays a seeded random
+    /// op stream against the candidate AND the official reference and
+    /// requires equivalent replies. A hardcoded routing table cannot
+    /// answer random keys; a protocol-faithful server can. Error replies
+    /// compare by category (`-ERR`) — message text legitimately differs
+    /// across implementations — while value-carrying replies must match
+    /// byte-for-byte. Never called from `run_all`; the pipeline logs the
+    /// single verdict stage separately under [ROBUST].
+    pub async fn run_differential(&self, ref_port: u16) -> Vec<StageResult> {
+        let name = "Differential vs ref-redis on seeded traffic (advisory)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 103,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let addr = format!("127.0.0.1:{}", ref_port);
+        let mut reference =
+            match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+                Ok(Ok(s)) => s,
+                _ => {
+                    return vec![fail(format!(
+                        "reference unreachable at {addr} (harness, not candidate)"
+                    ))]
+                }
+            };
+        let mut candidate = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return vec![fail(format!("candidate connect: {e}"))],
+        };
+        // Seeded xorshift: identical stream every run of this seed, no rng crate needed.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.get_seed_prefix("test").hash(&mut h);
+        "differential-v1".hash(&mut h);
+        let mut rng = h.finish() | 1;
+        fn xnext(rng: &mut u64) -> u64 {
+            *rng ^= *rng << 13;
+            *rng ^= *rng >> 7;
+            *rng ^= *rng << 17;
+            *rng
+        }
+        const ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ";
+        let tag: String = (0..6)
+            .map(|_| ALPHA[(xnext(&mut rng) % ALPHA.len() as u64) as usize] as char)
+            .collect();
+        let keys: Vec<String> = (0..8).map(|i| format!("diff_{tag}_{i}")).collect();
+        let ctr = format!("diff_{tag}_ctr");
+        // (opname, args) with owned strings: the stream is fixed per seed.
+        let mut ops: Vec<(String, Vec<String>)> = Vec::new();
+        for _ in 0..24 {
+            let k = keys[(xnext(&mut rng) % 8) as usize].clone();
+            match xnext(&mut rng) % 6 {
+                0 => {
+                    let vlen = (xnext(&mut rng) % 17) as usize;
+                    let v: String = (0..vlen)
+                        .map(|_| ALPHA[(xnext(&mut rng) % ALPHA.len() as u64) as usize] as char)
+                        .collect();
+                    ops.push(("SET".into(), vec![k, v]))
+                }
+                1 => ops.push(("GET".into(), vec![k])),
+                2 => ops.push(("DEL".into(), vec![k])),
+                3 => ops.push(("EXISTS".into(), vec![k])),
+                4 => ops.push(("INCR".into(), vec![ctr.clone()])),
+                _ => ops.push(("DECR".into(), vec![ctr.clone()])),
+            }
+        }
+        let body = async {
+            for (i, (op, args)) in ops.iter().enumerate() {
+                let arg_refs: Vec<&str> = std::iter::once(op.as_str())
+                    .chain(args.iter().map(|s| s.as_str()))
+                    .collect();
+                let want = Self::send_resp_cmd(&mut reference, &arg_refs)
+                    .await
+                    .map_err(|e| format!("reference op #{i} {op} failed: {e}"))?;
+                let got = Self::send_resp_cmd(&mut candidate, &arg_refs)
+                    .await
+                    .map_err(|e| format!("candidate op #{i} {op} failed: {e}"))?;
+                let (nw, ng) = (Self::normalize_reply(&want), Self::normalize_reply(&got));
+                if nw != ng {
+                    return Err(format!(
+                        "divergence at op #{i} {op} {args:?}: ref={want:?} candidate={got:?}"
+                    ));
+                }
+            }
+            // Best-effort cleanup of our keys on both sides; failures ignored.
+            for k in keys.iter().chain(std::iter::once(&ctr)) {
+                let _ = Self::send_resp_cmd(&mut reference, &["DEL", k]).await;
+                let _ = Self::send_resp_cmd(&mut candidate, &["DEL", k]).await;
+            }
+            Ok::<(), String>(())
+        };
+        match tokio::time::timeout(Duration::from_secs(90), body).await {
+            Ok(Ok(())) => vec![StageResult {
+                stage: 103,
+                name,
+                passed: true,
+                error: None,
+            }],
+            Ok(Err(e)) => vec![fail(e)],
+            Err(_) => vec![fail("differential stream timed out after 90s".to_string())],
+        }
+    }
+
+    /// Reply equivalence classes: identical frames match; error payloads
+    /// reduce to their `-ERR` category since message text legitimately
+    /// differs between implementations.
+    fn normalize_reply(reply: &str) -> String {
+        let t = reply.trim_end_matches(['\r', '\n']);
+        if t.starts_with('-') {
+            return "-ERR".to_string();
+        }
+        t.to_string()
+    }
     pub async fn test_stage1_handshake(&self) -> StageResult {
         let name = "Stage 1: PING & ECHO Handshake".to_string();
         let mut stream = match self.connect().await {
@@ -962,6 +1076,179 @@ mod tests {
         assert_eq!(out[1].stage, 102);
     }
 
+    /// In-memory RESP mock with real key/value + counter semantics.
+    /// `flip_get` poisons one GET reply to simulate a divergent candidate.
+    async fn spawn_kv_mock(flip_get: bool) -> u16 {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let db: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    let mut poisoned = false;
+                    loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        // Parse one array frame: *N then N bulk strings.
+                        let frame = (|| -> Option<(Vec<String>, usize)> {
+                            let s = std::str::from_utf8(&buf).ok()?;
+                            let mut lines = s.split("\r\n");
+                            let head = lines.next()?;
+                            let count: usize = head.strip_prefix('*')?.parse().ok()?;
+                            let mut args = Vec::new();
+                            let mut consumed = head.len() + 2;
+                            for _ in 0..count {
+                                let h = lines.next()?;
+                                let len: usize = h.strip_prefix('$')?.parse().ok()?;
+                                consumed += h.len() + 2;
+                                let data = lines.next()?;
+                                if data.len() != len {
+                                    return None;
+                                }
+                                args.push(data.to_string());
+                                consumed += len + 2;
+                            }
+                            Some((args, consumed))
+                        })();
+                        let Some((args, used)) = frame else { continue };
+                        buf.drain(..used);
+                        if args.is_empty() {
+                            continue;
+                        }
+                        let reply = {
+                            let mut db = db.lock().unwrap();
+                            match args[0].to_uppercase().as_str() {
+                                "PING" => "+PONG\r\n".to_string(),
+                                "SET" if args.len() == 3 => {
+                                    db.insert(args[1].clone(), args[2].clone());
+                                    "+OK\r\n".to_string()
+                                }
+                                "GET" if args.len() == 2 => match db.get(&args[1]) {
+                                    Some(v) if flip_get && !poisoned => {
+                                        poisoned = true;
+                                        format!("${}\r\nWRONG\r\n", "WRONG".len())
+                                    }
+                                    Some(v) => format!("${}\r\n{}\r\n", v.len(), v),
+                                    None => "$-1\r\n".to_string(),
+                                },
+                                "DEL" => {
+                                    let n = args[1..]
+                                        .iter()
+                                        .filter(|k| db.remove(*k).is_some())
+                                        .count();
+                                    format!(":{}\r\n", n)
+                                }
+                                "EXISTS" => {
+                                    let n =
+                                        args[1..].iter().filter(|k| db.contains_key(*k)).count();
+                                    format!(":{}\r\n", n)
+                                }
+                                "INCR" | "DECR" if args.len() == 2 => {
+                                    let cur: i64 =
+                                        db.get(&args[1]).and_then(|v| v.parse().ok()).unwrap_or(0);
+                                    let nv = if args[0].to_uppercase() == "INCR" {
+                                        cur + 1
+                                    } else {
+                                        cur - 1
+                                    };
+                                    db.insert(args[1].clone(), nv.to_string());
+                                    format!(":{}\r\n", nv)
+                                }
+                                _ => "-ERR unknown\r\n".to_string(),
+                            }
+                        };
+                        if socket.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// Drive run_differential against a mock reference port by pointing a
+    /// verifier at the mock candidate and overriding the ref dial. The
+    /// verifier under test dials `ref_port`, so a mock there suffices.
+    #[tokio::test]
+    async fn test_differential_passes_on_identical_servers() {
+        let cand = spawn_kv_mock(false).await;
+        // Reference mock shares nothing but implements identical semantics.
+        let reference = spawn_kv_mock(false).await;
+        // Point the verifier at the candidate mock; patch ref dial by
+        // binding order: run against candidate, ref via second mock.
+        let v = RedisVerifier::new(cand, Some("differential"));
+        let out = v.run_differential(reference).await;
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].passed,
+            "identical servers must agree: {:?}",
+            out[0].error
+        );
+        assert_eq!(out[0].stage, 103);
+    }
+
+    #[tokio::test]
+    async fn test_differential_catches_divergence() {
+        let cand = spawn_kv_mock(true).await;
+        let reference = spawn_kv_mock(false).await;
+        let v = RedisVerifier::new(cand, Some("differential"));
+        let out = v.run_differential(reference).await;
+        assert!(!out[0].passed, "divergent GET must fail");
+        let err = out[0].error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("divergence at op"),
+            "must locate the op: {err}"
+        );
+        assert!(err.contains("WRONG"), "must show both replies: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_differential_reference_down_is_graceful() {
+        let cand = spawn_kv_mock(false).await;
+        // Reserve then drop a port so nothing listens there.
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let v = RedisVerifier::new(cand, Some("differential"));
+        let out = v.run_differential(dead_port).await;
+        assert!(!out[0].passed);
+        assert!(
+            out[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("reference unreachable"),
+            "must blame the harness, not the candidate: {:?}",
+            out[0].error
+        );
+    }
+
+    #[test]
+    fn test_normalize_reply_classes() {
+        // Errors reduce to category; values compare exactly.
+        assert_eq!(RedisVerifier::normalize_reply("-ERR nope\r\n"), "-ERR");
+        assert_eq!(
+            RedisVerifier::normalize_reply("-WRONGTYPE blah\r\n"),
+            "-ERR"
+        );
+        assert_eq!(RedisVerifier::normalize_reply("+OK\r\n"), "+OK");
+        assert_eq!(RedisVerifier::normalize_reply("$3\r\nfoo\r\n"), "$3\r\nfoo");
+        assert_eq!(RedisVerifier::normalize_reply(":17\r\n"), ":17");
+        assert_ne!(
+            RedisVerifier::normalize_reply(":17\r\n"),
+            RedisVerifier::normalize_reply(":18\r\n")
+        );
+    }
     #[tokio::test]
     async fn test_robustness_fails_when_server_dies() {
         // Fragile mock: dies on first garbage byte, so the fresh-connection

@@ -1231,6 +1231,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             sandbox
                 .start_candidate_in_docker(&work_tmp, p)
                 .context("start replay candidate")?;
+            // Differential oracle needs the official reference too (redis
+            // only, like the pipeline). Best-effort: a missing reference
+            // degrades to a reported advisory skip, never a failure.
+            if task == TaskType::Redis {
+                if let Err(e) = sandbox.start_reference_redis(6380) {
+                    println!("replay reference unavailable: {e:#} (differential skipped)");
+                }
+            }
             if !sandbox.wait_for_port(p, 25).await {
                 sandbox.cleanup();
                 let _ = std::fs::remove_dir_all(&work_tmp);
@@ -1252,6 +1260,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     let v = RedisVerifier::new(p, Some(&replay_seed));
                     let r = v.run_all().await;
                     replay_robust = v.run_robustness().await;
+                    replay_robust.extend(v.run_differential(6380).await);
                     (r.pass_rate, r.passed_count, r.total_stages)
                 }
                 TaskType::Http => {

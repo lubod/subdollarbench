@@ -823,6 +823,14 @@ impl BenchmarkPipeline {
                         log_robust(&logger, std::slice::from_ref(&s));
                         extra_robustness.push(s);
                     }
+                    // Differential oracle vs the live reference (advisory,
+                    // unscored): the same seeded op stream runs on both
+                    // servers; hardcoded tables cannot answer random keys.
+                    let ref_port = crate::web::server::worker_port(6380, config.worker);
+                    for s in verifier.run_differential(ref_port).await {
+                        log_robust(&logger, std::slice::from_ref(&s));
+                        extra_robustness.push(s);
+                    }
                     (pr, ps, ts, stages)
                 }
                 TaskType::Http => {

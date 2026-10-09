@@ -8,8 +8,8 @@
   - [x] 2a. Build archived workspace + run verifier, no API key (reuse `eval` path)
   - [x] 2b. CLI wiring + docs
 - [ ] 3. Robustness probes → differential oracle (weeks, flake discipline)
-  - [ ] 3a. Malformed-frame + slow-close probes, unscored first (redis/http)
-  - [ ] 3b. Differential oracle vs reference on seeded random traffic (redis/http)
+  - [x] 3a. Malformed-frame + slow-close probes, unscored first (redis/http)
+  - [x] 3b. Differential oracle vs reference on seeded random traffic (redis/http)
   - [ ] 3c. Promote to scoring only with zero-flake evidence; version bump per change
 - [ ] 4. Breadth wave (needs spend approval)
   - [ ] 4a. Verify which budget IDs still exist on OpenRouter
