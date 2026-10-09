@@ -3672,7 +3672,15 @@ mod tests {
         assert!(res.status() == 403 || res.status() == 404);
     }
 
+    // Live-fire: boots a real server against the REAL workspace/, runs/
+    // and results/ roots (resolve_*_dir have no test override) and
+    // remove_dir_all's them at cleanup. A run during a live wave deletes
+    // a sibling trial's mounted workdir mid-trial (ENOENT under a live
+    // bind mount) — the exact //deleted signature. Ignored by default;
+    // run explicitly, never during a wave. Proper fix: test AppState
+    // with temp dirs (TODO_EFFORT H7).
     #[tokio::test]
+    #[ignore]
     async fn test_web_routes_lifecycle() {
         // Token isolation: the bearer gate reads SDB_UI_TOKEN from the
         // environment, and the production token is set in this shell's

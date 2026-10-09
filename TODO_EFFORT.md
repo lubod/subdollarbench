@@ -114,7 +114,25 @@ path. Retry machinery would guard a hypothetical, so it was cut.
 
 - [x] G1. (release restart, integrity clean, idle before+after) [GATE: idle + 30s notice] Release build, restart
   engine+gui, integrity clean, `migrate-check` clean.
-- [ ] G2. RUNNING as q51 (redis/max/opencode/ling, 1 trial, enqueued 2026-10-09 ~14:54Z). Early signal healthy: turn-1 text brief, immediate `write` tool, no cutoff. Verdict pending completion: variant recorded? reasoning volumes vs prose baseline? recovery exercised? [GATE: micro-spend ~1 trial] Single max-effort OpenCode trial
+- [ ] G2. q51 RAN 14:54–15:14Z but verdict INCONCLUSIVE (see incident below).
+  Confirmed in prod: variant `max` resolved (session records it, no
+  fallback), telemetry live (turns 101 on API), recovery correctly silent
+  (51 tool calls → trigger rightly not fired). Effect (reasoning volumes
+  vs prose baseline) NOT established: trial's workspace was deleted
+  mid-trial by an unidentified external actor, agent worked 101 turns in
+  a detached mount + container /tmp, archive faithfully copied an empty
+  dir → 0% stands per no-rescoring rule, flagged for rerun.
+  INCIDENT 2026-10-09 ~15:05–15:13Z: staging workdir deleted mid-trial
+  (agent-observed `total 0` + mountinfo `//deleted`; agent cleared —
+  no workspace wipe in its tool calls, it debugged the mount for 5
+  turns). Ruled out: our pipeline (prep once at start, no mid-trial
+  delete path), archive (copies, never deletes), sdb-watch (read-only),
+  my commands (all read-only in window), tests by me (none ran).
+  Unresolved: another box actor (second live session on pts/2) vs
+  unknown engine path. Mitigations shipped: `test_web_routes_lifecycle`
+  #[ignore]d (it remove_dir_all's the REAL workspace/ root; comment
+  admits prior destruction) — see H7. RECOMMEND: $0 rerun of this exact
+  cell as G2-redo after confirming no test/cleanup runs during waves. RUNNING as q51 (redis/max/opencode/ling, 1 trial, enqueued 2026-10-09 ~14:54Z). Early signal healthy: turn-1 text brief, immediate `write` tool, no cutoff. Verdict pending completion: variant recorded? reasoning volumes vs prose baseline? recovery exercised? [GATE: micro-spend ~1 trial] Single max-effort OpenCode trial
   as canary: assert `--variant` accepted (no resolution error) and
   reasoning-token volume moves vs prose-only baseline. If forwarding is
   inert → B4 body-passthrough path before any wave.
@@ -140,7 +158,13 @@ path. Retry machinery would guard a hypothetical, so it was cut.
   a first-class category via §F flags), 5b language analysis, 5c draft.
 - [ ] H6. Process rules (add to TODO_RIGOR.md Rules): freeze graded
   files during waves (mid-wave edits caused q50's 4-hash fingerprint
-  drift); no archived rescoring without review (already DECISIONS).
+  drift); no archived rescoring without review (already DECISIONS);
+  no `cargo test` (un-ignored live-fire subset only) or manual
+  workspace/runs cleanup during a live wave — q51's staging was deleted
+  mid-trial by an unidentified actor (incident note under G2).
+- [ ] H7. Test isolation proper fix: test AppState with temp dirs so
+  `test_web_routes_lifecycle` can run un-ignored without touching real
+  workspace/runs/results roots (currently #[ignore]d as a loaded gun).
 
 Order: A → B+C+D (any order, one branch each or stacked) → E → F →
 G1 → G2 → H (H1 anytime; H4 on approval).
