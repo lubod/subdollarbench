@@ -1453,6 +1453,11 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Show hidden runs">
                 <input type="checkbox" onchange="toggleLbHidden(this.checked)"> 👁 Hidden
               </label>
+              <select id="lbTierSelect" onchange="setBoardTier(this.value)" title="Free = $0 API spend (compute floor only). Never compare across tiers on cost." style="padding: 4px 8px; font-size: 0.75rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
+                <option value="all">All tiers</option>
+                <option value="paid">Paid</option>
+                <option value="free">Free ($0 API)</option>
+              </select>
               <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="loadLeaderboard()">🔄 Refresh</button>
               <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 5px 12px; font-size: 0.78rem; text-decoration: none;" title="Public rollup: one row per model">↗ Public rollup</a>
             </div>
@@ -1493,6 +1498,11 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <option value="cpp">Cost per pass (low first)</option>
                 <option value="cost">Total cost (low first)</option>
                 <option value="trials">Trials</option>
+              </select>
+              <select id="modelsTierSelect" onchange="setBoardTier(this.value)" title="Free = $0 API spend (compute floor only). Never compare across tiers on cost." style="padding: 4px 8px; font-size: 0.75rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
+                <option value="all">All tiers</option>
+                <option value="paid">Paid</option>
+                <option value="free">Free ($0 API)</option>
               </select>
               <span id="modelsCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
             </div>
@@ -3018,6 +3028,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const tbody = document.getElementById('lbTableBody');
       const rows = (lbCache || []).filter(r => {
         if ((r.portal_hidden || r.poisoned) && !lbShowHidden) return false;
+        if (boardTier !== 'all' && tierOf(r) !== boardTier) return false;
         if (!lbFilter) return true;
         const text = `${r.model} ${r.task} ${r.effort || ''} ${r.stability || ''}`.toLowerCase();
         return text.includes(lbFilter);
@@ -3102,7 +3113,10 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           if (!subs.length) {
             dc.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No per-trial detail in this row.</span>';
           } else {
-            dc.innerHTML = '<table style="width:100%;font-size:0.75rem;"><thead><tr style="color:var(--text-muted);text-align:left;"><th>Trial</th><th>Pass</th><th>Cost</th><th>Turns</th><th>Duration</th><th>Throughput</th></tr></thead><tbody>' +
+            const tpIqr = iqr(subs.map(t => t.throughput_req_sec));
+            const tokIqr = iqr(subs.map(t => t.total_tokens ?? ((t.prompt_tokens || 0) + (t.cached_tokens || 0) + (t.completion_tokens || 0))));
+            const spread = `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:6px;" title="Inter-quartile range across trials (display only; ranking uses Wilson P@1 bounds)">spread — throughput: ${fmtIqr(tpIqr, v => fmtTp(v))} · tokens: ${fmtIqr(tokIqr)}</div>`;
+            dc.innerHTML = spread + '<table style="width:100%;font-size:0.75rem;"><thead><tr style="color:var(--text-muted);text-align:left;"><th>Trial</th><th>Pass</th><th>Cost</th><th>Turns</th><th>Duration</th><th>Throughput</th></tr></thead><tbody>' +
               subs.map((t, i) => {
                 const ok = (t.pass_rate ?? 0) >= 100;
                 const tc = t.total_cost_usd ?? t.effective_cost_usd;
@@ -3142,6 +3156,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const canon = {};
       boardRows.forEach(r => {
         if ((r.id || '').startsWith('test_')) return;
+        if (boardTier !== 'all' && tierOf(r) !== boardTier) return;
         const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}\u0001${(r.harness || 'omp').toLowerCase()}`;
         const n = r.total_trials ?? (r.subruns || []).length ?? 1;
         const ex = canon[key];
@@ -3283,7 +3298,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const stamp = (r.rules_version || '').split('+')[0] || '';
             const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
             const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
-            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
+            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
             cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
           });
           tr.innerHTML = cells;
@@ -3392,6 +3407,35 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       if (v == null) return '-';
       if (v >= 1000) return (v / 1000).toFixed(1) + 'k/s';
       return Math.round(v) + '/s';
+    }
+    // Pricing tier from data, not names: $0 API spend = free tier (ranks on
+    // the compute floor only — never compare against paid rows on cost).
+    // Null/unknown spend counts as paid so nothing hides by accident.
+    function tierOf(r) {
+      return ((r || {}).total_cost_usd ?? null) === 0 ? 'free' : 'paid';
+    }
+    let boardTier = 'all';
+    function setBoardTier(v) {
+      boardTier = v;
+      for (const id of ['lbTierSelect', 'modelsTierSelect']) {
+        const el = document.getElementById(id);
+        if (el) el.value = v;
+      }
+      renderLeaderboard();
+      renderModels();
+    }
+    // Inter-quartile range over trial values (display only; Wilson on P@1
+    // stays the rank key). Nearest-rank quartiles; null below n=2.
+    function iqr(vals) {
+      const a = (vals || []).filter(v => v != null && isFinite(v)).sort((x, y) => x - y);
+      if (a.length < 2) return null;
+      const at = p => a[Math.min(a.length - 1, Math.floor(p * (a.length - 1)))];
+      return { q1: at(0.25), med: at(0.5), q3: at(0.75), n: a.length };
+    }
+    function fmtIqr(x, fmt) {
+      if (!x) return 'n/a';
+      const f = fmt || (v => Math.round(v).toLocaleString());
+      return `${f(x.q1)}–${f(x.q3)} (med ${f(x.med)}, n=${x.n})`;
     }
 
 
