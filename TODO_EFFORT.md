@@ -132,18 +132,27 @@ path. Retry machinery would guard a hypothetical, so it was cut.
   unknown engine path. Mitigations shipped: `test_web_routes_lifecycle`
   #[ignore]d (it remove_dir_all's the REAL workspace/ root; comment
   admits prior destruction) — see H7. RECOMMEND: $0 rerun of this exact
-  cell as G2-redo after confirming no test/cleanup runs during waves. RUNNING as q51 (redis/max/opencode/ling, 1 trial, enqueued 2026-10-09 ~14:54Z). Early signal healthy: turn-1 text brief, immediate `write` tool, no cutoff. Verdict pending completion: variant recorded? reasoning volumes vs prose baseline? recovery exercised? [GATE: micro-spend ~1 trial] Single max-effort OpenCode trial
-  as canary: assert `--variant` accepted (no resolution error) and
-  reasoning-token volume moves vs prose-only baseline. If forwarding is
-  inert → B4 body-passthrough path before any wave.
+  cell as G2-redo after confirming no test/cleanup runs during waves.
+  UPDATE (effect analysis): q51 reasoning 24,366 sits at the median of 28
+  prose-only redis/ling sessions (median 21,461, max 43,202) — n=1,
+  indistinguishable. Resolution proven, effect NOT established.
+  Discriminating test proposed: pdf/max/opencode single trial ($0; the
+  cutoff-inducing task) — also exercises recovery live if cutoffs recur.
+  Propose both reruns (redis verdict-integrity + pdf effect) with user
+  go-ahead.
 - [ ] G3. Node `--check` on GUI JS if touched; portal regen only if
   displayed numbers change (annotation alone doesn't).
 
 ## H. Rest of roadmap (consolidated, unchanged priority)
 
-- [ ] H1. Slice 3c: gather flake evidence free via `replay` on archived
-  redis passes (probes run inside replay); [GATE: user sets promotion
-  threshold — N clean rows across M candidates] then promote + bump.
+- [x] H1. Slice 3c evidence (2026-10-09, 3 archived-trial replays, all
+  MATCH): Robust1 PASS 3/3, differential PASS 3/3, Robust2 FAIL 3/3 with
+  identical signature (slow-frame `$-1` vs bulk foo) — systematic, not
+  flake. Reading: Robust1 + differential are promotion candidates (need
+  user threshold + multi-model rows — all 3 are muse-spark); Robust2
+  needs a POLICY decision first (strict reference-parity vs lenient: is
+  answering a partial frame with $-1 fail-worthy?). [GATE: user sets
+  promotion threshold + Robust2 policy] then promote + bump.
 - [ ] H2. Slice 3b label: roadmap checkbox says "(redis/http)", oracle
   is redis-only by design — one-line fix with next commit touching
   TODO_RIGOR.md.
