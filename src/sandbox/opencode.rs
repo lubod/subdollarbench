@@ -224,6 +224,72 @@ impl OpenCodeRunner {
         t == "provider.no-route" && msg.contains("Variant unavailable")
     }
 
+    /// Max cutoff recoveries per trial: cutoff → resume → cutoff again →
+    /// accept the 0% as genuine model failure. Never loop on a model that
+    /// won't act.
+    const MAX_CUTOFF_RECOVERIES: u32 = 2;
+
+    /// Decide cutoff recovery. Call ONLY on a clean exit-0 with limits
+    /// unhit (the match arm guarantees both): zero tool calls this attempt
+    /// plus an empty workspace means the turn died before acting (measured:
+    /// 30k-token thought, `finish: length`, idle `succeeded`). A trial that
+    /// acted (tools>0) or produced files never triggers, however it exited.
+    /// Pure for unit tests; the loop feeds it live signals.
+    fn should_recover_cutoff(
+        exit_success: bool,
+        limited: bool,
+        tool_uses: u32,
+        recoveries_used: u32,
+        workspace_empty: bool,
+    ) -> bool {
+        exit_success
+            && !limited
+            && tool_uses == 0
+            && workspace_empty
+            && recoveries_used < Self::MAX_CUTOFF_RECOVERIES
+    }
+
+    /// Workspace holds candidate content: entrypoint files or anything else
+    /// the agent wrote. AGENTS.md is ours (written pre-launch), never
+    /// counts. Bounded walk so a pathological tree can't stall the check.
+    fn workspace_has_content(dir: &std::path::Path) -> bool {
+        if dir.join("start.sh").is_file() || dir.join("Dockerfile").is_file() {
+            return true;
+        }
+        let mut stack = vec![dir.to_path_buf()];
+        let mut seen = 0usize;
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                seen += 1;
+                // Pathological: treat as content, never stall.
+                if seen > 5000 {
+                    return true;
+                }
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if e.file_name().to_str() == Some("AGENTS.md") {
+                    continue;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Recovery nudge: short, tool-first. The model saw the full brief on
+    /// turn 1 (then got cut off), so restate only the action contract.
+    fn cutoff_nudge(port: u16) -> String {
+        format!(
+            "Your previous response was cut off before creating any files (no tool calls reached /workspace). Do NOT write a long plan. Immediately call the `write` and `bash` tools: create the implementation with entrypoint `./start.sh` or `Dockerfile` listening on port {port}, then test it. Brief thinking, then tools."
+        )
+    }
+
     /// Host dirs holding stored Console auth (opencode.db) + config.
     /// Mounted into the sandbox like OMP's `~/.omp` mount. Per-run
     /// `--session` ids keep concurrent runs apart in the shared db.
@@ -283,6 +349,10 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         let variant_id = Self::variant_for_effort(&effort_level);
         let variant_failed = Arc::new(AtomicBool::new(false));
         let variant_disabled = Arc::new(AtomicBool::new(variant_id.is_none()));
+        // Cutoff recoveries used (cap Self::MAX_CUTOFF_RECOVERIES). Doubles
+        // as the prompt selector: recovery attempts get the tool-first
+        // nudge instead of the full brief.
+        let cutoff_recoveries = Arc::new(std::sync::atomic::AtomicU32::new(0));
         // Fail fast on non-OpenRouter ids: no container, no spend, no session.
         let effective_model = Self::resolve_model_id(model)?;
 
@@ -334,6 +404,10 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             test_cmd,
             &effort_level,
         );
+        // Recovery prompt: attempts after a cutoff get the tool-first nudge
+        // (the model already saw the full brief on turn 1). Selected in
+        // make_cmd by cutoff_recoveries.
+        let recovery_nudge = Self::cutoff_nudge(target_port);
 
         // Model id validated above (OpenRouter-only); passed through
         // untouched so provider/model/variant strings keep working.
@@ -453,7 +527,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     }
                 })
                 .arg("--auto")
-                .arg(&effective_prompt);
+                .arg(if cutoff_recoveries.load(Ordering::SeqCst) > 0 {
+                    // Recovery attempt: same session, tool-first nudge.
+                    &recovery_nudge
+                } else {
+                    &effective_prompt
+                });
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             cmd
         };
@@ -526,6 +605,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         let outcome: Result<OmpSessionStats> = loop {
             let rate_limited = Arc::new(AtomicBool::new(false));
             let attempt_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            // Tool calls THIS attempt (fresh per iteration: no reset races
+            // with the previous reader). Feeds the cutoff-recovery trigger.
+            let attempt_tools = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let mut child = make_cmd()
                 .spawn()
                 .map_err(|e| anyhow!("Failed to spawn opencode in docker: {}", e))?;
@@ -539,6 +621,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 let tx_o = tx.clone();
                 let stats_o = stats.clone();
                 let turns_o = turns.clone();
+                let tools_o = attempt_tools.clone();
                 let variant_failed_o = variant_failed.clone();
                 let spent_o = spent.clone();
                 let limit_hit_o = limit_hit.clone();
@@ -582,6 +665,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 }
                             }
                             "tool_use" => {
+                                tools_o.fetch_add(1, Ordering::SeqCst);
                                 let tool = v
                                     .pointer("/part/tool")
                                     .or_else(|| v.get("tool"))
@@ -754,7 +838,29 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             let st = Self::snapshot_stats(&stats, &turns);
             let tail = attempt_tail.lock().unwrap().join(" | ");
             match waited {
-                Some(status) if status.success() && !limited => break Ok(st),
+                Some(status) if status.success() && !limited => {
+                    // Cutoff recovery: a clean exit that never acted (0
+                    // tools, empty workspace) is a truncated turn, not a
+                    // verdict — resume the same session with the tool-first
+                    // nudge. Capped (MAX_CUTOFF_RECOVERIES); past the cap the
+                    // 0% stands as genuine model failure. No new status, no
+                    // rescoring path: recovered trials score normally.
+                    if Self::should_recover_cutoff(
+                        true,
+                        false,
+                        attempt_tools.load(Ordering::SeqCst),
+                        cutoff_recoveries.load(Ordering::SeqCst),
+                        !Self::workspace_has_content(&canonical_workdir),
+                    ) {
+                        let n = cutoff_recoveries.fetch_add(1, Ordering::SeqCst) + 1;
+                        let _ = retry_tx.send(format!(
+                            "[CUTOFF-RECOVER] exit 0 with 0 tool calls and empty workspace; resuming same session with tool-first nudge ({n}/{})",
+                            Self::MAX_CUTOFF_RECOVERIES
+                        ));
+                        continue;
+                    }
+                    break Ok(st);
+                }
                 _ if limited => {
                     // Parity with OMP (stopped_by_limit returns Ok): hitting
                     // max turns/budget ends the run normally with partial
@@ -975,6 +1081,57 @@ mod tests {
         assert!(!OpenCodeRunner::is_variant_unavailable_event(
             &serde_json::Value::Null
         ));
+    }
+
+    #[test]
+    fn test_should_recover_cutoff_needs_all_three_signals() {
+        use OpenCodeRunner as R;
+        // The measured shape: clean exit, 0 tools, empty workspace.
+        assert!(R::should_recover_cutoff(true, false, 0, 0, true));
+        // Second recovery allowed (cap is 2)...
+        assert!(R::should_recover_cutoff(true, false, 0, 1, true));
+        // ...third strike accepted as genuine failure.
+        assert!(!R::should_recover_cutoff(true, false, 0, 2, true));
+        // Acted or produced files: never recover, however it exited.
+        assert!(!R::should_recover_cutoff(true, false, 1, 0, true));
+        assert!(!R::should_recover_cutoff(true, false, 0, 0, false));
+        // Non-clean exits keep their own paths (timeout/rate-limit arms).
+        assert!(!R::should_recover_cutoff(false, false, 0, 0, true));
+        assert!(!R::should_recover_cutoff(true, true, 0, 0, true));
+    }
+
+    #[test]
+    fn test_workspace_has_content_ignores_our_agents_md() {
+        let dir = std::env::temp_dir().join(format!("ws_content_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!OpenCodeRunner::workspace_has_content(&dir));
+        std::fs::write(dir.join("AGENTS.md"), "ours").unwrap();
+        assert!(
+            !OpenCodeRunner::workspace_has_content(&dir),
+            "our pre-launch file must not count"
+        );
+        std::fs::write(dir.join("notes.txt"), "agent wrote this").unwrap();
+        assert!(OpenCodeRunner::workspace_has_content(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir2 = std::env::temp_dir().join(format!("ws_entry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir2.join("start.sh"), "#!/bin/sh").unwrap();
+        assert!(OpenCodeRunner::workspace_has_content(&dir2));
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn test_cutoff_nudge_is_tool_first_and_names_port() {
+        let n = OpenCodeRunner::cutoff_nudge(8090);
+        assert!(n.contains("8090"), "must restate the action contract");
+        assert!(n.contains("`write`"), "must name tools, not plans");
+        assert!(
+            n.len() < 600,
+            "nudge must be short — it rides every recovery attempt"
+        );
     }
 
     #[test]

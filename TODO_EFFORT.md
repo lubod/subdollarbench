@@ -73,16 +73,16 @@ path. Retry machinery would guard a hypothetical, so it was cut.
 
 ## D. Resume-on-cutoff recovery (opencode)
 
-- [ ] D1. Trigger in the attempt loop: exit-0 AND 0 `tool_use` events
+- [x] D1. Trigger in the attempt loop: exit-0 AND 0 `tool_use` events
   AND empty workspace (no start.sh/Dockerfile/files). All three signals
   already observed by the runner — no session-DB dependency.
-- [ ] D2. Recovery = resume same `--session` with injected user message
+- [x] D2. (cap 2; same turn/budget limits; turns accumulate via §A fix) Recovery = resume same `--session` with injected user message
   ("previous response cut off before creating files — start executing
   tools now"), under the same turn/budget limits. Cap 2 recoveries per
   trial; third strike accepts the 0% as genuine model failure.
-- [ ] D3. Log `[CUTOFF-RECOVER]` with attempt number; trial continues as
+- [x] D3. Log `[CUTOFF-RECOVER]` with attempt number; trial continues as
   a normal trial (no new status, no rescoring path).
-- [ ] D4. Unit tests with synthetic event streams: trigger fires only on
+- [x] D4. Unit tests with synthetic event streams: trigger fires only on
   all-three-signals; cap enforced; normal zero-tool-but-files and
   nonzero-tool exits unaffected. Full suite + fmt + clippy.
 

@@ -2126,7 +2126,8 @@ mod tests {
         )
         .expect("thinking_level_change must render");
         assert!(
-            out.iter().any(|l| l.contains("[THINKING]") && l.contains("high")),
+            out.iter()
+                .any(|l| l.contains("[THINKING]") && l.contains("high")),
             "unexpected: {out:?}"
         );
         // Missing level degrades to silence, never a panic.
