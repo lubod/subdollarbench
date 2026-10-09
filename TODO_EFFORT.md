@@ -1,0 +1,135 @@
+# Effort parity + cutoff recovery — implementation TODO (2026-10-09)
+
+Bundle: give both harnesses machine-level effort control, recover (not
+reclassify) turn-1 reasoning cutoffs, fix turn telemetry, annotate history.
+Plus consolidated remaining roadmap (§H). Code-only except marked gates.
+
+Decisions already taken (not re-litigated here):
+- No prose clamp in OpenCode: effort stays `max` where requested. OMP's
+  flag clamp is replaced by attempt-then-fallback (§C), not extended.
+- No retroactive reclassification of archived 0% rows (verdict-honesty
+  rule, DECISIONS #7). History gets annotated (§F), never rescored.
+- Effort is harness-relative by construction (`max` = most the
+  harness+provider path supports); ranks never mix harnesses, so no
+  cross-harness comparability is claimed.
+
+## A. Turn telemetry fix (no RULES bump — display-only field)
+
+- [ ] A1. Copy `turns` into `st.steps_taken` on all 4 return paths in
+  `src/sandbox/opencode.rs` (billing-Err ~632, success-Ok ~649,
+  limit-Ok ~656, timeout/cancel-Err ~659/678/687). Scope confirmed:
+  171/171 opencode manifests read `turns: 0` vs 0/441 omp.
+- [ ] A2. Unit test: synthetic `step_start` event stream →
+  assert `steps_taken` propagated on Ok and on Err partial_stats.
+- [ ] A3. `cargo test --lib`, `fmt`, `clippy -D warnings`.
+
+## B. OpenCode machine effort: `--variant` wiring
+
+- [ ] B1. Zero-spend introspection: in the sandbox image, list the
+  openrouter provider catalog variants (`opencode models`-equivalent) for
+  `inclusionai/ling-3.1-flash`; record which of
+  off/minimal/low/medium/high/xhigh/max resolve vs error.
+- [ ] B2. Per-trial `OPENCODE_CONFIG_CONTENT` generation in
+  `src/sandbox/opencode.rs`: define variants for the openrouter provider
+  mapping each level → `reasoningEffort` (off→none, minimal→minimal,
+  low→low, medium→medium, high→high, xhigh→xhigh, max→max). Model-ID form
+  (prefixed vs bare) resolved with the same suffix matching as
+  `fetch_openrouter_model_pricing`. Passed via `-e` like
+  `OPENROUTER_API_KEY` today. Prose effort line stays untouched.
+- [ ] B3. Add `.arg("--variant").arg(effort)` next to `-m` in `make_cmd`;
+  unknown-variant resolution error → fall back to no-variant (prose-only)
+  + log line. Never fail the trial on variant config.
+- [ ] B4. Forwarding check: if the openai-compatible package ignores
+  `reasoningEffort` (docs warn options "may be ignored"), fall back to
+  raw `body` passthrough `{"reasoning": {"effort": ...}}` (OpenRouter
+  native dialect). Effect verified by reasoning-token volumes (§G),
+  not by absence of error.
+- [ ] B5. Unit tests: variant-config JSON shape per effort level;
+  fallback path on resolution error. Full suite + fmt + clippy.
+
+## C. OMP attempt-then-fallback (replaces blanket pre-clamp)
+
+- [ ] C1. Try `--thinking=<requested>` verbatim (including `max`);
+  on provider rejection signature (HTTP 400 in stderr/session JSON —
+  verify exact shape first; today the tripwire only matches
+  401/402/429) resume the attempt with `--thinking=high` + log line.
+  General rule (any level, not just max): rejection → retry once at high.
+- [ ] C2. Keep `resolve_thinking_level`'s `""|default|auto → high`
+  mapping; remove only the max pre-clamp. Existing
+  `test_resolve_thinking_level` updated (max passes through now).
+- [ ] C3. Unit tests: 400-signature matcher (positive + negative cases);
+  fallback downgrades once, never loops. Full suite + fmt + clippy.
+
+## D. Resume-on-cutoff recovery (opencode)
+
+- [ ] D1. Trigger in the attempt loop: exit-0 AND 0 `tool_use` events
+  AND empty workspace (no start.sh/Dockerfile/files). All three signals
+  already observed by the runner — no session-DB dependency.
+- [ ] D2. Recovery = resume same `--session` with injected user message
+  ("previous response cut off before creating files — start executing
+  tools now"), under the same turn/budget limits. Cap 2 recoveries per
+  trial; third strike accepts the 0% as genuine model failure.
+- [ ] D3. Log `[CUTOFF-RECOVER]` with attempt number; trial continues as
+  a normal trial (no new status, no rescoring path).
+- [ ] D4. Unit tests with synthetic event streams: trigger fires only on
+  all-three-signals; cap enforced; normal zero-tool-but-files and
+  nonzero-tool exits unaffected. Full suite + fmt + clippy.
+
+## E. RULES bump `.3` + docs
+
+- [ ] E1. `RULES_VERSION` → `2026-10-09.3`, history entry: "machine
+  effort parity (opencode `--variant`, OMP attempt-fallback) + cutoff
+  recovery (D). Prompt templates unchanged; archived rows comparable."
+  Telemetry (A) and annotation (F) explicitly out of bump scope.
+- [ ] E2. `docs/DECISIONS.md` #9: harness-relative effort semantics,
+  attempt-then-fallback on both harnesses, recovery-over-reclassification,
+  2-recovery cap rationale.
+- [ ] E3. Fingerprint note: composed prompts (prose + variant + flag)
+  are not hashed — only templates are. Record the gap; bump carries it.
+
+## F. Annotate archived cutoff trials (no rescoring, dry-run default)
+
+- [ ] F1. `annotate-cutoff [--yes]` CLI (repair/cost-annotate idiom):
+  map the 26 pure-signature sessions (`user → reasoning-only
+  finish:length → idle`, session id embeds run id) to trial manifests;
+  set `cutoff_turn1: true` (new `Option<bool>`, serde default) on trial
+  manifests + bench.db `runs` rows. Scores, costs, parents untouched.
+- [ ] F2. Idempotence + dry-run-first verification; backup `bench.db`
+  before `--yes` (precedent: `bench.db.bak-*`).
+- [ ] F3. Unit tests: signature matcher (pure-cutoff vs cheat-DQ with
+  tools vs genuine failure); null-vs-absent field handling.
+
+## G. Deploy + effect check
+
+- [ ] G1. [GATE: idle + 30s notice] Release build, restart
+  engine+gui, integrity clean, `migrate-check` clean.
+- [ ] G2. [GATE: micro-spend ~1 trial] Single max-effort OpenCode trial
+  as canary: assert `--variant` accepted (no resolution error) and
+  reasoning-token volume moves vs prose-only baseline. If forwarding is
+  inert → B4 body-passthrough path before any wave.
+- [ ] G3. Node `--check` on GUI JS if touched; portal regen only if
+  displayed numbers change (annotation alone doesn't).
+
+## H. Rest of roadmap (consolidated, unchanged priority)
+
+- [ ] H1. Slice 3c: gather flake evidence free via `replay` on archived
+  redis passes (probes run inside replay); [GATE: user sets promotion
+  threshold — N clean rows across M candidates] then promote + bump.
+- [ ] H2. Slice 3b label: roadmap checkbox says "(redis/http)", oracle
+  is redis-only by design — one-line fix with next commit touching
+  TODO_RIGOR.md.
+- [ ] H3. Matrix 1b-parity follow-up: matrix tab ignores `boardTier`
+  (leaderboard/portal/models filter; matrix mixes tiers). Decide:
+  filter vs explicit "mixed" badge. Small, GUI-only.
+- [ ] H4. [GATE: spend approval] Slice 4b breadth wave: 63-cell full
+  (~$60, 2–3 wks) or 36-cell narrowed (redis/http/proxy/pubsub).
+  Includes rerun of ruined pdf/max/opencode cell under new stamp —
+  doubles as resume-recovery field test.
+- [ ] H5. Slice 5 paper (blocked on H4): 5a taxonomy (cutoff trials now
+  a first-class category via §F flags), 5b language analysis, 5c draft.
+- [ ] H6. Process rules (add to TODO_RIGOR.md Rules): freeze graded
+  files during waves (mid-wave edits caused q50's 4-hash fingerprint
+  drift); no archived rescoring without review (already DECISIONS).
+
+Order: A → B+C+D (any order, one branch each or stacked) → E → F →
+G1 → G2 → H (H1 anytime; H4 on approval).
