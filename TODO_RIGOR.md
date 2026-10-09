@@ -1,6 +1,6 @@
 # Rigor roadmap — 5 slices (2026-10-09)
 
-- [ ] 1. Uncertainty display + free/paid split + canary (days, no grading change)
+- [x] 1. Uncertainty display + free/paid split + canary (days, no grading change)
   - [x] 1a. Throughput/token IQR across trials on run + matrix views (Wilson stays the rank key)
   - [x] 1b. Split boards: free vs paid (replace display-only badges; no invented costs)
      * GUI + static portal parity: tier pills + IQR spread, helpers hoisted to
@@ -11,7 +11,7 @@
        muse-spark rows that recorded $0.00 from counter lag — annotation only,
        no score rewrites. Board verified: 17/17 muse rows now paid.
   - [x] 1c. Canary GUIDs in all 7 prompt templates + advisory workspace echo scan (RULES 2026-10-09.2)
-- [ ] 2. `replay <run_id>` (day)
+- [x] 2. `replay <run_id>` (day; e2e validated 2026-10-09)
   - [x] 2a. Build archived workspace + run verifier, no API key (reuse `eval` path)
   - [x] 2b. CLI wiring + docs
 - [ ] 3. Robustness probes → differential oracle (weeks, flake discipline)
