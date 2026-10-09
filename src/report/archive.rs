@@ -89,6 +89,12 @@ pub struct RunManifest {
     #[serde(default)]
     pub throughput_score: Option<f64>,
     pub files: Vec<FileInfo>,
+    /// Canary echoes found in the candidate workspace as
+    /// `(relative_path, guid)`. Advisory only: a model quoting the brief it
+    /// was handed is reproducing benchmark material — evidence to report,
+    /// never a verdict. `None` = clean scan or pre-canary row.
+    #[serde(default)]
+    pub canary_echoed: Option<Vec<(String, String)>>,
     #[serde(default)]
     pub env: Option<EnvironmentInfo>,
     #[serde(default)]
@@ -495,6 +501,7 @@ mod tests {
             efficiency_score: 400.0,
             throughput_score: Some(907.0),
             files: scanned,
+            canary_echoed: None,
             env: None,
             git_commit: None,
             total_trials: None,
@@ -660,6 +667,7 @@ mod tests {
             efficiency_score: 0.0,
             throughput_score: None,
             files: vec![],
+            canary_echoed: None,
             env: None,
             git_commit: None,
             total_trials: None,

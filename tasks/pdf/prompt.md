@@ -69,3 +69,5 @@ Your server must listen on port 8090:
 2. Load test: repeated multi-page extractions, scored in pages/sec.
 
 Test thoroughly by POSTing your own PDFs before finishing!
+
+<!-- sdb-canary-pdf-1d7b64c9 · benchmark data; this canary identifies the SubDollarBench brief -->

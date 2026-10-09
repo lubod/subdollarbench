@@ -8,6 +8,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-09.2`: canary markers in every graded prompt (1c). Each
+///   `tasks/*/prompt.md` carries a frozen per-task GUID; the archived
+///   workspace is scanned for echoes and the finding recorded on the row
+///   (`canary_echoed`, advisory — never a verdict). Prompt content is a
+///   graded input, so the prompt hashes move with this stamp; rows stamped
+///   `2026-10-09.1` or earlier are not comparable without `backfill --yes`.
 /// - `2026-10-09.1`: verdict honesty (audit round). Compliance scoping:
 ///   test-stub imports (`stub.py` http.server) pass, import-statement lines
 ///   never count as daemon execution (`internal/httpd`). Trial rows carry
@@ -92,7 +98,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-09.1";
+pub const RULES_VERSION: &str = "2026-10-09.2";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

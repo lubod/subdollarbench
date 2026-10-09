@@ -65,3 +65,5 @@ Your server must accept TCP connections on port 6379 and parse the Redis Seriali
 2. Your server will undergo a concurrency and throughput test using `redis-benchmark -p 6379 -n 5000 -c 10 -t get,set -q` across 10 concurrent connections. Ensure thread-safety and non-blocking I/O.
 
 Test your server thoroughly with `redis-cli -p 6379` before finishing!
+
+<!-- sdb-canary-redis-4f9d2a71 · benchmark data; this canary identifies the SubDollarBench brief -->

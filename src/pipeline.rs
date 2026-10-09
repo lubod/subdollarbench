@@ -1373,6 +1373,22 @@ impl BenchmarkPipeline {
         let lang = LeaderboardManager::detect_language(&config.workdir);
         let scanned_files = RunArchiver::scan_workspace_files(&config.workdir);
 
+        // Canary echo scan (advisory, never a verdict): a workspace that
+        // reproduces a benchmark canary GUID is echoing benchmark prompt
+        // material — contamination evidence worth surfacing, not a cheat.
+        let canary_hits = crate::report::canary::scan_workspace_for_canary(&config.workdir);
+        if !canary_hits.is_empty() {
+            logger.log(&format!(
+                "[CANARY] {} echo(s) of benchmark markers in the candidate workspace: {}",
+                canary_hits.len(),
+                canary_hits
+                    .iter()
+                    .map(|(f, g)| format!("{f} -> {g}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+
         // Single verdict chain shared by the manifest and the result
         // row: trial results carry status so merges and boards never
         // re-derive (or drop) it.
@@ -1443,6 +1459,7 @@ impl BenchmarkPipeline {
             efficiency_score,
             throughput_score,
             files: scanned_files,
+            canary_echoed: (!canary_hits.is_empty()).then_some(canary_hits),
             env: None,
             git_commit: None,
             rules_version: Some(crate::report::rules_fingerprint()),

@@ -56,3 +56,5 @@ Your server must listen on port 8080 and implement HTTP/1.1:
 2. The server will be stress-tested with `wrk -t2 -c20 -d3s http://localhost:8080/`.
 
 Test your server thoroughly with `curl` before finishing!
+
+<!-- sdb-canary-http-b83c05e6 · benchmark data; this canary identifies the SubDollarBench brief -->

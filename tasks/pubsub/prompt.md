@@ -35,3 +35,5 @@ Your implementation must meet high professional software engineering standards:
 4. Soak: hundreds of concurrent subscribers, 100% delivery, bounded p99 broadcast latency, bounded memory.
 
 Test with raw sockets (python3) — including 200+ concurrent connections — before finishing!
+
+<!-- sdb-canary-pubsub-6c40f1b8 · benchmark data; this canary identifies the SubDollarBench brief -->

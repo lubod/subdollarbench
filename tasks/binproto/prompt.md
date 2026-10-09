@@ -65,3 +65,5 @@ Integrity & framing rules:
 5. 50-frame pipeline: all Sequences answered, deadline 3 s.
 
 Self-test tip: craft frames with `struct.pack('>4sHBBII', b'SDB1', seq, op, 0, len, crc)` (Python) or equivalent; verify with rapid pipelined writes before finishing!
+
+<!-- sdb-canary-binproto-58af13d4 · benchmark data; this canary identifies the SubDollarBench brief -->

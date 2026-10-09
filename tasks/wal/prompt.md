@@ -39,3 +39,5 @@ Your implementation must meet high professional software engineering standards:
 3. Throughput: pipelined PUB burst (messages/sec).
 
 Test with raw TCP (`nc`/`python3`) including a kill -9 + restart cycle before finishing!
+
+<!-- sdb-canary-wal-9b3e7c25 · benchmark data; this canary identifies the SubDollarBench brief -->

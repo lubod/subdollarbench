@@ -2584,6 +2584,7 @@ mod tests {
             efficiency_score: 66.6,
             throughput_score: Some(66.6),
             files: Vec::new(),
+            canary_echoed: None,
             env: None,
             git_commit: None,
             total_trials: None,

@@ -41,3 +41,5 @@ Your implementation must meet high professional software engineering standards:
 4. Throughput: concurrent GET load (requests/sec).
 
 Test with `curl` and kill/restart cycles of an upstream before finishing!
+
+<!-- sdb-canary-proxy-a2e58d03 · benchmark data; this canary identifies the SubDollarBench brief -->
