@@ -1557,9 +1557,10 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <tbody id="matrixTableBody">
                 <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading matrix...</td></tr>
               </tbody>
+              <tfoot id="matrixTableFoot"></tfoot>
             </table>
           </div>
-          <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. Same-regime ranks only — mixed stamps never compare.</p>
+          <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. The last column summarizes each row (mean P@1, 100% cells, coverage, spend); the footer summarizes each task column (mean P@1, best model, rows run). Same-regime ranks only — mixed stamps never compare.</p>
         </div>
 
         <!-- Tab 3: Prompt Specification -->
@@ -3256,6 +3257,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const badge = document.getElementById('matrixCountBadge');
       const head = document.getElementById('matrixHeadRow');
       const tbody = document.getElementById('matrixTableBody');
+      const tfoot = document.getElementById('matrixTableFoot');
       if (!tbody || !head) return;
       // Canonical per (model, effort, task): most trials wins, latest breaks ties.
       const canon = {};
@@ -3268,8 +3270,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
       const models = [...new Set(Object.values(canon).map(r => r.model))].sort();
       const tasks = ['redis', 'binproto', 'http', 'pdf', 'proxy', 'pubsub', 'wal'];
+      // Column aggregates: mean P@1, best model, rows run — over cells that ran.
+      const colStats = tasks.map(() => ({ sum: 0, n: 0, best: null, bestV: -1 }));
+      let rowCount = 0, filledCells = 0, grandSum = 0, grandN = 0;
       const efforts = [...new Set(Object.values(canon).map(r => r.effort || 'auto'))].sort();
-      head.innerHTML = '<th>Model</th>' + tasks.map(t => `<th>${escapeHtml(t)}</th>`).join('');
+      head.innerHTML = '<th>Model</th>' + tasks.map(t => `<th>${escapeHtml(t)}</th>`).join('')
+        + `<th title="Row summary: mean P@1 across tasks this row ran · cells at 100% · task coverage · summed spend">Row summary</th>`;
       tbody.innerHTML = '';
       models.forEach(m => {
         efforts.forEach(eff => {
@@ -3277,6 +3283,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           if (!hhs.length) return;
           hhs.forEach(hh => {
           const tr = document.createElement('tr');
+          let rowSum = 0, rowRun = 0, rowFull = 0, rowCost = 0;
+          const rowTip = [];
           const htag = `<span class="badge ${hh === 'omp' ? 'badge-info' : 'badge-effort'}" title="Agent harness (ranks never mix harnesses)">harness: ${hh}</span>`;
           const stampRow = tasks.map(t => canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]).find(Boolean);
           const stamp = stampRow ? String(stampRow.rules_version || 'legacy').split('+')[0] : '';
@@ -3287,7 +3295,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             + `${htag}`
             + (stamp ? `<span style="font-size:.68rem;color:var(--text-muted);" title="Rules stamp + wave time">${escapeHtml(stamp)} · ${escapeHtml(wave)}</span>` : '')
             + `</div></td>`;
-          tasks.forEach(t => {
+          tasks.forEach((t, ti) => {
             const r = canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`];
             if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
             if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click the cell to inspect, ＋ to rerun clean" style="cursor:pointer;" onclick="inspectRun('${escapeHtml(r.id || '')}')">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
@@ -3300,13 +3308,36 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
             const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
             cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
+            rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
+            rowCost += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
+            rowTip.push(`${t}: ${Math.round(p1)}% (n=${n})`);
+            const cs = colStats[ti];
+            cs.sum += p1; cs.n++; if (p1 > cs.bestV) { cs.bestV = p1; cs.best = m; }
           });
+          const rowAvg = rowRun ? Math.round(rowSum / rowRun) : 0;
+          cells += `<td style="font-size:.75rem;white-space:nowrap;" title="${escapeHtml(rowTip.join('\n'))}">${rowAvg}% avg · ${rowFull}/${tasks.length} @100% · cov ${rowRun}/${tasks.length} · $${rowCost.toFixed(4)}</td>`;
+          rowCount++; filledCells += rowRun; grandSum += rowSum; grandN += rowRun;
           tr.innerHTML = cells;
           tbody.appendChild(tr);
           });
         });
       });
-      if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks`;
+      if (tfoot) {
+        if (!rowCount) {
+          tfoot.innerHTML = '';
+        } else {
+          const cornerAvg = grandN ? Math.round(grandSum / grandN) : 0;
+          const corner = `<td><div style="display:flex;flex-direction:column;gap:2px;"><span style="font-weight:700;">Column summary</span><span style="font-size:.7rem;color:var(--text-muted);">${rowCount} rows · ${filledCells}/${rowCount * tasks.length} cells · avg ${cornerAvg}%</span></div></td>`;
+          const cols = tasks.map((t, ti) => {
+            const cs = colStats[ti];
+            if (!cs.n) return `<td style="text-align:center;color:var(--text-muted);">—</td>`;
+            const tip = `mean P@1 across the ${cs.n} row(s) that ran ${t}; best row shown`;
+            return `<td style="text-align:center;font-size:.75rem;" title="${escapeHtml(tip)}">${Math.round(cs.sum / cs.n)}% avg<br><span style="color:var(--text-muted);">best ${escapeHtml(shortModelName(cs.best))} ${Math.round(cs.bestV)}% · n=${cs.n}</span></td>`;
+          }).join('');
+          tfoot.innerHTML = `<tr style="border-top:2px solid var(--border);background:rgba(13,17,23,.5);">${corner}${cols}<td></td></tr>`;
+        }
+      }
+      if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks · ${rowCount} rows · ${filledCells} cells`;
     }
 
     function renderTasks() {

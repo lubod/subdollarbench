@@ -4369,4 +4369,64 @@ mod tests {
             Some(true)
         );
     }
+
+    /// The GUI matrix tab is inline JS inside index.html: a typo there breaks
+    /// the whole board, and nothing in the Rust compile path would notice.
+    /// Mirrors the portal JS guard — pins the row/column summary markers and
+    /// runs node --check on the extracted script (skipped when node is
+    /// absent). The paren typo this family of tests guards against shipped
+    /// once in the portal during review.
+    #[test]
+    fn test_gui_matrix_js_has_row_and_column_summaries_and_parses() {
+        let html = include_str!("index.html");
+        // Markup: the footer element the column summaries render into.
+        assert!(
+            html.contains("matrixTableFoot"),
+            "matrix table must carry the column-summary footer element"
+        );
+        // Script: row accumulator + summary cell, column aggregates + footer.
+        for marker in [
+            "Row summary</th>",
+            "colStats",
+            "Column summary",
+            "rowTip",
+            "grandSum",
+        ] {
+            assert!(
+                html.contains(marker),
+                "matrix JS must contain the row/column summary logic ({marker})"
+            );
+        }
+        // Extract the single inline <script> block (shared.js loads
+        // separately via /static/shared.js) and parse-check it.
+        let mut scripts = Vec::new();
+        let mut rest = html;
+        while let Some(s) = rest.find("<script>") {
+            let body = &rest[s + "<script>".len()..];
+            if let Some(e) = body.find("</script>") {
+                scripts.push(&body[..e]);
+                rest = &body[e + "</script>".len()..];
+            } else {
+                break;
+            }
+        }
+        assert_eq!(scripts.len(), 1, "index.html must hold one inline script");
+        let dir = std::env::temp_dir().join(format!("gui_js_check_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("gui.js");
+        std::fs::write(&f, scripts[0]).unwrap();
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&f)
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
+        match out {
+            Ok(o) => assert!(
+                o.status.success(),
+                "node --check rejected the GUI JS: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(_) => eprintln!("node not found; skipping GUI JS parse check"),
+        }
+    }
 }
