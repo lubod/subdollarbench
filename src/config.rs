@@ -466,6 +466,25 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [maintain] One-shot data repair: cure false-positive cheat stamps
+    /// and 100%-pass agent_killed stamps on trial manifests, consolidate
+    /// loose `*_trialN.json` files into parents, re-merge affected parents,
+    /// and prune `runs` rows with no directory on disk.
+    /// Dry run by default; --yes writes (manifests, results JSON, bench.db).
+    Repair {
+        /// Path to results directory (must be the canonical repo results/)
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+
+        /// Path to runs directory (must be the canonical repo runs/)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// Actually rewrite files (without it, only prints the plan)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
     /// [maintain] Report-only integrity audit (orphans, junk rows, row-file drift).
     /// Exit 1 on findings. Also runs warn-only on every engine boot.
     MigrateCheck,

@@ -35,3 +35,11 @@ Revisit if latency variance swamps model signal. Ref: `src/cost/calculator.rs:18
 (`src/config.rs:127,150`); synthesis is grounded in deterministic stats +
 manifest failures, never a verdict. `canonical_best` is the shared tie-break
 (pass rate, then throughput else efficiency). Revisit on judge-model rotation.
+
+## 7. Audit repair: cures, consolidation, DQ exclusion (2026-10-09)
+Second-agent audit verified 5/7 findings; fixed all: compliance test-scope
++ import-line skip, launch-error split, 100%-pass status parity, `repair`
+command (7 DQ + 41 agent_killed cures, 12 loose groups merged, 818 runs
+pruned), ranked boards exclude cheats. Declined: CSRF lockdown on auth
+bootstrap (breaks headless CLI), zero-cost rescoring (policy, not defect).
+Stamp `2026-10-09.1`; prior stamps need `backfill --yes` to unify.

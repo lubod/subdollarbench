@@ -15,6 +15,12 @@ pub struct BenchmarkRunResult {
     pub task: String,
     pub language: String,
     pub effort: Option<String>,
+    /// Trial/parent verdict status (`completed`, `failed_tests`,
+    /// `disqualified_cheat`, ...). None = legacy rows predating the field.
+    /// Boards exclude `disqualified_cheat` (a cheat is not a measurement);
+    /// runs pages still show it with its badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     /// Agent harness ("omp" | "opencode"; None = legacy OMP rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
@@ -519,6 +525,14 @@ impl BenchmarkRunResult {
             method_version: best.method_version.clone(),
             rules_version: merged_rules_version,
             graded_under: merged_graded_under,
+            status: if subruns
+                .iter()
+                .any(|s| s.status.as_deref() == Some("disqualified_cheat"))
+            {
+                Some("disqualified_cheat".to_string())
+            } else {
+                None
+            },
             subruns,
             total_trials: Some(n as u32),
             pass_at_1: Some(pass_at_1),
@@ -727,12 +741,33 @@ impl LeaderboardManager {
             return None;
         }
 
-        let merged = BenchmarkRunResult::merge_subruns(
+        let mut merged = BenchmarkRunResult::merge_subruns(
             parent_run_id,
             subrun_results.to_vec(),
             batch_drift,
             Some(crate::report::rules::fingerprint()),
         )?;
+        // Belt and suspenders with the manifest-file check below: trial
+        // manifests are authoritative for cheating (old result rows predate
+        // the status field), so a manifest verdict always wins here.
+        let manifest_cheat = subrun_results.iter().any(|sub| {
+            let p = crate::config::get_repo_root()
+                .join("runs")
+                .join(&sub.id)
+                .join("manifest.json");
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("status")
+                        .and_then(|x| x.as_str())
+                        .map(|x| x.to_string())
+                })
+                == Some("disqualified_cheat".to_string())
+        });
+        if manifest_cheat {
+            merged.status = Some("disqualified_cheat".to_string());
+        }
 
         if save_results {
             let repo_root = crate::config::get_repo_root();
@@ -1119,6 +1154,17 @@ impl LeaderboardManager {
         let cut = pre - list.len();
         if cut > 0 {
             eprintln!("[LEADERBOARD] finalize: filtered {cut} junk row(s) (test_/0-trial)");
+        }
+        // Cheat verdicts are not measurements: disqualified parents never
+        // rank (runs pages and the inspector still show them with the badge).
+        // Genuine cheats stay out; false-positive cures re-enter via repair.
+        let pre_dq = list.len();
+        list.retain(|r| r.status.as_deref() != Some("disqualified_cheat"));
+        let cut_dq = pre_dq - list.len();
+        if cut_dq > 0 {
+            eprintln!(
+                "[LEADERBOARD] finalize: excluded {cut_dq} disqualified_cheat row(s) from ranking"
+            );
         }
         for res in &mut list {
             if res.total_tokens == 0 {
@@ -1619,6 +1665,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
@@ -1671,6 +1718,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: pass,
             passed_stages: 4,
@@ -1813,6 +1861,7 @@ mod tests {
                 task: "redis".to_string(),
                 language: "Python".to_string(),
                 effort: Some("auto".to_string()),
+                status: None,
                 harness: None,
                 pass_rate: pass,
                 passed_stages: if pass >= 100.0 { 6 } else { 3 },
@@ -1920,6 +1969,7 @@ mod tests {
             task: "proxy".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 5,
@@ -1971,6 +2021,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
@@ -2040,6 +2091,7 @@ mod tests {
             task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: pass,
             passed_stages: 6,
@@ -2099,6 +2151,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
@@ -2275,6 +2328,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: Some("auto".to_string()),
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
@@ -2331,6 +2385,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 0.0,
             passed_stages: 0,
@@ -2379,6 +2434,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Python".to_string(),
             effort: Some("low".to_string()),
+            status: None,
             harness: None,
             pass_rate: 50.0,
             passed_stages: 2,
@@ -2421,6 +2477,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: Some("high".to_string()),
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
@@ -2522,6 +2579,59 @@ mod tests {
     }
 
     #[test]
+    fn test_finalize_excludes_disqualified_from_ranking() {
+        // A cheat verdict is not a measurement: DQ rows never rank, but
+        // honest rows in the same set are untouched.
+        let mk = |id: &str, status: Option<&str>| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            status: status.map(|s| s.to_string()),
+            harness: None,
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 1.0,
+            throughput_score: None,
+            timestamp: "2026-10-09T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: Some("v1".to_string()),
+            graded_under: None,
+            subruns: vec![],
+            total_trials: Some(1),
+            pass_at_1: Some(100.0),
+            pass_at_k: Some(100.0),
+            avg_pass_rate: Some(100.0),
+            pass_at_1_lo: Some(20.0),
+            pass_at_1_hi: Some(100.0),
+            stability: None,
+            frontier_fraction: None,
+        };
+        let out = LeaderboardManager::finalize_results(vec![
+            mk("dq1", Some("disqualified_cheat")),
+            mk("ok1", None),
+        ]);
+        assert_eq!(out.len(), 1, "DQ row must not rank");
+        assert_eq!(out[0].id, "ok1");
+    }
+
+    #[test]
     fn test_frontier_fractions() {
         // Best anchored tp per (task, rules) = 1.0; others fractioned.
         // Unanchored rows (no ref) keep None; losers fraction below 1.
@@ -2531,6 +2641,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,
@@ -2562,6 +2673,7 @@ mod tests {
                 language: "Go".to_string(),
                 effort: None,
                 harness: None,
+                status: None,
                 pass_rate: 100.0,
                 passed_stages: 4,
                 total_stages: 4,
@@ -2634,6 +2746,7 @@ mod tests {
             task: "wal".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: pass,
             passed_stages: 6,
@@ -2734,6 +2847,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Go".to_string(),
             effort: None,
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,

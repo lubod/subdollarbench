@@ -1087,6 +1087,45 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             );
         }
 
+        Commands::Repair {
+            results_dir,
+            runs_dir,
+            yes,
+        } => {
+            let rep = subdollarbench::report::run_repair(
+                std::path::Path::new(&results_dir),
+                std::path::Path::new(&runs_dir),
+                yes,
+            )?;
+            println!(
+                "repair{}: scanned {} trial manifests; cured {} DQ + {} agent_killed; still-DQ {}; loose {}/{} groups/trials; consolidated {}; re-merged {}; pruned {} stale runs; {} warning(s)",
+                if yes { "" } else { " (dry-run)" },
+                rep.manifests_scanned,
+                rep.cured_dq.len(),
+                rep.cured_agent_killed.len(),
+                rep.still_dq.len(),
+                rep.loose_groups,
+                rep.loose_trials,
+                rep.consolidated.len(),
+                rep.parents_remerged.len(),
+                rep.pruned_runs.len(),
+                rep.warnings.len(),
+            );
+            for line in rep
+                .cured_dq
+                .iter()
+                .chain(rep.cured_agent_killed.iter())
+                .chain(rep.still_dq.iter().take(5))
+                .chain(rep.consolidated.iter())
+                .chain(rep.parents_remerged.iter())
+                .chain(rep.pruned_runs.iter().take(5))
+                .chain(rep.skipped_existing_parent.iter())
+                .chain(rep.warnings.iter())
+            {
+                println!("  {line}");
+            }
+        }
+
         Commands::MigrateCheck => {
             // Report-only integrity audit: orphans, junk rows, row-file drift.
             // Runs on every engine boot (warn-only); exit 1 on findings.
@@ -2162,6 +2201,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Rust".to_string(),
             effort: Some("low".to_string()),
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 4,

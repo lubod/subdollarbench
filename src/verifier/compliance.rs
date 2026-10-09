@@ -658,6 +658,27 @@ impl ComplianceChecker {
         Some(None) // Is an ELF binary, but no forbidden signature found
     }
 
+    /// True for local dev/test scaffolding (stubs, upsteam simulators,
+    /// self-tests, mocks). Such files are exempt from *import* checks: an
+    /// unused `import redis` in `my_test.py` cannot serve traffic (the
+    /// black-box verifier would still fail), while daemon execution, ELF
+    /// vendor-signature, binary, Dockerfile, and obfuscation checks keep
+    /// applying to every file. Name allowlisting is safe here precisely
+    /// because imports don't run servers.
+    fn is_test_scope(filename: &str) -> bool {
+        let stem = filename
+            .split('.')
+            .next()
+            .unwrap_or(filename)
+            .to_lowercase();
+        let base = filename.to_lowercase();
+        [
+            "test", "stub", "echo", "selftest", "mock", "fake", "fixture", "sample", "example",
+        ]
+        .iter()
+        .any(|k| stem.contains(k) || base.contains(k))
+    }
+
     fn inspect_file(path: &Path, filename: &str, violations: &mut Vec<String>) {
         // First check if it is an ELF binary with foreign precompiled signatures
         if let Some(elf_match) = Self::scan_elf_for_vendor_signatures(path) {
@@ -674,6 +695,10 @@ impl ComplianceChecker {
             Ok(c) => c,
             Err(_) => return,
         };
+        // Import checks skip test scaffolding (see is_test_scope):
+        // execution, binary, Dockerfile, and obfuscation checks below
+        // still apply to every file.
+        let check_imports = !Self::is_test_scope(filename);
 
         // 1. Dockerfile base-image and RUN/CMD/ENTRYPOINT daemon inspection
         if filename.eq_ignore_ascii_case("Dockerfile") || filename.contains("Dockerfile") {
@@ -860,27 +885,28 @@ impl ComplianceChecker {
         match ext {
             "py" => {
                 let lower = content.to_lowercase();
-                if content.contains("http.server") {
+                if check_imports && content.contains("http.server") {
                     violations.push(format!("{}: imports built-in http.server", filename));
                 }
-                if content.contains("wsgiref.simple_server") {
+                if check_imports && content.contains("wsgiref.simple_server") {
                     violations.push(format!(
                         "{}: imports built-in wsgiref.simple_server",
                         filename
                     ));
                 }
-                if Self::imports_py_module(&content, "flask") {
+                if check_imports && Self::imports_py_module(&content, "flask") {
                     violations.push(format!("{}: imports flask", filename));
                 }
-                if Self::imports_py_module(&content, "fitz")
-                    || Self::imports_py_module(&content, "pymupdf")
-                    || Self::imports_py_module(&content, "pdfminer")
-                    || Self::imports_py_module(&content, "pypdf")
-                    || Self::imports_py_module(&content, "pdfplumber")
+                if check_imports
+                    && (Self::imports_py_module(&content, "fitz")
+                        || Self::imports_py_module(&content, "pymupdf")
+                        || Self::imports_py_module(&content, "pdfminer")
+                        || Self::imports_py_module(&content, "pypdf")
+                        || Self::imports_py_module(&content, "pdfplumber"))
                 {
                     violations.push(format!("{}: imports pdf library", filename));
                 }
-                if Self::imports_py_module(&content, "fastapi") {
+                if check_imports && Self::imports_py_module(&content, "fastapi") {
                     violations.push(format!("{}: imports fastapi", filename));
                 }
                 // Obfuscated dynamic execution & reflection detection
@@ -905,7 +931,10 @@ impl ComplianceChecker {
                         filename
                     ));
                 }
-                if content.contains("require('express')") || content.contains("from 'express'") {
+                if check_imports
+                    && (content.contains("require('express')")
+                        || content.contains("from 'express'"))
+                {
                     violations.push(format!("{}: imports express", filename));
                 }
             }
@@ -933,11 +962,43 @@ impl ComplianceChecker {
 
         // 8. Embedded daemon invocations inside string literals of source files
         // (e.g. subprocess.Popen(["redis-server"]) in an entrypoint script).
+        // Import-statement lines are skipped: `import rawhttp/internal/httpd`
+        // names a local package path, not an execution. Execution strings
+        // on any other line still match (an `import os` line never excuses
+        // an `os.system("redis-server")` on the next one). Go multi-line
+        // `import ( ... )` blocks are skipped wholesale: each path sits on
+        // its own line without the `import` keyword.
         if matches!(
             ext,
             "py" | "go" | "js" | "ts" | "rs" | "c" | "cpp" | "cc" | "h" | "hpp"
         ) {
-            for lit in Self::string_literals(&content) {
+            let mut in_go_import_block = false;
+            let mut code_lines: Vec<&str> = Vec::new();
+            for l in content.lines() {
+                let s = l.trim_start().to_lowercase();
+                if ext == "go" {
+                    if s.starts_with("import (") || s.starts_with("import(") {
+                        in_go_import_block = true;
+                        continue;
+                    }
+                    if in_go_import_block {
+                        if s.starts_with(')') {
+                            in_go_import_block = false;
+                        }
+                        continue;
+                    }
+                }
+                if s.starts_with("import ")
+                    || s.starts_with("from ")
+                    || s.starts_with("#include")
+                    || s.starts_with("require(")
+                    || s.starts_with("use ") && s.contains("::")
+                {
+                    continue;
+                }
+                code_lines.push(l);
+            }
+            for lit in Self::string_literals(&code_lines.join("\n")) {
                 if let Some(v) = Self::check_literal_invocation(&lit) {
                     violations.push(format!("{}: {}", filename, v));
                     break;
@@ -950,6 +1011,84 @@ impl ComplianceChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_test_scope_imports_pass_but_execution_still_fails() {
+        // Regression (proxy trials): a test stub simulating upstreams with
+        // stdlib http is scaffolding, not a framework — but executing a
+        // daemon from any file (even a stub) is still a violation.
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_testscope_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        fs::write(
+            temp_dir.join("stub.py"),
+            "import http.server\nclass H(http.server.BaseHTTPRequestHandler): pass\n",
+        )
+        .unwrap();
+        assert!(
+            ComplianceChecker::check_no_frameworks(&temp_dir).is_ok(),
+            "test stub http.server import must pass"
+        );
+        fs::write(
+            temp_dir.join("server.py"),
+            "import flask\napp = flask.Flask(__name__)\n",
+        )
+        .unwrap();
+        assert!(
+            ComplianceChecker::check_no_frameworks(&temp_dir).is_err(),
+            "real flask import in candidate code must still fail"
+        );
+        fs::write(temp_dir.join("run_daemon.py"), "import subprocess\n").unwrap();
+        fs::write(
+            temp_dir.join("evil.py"),
+            "import os\nos.system(\"redis-server\")\n",
+        )
+        .unwrap();
+        let _ = fs::remove_file(temp_dir.join("server.py"));
+        assert!(
+            ComplianceChecker::check_no_frameworks(&temp_dir).is_err(),
+            "daemon execution string must fail even next to test files"
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_go_import_block_not_a_daemon() {
+        // Regression (http trial): paths inside a multi-line `import ( )`
+        // block name local packages. Import lines are not executions.
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_goimport_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        fs::write(
+            temp_dir.join("main.go"),
+            "package main\nimport (\n\t\"fmt\"\n\trawhttp/internal/httpd\n)\nfunc main() { httpd.Serve() }\n",
+        )
+        .unwrap();
+        assert!(
+            ComplianceChecker::check_no_frameworks(&temp_dir).is_ok(),
+            "go import block must not flag as daemon"
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_go_import_path_not_a_daemon() {
+        // Regression (http trial): `import rawhttp/internal/httpd` names a
+        // local package path. Import lines are not executions.
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_compliance_goimport_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        fs::write(
+            temp_dir.join("main.go"),
+            "package main\nimport rawhttp/internal/httpd\nfunc main() { httpd.Serve() }\n",
+        )
+        .unwrap();
+        assert!(
+            ComplianceChecker::check_no_frameworks(&temp_dir).is_ok(),
+            "go import path must not flag as daemon"
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn test_compliance_checker_clean_workspace() {

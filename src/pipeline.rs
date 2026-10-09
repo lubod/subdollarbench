@@ -651,13 +651,23 @@ impl BenchmarkPipeline {
             // a model that scored zero: the error used to be discarded, and
             // every verifier then failed on transport.
             if let Err(e) = sandbox.start_candidate_in_docker(&config.workdir, port) {
-                logger.log(&format!(
-                    "[INFRA] Candidate container failed to start ({e}); \
-                     verifiers would fail on transport, not on the candidate."
-                ));
-                // Latched below via `infra_error`; declared here so both paths
-                // converge on one flag.
-                infra_error = true;
+                // Model packaging faults (bad entrypoint, missing +x) are
+                // failed_tests, not infra: the model built something
+                // unrunnable. Only daemon-side failures latch infra_error.
+                if crate::sandbox::docker::SandboxManager::is_model_packaging_error(&e.to_string())
+                {
+                    logger.log(&format!(
+                        "[MODEL-FAULT] Candidate container failed to start ({e}); scoring as model failure."
+                    ));
+                } else {
+                    logger.log(&format!(
+                        "[INFRA] Candidate container failed to start ({e}); \
+                         verifiers would fail on transport, not on the candidate."
+                    ));
+                    // Latched below via `infra_error`; declared here so both paths
+                    // converge on one flag.
+                    infra_error = true;
+                }
             }
 
             // Proxy needs its upstream pool, which lives on the private run
@@ -1318,29 +1328,34 @@ impl BenchmarkPipeline {
         let lang = LeaderboardManager::detect_language(&config.workdir);
         let scanned_files = RunArchiver::scan_workspace_files(&config.workdir);
 
-        let manifest = RunManifest {
-            run_id: run_id.clone(),
-            model: config.model.clone(),
-            task: config.task.to_string(),
+        // Single verdict chain shared by the manifest and the result
+        // row: trial results carry status so merges and boards never
+        // re-derive (or drop) it.
+        let trial_status: String = if infra_error && !disqualified {
             // `infra_error` first: a harness fault that also scored 0% must
             // not be archived as `failed_tests`, which is a model verdict.
             // Ordering matters - a disqualified run is a model-side result and
             // keeps its own status even if setup also faulted.
-            status: if infra_error && !disqualified {
-                "infra_error".to_string()
-            } else if disqualified {
-                "disqualified_cheat".to_string()
-            } else if pass_rate == 100.0 {
-                if agent_failed {
-                    "agent_killed".to_string()
-                } else {
-                    "completed".to_string()
-                }
-            } else if agent_failed {
-                "agent_failed".to_string()
-            } else {
-                "failed_tests".to_string()
-            },
+            "infra_error".to_string()
+        } else if disqualified {
+            "disqualified_cheat".to_string()
+        } else if pass_rate == 100.0 {
+            // Solved is solved: how the agent died (turn limit reached
+            // after the files landed, 429 post-completion, non-zero exit
+            // with a working candidate) doesn't unsolve a 100% verified
+            // candidate. agent_failed stays on PipelineOutput for
+            // telemetry; the status reflects the verdict.
+            "completed".to_string()
+        } else if agent_failed {
+            "agent_failed".to_string()
+        } else {
+            "failed_tests".to_string()
+        };
+        let manifest = RunManifest {
+            run_id: run_id.clone(),
+            model: config.model.clone(),
+            task: config.task.to_string(),
+            status: trial_status.clone(),
             language: lang.clone(),
             effort: Some(config.effort.clone()),
             started_at,
@@ -1426,6 +1441,7 @@ impl BenchmarkPipeline {
             language: lang,
             effort: Some(config.effort.clone()),
             harness: Some(config.harness.to_string()),
+            status: Some(trial_status.clone()),
             pass_rate,
             passed_stages,
             total_stages,

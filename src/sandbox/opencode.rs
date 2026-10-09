@@ -647,11 +647,17 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             let tail = attempt_tail.lock().unwrap().join(" | ");
             match waited {
                 Some(status) if status.success() && !limited => break Ok(st),
-                _ if limited || timed_out || cancelled => {
+                _ if limited => {
+                    // Parity with OMP (stopped_by_limit returns Ok): hitting
+                    // max turns/budget ends the run normally with partial
+                    // stats. A 100% verified candidate then scores completed
+                    // (see pipeline status chain); cost still prices the run.
+                    let _ = msg;
+                    break Ok(st);
+                }
+                _ if timed_out || cancelled => {
                     break Err(anyhow!(OmpExecutionError {
-                        message: if limited {
-                            format!("opencode limit reached: {}", msg)
-                        } else if cancelled {
+                        message: if cancelled {
                             "opencode run cancelled by user".to_string()
                         } else {
                             "opencode timeout reached".to_string()

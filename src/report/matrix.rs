@@ -78,6 +78,21 @@ pub fn validate_comparison_wave(results: &[BenchmarkRunResult]) -> anyhow::Resul
             harnesses.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
+    // Cheat verdicts are not measurements: they never rank. Refuse loudly
+    // rather than silently dropping rows from a comparison the caller
+    // assumed was complete.
+    let dq: Vec<String> = results
+        .iter()
+        .filter(|r| r.status.as_deref() == Some("disqualified_cheat"))
+        .map(|r| r.id.clone())
+        .collect();
+    if !dq.is_empty() {
+        anyhow::bail!(
+            "matrix-report: refusing to compare {} disqualified_cheat row(s) ({}) — a cheat is not a measurement; exclude them or cure false positives via repair before comparing",
+            dq.len(),
+            dq.into_iter().take(5).collect::<Vec<_>>().join(", ")
+        );
+    }
     let mut per_model: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for r in results {
         per_model
@@ -125,6 +140,7 @@ mod tests {
             task: "redis".to_string(),
             language: "Python".to_string(),
             effort: effort.map(|s| s.to_string()),
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 5,
@@ -339,6 +355,28 @@ mod tests {
         b.harness = Some("opencode".to_string());
         let err = validate_comparison_wave(&[a, b]).unwrap_err();
         assert!(format!("{err:#}").contains("harness"));
+    }
+
+    #[test]
+    fn test_wave_dq_rows_refused() {
+        let mut a = wave_run(
+            "a1",
+            "model-a",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        let b = wave_run(
+            "b1",
+            "model-b",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        a.status = Some("disqualified_cheat".to_string());
+        let err = validate_comparison_wave(&[a, b.clone()]).unwrap_err();
+        assert!(format!("{err:#}").contains("disqualified"), "got: {err:#}");
+        assert!(validate_comparison_wave(&[b]).is_ok());
     }
 
     #[test]

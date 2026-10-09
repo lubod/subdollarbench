@@ -114,10 +114,11 @@ impl Store {
     /// Insert or replace the parent row plus one `trials` row per subrun
     /// (`trial_no` = subrun index + 1) in a single transaction.
     ///
-    /// Per-trial `status` has no dedicated field on [`BenchmarkRunResult`],
-    /// so it is derived from the subrun's own signal: `pass_rate >= 100.0`
-    /// stores `"passed"`, anything lower stores `"failed"`. Rows written
-    /// before this derivation keep `""` until re-migrated.
+    /// Per-trial `status` is the subrun's own verdict when present
+    /// (`completed`, `failed_tests`, `disqualified_cheat`, ...), falling
+    /// back to the pass-rate derivation (`passed`/`failed`) for legacy rows
+    /// that predate the status field. Rows written before either derivation
+    /// keep `""` until re-migrated.
     /// Per-subrun pass/fail verdict used for `trials.status` (see
     /// [`Store::upsert_parent`]): full pass rate means passed, else failed.
     pub fn trial_status(pass_rate: f64) -> &'static str {
@@ -125,6 +126,17 @@ impl Store {
             "passed"
         } else {
             "failed"
+        }
+    }
+
+    /// Status recorded for one trial row: the subrun's own verdict when the
+    /// row carries it, else the legacy pass-rate derivation. A cheat or
+    /// harness-fault label must survive here — deriving from pass_rate
+    /// would launder `disqualified_cheat` into plain `failed`.
+    pub fn trial_row_status(sub: &BenchmarkRunResult) -> String {
+        match sub.status.as_deref() {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => Self::trial_status(sub.pass_rate).to_string(),
         }
     }
 
@@ -173,7 +185,7 @@ impl Store {
                     result.id,
                     i as i64 + 1,
                     sub.pass_rate,
-                    Self::trial_status(sub.pass_rate),
+                    Self::trial_row_status(sub),
                     sub.total_cost_usd,
                     sub.duration_seconds,
                     sub.turns.map(|t| t as i64),
@@ -459,6 +471,27 @@ mod tests {
     use super::*;
     use crate::web::server::{QueueKind, RunRequest};
 
+    #[test]
+    fn test_trial_row_status_prefers_verdict() {
+        // A cheat label must survive the trials table — deriving from
+        // pass_rate would launder disqualified_cheat into plain failed.
+        let mut dq = sample_result("dq");
+        dq.status = Some("disqualified_cheat".to_string());
+        dq.pass_rate = 0.0;
+        assert_eq!(Store::trial_row_status(&dq), "disqualified_cheat");
+        let mut ok = sample_result("ok");
+        ok.status = Some("completed".to_string());
+        ok.pass_rate = 100.0;
+        assert_eq!(Store::trial_row_status(&ok), "completed");
+        // Legacy rows without status keep the pass-rate derivation.
+        let mut legacy = sample_result("legacy");
+        legacy.status = None;
+        legacy.pass_rate = 100.0;
+        assert_eq!(Store::trial_row_status(&legacy), "passed");
+        legacy.pass_rate = 0.0;
+        assert_eq!(Store::trial_row_status(&legacy), "failed");
+    }
+
     fn sample_result(id: &str) -> BenchmarkRunResult {
         BenchmarkRunResult {
             id: id.to_string(),
@@ -466,6 +499,7 @@ mod tests {
             task: "test-task".to_string(),
             language: "rust".to_string(),
             effort: Some("low".to_string()),
+            status: None,
             harness: None,
             pass_rate: 100.0,
             passed_stages: 3,

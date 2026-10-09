@@ -1544,6 +1544,24 @@ impl SandboxManager {
             .map(|dt| dt.timestamp() as u64)
     }
 
+    /// True when a candidate-launch failure is the model's packaging
+    /// fault, not harness infrastructure: bad entrypoint paths, missing
+    /// +x, image-internal permission or layout errors. Such trials are
+    /// `failed_tests` (0%), never `infra_error` — the model built
+    /// something unrunnable. Daemon-side failures (socket, bridge, disk
+    /// pressure, timeouts) stay infra. Matching is substring-based on the
+    /// docker CLI stderr, fail-closed toward infra on anything unrecognized.
+    pub fn is_model_packaging_error(err: &str) -> bool {
+        let l = err.to_lowercase();
+        // NOTE: no bare "not found" — daemon "network ... not found" is
+        // infra, while "no such file" paths are entrypoint faults.
+        l.contains("no such file or directory")
+            || l.contains("is a directory")
+            || l.contains("permission denied")
+            || l.contains("executable file not found")
+            || l.contains("exec format error")
+    }
+
     /// Legacy path, kept for Drop + tests. New code prefers RunGuard
     /// (label-filtered, panic-safe). Idempotent: safe to call twice.
     pub fn cleanup(&self) {
@@ -1649,6 +1667,35 @@ impl Drop for SandboxManager {
     fn drop(&mut self) {
         if self.needs_cleanup.load(Ordering::SeqCst) {
             self.cleanup();
+        }
+    }
+}
+
+#[cfg(test)]
+mod launch_class_tests {
+    use super::SandboxManager;
+
+    #[test]
+    fn test_model_packaging_vs_daemon_errors() {
+        // The five quoted launch failures from the audit: model faults.
+        for e in [
+            "exec: \"/broker\": stat /broker: no such file or directory",
+            "exec: \"/proxy\": stat /proxy: no such file or directory",
+            "exec: \"/server\": is a directory: permission denied",
+            "exec: \"./start.sh\": permission denied",
+            "exec: \"/app/sdb-redis\": permission denied",
+        ] {
+            assert!(SandboxManager::is_model_packaging_error(e), "{e}");
+        }
+        // Daemon-side failures stay infra (incl. network-not-found:
+        // bare "not found" must NOT match).
+        for e in [
+            "Cannot connect to the Docker daemon",
+            "network subdollar-net-x not found",
+            "no space left on device",
+            "driver failed programming external connectivity",
+        ] {
+            assert!(!SandboxManager::is_model_packaging_error(e), "{e}");
         }
     }
 }

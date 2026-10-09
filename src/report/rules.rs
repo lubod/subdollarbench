@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-09.1`: verdict honesty (audit round). Compliance scoping:
+///   test-stub imports (`stub.py` http.server) pass, import-statement lines
+///   never count as daemon execution (`internal/httpd`). Trial rows carry
+///   `status`; merges propagate `disqualified_cheat`; ranked boards
+///   (leaderboard, portal, matrix) exclude cheats instead of scoring them
+///   as active; model packaging faults score `failed_tests`, not
+///   `infra_error`; 100%-verified candidates score `completed` however the
+///   agent died. Companion `repair` command cures false positives and
+///   consolidates loose trials. Results stamped `2026-10-03.9` or earlier
+///   are not comparable without `backfill --yes`.
 /// - `2026-10-03.9`: phantom-row exclusion (legacy single-shot JSONs with no
 ///   subruns/no trial count no longer publish; their bare 100% pass_rate
 ///   drew green 100%-n=0 cells that were never trials). No leniency change
@@ -82,7 +92,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-03.9";
+pub const RULES_VERSION: &str = "2026-10-09.1";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
