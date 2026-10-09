@@ -1246,15 +1246,18 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     .map(|d| d.as_nanos())
                     .unwrap_or(0)
             );
+            let mut replay_robust = Vec::new();
             let (pass_rate, passed, total) = match task {
                 TaskType::Redis => {
                     let v = RedisVerifier::new(p, Some(&replay_seed));
                     let r = v.run_all().await;
+                    replay_robust = v.run_robustness().await;
                     (r.pass_rate, r.passed_count, r.total_stages)
                 }
                 TaskType::Http => {
                     let v = HttpVerifier::new(p, Some(&replay_seed));
                     let r = v.run_all().await;
+                    replay_robust = v.run_robustness().await;
                     (r.pass_rate, r.passed_count, r.total_stages)
                 }
                 TaskType::Pdf => {
@@ -1326,6 +1329,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     (r.pass_rate, r.passed_count, r.total_stages)
                 }
             };
+            for s in &replay_robust {
+                println!(
+                    "robustness (advisory): {} -> {} {}",
+                    s.name,
+                    if s.passed { "PASS" } else { "FAIL" },
+                    s.error.as_deref().unwrap_or("")
+                );
+            }
             sandbox.cleanup();
             let _ = std::fs::remove_dir_all(&work_tmp);
             println!(
@@ -2508,6 +2519,7 @@ mod tests {
             passed_stages: 4,
             total_stages: 4,
             stages: Vec::new(),
+            robustness: Vec::new(),
             throughput_req_sec: None,
             reference_throughput_req_sec: None,
             baseline_source: None,

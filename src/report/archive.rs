@@ -45,6 +45,10 @@ pub struct RunManifest {
     pub passed_stages: u32,
     pub total_stages: u32,
     pub stages: Vec<StageResult>,
+    /// Advisory robustness probes (redis/http): reported, never scored.
+    /// Empty on older rows and non-probed tasks.
+    #[serde(default)]
+    pub robustness: Vec<StageResult>,
     pub throughput_req_sec: Option<f64>,
     #[serde(default)]
     pub reference_throughput_req_sec: Option<f64>,
@@ -460,6 +464,7 @@ mod tests {
                 passed: true,
                 error: None,
             }],
+            robustness: Vec::new(),
             throughput_req_sec: Some(45000.0),
             reference_throughput_req_sec: Some(71000.0),
             baseline_source: None,
@@ -622,6 +627,7 @@ mod tests {
             passed_stages: 1,
             total_stages: 1,
             stages: vec![],
+            robustness: Vec::new(),
             throughput_req_sec: None,
             reference_throughput_req_sec: None,
             baseline_source: None,

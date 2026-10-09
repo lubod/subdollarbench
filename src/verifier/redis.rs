@@ -171,6 +171,126 @@ impl RedisVerifier {
         Ok(String::from_utf8_lossy(&buf).to_string())
     }
 
+    /// Advisory robustness probes (NOT scored): malformed-input survival
+    /// and slow-sender isolation. A server may close the offending
+    /// connection — that is acceptable behavior. What passes is *service*
+    /// survival: a fresh connection must serve PING afterwards, and a
+    /// half-open sender must not stall other clients. Never called from
+    /// `run_all`; the pipeline logs these separately under [ROBUST].
+    pub async fn run_robustness(&self) -> Vec<StageResult> {
+        vec![
+            self.robust_malformed().await,
+            self.robust_slow_sender().await,
+        ]
+    }
+
+    async fn robust_malformed(&self) -> StageResult {
+        let name = "Robust 1: malformed input survival (advisory)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 101,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        // Binary garbage + a truncated array header on one connection.
+        let mut dirty = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect for garbage probe: {e}")),
+        };
+        use tokio::io::AsyncWriteExt;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            dirty.write_all(b"\xff\xfe\x00bad\r\n*3\r\n$3\r\nGE"),
+        )
+        .await;
+        // Service must survive on a FRESH connection (same-socket survival
+        // is not required — closing garbage senders is legitimate).
+        drop(dirty);
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("reconnect after garbage: {e}")),
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            Self::send_resp_cmd(&mut stream, &["PING"]),
+        )
+        .await
+        {
+            Ok(Ok(r)) if r.trim() == "+PONG" => StageResult {
+                stage: 101,
+                name,
+                passed: true,
+                error: None,
+            },
+            Ok(Ok(r)) => fail(format!("PING after garbage got {r:?}, want +PONG")),
+            Ok(Err(e)) => fail(format!("PING after garbage failed: {e}")),
+            Err(_) => fail("PING after garbage timed out (server wedged?)".to_string()),
+        }
+    }
+
+    async fn robust_slow_sender(&self) -> StageResult {
+        let name = "Robust 2: slow sender + half-open isolation (advisory)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 102,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        use tokio::io::AsyncWriteExt;
+        // Half-open sender: partial frame, long pause, then completion.
+        let mut slow = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect slow sender: {e}")),
+        };
+        if tokio::time::timeout(Duration::from_secs(3), slow.write_all(b"*2\r\n$3\r\nGE"))
+            .await
+            .is_err()
+        {
+            return fail("partial write failed".to_string());
+        }
+        // While the sender is half-open, an independent client must work.
+        let mut other = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("parallel connect during half-open: {e}")),
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            Self::send_resp_cmd(&mut other, &["PING"]),
+        )
+        .await
+        {
+            Ok(Ok(r)) if r.trim() == "+PONG" => {}
+            Ok(Ok(r)) => return fail(format!("parallel PING got {r:?} during half-open")),
+            Ok(Err(e)) => return fail(format!("parallel PING failed during half-open: {e}")),
+            Err(_) => {
+                return fail(
+                    "parallel PING timed out during half-open (single-threaded server?)"
+                        .to_string(),
+                )
+            }
+        }
+        // Complete the slow frame; expect a well-formed bulk reply.
+        if tokio::time::timeout(
+            Duration::from_secs(3),
+            slow.write_all(b"T\r\n$3\r\nfoo\r\n"),
+        )
+        .await
+        .is_err()
+        {
+            return fail("completion write failed".to_string());
+        }
+        match tokio::time::timeout(Duration::from_secs(5), Self::read_resp_reply(&mut slow)).await {
+            Ok(Ok(r)) if r.contains("foo") => StageResult {
+                stage: 102,
+                name,
+                passed: true,
+                error: None,
+            },
+            Ok(Ok(r)) => fail(format!("slow-frame reply {r:?}, want bulk foo")),
+            Ok(Err(e)) => fail(format!("slow-frame read failed: {e}")),
+            Err(_) => fail("slow-frame reply timed out".to_string()),
+        }
+    }
     pub async fn test_stage1_handshake(&self) -> StageResult {
         let name = "Stage 1: PING & ECHO Handshake".to_string();
         let mut stream = match self.connect().await {
@@ -795,6 +915,79 @@ mod tests {
         assert!(!RedisVerifier::is_complete_resp_frame(b"*1\r\n*1\r\n")); // nested incomplete array
     }
 
+    /// Tolerant mock: ignores unknown bytes, answers PING and foo bulk.
+    /// Models a server that survives garbage and serves concurrent clients.
+    async fn spawn_tolerant_mock() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let upper = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+                        let reply = if upper.contains("PING") {
+                            Some(&b"+PONG\r\n"[..])
+                        } else if upper.contains("FOO") {
+                            Some(&b"$3\r\nfoo\r\n"[..])
+                        } else {
+                            // Anything else (garbage, partials): stay open, stay silent.
+                            None
+                        };
+                        if let Some(r) = reply {
+                            if socket.write_all(r).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn test_robustness_passes_on_tolerant_server() {
+        let port = spawn_tolerant_mock().await;
+        let v = RedisVerifier::new(port, Some("robust"));
+        let out = v.run_robustness().await;
+        assert_eq!(out.len(), 2);
+        assert!(out[0].passed, "malformed: {:?}", out[0].error);
+        assert!(out[1].passed, "slow sender: {:?}", out[1].error);
+        assert_eq!(out[0].stage, 101);
+        assert_eq!(out[1].stage, 102);
+    }
+
+    #[tokio::test]
+    async fn test_robustness_fails_when_server_dies() {
+        // Fragile mock: dies on first garbage byte, so the fresh-connection
+        // PING must fail and the probe must say so (not hang, not pass).
+        use tokio::io::AsyncReadExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // Accept exactly one connection, then vanish forever.
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 64];
+                let _ = socket.read(&mut buf).await;
+                // Drop without reply and close the listener: reconnects fail.
+            }
+        });
+        // Give the listener a moment, then burn its single accept.
+        let v = RedisVerifier::new(port, Some("robust"));
+        let out = v.run_robustness().await;
+        assert!(!out[0].passed, "dead server must fail the malformed probe");
+        assert!(
+            out[0].error.as_deref().unwrap_or("").contains("PING")
+                || out[0].error.as_deref().unwrap_or("").contains("reconnect"),
+            "error must name the failed step: {:?}",
+            out[0].error
+        );
+    }
     #[tokio::test]
     async fn test_mock_redis_handshake_success() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

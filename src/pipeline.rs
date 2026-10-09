@@ -612,6 +612,12 @@ impl BenchmarkPipeline {
         let mut reference_throughput = None;
         // Verifier-measured rate (wal/proxy/pubsub soak); step 8 prefers it.
         let mut extra_throughput: Option<f64> = None;
+        // Advisory robustness probes (redis/http only): run AFTER the scored
+        // stages, logged under [ROBUST], never counted in the pass rate.
+        // Stored on the manifest for later analysis. Declared out here
+        // because the arms below do not share a scope (same reason as
+        // infra_error above).
+        let mut extra_robustness: Vec<crate::verifier::StageResult> = Vec::new();
         let mut baseline_source: Option<String> = None;
         // Latched by whichever setup path hits a harness fault. Declared out
         // here because the two sites live in different arms of the expression
@@ -721,6 +727,18 @@ impl BenchmarkPipeline {
                 logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
             }
 
+            let log_robust = |logger: &Arc<dyn PipelineLogger>,
+                              rs: &[crate::verifier::StageResult]| {
+                for s in rs {
+                    logger.log(&format!(
+                        "  [ROBUST] Stage {}: {} -> {} {} (advisory, unscored)",
+                        s.stage,
+                        s.name,
+                        if s.passed { "PASS" } else { "FAIL" },
+                        s.error.as_deref().unwrap_or("")
+                    ));
+                }
+            };
             let (pr, ps, ts, sr) = match config.task {
                 TaskType::Redis => {
                     let verifier = RedisVerifier::new(port, Some(&verifier_seed));
@@ -801,6 +819,10 @@ impl BenchmarkPipeline {
                     let ps = stages.iter().filter(|s| s.passed).count() as u32;
                     let ts = stages.len() as u32;
                     let pr = ps as f64 / ts as f64 * 100.0;
+                    for s in verifier.run_robustness().await {
+                        log_robust(&logger, std::slice::from_ref(&s));
+                        extra_robustness.push(s);
+                    }
                     (pr, ps, ts, stages)
                 }
                 TaskType::Http => {
@@ -813,6 +835,10 @@ impl BenchmarkPipeline {
                             "  Stage {}: {} -> {} {}",
                             s.stage, s.name, status_str, err_str
                         ));
+                    }
+                    for s in verifier.run_robustness().await {
+                        log_robust(&logger, std::slice::from_ref(&s));
+                        extra_robustness.push(s);
                     }
                     (
                         summary.pass_rate,
@@ -1366,6 +1392,7 @@ impl BenchmarkPipeline {
             passed_stages,
             total_stages,
             stages: stage_results,
+            robustness: extra_robustness,
             throughput_req_sec: throughput,
             reference_throughput_req_sec: reference_throughput,
             baseline_source: baseline_source.clone(),

@@ -54,6 +54,155 @@ impl HttpVerifier {
         }
     }
 
+    /// Advisory robustness probes (NOT scored): malformed-request survival
+    /// and slow-header isolation. The server may close the offending
+    /// connection — that is acceptable behavior. What passes is *service*
+    /// survival on fresh connections plus concurrency under a half-open
+    /// sender. Never called from `run_all`; the pipeline logs these
+    /// separately under [ROBUST].
+    pub async fn run_robustness(&self) -> Vec<StageResult> {
+        vec![
+            self.robust_malformed().await,
+            self.robust_slow_headers().await,
+        ]
+    }
+
+    async fn robust_get_status(port: u16) -> Result<u16, String> {
+        use tokio::io::AsyncWriteExt;
+        let addr = format!("127.0.0.1:{}", port);
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("Connection timed out to {}", addr))?
+        .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .map_err(|e| format!("Write to {} failed: {}", addr, e))?;
+        let (status, complete) = Self::read_framed(&mut stream, &addr).await?;
+        if !complete {
+            return Err(format!("unframed response from {}", addr));
+        }
+        Ok(status)
+    }
+
+    async fn robust_malformed(&self) -> StageResult {
+        let name = "Robust 1: malformed request survival (advisory)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 101,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        use tokio::io::AsyncWriteExt;
+        let addr = format!("127.0.0.1:{}", self.target_port);
+        let mut dirty = match tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            _ => return fail(format!("connect for garbage probe: {}", addr)),
+        };
+        // Garbage request line + a header with no colon on one connection.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            dirty.write_all(b"\x00\x01 GARBAGE\r\nNoColonHere\r\n\r\n"),
+        )
+        .await;
+        drop(dirty);
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            Self::robust_get_status(self.target_port),
+        )
+        .await
+        {
+            Ok(Ok(200)) => StageResult {
+                stage: 101,
+                name,
+                passed: true,
+                error: None,
+            },
+            Ok(Ok(s)) => fail(format!("GET / after garbage got {s}, want 200")),
+            Ok(Err(e)) => fail(format!("GET / after garbage failed: {e}")),
+            Err(_) => fail("GET / after garbage timed out (server wedged?)".to_string()),
+        }
+    }
+
+    async fn robust_slow_headers(&self) -> StageResult {
+        let name = "Robust 2: slow headers + half-open isolation (advisory)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 102,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        use tokio::io::AsyncWriteExt;
+        let addr = format!("127.0.0.1:{}", self.target_port);
+        let mut slow = match tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            _ => return fail(format!("connect slow sender: {}", addr)),
+        };
+        if tokio::time::timeout(
+            Duration::from_secs(3),
+            slow.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n"),
+        )
+        .await
+        .is_err()
+        {
+            return fail("partial header write failed".to_string());
+        }
+        // An independent client must succeed while the sender is half-open.
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            Self::robust_get_status(self.target_port),
+        )
+        .await
+        {
+            Ok(Ok(200)) => {}
+            Ok(Ok(s)) => return fail(format!("parallel GET / got {s} during half-open")),
+            Ok(Err(e)) => return fail(format!("parallel GET / failed during half-open: {e}")),
+            Err(_) => {
+                return fail(
+                    "parallel GET / timed out during half-open (single-threaded server?)"
+                        .to_string(),
+                )
+            }
+        }
+        // Complete the slow request; expect a framed 200.
+        if tokio::time::timeout(
+            Duration::from_secs(3),
+            slow.write_all(b"Connection: close\r\n\r\n"),
+        )
+        .await
+        .is_err()
+        {
+            return fail("completion write failed".to_string());
+        }
+        match tokio::time::timeout(Duration::from_secs(8), Self::read_framed(&mut slow, &addr))
+            .await
+        {
+            Ok(Ok((200, true))) => StageResult {
+                stage: 102,
+                name,
+                passed: true,
+                error: None,
+            },
+            Ok(Ok((s, c))) => fail(format!(
+                "slow request got status {s} complete={c}, want 200+framed"
+            )),
+            Ok(Err(e)) => fail(format!("slow request read failed: {e}")),
+            Err(_) => fail("slow request reply timed out".to_string()),
+        }
+    }
     pub async fn test_stage1_root(&self) -> StageResult {
         let name = "Stage 1: GET / (Root 200 OK + keep-alive)".to_string();
         // Raw socket, not reqwest: pooling only reuses a connection after the
@@ -556,6 +705,73 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// Tolerant mock: answers every complete request 200, stays open on
+    /// garbage/partials. Models a server that survives malformed input.
+    async fn spawn_tolerant_http_mock() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let mut pending = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        pending.extend_from_slice(&buf[..n]);
+                        // One reply per header terminator seen.
+                        while let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+                            pending.drain(..pos + 4);
+                            if socket
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn test_robustness_passes_on_tolerant_server() {
+        let port = spawn_tolerant_http_mock().await;
+        let v = HttpVerifier::new(port, Some("robust"));
+        let out = v.run_robustness().await;
+        assert_eq!(out.len(), 2);
+        assert!(out[0].passed, "malformed: {:?}", out[0].error);
+        assert!(out[1].passed, "slow headers: {:?}", out[1].error);
+        assert_eq!(out[0].stage, 101);
+        assert_eq!(out[1].stage, 102);
+    }
+
+    #[tokio::test]
+    async fn test_robustness_fails_when_server_dies() {
+        // Fragile mock: accepts once, then vanishes — the follow-up GET
+        // must fail and the probe must say so (not hang, not pass).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 64];
+                let _ = socket.read(&mut buf).await;
+            }
+        });
+        let v = HttpVerifier::new(port, Some("robust"));
+        let out = v.run_robustness().await;
+        assert!(!out[0].passed, "dead server must fail the malformed probe");
+        assert!(
+            out[0].error.as_deref().unwrap_or("").contains("GET /"),
+            "error must name the failed step: {:?}",
+            out[0].error
+        );
+    }
     #[tokio::test]
     async fn test_http_verifier_all_stages_pass() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -3963,6 +3963,21 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 20px;">No detailed stages were recorded for this run.</div>';
       }
 
+      if (m.robustness && m.robustness.length) {
+        const rCard = document.createElement('div');
+        rCard.className = 'stage-card';
+        rCard.style.borderColor = 'rgba(210,153,34,0.35)';
+        rCard.innerHTML = `
+          <div style="font-size: 0.8rem; font-weight: 700; color: var(--warning);" title="Advisory robustness probes (malformed input, slow senders). Reported, never scored.">🛡️ Robustness (advisory, unscored)</div>
+          ` + m.robustness.map(s => `
+          <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 3px 0;">
+            <span style="font-size: 0.78rem; color: #fff;">${escapeHtml(s.name || `Robust ${s.stage}`)}</span>
+            <span class="badge ${s.passed ? 'badge-pass' : 'badge-fail'}">${s.passed ? '✔ PASS' : '✕ FAIL'}</span>
+          </div>
+          ${s.error ? `<div style="font-size: 0.72rem; color: var(--text-muted); white-space: pre-wrap;">${escapeHtml(s.error)}</div>` : ''}`).join('');
+        container.appendChild(rCard);
+      }
+
       if (m.throughput_req_sec) {
         const tpCard = document.createElement('div');
         tpCard.className = 'stage-card';

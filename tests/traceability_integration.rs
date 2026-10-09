@@ -75,6 +75,7 @@ func main() {
         passed_stages: 4,
         total_stages: 4,
         stages,
+        robustness: Vec::new(),
         throughput_req_sec: Some(68500.0),
         reference_throughput_req_sec: Some(71000.0),
         baseline_source: None,
