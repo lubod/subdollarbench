@@ -14,6 +14,7 @@ use subdollarbench::report::{
     assess_stability, BenchmarkRunResult, LeaderboardManager, PortalExporter, RunManifest,
     Stability,
 };
+use subdollarbench::sandbox::docker::{RunGuard, SandboxManager, PROXY_UPSTREAM_PORTS};
 use subdollarbench::verifier::{
     BinprotoVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier,
     WalVerifier,
@@ -1123,6 +1124,218 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 .chain(rep.warnings.iter())
             {
                 println!("  {line}");
+            }
+        }
+
+        Commands::Replay {
+            run,
+            port,
+            runs_dir,
+        } => {
+            // Resolve runs/<id> by exact id or unambiguous prefix.
+            let root = Path::new(&runs_dir);
+            let mut hits: Vec<String> = std::fs::read_dir(root)
+                .with_context(|| format!("read runs dir {runs_dir}"))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|id| id == &run || id.starts_with(&run))
+                .collect();
+            hits.sort();
+            let run_id = match hits.len() {
+                0 => anyhow::bail!("no run matches '{run}' in {runs_dir}"),
+                1 => hits.remove(0),
+                _ => {
+                    eprintln!("ambiguous prefix '{run}':");
+                    for h in &hits {
+                        eprintln!("  {h}");
+                    }
+                    anyhow::bail!("{} runs match; give a longer prefix", hits.len())
+                }
+            };
+            let run_path = root.join(&run_id);
+            let manifest: RunManifest =
+                serde_json::from_str(&std::fs::read_to_string(run_path.join("manifest.json"))?)
+                    .with_context(|| format!("read manifest for {run_id}"))?;
+            let task = parse_task(&manifest.task)?;
+            let p = port.unwrap_or(match task {
+                TaskType::Redis => 6379,
+                TaskType::Http => 8080,
+                TaskType::Pdf => 8090,
+                TaskType::Wal => 6390,
+                TaskType::Proxy => 8091,
+                TaskType::Pubsub => 8092,
+                TaskType::Binproto => 6395,
+            });
+            // Port safety: never fight a live engine over task ports.
+            // Best-effort check — an unreachable engine means idle-or-down,
+            // which is exactly when replay is safe.
+            let server = resolve_server_flag(&None);
+            if let Ok(st) = remote::get_json(&server, "/api/status").await {
+                if st
+                    .get("is_running")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!(
+                        "engine is live; replay needs its task port ({p}) free — stop the wave or wait for idle"
+                    );
+                }
+            }
+            println!("replaying {run_id} ({task} on port {p})...");
+            // Copy the archived workspace aside: the archive is evidence and
+            // must never be mutated (perms relax + build artifacts stay out).
+            let work_src = run_path.join("workspace");
+            let work_tmp =
+                std::env::temp_dir().join(format!("sdb-replay-{run_id}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&work_tmp);
+            fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<()> {
+                std::fs::create_dir_all(dst)?;
+                for e in std::fs::read_dir(src)? {
+                    let e = e?;
+                    let d = dst.join(e.file_name());
+                    if e.file_type()?.is_dir() {
+                        copy_tree(&e.path(), &d)?;
+                    } else if !e.file_type()?.is_symlink() {
+                        std::fs::copy(e.path(), d)?;
+                    }
+                }
+                Ok(())
+            }
+            copy_tree(&work_src, &work_tmp)
+                .with_context(|| format!("copy workspace for {run_id}"))?;
+            let sandbox =
+                SandboxManager::with_id(&format!("replay-{}", run_id.replace(['/', ':'], "_")));
+            let _guard = RunGuard::new(SandboxManager::with_id(&format!(
+                "replay-{}",
+                run_id.replace(['/', ':'], "_")
+            )));
+            if !sandbox.ensure_runnable_candidate(&work_tmp)? {
+                sandbox.cleanup();
+                let _ = std::fs::remove_dir_all(&work_tmp);
+                anyhow::bail!("{run_id}: no Dockerfile or start.sh in archived workspace");
+            }
+            // Compliance re-check (reported, never gates): the archived
+            // verdict stands; this tells the auditor whether it reproduces.
+            match subdollarbench::verifier::compliance::ComplianceChecker::check_no_frameworks(
+                &work_tmp,
+            ) {
+                Ok(()) => println!("compliance re-check: PASS"),
+                Err(v) => println!("compliance re-check: FAIL ({v})"),
+            }
+            if task == TaskType::Proxy {
+                sandbox
+                    .start_upstream_pool(&PROXY_UPSTREAM_PORTS)
+                    .context("start replay upstream pool")?;
+            }
+            sandbox
+                .start_candidate_in_docker(&work_tmp, p)
+                .context("start replay candidate")?;
+            if !sandbox.wait_for_port(p, 25).await {
+                sandbox.cleanup();
+                let _ = std::fs::remove_dir_all(&work_tmp);
+                anyhow::bail!(
+                    "{run_id}: candidate never opened port {p}\n{}",
+                    sandbox.get_candidate_logs()
+                );
+            }
+            let replay_seed = format!(
+                "replay-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let (pass_rate, passed, total) = match task {
+                TaskType::Redis => {
+                    let v = RedisVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_all().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+                TaskType::Http => {
+                    let v = HttpVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_all().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+                TaskType::Pdf => {
+                    let v = PdfVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_all().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+                TaskType::Wal => {
+                    let v = WalVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_basic().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+                TaskType::Proxy => {
+                    let ups: Vec<(String, u16)> = (1u8..=3u8)
+                        .map(|i| {
+                            (
+                                sandbox.upstream_name(i),
+                                PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                            )
+                        })
+                        .collect();
+                    // Mirror the pipeline exactly (routing + failover +
+                    // throughput stage) so the replayed pass rate is
+                    // comparable with the archived one.
+                    let v = ProxyVerifier::new(p, Some(&replay_seed), ups);
+                    let routing = v.run_routing().await;
+                    let mut stages = routing.stages.clone();
+                    for s in &routing.stages {
+                        println!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            s.name,
+                            if s.passed { "PASS" } else { "FAIL" },
+                            s.error.as_deref().unwrap_or("")
+                        );
+                    }
+                    let fo = v.run_failover().await;
+                    println!(
+                        "  Stage {}: {} -> {} {}",
+                        fo.stage,
+                        fo.name,
+                        if fo.passed { "PASS" } else { "FAIL" },
+                        fo.error.as_deref().unwrap_or("")
+                    );
+                    stages.push(fo);
+                    let tp = v.measure_throughput().await;
+                    match tp {
+                        Some(x) => println!("  Candidate load: {x:.0} req/sec"),
+                        None => println!("  Candidate load: no measurement"),
+                    }
+                    stages.push(subdollarbench::verifier::StageResult {
+                        stage: 5,
+                        name: "Stage 5: Concurrent GET throughput".to_string(),
+                        passed: tp.is_some(),
+                        error: None,
+                    });
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    (ps as f64 / ts as f64 * 100.0, ps, ts)
+                }
+                TaskType::Pubsub => {
+                    let v = PubsubVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_all().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+                TaskType::Binproto => {
+                    let v = BinprotoVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_all().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+            };
+            sandbox.cleanup();
+            let _ = std::fs::remove_dir_all(&work_tmp);
+            println!(
+                "replay: {pass_rate:.1}% ({passed}/{total}) vs archived {:.1}% ({}/{})",
+                manifest.pass_rate, manifest.passed_stages, manifest.total_stages
+            );
+            if (pass_rate - manifest.pass_rate).abs() > 0.5 {
+                println!("MISMATCH: replay disagrees with the archived verdict — investigate before citing");
+            } else {
+                println!("MATCH: replay reproduces the archived verdict");
             }
         }
 
@@ -2381,6 +2594,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_main_cli_run_eval_only_redis() {
+        // Replay resolution errors need no docker and no engine: unknown id
+        // and ambiguous prefixes fail before any container or HTTP call.
+        let empty_runs =
+            std::env::temp_dir().join(format!("test_replay_empty_{}", std::process::id()));
+        let _ = fs::create_dir_all(&empty_runs);
+        let cli_none = Cli {
+            command: Commands::Replay {
+                run: "nope".to_string(),
+                port: None,
+                runs_dir: empty_runs.to_string_lossy().to_string(),
+            },
+        };
+        assert!(run_cli(cli_none).await.is_err());
+        let amb_runs = std::env::temp_dir().join(format!("test_replay_amb_{}", std::process::id()));
+        let _ = fs::create_dir_all(amb_runs.join("redis_aaa_w0"));
+        let _ = fs::create_dir_all(amb_runs.join("redis_aab_w0"));
+        let cli_amb = Cli {
+            command: Commands::Replay {
+                run: "redis_aa".to_string(),
+                port: None,
+                runs_dir: amb_runs.to_string_lossy().to_string(),
+            },
+        };
+        assert!(run_cli(cli_amb).await.is_err());
+        let _ = fs::remove_dir_all(&empty_runs);
+        let _ = fs::remove_dir_all(&amb_runs);
+
         let temp_workdir =
             std::env::temp_dir().join(format!("test_main_run_redis_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_workdir);

@@ -485,6 +485,22 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [analyze] Re-verify an archived candidate workspace without any LLM
+    /// call: rebuilds/reruns runs/<id>/workspace in an isolated container
+    /// and runs the verifier. Bails while the engine is live (port safety).
+    Replay {
+        /// Run id or unambiguous prefix (resolved against runs/)
+        run: String,
+
+        /// Override the task's default port (default: task standard port)
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Path to runs directory
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+    },
+
     /// [maintain] Report-only integrity audit (orphans, junk rows, row-file drift).
     /// Exit 1 on findings. Also runs warn-only on every engine boot.
     MigrateCheck,
@@ -1331,6 +1347,45 @@ mod tests {
                 assert_eq!(port, None);
             }
             _ => panic!("Expected Eval command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_replay() {
+        let cli = Cli::try_parse_from(["subdollarbench", "replay", "redis_abc123"]).unwrap();
+        match cli.command {
+            Commands::Replay {
+                run,
+                port,
+                runs_dir,
+            } => {
+                assert_eq!(run, "redis_abc123");
+                assert_eq!(port, None);
+                assert_eq!(runs_dir, "./runs");
+            }
+            _ => panic!("Expected Replay command"),
+        }
+        let cli2 = Cli::try_parse_from([
+            "subdollarbench",
+            "replay",
+            "abc",
+            "--port",
+            "6399",
+            "--runs-dir",
+            "/tmp/r",
+        ])
+        .unwrap();
+        match cli2.command {
+            Commands::Replay {
+                run,
+                port,
+                runs_dir,
+            } => {
+                assert_eq!(run, "abc");
+                assert_eq!(port, Some(6399));
+                assert_eq!(runs_dir, "/tmp/r");
+            }
+            _ => panic!("Expected Replay command"),
         }
     }
 
