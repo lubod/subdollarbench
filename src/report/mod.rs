@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod cost_annotate;
 pub mod environment;
 pub mod judge;
 pub mod leaderboard;
@@ -9,6 +10,7 @@ pub mod rules;
 pub mod store;
 
 pub use archive::{FileInfo, RunArchiver, RunManifest, RunTokenUsage};
+pub use cost_annotate::{run_cost_annotate, CostAnnotateReport};
 pub use environment::EnvironmentInfo;
 pub use judge::{ReviewJson, RunJudge};
 pub use leaderboard::{assess_stability, BenchmarkRunResult, LeaderboardManager, Stability};

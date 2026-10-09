@@ -5,6 +5,11 @@
   - [x] 1b. Split boards: free vs paid (replace display-only badges; no invented costs)
      * GUI + static portal parity: tier pills + IQR spread, helpers hoisted to
        shared.js (single source), portal JS parse-guarded by a node --check test
+     * Cost honesty behind the split: `resolve_api_cost` (a zero live key-usage
+       delta never zeroes a paid model; formula wins + source recorded), and
+       `cost-annotate` backfilled `cost_formula_usd` onto the 144 archived
+       muse-spark rows that recorded $0.00 from counter lag — annotation only,
+       no score rewrites. Board verified: 17/17 muse rows now paid.
   - [ ] 1c. Canary string in all prompt templates + workspace seeds (pending idle — prompt edits contaminate running trials)
 - [ ] 2. `replay <run_id>` (day)
   - [x] 2a. Build archived workspace + run verifier, no API key (reuse `eval` path)

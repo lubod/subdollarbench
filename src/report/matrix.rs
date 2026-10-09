@@ -155,6 +155,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.015),
             duration_seconds: None,
             turns: None,

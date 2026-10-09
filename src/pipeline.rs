@@ -1337,7 +1337,18 @@ impl BenchmarkPipeline {
             }
         }
 
-        let cost_usd = live_spend_delta.unwrap_or(breakdown.total_cost_usd);
+        // Cost accounting: the live key-usage delta is ground truth only when
+        // it moves; a zero delta is weekly-counter lag, not zero spend (see
+        // resolve_api_cost). Both measurements stay in the record so a
+        // disagreement is auditable after the fact.
+        let (cost_usd, cost_source) =
+            ModelPricing::resolve_api_cost(live_spend_delta, breakdown.total_cost_usd);
+        if cost_source == "formula_zero_delta" {
+            logger.log(&format!(
+                "[COST] Live key usage read $0.00 but tokens price at ${:.4} — recording the formula cost (counter lag).",
+                breakdown.total_cost_usd
+            ));
+        }
         let effective_cost_usd = ModelPricing::calculate_effective_cost(
             cost_usd,
             duration_seconds,
@@ -1425,6 +1436,8 @@ impl BenchmarkPipeline {
                 total_tokens: total_run_tokens,
             },
             cost_usd,
+            cost_source: Some(cost_source.to_string()),
+            cost_formula_usd: Some(breakdown.total_cost_usd),
             effective_cost_usd: Some(effective_cost_usd),
             savings_percent: breakdown.savings_percent,
             efficiency_score,
@@ -1497,6 +1510,8 @@ impl BenchmarkPipeline {
             completion_tokens,
             total_tokens: total_run_tokens,
             total_cost_usd: cost_usd,
+            cost_source: Some(cost_source.to_string()),
+            cost_formula_usd: Some(breakdown.total_cost_usd),
             effective_cost_usd: Some(effective_cost_usd),
             duration_seconds: Some(duration_seconds),
             turns: Some(omp_stats.steps_taken),

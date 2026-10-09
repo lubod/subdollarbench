@@ -485,6 +485,29 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// [maintain] Cost-honesty annotation: rows archived with
+    /// `cost_usd: 0` from the pre-fix live-delta rule (a paid model read as
+    /// zero because the weekly key-usage counter had not caught up) gain
+    /// `cost_formula_usd` from their recorded tokens at catalog prices, so
+    /// the boards stop ranking a paid model as free. Annotates only —
+    /// cost_usd, effective cost, and scores are never rewritten. A model
+    /// with no catalog price (unreachable catalog, genuinely free) is
+    /// skipped, never priced from the offline fallback.
+    /// Dry run by default; --yes writes (manifests, results JSON, bench.db).
+    CostAnnotate {
+        /// Path to results directory (must be the canonical repo results/)
+        #[arg(long, default_value = "./results")]
+        results_dir: String,
+
+        /// Path to runs directory (must be the canonical repo runs/)
+        #[arg(long, default_value = "./runs")]
+        runs_dir: String,
+
+        /// Actually rewrite files (without it, only prints the plan)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
     /// [analyze] Re-verify an archived candidate workspace without any LLM
     /// call: rebuilds/reruns runs/<id>/workspace in an isolated container
     /// and runs the verifier. Bails while the engine is live (port safety).

@@ -89,6 +89,8 @@ func main() {
             total_tokens: 21700,
         },
         cost_usd: 0.0031,
+        cost_source: None,
+        cost_formula_usd: None,
         effective_cost_usd: Some(0.005),
         savings_percent: 63.5,
         efficiency_score: 322.6,

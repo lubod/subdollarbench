@@ -43,3 +43,22 @@ command (7 DQ + 41 agent_killed cures, 12 loose groups merged, 818 runs
 pruned), ranked boards exclude cheats. Declined: CSRF lockdown on auth
 bootstrap (breaks headless CLI), zero-cost rescoring (policy, not defect).
 Stamp `2026-10-09.1`; prior stamps need `backfill --yes` to unify.
+
+## 8. Zero live-delta is not zero spend (2026-10-09.2)
+Cost came from `live_spend_delta.unwrap_or(formula)`. `/auth/key` reports
+*weekly* usage with variable lag, so a counter that had not caught up read
+exactly `0.00` — and 144 archived muse-spark runs (2026-10-06, a paid model
+at $0.10/$0.20 per M) recorded that false zero. It flattered their
+efficiency scores and parked a paid model on the free board. Rule now:
+a delta that *moves* is the measurement (credits, promos, provider-specific
+billing live there); a zero delta never overrides a positive formula cost —
+the token-priced formula wins and the disagreement is recorded
+(`resolve_api_cost`, sources `live` / `formula` / `formula_zero_delta`).
+Retroactive fix is **annotation, not rescoring**: `cost-annotate` writes
+`cost_formula_usd` from recorded tokens at *catalog-confirmed* prices onto
+those rows (manifests, results, both bench.db tables), so `tierOf` reads
+them paid. Archived `cost_usd`, effective cost, and scores are untouched —
+re-deriving published numbers is a grading decision, needs its own review.
+An unconfirmable price (catalog miss) leaves the row alone rather than
+pricing it from the offline fallback, which would relabel genuinely free
+rows as paid. Ref: `src/cost/calculator.rs`, `src/report/cost_annotate.rs`.

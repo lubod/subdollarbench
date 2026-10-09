@@ -114,6 +114,36 @@ impl ModelPricing {
             + (cached as f64 * COMPUTE_COST_PER_TOKEN * COMPUTE_COST_CACHED_FRACTION)
     }
 
+    /// Resolve the recorded API cost from the two measurements we take.
+    ///
+    /// The live key-usage delta is ground truth *when it moves*: it is the
+    /// only value that reflects promotions, credits, and provider-specific
+    /// billing. But `/auth/key` reports weekly usage with variable lag, so
+    /// `delta == 0` is not evidence of zero spend — it is equally consistent
+    /// with "the counter has not caught up yet". 144 archived muse-spark
+    /// rows (2026-10-06) recorded exactly that: a paid model at $0.00,
+    /// which both flattered its efficiency score and parked a paid model on
+    /// the free board. A zero delta therefore never overrides a positive
+    /// formula cost; the formula (token-count based, conservative) wins
+    /// that disagreement, and the disagreement is recorded rather than
+    /// silently averaged away.
+    ///
+    /// Returns `(cost, source)` where source is `"live"`, `"formula"`, or
+    /// `"formula_zero_delta"` (the disagreement case above).
+    pub fn resolve_api_cost(live_delta: Option<f64>, formula_cost: f64) -> (f64, &'static str) {
+        match live_delta {
+            // The counter moved: it is the measurement, whatever the
+            // formula thinks (credits and promos live here).
+            Some(d) if d > 0.0 => (d, "live"),
+            // A paid model cannot have spent exactly zero; the weekly
+            // counter simply has not caught up.
+            Some(_) if formula_cost > 0.0 => (formula_cost, "formula_zero_delta"),
+            // Zero delta, zero formula (or no live reading at all).
+            Some(_) => (formula_cost, "formula"),
+            None => (formula_cost, "formula"),
+        }
+    }
+
     /// Calculates effective total cost: API spend + compute runtime floor.
     ///
     /// `total_tokens` is the whole context (fresh + cached + completion) and
@@ -409,6 +439,42 @@ mod tests {
     /// is a cheap paid model with no table entry, so a regression that let an
     /// unpriced model fall through to zero would silently record real runs as
     /// free and flatter every score that divides by cost.
+    /// The regression this fixes: a zero live-delta (weekly counter lag)
+    /// recorded a paid model at $0.00 — 144 archived rows. Zero delta must
+    /// never beat a positive formula cost.
+    #[test]
+    fn test_zero_live_delta_never_zeros_a_paid_model() {
+        let (c, src) = ModelPricing::resolve_api_cost(Some(0.0), 0.0175);
+        assert_eq!(c, 0.0175, "formula must win a zero-delta disagreement");
+        assert_eq!(src, "formula_zero_delta");
+
+        // A genuinely free model: formula is zero too, so zero stands.
+        let (c, src) = ModelPricing::resolve_api_cost(Some(0.0), 0.0);
+        assert_eq!(c, 0.0);
+        assert_eq!(src, "formula");
+
+        // Counter moved: it is the measurement, even below the formula
+        // (credits, promos, discounted providers).
+        let (c, src) = ModelPricing::resolve_api_cost(Some(0.0021), 0.05);
+        assert_eq!(c, 0.0021);
+        assert_eq!(src, "live");
+
+        // No live reading available: formula only.
+        let (c, src) = ModelPricing::resolve_api_cost(None, 0.0333);
+        assert_eq!(c, 0.0333);
+        assert_eq!(src, "formula");
+    }
+
+    /// A disagreement must stay visible in the record, not just the log:
+    /// the board reader needs to know the cost came from the formula
+    /// because the live counter read zero.
+    #[test]
+    fn test_disagreement_source_is_distinguishable_from_plain_formula() {
+        let (_, a) = ModelPricing::resolve_api_cost(Some(0.0), 0.01);
+        let (_, b) = ModelPricing::resolve_api_cost(None, 0.01);
+        assert_ne!(a, b, "source strings must distinguish the disagreement");
+    }
+
     #[test]
     fn test_unpriced_model_falls_back_to_a_positive_rate() {
         let p = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor");

@@ -1088,6 +1088,39 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             );
         }
 
+        Commands::CostAnnotate {
+            results_dir,
+            runs_dir,
+            yes,
+        } => {
+            let rep = subdollarbench::report::run_cost_annotate(
+                std::path::Path::new(&results_dir),
+                std::path::Path::new(&runs_dir),
+                yes,
+            )
+            .await?;
+            println!(
+                "cost-annotate{}: scanned {} manifests; annotate {} manifest row(s), {} result row(s), {} db run row(s), {} db parent row(s); {} row(s) price zero or unconfirmable; {} warning(s)",
+                if yes { "" } else { " (dry-run)" },
+                rep.manifests_scanned,
+                rep.annotated.len(),
+                rep.results_annotated,
+                rep.db_annotated,
+                rep.db_parents_annotated,
+                rep.already_free,
+                rep.warnings.len(),
+            );
+            for line in &rep.annotated {
+                println!("  + {line}");
+            }
+            for line in &rep.warnings {
+                println!("  ! {line}");
+            }
+            if !yes {
+                println!("  (dry run: nothing written; re-run with --yes to apply)");
+            }
+        }
+
         Commands::Repair {
             results_dir,
             runs_dir,
@@ -2449,6 +2482,8 @@ mod tests {
             completion_tokens: 20,
             total_tokens: 170,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.015),
             duration_seconds: Some(60.0),
             turns: Some(4),
@@ -2542,6 +2577,8 @@ mod tests {
                 total_tokens: 120,
             },
             cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.015),
             savings_percent: 10.0,
             efficiency_score: 66.6,

@@ -2486,6 +2486,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: cost,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: effective,
             duration_seconds: None,
             turns: None,

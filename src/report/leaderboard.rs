@@ -42,6 +42,13 @@ pub struct BenchmarkRunResult {
     #[serde(default)]
     pub total_tokens: u64,
     pub total_cost_usd: f64,
+    /// Cost provenance (`"live"` / `"formula"` / `"formula_zero_delta"`)
+    /// and the token-priced value, so the boards can tell a measured zero
+    /// from a lagging one (a paid model at $0.00 must not read as free).
+    #[serde(default)]
+    pub cost_source: Option<String>,
+    #[serde(default)]
+    pub cost_formula_usd: Option<f64>,
     #[serde(default)]
     pub effective_cost_usd: Option<f64>,
     #[serde(default)]
@@ -150,6 +157,36 @@ pub enum Stability {
 /// CV > 25% -> Unstable (> 50% also flags a suspect measurement);
 /// CV 10-25% -> Watch; otherwise Stable. Throughput-free tasks
 /// are judged on pass spread alone.
+/// Unanimous cost provenance across trials, else "mixed" — the same rule the
+/// merged row applies to `graded_under`. A parent that cannot say how its
+/// dollars were measured has no single story to tell.
+fn merge_cost_source(subruns: &[BenchmarkRunResult]) -> Option<String> {
+    let first = subruns.first()?.cost_source.clone()?;
+    if subruns
+        .iter()
+        .all(|s| s.cost_source.as_deref() == Some(first.as_str()))
+    {
+        Some(first)
+    } else {
+        Some("mixed".to_string())
+    }
+}
+
+/// Summed token-priced cost across trials (the formula side of the record),
+/// present only when every trial carries it.
+fn merge_cost_formula(subruns: &[BenchmarkRunResult]) -> Option<f64> {
+    if subruns.iter().all(|s| s.cost_formula_usd.is_some()) {
+        Some(
+            subruns
+                .iter()
+                .map(|s| s.cost_formula_usd.unwrap_or(0.0))
+                .sum(),
+        )
+    } else {
+        None
+    }
+}
+
 pub fn assess_stability(subruns: &[BenchmarkRunResult]) -> (Stability, String) {
     if subruns.len() < 2 {
         return (Stability::Stable, "single trial".to_string());
@@ -515,6 +552,10 @@ impl BenchmarkRunResult {
             completion_tokens: fair_comp,
             total_tokens: fair_tot_tok,
             total_cost_usd: fair_cost_usd,
+            // Cost provenance: unanimous trials agree on the source; a mix
+            // says so rather than picking one verdict's story.
+            cost_source: merge_cost_source(&subruns),
+            cost_formula_usd: merge_cost_formula(&subruns),
             effective_cost_usd: Some(fair_eff_cost_usd),
             duration_seconds: fair_dur,
             turns: fair_turns,
@@ -1680,6 +1721,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: None,
             turns: None,
@@ -1733,6 +1776,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: None,
             turns: None,
@@ -1876,6 +1921,8 @@ mod tests {
                 completion_tokens: 500,
                 total_tokens: 3500,
                 total_cost_usd: cost,
+                cost_source: None,
+                cost_formula_usd: None,
                 effective_cost_usd: Some(cost * 2.0),
                 duration_seconds: Some(dur),
                 turns: Some(turns),
@@ -1984,6 +2031,8 @@ mod tests {
             completion_tokens: 50,
             total_tokens: 150,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.02),
             duration_seconds: Some(10.0),
             turns: Some(5),
@@ -2036,6 +2085,8 @@ mod tests {
             completion_tokens: 500,
             total_tokens: 1500,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.02),
             duration_seconds: Some(10.0),
             turns: Some(5),
@@ -2106,6 +2157,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.01),
             duration_seconds: Some(10.0),
             turns: Some(5),
@@ -2166,6 +2219,8 @@ mod tests {
             completion_tokens: 500,
             total_tokens: 1500,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.02),
             duration_seconds: Some(60.0),
             turns: Some(10),
@@ -2343,6 +2398,8 @@ mod tests {
             completion_tokens: 100,
             total_tokens: 1600,
             total_cost_usd: 0.005,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.008),
             duration_seconds: Some(60.0),
             turns: Some(4),
@@ -2400,6 +2457,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: None,
             turns: None,
@@ -2449,6 +2508,8 @@ mod tests {
             completion_tokens: 200,
             total_tokens: 1700,
             total_cost_usd: 0.001,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.003),
             duration_seconds: Some(40.0),
             turns: Some(2),
@@ -2492,6 +2553,8 @@ mod tests {
             completion_tokens: 300,
             total_tokens: 3800,
             total_cost_usd: 0.005,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.008),
             duration_seconds: Some(50.0),
             turns: Some(3),
@@ -2603,6 +2666,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: None,
             turns: None,
@@ -2656,6 +2721,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: None,
             turns: None,
@@ -2687,6 +2754,8 @@ mod tests {
                 completion_tokens: 0,
                 total_tokens: 0,
                 total_cost_usd: 0.01,
+                cost_source: None,
+                cost_formula_usd: None,
                 effective_cost_usd: None,
                 duration_seconds: None,
                 turns: None,
@@ -2761,6 +2830,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: Some(0.01),
             duration_seconds: Some(10.0),
             turns: Some(5),
@@ -2862,6 +2933,8 @@ mod tests {
             completion_tokens: 0,
             total_tokens: 0,
             total_cost_usd: 0.001,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: None,
             turns: None,

@@ -75,11 +75,15 @@ function formatThroughput(tp, task) {
   return `${Math.round(tp).toLocaleString()} ${unit}`;
 }
 
-// Pricing tier from data, not names: $0 API spend = free tier (ranks on the
-// compute floor only — never compare against paid rows on cost).
-// Null/unknown spend counts as paid so nothing hides by accident.
+// Pricing tier from data, not names. A weekly key-usage counter that reads
+// zero is lag, not spend, so free requires BOTH the recorded API cost and
+// the token-priced formula to be zero. Absent formula (rows archived before
+// the field existed) defers to the recorded cost.
 function tierOf(r) {
-  return ((r || {}).total_cost_usd ?? null) === 0 ? 'free' : 'paid';
+  const c = ((r || {}).total_cost_usd ?? 0);
+  const f = (r || {}).cost_formula_usd;
+  if (f == null) return c === 0 ? 'free' : 'paid';
+  return (c === 0 && f === 0) ? 'free' : 'paid';
 }
 
 // Compact throughput render for spread lines and trial tables.

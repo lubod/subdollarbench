@@ -514,6 +514,8 @@ mod tests {
             completion_tokens: 50,
             total_tokens: 150,
             total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
             effective_cost_usd: None,
             duration_seconds: Some(1.5),
             turns: Some(2),
