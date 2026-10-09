@@ -83,24 +83,20 @@ fn install_bench_policy_extension(host_agent_dir: &Path) -> Option<String> {
 /// level sent to omp, plus a console note when the request was rewritten.
 /// There is no `auto`: the legacy alias meant "omit the flag", which omp
 /// resolves to its own default (`high`) — so `high` is spelled out instead.
-/// `max` is clamped to `high` for non-OpenAI providers (HTTP 400 otherwise).
-fn resolve_thinking_level(effort: Option<&str>, effective_model: &str) -> (String, String) {
+/// `max` passes through verbatim for every provider: the omp CLI downgrades
+/// unsupported levels itself (measured 2026-10-09: `--thinking=max` on
+/// ling-3.1-flash records `thinkingLevel: "high"` in the session, exit 0,
+/// no HTTP 400). The pre-clamp that rewrote max→high runner-side was
+/// redundant with that downgrade and hid the requested level from the
+/// record, so it was removed; the session's `thinking_level_change` event
+/// (surfaced as [THINKING]) is the source of truth for what ran.
+fn resolve_thinking_level(effort: Option<&str>, _effective_model: &str) -> (String, String) {
     let requested = effort.map(|e| e.trim().to_lowercase()).unwrap_or_default();
     let level = match requested.as_str() {
         "" | "default" | "auto" => "high".to_string(),
         other => other.to_string(),
     };
-    if level == "max"
-        && !effective_model.starts_with("openai/")
-        && !effective_model.contains("/openai/")
-    {
-        (
-            "high".to_string(),
-            " (requested max, clamped for provider)".to_string(),
-        )
-    } else {
-        (level, String::new())
-    }
+    (level, String::new())
 }
 
 /// Billing tripwire: classify provider session errors that must pause the
@@ -1695,6 +1691,16 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         } else if custom_type == Some("session_exit") {
             results.push("[SESSION] Agent session concluded.".to_string());
         }
+        // Session-level thinking negotiation: the CLI records the EFFECTIVE
+        // level here (it downgrades unsupported requested levels itself —
+        // measured: --thinking=max → thinkingLevel "high", no error). This
+        // line, next to the [OMP-PROMPT] requested level, makes any
+        // downgrade visible instead of silent.
+        else if v.get("type").and_then(|t| t.as_str()) == Some("thinking_level_change") {
+            if let Some(lvl) = v.get("thinkingLevel").and_then(|l| l.as_str()) {
+                results.push(format!("[THINKING] session thinking level: {}", lvl));
+            }
+        }
 
         if results.is_empty() {
             None
@@ -2099,13 +2105,32 @@ mod tests {
             resolve_thinking_level(Some("low"), "openrouter/meta/m"),
             ("low".to_string(), String::new())
         );
-        // Max survives for OpenAI models, clamps elsewhere with a note.
+        // Max passes through verbatim for every provider: the omp CLI
+        // downgrades unsupported levels itself (measured: --thinking=max on
+        // ling records thinkingLevel "high", exit 0, no HTTP 400), and the
+        // session's thinking_level_change event reports what actually ran.
         let (lvl, note) = resolve_thinking_level(Some("max"), "openai/gpt-5.2");
         assert_eq!(lvl, "max");
         assert!(note.is_empty());
         let (lvl, note) = resolve_thinking_level(Some("max"), "openrouter/meta/m");
-        assert_eq!(lvl, "high");
-        assert!(note.contains("clamped"));
+        assert_eq!(lvl, "max");
+        assert!(note.is_empty());
+    }
+
+    #[test]
+    fn test_forward_thinking_level_change_reports_effective_level() {
+        // The CLI's downgrade must be visible: requested level is logged at
+        // launch ([OMP-PROMPT]), effective level arrives here ([THINKING]).
+        let out = OmpRunner::format_session_line(
+            r#"{"type":"thinking_level_change","id":"b185e3e7","thinkingLevel":"high","configured":null}"#,
+        )
+        .expect("thinking_level_change must render");
+        assert!(
+            out.iter().any(|l| l.contains("[THINKING]") && l.contains("high")),
+            "unexpected: {out:?}"
+        );
+        // Missing level degrades to silence, never a panic.
+        assert!(OmpRunner::format_session_line(r#"{"type":"thinking_level_change"}"#).is_none());
     }
 
     #[test]

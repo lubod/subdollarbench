@@ -54,18 +54,22 @@ Decisions already taken (not re-litigated here):
 - [x] B5. Unit tests: variant-config JSON shape per effort level;
   fallback path on resolution error. Full suite + fmt + clippy.
 
-## C. OMP attempt-then-fallback (replaces blanket pre-clamp)
+## C. OMP: unclamp (evidence killed the fallback plan)
 
-- [ ] C1. Try `--thinking=<requested>` verbatim (including `max`);
-  on provider rejection signature (HTTP 400 in stderr/session JSON —
-  verify exact shape first; today the tripwire only matches
-  401/402/429) resume the attempt with `--thinking=high` + log line.
-  General rule (any level, not just max): rejection → retry once at high.
-- [ ] C2. Keep `resolve_thinking_level`'s `""|default|auto → high`
-  mapping; remove only the max pre-clamp. Existing
-  `test_resolve_thinking_level` updated (max passes through now).
-- [ ] C3. Unit tests: 400-signature matcher (positive + negative cases);
-  fallback downgrades once, never loops. Full suite + fmt + clippy.
+Measured 2026-10-09 ($0 probes on ling): `--thinking=max` is ACCEPTED
+(exit 0) and the CLI records `thinkingLevel: "high"` in the session —
+it downgrades unsupported levels itself, no HTTP 400 exists on this
+path. Retry machinery would guard a hypothetical, so it was cut.
+
+- [x] C1. `--thinking=<requested>` verbatim (pre-clamp removed). No
+  retry loop: nothing to retry (see measurement). If a 400 ever
+  materializes in logs, build fallback then (YAGNI until evidence).
+- [x] C2. Kept `""|default|auto → high`; `test_resolve_thinking_level`
+  updated (max passes through for every provider).
+- [x] C3. `[THINKING]` telemetry arm on `format_session_line` (the live
+  tailer path): the session's `thinking_level_change` event renders the
+  EFFECTIVE level next to the `[OMP-PROMPT]` requested level, so CLI
+  downgrades are visible, never silent. Unit tests for both.
 
 ## D. Resume-on-cutoff recovery (opencode)
 
