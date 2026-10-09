@@ -74,3 +74,32 @@ function formatThroughput(tp, task) {
     : 'req/s';
   return `${Math.round(tp).toLocaleString()} ${unit}`;
 }
+
+// Pricing tier from data, not names: $0 API spend = free tier (ranks on the
+// compute floor only — never compare against paid rows on cost).
+// Null/unknown spend counts as paid so nothing hides by accident.
+function tierOf(r) {
+  return ((r || {}).total_cost_usd ?? null) === 0 ? 'free' : 'paid';
+}
+
+// Compact throughput render for spread lines and trial tables.
+function fmtTp(v) {
+  if (v == null) return '-';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k/s';
+  return Math.round(v) + '/s';
+}
+
+// Inter-quartile range over trial values (display only; Wilson on P@1
+// stays the rank key). Nearest-rank quartiles; null below n=2.
+function iqr(vals) {
+  const a = (vals || []).filter(v => v != null && isFinite(v)).sort((x, y) => x - y);
+  if (a.length < 2) return null;
+  const at = p => a[Math.min(a.length - 1, Math.floor(p * (a.length - 1)))];
+  return { q1: at(0.25), med: at(0.5), q3: at(0.75), n: a.length };
+}
+
+function fmtIqr(x, fmt) {
+  if (!x) return 'n/a';
+  const f = fmt || (v => Math.round(v).toLocaleString());
+  return `${f(x.q1)}\u2013${f(x.q3)} (med ${f(x.med)}, n=${x.n})`;
+}

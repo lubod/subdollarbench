@@ -528,6 +528,9 @@ const PORTAL_JS: &str = concat!(
   let currentTab = 'models';
   let searchQuery = '';
   let passOnly = false;
+  // Data-derived pricing tier (shared.js: tierOf). 'all' by default so
+  // nothing hides until the reader asks for a split.
+  let boardTier = 'all';
   // Default sort mirrors the server rank: P@1 lower bound, descending.
   let sortCol = 'p1lo';
   let sortDir = -1;
@@ -617,6 +620,12 @@ const PORTAL_JS: &str = concat!(
     if (onlyPassed) {
       filtered = filtered.filter(r => ((r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? r.avg_pass_rate : (r.pass_rate || 0)) >= 100);
     }
+    // Free rows rank on the compute floor only (zero API spend); paid rows
+    // pay per token. Cross-tier cost comparisons rank nothing, so the split
+    // is explicit and data-derived.
+    if (boardTier !== 'all') {
+      filtered = filtered.filter(r => tierOf(r) === boardTier);
+    }
 
     // 'score' sorts on the server-side score (proportional, no cliff);
     // 'p1lo' mirrors the Rust rank key (P@1 lower bound, descending).
@@ -705,6 +714,11 @@ const PORTAL_JS: &str = concat!(
           <details style="margin-top: 5px; font-size: 0.72rem; color: var(--mut);">
             <summary style="cursor: pointer; color: var(--acc); font-weight: 600;">View ${r.subruns.length} trials breakdown ▾ (${passingCount}/${r.subruns.length} passed · Total spend: $${totalSpent.toFixed(4)})</summary>
             <div style="margin-top: 4px; padding: 6px 8px; background: rgba(0,0,0,0.25); border-radius: 4px; border: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; gap: 4px;">
+              ${(() => {
+                const tpIqr = iqr(r.subruns.map(sr => sr.throughput_req_sec));
+                const tokIqr = iqr(r.subruns.map(sr => sr.total_tokens || ((sr.prompt_tokens || 0) + (sr.cached_tokens || 0) + (sr.completion_tokens || 0))));
+                return `<div style="font-size: 0.72rem; color: var(--mut);" title="Inter-quartile range across trials (display only; ranking uses Wilson P@1 bounds)">spread — throughput: ${fmtIqr(tpIqr, fmtTp)} · tokens: ${fmtIqr(tokIqr)}</div>`;
+              })()}
               ${r.subruns.map((sr, sIdx) => {
                 const sPass = (sr.pass_rate || 0) >= 100;
                 const statusTag = sPass ? '<span style="color:var(--grn);font-weight:600;">✔ 100%</span>' : `<span style="color:var(--red);font-weight:600;">✕ ${Math.round(sr.pass_rate || 0)}%</span>`;
@@ -932,6 +946,7 @@ const PORTAL_JS: &str = concat!(
     // 1. Group runs by (model, effort, task) and pick canonical run (highest trials, latest timestamp)
     const canonical = {};
     for (const r of RUNS_DATA) {
+      if (boardTier !== 'all' && tierOf(r) !== boardTier) continue;
       const task = (r.task || '').toLowerCase();
       const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task + '\u0001' + ((r.harness || 'omp').toLowerCase());
       const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
@@ -1109,6 +1124,17 @@ const PORTAL_JS: &str = concat!(
 
   window.__subdollar_pass_toggle = function(checked) {
     passOnly = !!checked;
+    updateLeaderboardView();
+  };
+
+  window.__subdollar_tier = function(v) {
+    boardTier = (v === 'free' || v === 'paid') ? v : 'all';
+    const btns = document.querySelectorAll('[data-tier]');
+    for (let i = 0; i < btns.length; i++) {
+      const on = btns[i].getAttribute('data-tier') === boardTier;
+      if (on) btns[i].classList.add('active');
+      else btns[i].classList.remove('active');
+    }
     updateLeaderboardView();
   };
 
@@ -1886,7 +1912,7 @@ impl PortalExporter {
         };
 
         format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div><div class=\"card\"><div class=\"k\">📓 WAL Broker</div><div class=\"v\">{wal}</div></div><div class=\"card\"><div class=\"k\">🔀 Reverse Proxy</div><div class=\"v\">{proxy}</div></div><div class=\"card\"><div class=\"k\">📢 Pub/Sub Broker</div><div class=\"v\">{pubsub}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                                  <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>                          <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             {methodology}<script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">             <title>SubDollarBench Leaderboard Portal</title>             <style>{css}</style></head><body><main>             <div style=\"display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:1.2rem;\">               <div>                 <h1>🏆 SubDollarBench Leaderboard Portal</h1>                 <div class=\"sub\">Autonomous under-$1 LLM systems benchmark · Task-specific &amp; consolidated rankings · Strict 100% pass rate requirement · Calibrated reference-adjusted throughput (pts/¢)</div>               </div>               <div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:6px;\">                 <div style=\"display:flex;align-items:center;gap:8px;\">                   <a href=\"/\" style=\"display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;background:rgba(88,166,255,0.12);color:var(--primary);text-decoration:none;font-weight:600;font-size:0.78rem;border:1px solid rgba(88,166,255,0.25);\">🚀 Benchmark Runner &amp; Console</a>                 </div>                 <div style=\"text-align:right;font-size:0.74rem;color:var(--mut);\">                   <div>Updated {now}{base_info}</div>                   <div style=\"margin-top:4px;\"><span class=\"badge badge-pass\">✔ {passed} Passed</span> <span class=\"badge badge-info\">📊 {n} Total</span></div>                 </div>               </div>             </div>             <div class=\"grid\">               <div class=\"card\"><div class=\"k\">Total Runs</div><div class=\"v\">{n}</div></div>               <div class=\"card\"><div class=\"k\">Passed (100%)</div><div class=\"v\" style=\"color:var(--grn);\">{passed}</div></div>               <div class=\"card\"><div class=\"k\">🌐 HTTP Server</div><div class=\"v\">{http}</div></div>               <div class=\"card\"><div class=\"k\">⚡ Redis Clone</div><div class=\"v\">{redis}</div></div>               <div class=\"card\"><div class=\"k\">📄 PDF Microservice</div><div class=\"v\">{pdf}</div></div><div class=\"card\"><div class=\"k\">📓 WAL Broker</div><div class=\"v\">{wal}</div></div><div class=\"card\"><div class=\"k\">🔀 Reverse Proxy</div><div class=\"v\">{proxy}</div></div><div class=\"card\"><div class=\"k\">📢 Pub/Sub Broker</div><div class=\"v\">{pubsub}</div></div>             </div>             <div class=\"controls-bar\">               <div class=\"pills-group\">                 <button type=\"button\" class=\"btn-toggle active\" data-tier=\"all\" onclick=\"window.__subdollar_tier('all')\" title=\"Compare every row\">All</button>                 <button type=\"button\" class=\"btn-toggle\" data-tier=\"free\" onclick=\"window.__subdollar_tier('free')\" title=\"Free = $0 API spend (compute floor only). Never compare across tiers on cost.\">Free ($0 API)</button>                 <button type=\"button\" class=\"btn-toggle\" data-tier=\"paid\" onclick=\"window.__subdollar_tier('paid')\" title=\"Rows with paid API usage\">Paid</button>                                  <label style=\"font-size:0.75rem;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;\">                   <input type=\"checkbox\" onchange=\"window.__subdollar_pass_toggle(this.checked)\"> 100% Pass Only                 </label>                 <input type=\"text\" class=\"search-input\" placeholder=\"🔍 Search model or language...\" oninput=\"window.__subdollar_search(this.value)\">               </div>             </div>                          <div id=\"portalDynamicContainer\">               <div style=\"margin-bottom:12px;padding:10px 14px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.2);border-radius:6px;font-size:0.78rem;color:var(--mut);display:flex;align-items:center;gap:8px;\">                 <span>📐</span>                 <span><strong>Scoring Regime:</strong> Throughput scoring is normalized against measured reference baselines on this benchmark host: <strong>HTTP</strong> (Nginx: 33k req/s), <strong>Redis</strong> (Redis: 71k req/s), <strong>DNS</strong> (Reference UDP Resolver: 19k queries/s), <strong>PDF</strong> (Reference Extractor: 4.6k pages/s).</span>               </div>               <div class=\"wrap\">                 <table>                   <thead>                     <tr>                       <th style=\"width:50px;text-align:center;\">#</th>                       <th>Model &amp; Stack</th>                       <th>Conformance &amp; Effort</th>                       <th>Duration</th>                       <th style=\"text-align:center;\">Turns</th>                       <th>Throughput</th>                       <th>Cost &amp; Tokens</th>                       <th>Score pts/&cent;</th>                       <th>Action</th>                     </tr>                   </thead>                   <tbody>{initial_rows}</tbody>                 </table>               </div>             </div>             {methodology}<script>window.__SUBDOLLAR_RUNS__ = {runs_json};</script>             <script>{js}</script>             <footer class=\"muted\">SubDollarBench static portal · Click any row to inspect run logs and source code · Click a table header to sort.</footer>             </main></body></html>",
             css = PORTAL_CSS,
             js = PORTAL_JS,
             n = results.len(),
@@ -2720,6 +2746,63 @@ mod tests {
         assert!(publishable("2026-09-26T15:34:10"));
         assert!(publishable("2026-09-26T19:45:16.109579"));
         assert!(!publishable("2026-09-16T14:54:59.418874"));
+    }
+
+    /// The portal is a single inline <script>: a typo inside it breaks the
+    /// whole page, and nothing in the Rust compile path would notice. These
+    /// assertions pin the free/paid board split (slice 1b parity) and, when
+    /// node is available, hard-fail on a JS syntax error. The paren typo this
+    /// guards against actually shipped once during review.
+    #[test]
+    fn test_portal_js_has_tier_split_and_parses() {
+        assert!(
+            PORTAL_JS.contains("window.__subdollar_tier"),
+            "portal must expose the tier handler"
+        );
+        assert!(
+            PORTAL_JS.contains("data-tier"),
+            "portal markup must carry the tier pills"
+        );
+        assert!(
+            PORTAL_JS.contains("tierOf(r) === boardTier"),
+            "both views must filter on the data-derived tier"
+        );
+        // Layout parity with the GUI: the spread line is display-only and the
+        // rank key stays Wilson P@1.
+        assert!(
+            PORTAL_JS.contains("spread \u{2014} throughput")
+                || PORTAL_JS.contains("spread — throughput")
+        );
+
+        // Leaf helpers come from shared.js (inlined by concat!), not redefined.
+        assert!(PORTAL_JS.contains("function tierOf"));
+        assert!(PORTAL_JS.contains("function iqr"));
+        assert!(PORTAL_JS.contains("function fmtTp"));
+
+        // Delimiter balance is necessary-but-not-sufficient; node --check is
+        // the real parser. Skip (not fail) when node is absent.
+        for (open, close) in [("{", "}"), ("(", ")"), ("[", "]")] {
+            let o = PORTAL_JS.matches(open).count();
+            let c = PORTAL_JS.matches(close).count();
+            assert_eq!(o, c, "unbalanced {open}{close} in portal JS");
+        }
+        let dir = std::env::temp_dir().join(format!("portal_js_check_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("portal.js");
+        std::fs::write(&f, PORTAL_JS).unwrap();
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&f)
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
+        match out {
+            Ok(o) => assert!(
+                o.status.success(),
+                "node --check rejected the portal JS: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(_) => eprintln!("node not found; skipping portal JS parse check"),
+        }
     }
 
     #[test]
