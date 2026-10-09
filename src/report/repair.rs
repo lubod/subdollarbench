@@ -348,8 +348,6 @@ pub struct RepairOutcome {
     pub report: RepairReport,
 }
 
-
-
 /// Dry-run by default; `apply=true` writes (manifests, results JSON,
 /// bench.db, trial-file cleanup via consolidate).
 pub fn run_repair(results_dir: &Path, runs_dir: &Path, apply: bool) -> Result<RepairReport> {
