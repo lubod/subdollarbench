@@ -191,6 +191,11 @@ until the wave lands — do NOT regen/push an empty board).
 Wave spec (user-approved): `openrouter/inclusionai/ling-3.1-flash` × 7
 tasks × {low,high,max} × {omp,opencode} × 9 trials = 42 cells / 378
 trials, uniform (no extend-if-unstable), enqueued q1–q42 (~17:11Z).
+  2026-10-10: REMOVED pending opencode proxy cells (q25/q32/q39) — proxy
+  task is infra-capped this wave (prompt port contradiction + upstream
+  publish decay; see proxy diagnosis). Saved ~27 trials of unscorable
+  runs. Done OMP proxy cells (q4/q11/q18) kept as records, flagged for
+  post-drain annotation + rerun under fixed prompt. Queue now 39 cells.
 First wave on the new binary: machine variants, cutoff recovery,
 turn telemetry, effective-effort recording, live robustness probes.
 Model spend $0 (catalog-free); review judge (muse-spark default) ≈ $2
