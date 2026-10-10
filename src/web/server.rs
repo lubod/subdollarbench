@@ -4405,6 +4405,8 @@ mod tests {
             "liveFor",
             "· #${qi.pos}",
             "live snapshot",
+            "matrixLiveStrip",
+            "refreshMatrixLive",
         ] {
             assert!(
                 html.contains(marker),

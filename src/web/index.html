@@ -1547,8 +1547,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         <div id="tab-matrix" style="display: none; flex-direction: column; gap: 16px;">
           <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px;">
             <span id="matrixCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
-            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => renderMatrix())">Refresh</button>
+            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => refreshMatrixLive()).then(() => renderMatrix())">Refresh</button>
           </div>
+          <div id="matrixLiveStrip" style="display: none; font-size: 0.75rem; color: var(--text-muted);"></div>
           <div style="width: 100%; overflow-x: auto;">
             <table class="responsive-runs-table">
               <thead><tr id="matrixHeadRow">
@@ -2190,7 +2191,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       } else if (name === 'matrix') {
         document.getElementById('tab-matrix').style.display = 'flex';
         if (tabBtn) tabBtn.classList.add('active');
-        ensureBoardData().then(() => renderMatrix());
+        ensureBoardData().then(() => refreshMatrixLive()).then(() => renderMatrix());
       }
     }
 
@@ -3261,8 +3262,38 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       return ((el || {}).value || 'omp');
     }
 
+    // Queue + workers go stale within a wave: the shared loader
+    // early-returns on cached boardRows, so the matrix refreshes its live
+    // inputs itself on every view. Failure keeps the last snapshot.
+    async function refreshMatrixLive() {
+      try {
+        const [q, st] = await Promise.all([
+          fetch('/api/queue').then(r => r.ok ? r.json() : []).catch(() => []),
+          fetch('/api/status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+        ]);
+        boardQueueItems = q || [];
+        boardWorkers = (st && st.workers) || {};
+        const c = { Running: 0, Pending: 0, Done: 0 };
+        (boardQueueItems || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
+        boardQueue = c;
+      } catch (e) { /* keep last snapshot */ }
+    }
+
     function renderMatrix() {
       const badge = document.getElementById('matrixCountBadge');
+      const strip = document.getElementById('matrixLiveStrip');
+      if (strip) {
+        const live = Object.values(boardWorkers || {}).filter(w => w && w.model && w.task);
+        if (!live.length) {
+          strip.style.display = 'none';
+          strip.innerHTML = '';
+        } else {
+          strip.style.display = 'block';
+          strip.innerHTML = '▶ now running: ' + live.map(w =>
+            `<span class="badge badge-info" style="margin-right:6px;" title="${escapeHtml(w.run_id || '')}">▶ ${escapeHtml(shortModelName(w.model))} ${(w.task || '').toLowerCase()} ${escapeHtml(w.effort || '')} · trial ${(w.subrun ?? '?')}/${(w.total_subruns ?? '?')}${(w.turns != null ? ` · ${w.turns}t` : '')}</span>`
+          ).join('');
+        }
+      }
       const head = document.getElementById('matrixHeadRow');
       const tbody = document.getElementById('matrixTableBody');
       const tfoot = document.getElementById('matrixTableFoot');
@@ -4877,7 +4908,7 @@ function copyRunId() {
         }
         const data = await res.json();
         alert('Queued ' + data.id + ' (' + model.split('/').pop() + ' / ' + task + ' / ' + effort + ') — ' + (data.started ? 'started now' : 'position ' + (data.position ?? '?')));
-        ensureBoardData(true).then(() => renderMatrix());
+        ensureBoardData(true).then(() => refreshMatrixLive()).then(() => renderMatrix());
       } catch (e) { alert('Queue error: ' + e.message); }
     }
 
