@@ -216,3 +216,46 @@ Deep-analysis plan (runs when the wave drains):
 - [ ] J8. Probe data on fresh trials: Robust1/differential promotion
   evidence toward the 3c threshold; Robust2 policy input.
 - [ ] J9. Regen + push portal on landed data; paper inputs (5b/5c).
+
+## K. Cheat top-up + merge rule (user-approved 2026-10-10)
+
+Policy: 8 honest trials are accepted; the cheat stays visible. Two
+halves — operational top-ups (no code) + merge-rule change (code, .4).
+
+### K1. Top-ups (operational, NO code, NO bump)
+- Vehicle: existing `POST /api/runs/{id}/extend {trials, queue:true}`
+  (trial numbering continues at trial10+, no collisions; re-merges on
+  completion). Precedent: q43 extension.
+- DONE 2026-10-10 (engine live, .3 binary): q43 pdf/low +1, q44 pdf/high
+  +2, q45 pdf/max +2, q46 pubsub/low +1 = 6 trials, positions 13–16.
+  Same stamp as siblings (no deploy between) → no mixed fingerprints.
+- Rules: top-up count = cheat count, cap 2 attempts per cell per round;
+  a replacement that cheats again is accepted (cell ranks on valid n).
+  Proxy cells EXCLUDED (need prompt fix first; full reruns instead).
+- Post-drain: scan all cells (incl. opencode half) for remaining cheat
+  gaps; repeat once if needed.
+
+### K2. Merge rule (code, post-drain, RULES .4)
+- `merge_subruns`: drop `disqualified_cheat` subruns from pass
+  aggregates (rate, P@1, counts). All-cheat parent → status
+  `disqualified_cheat` (excluded, as today). Else status from valid
+  trials + new `disqualified_trials: [ids]` list on the row.
+- Visibility (the cheat must read clearly, not vanish):
+  - Matrix cell: `{p1}% n=<valid> DQ<cheats>` (e.g. `66.7% n=8 DQ1`)
+    with tooltip naming trial + reason + "excluded from score,
+    retained in record".
+  - Run page: DQ sections keep badges + add "excluded from parent
+    score" line.
+  - Portal methodology: one sentence on cheat exclusion + counts.
+- Existing merge-DQ-propagation tests updated (they pin old behavior).
+
+### K3. Backfill (post-deploy .4)
+- Recompute all parents under the new rule (repair/backfill path):
+  topped-up cells merge to n=9 (+ archived DQ trials alongside);
+  untopped cells show n=8+DQ markers. Scores change only by removing
+  cheat trials from denominators — no invented data.
+
+### .4 scope (one bump, one deploy, one backfill)
+cheat-merge + visibility + proxy template fix + upstream health gate +
+stage-prefix cosmetic. Trial rows keep stamping pre-bump versions until
+deploy; merges recomputed after.
