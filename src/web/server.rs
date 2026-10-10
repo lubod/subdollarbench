@@ -4396,7 +4396,21 @@ mod tests {
             html.contains("matrixTableFoot"),
             "matrix table must carry the column-summary footer element"
         );
-        // Script: row accumulator + summary cell, column aggregates + footer.
+        // Script: row accumulator + summary cell, column aggregates + footer,
+        // plus the wave monitor (queued/running status cells, live trial
+        // progress, rerun markers).
+        for marker in [
+            "boardQueueItems",
+            "boardWorkers",
+            "liveFor",
+            "queued #",
+            "live snapshot",
+        ] {
+            assert!(
+                html.contains(marker),
+                "matrix JS must contain the wave-monitor logic ({marker})"
+            );
+        }
         for marker in [
             "Row summary</th>",
             "colStats",

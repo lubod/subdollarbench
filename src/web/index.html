@@ -1560,7 +1560,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               <tfoot id="matrixTableFoot"></tfoot>
             </table>
           </div>
-          <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. The last column summarizes each row (mean P@1, 100% cells, coverage, spend); the footer summarizes each task column (mean P@1, best model, rows run). Same-regime ranks only — mixed stamps never compare.</p>
+          <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. The last column summarizes each row (mean P@1, 100% cells, coverage, spend); the footer summarizes each task column (mean P@1, best model, rows run). ⏳/▶ cells are queued/running wave cells (no P@1 yet — hover for status); ↻ on a scored cell means a rerun is queued or running. Same-regime ranks only — mixed stamps never compare.</p>
         </div>
 
         <!-- Tab 3: Prompt Specification -->
@@ -3133,18 +3133,26 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     // ===== Shared board data: Models / Tasks / Formula tabs =====
     let boardRows = [];
     let boardQueue = { Running: 0, Pending: 0, Done: 0 };
+    // Raw queue cells + live worker snapshot for the matrix wave monitor.
+    // Queued cells have no P@1: they render as status cells, never into
+    // aggregates. Refreshed with boardRows (matrix re-reads both).
+    let boardQueueItems = [];
+    let boardWorkers = {};
 
     async function ensureBoardData(force = false) {
       if (boardRows.length && !force) return boardRows;
       try {
-        const [lb, q] = await Promise.all([
+        const [lb, q, st] = await Promise.all([
           fetch('/api/leaderboard?task=all').then(r => r.ok ? r.json() : []),
           fetch('/api/queue').then(r => r.ok ? r.json() : []).catch(() => []),
+          fetch('/api/status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
         ]);
         boardRows = (lb || []).filter(r => !r.portal_hidden && !r.poisoned);
         const c = { Running: 0, Pending: 0, Done: 0 };
         (q || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
         boardQueue = c;
+        boardQueueItems = q || [];
+        boardWorkers = (st && st.workers) || {};
       } catch (e) {
         const b = document.getElementById('modelsErrorBanner');
         if (b) { b.style.display = 'block'; b.textContent = `Board offline: ${e.message || e}`; }
@@ -3268,18 +3276,60 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const ex = canon[key];
         if (!ex || n > (ex.total_trials ?? 0)) canon[key] = r;
       });
-      const models = [...new Set(Object.values(canon).map(r => r.model))].sort();
+      // Wave monitor: queued cells by canon key (Pending/Running only —
+      // Done rows are history, canon covers them). Pending order gives the
+      // "#n in queue" position.
+      const queued = {};
+      let pendPos = 0;
+      (boardQueueItems || []).forEach(qi => {
+        if (!qi || !qi.kind || !qi.kind.Run) return;
+        if (qi.status !== 'Pending' && qi.status !== 'Running') return;
+        const rk = qi.kind.Run;
+        const key = `${rk.model}\u0001${rk.effort || 'auto'}\u0001${(rk.task || '').toLowerCase()}\u0001${(rk.harness || 'omp').toLowerCase()}`;
+        if (qi.status === 'Pending') pendPos++;
+        queued[key] = { status: qi.status, id: qi.id, pos: qi.status === 'Pending' ? pendPos : 0,
+          trials: rk.trials ?? 9, note: qi.note || '', refusals: qi.refusals || 0,
+          notBefore: qi.not_before || null };
+      });
+      // Live trial progress. Workers carry (model, task, effort) but no
+      // harness, so a worker attaches to a rendered Running cell only when
+      // the attribution is unique: exactly one worker AND exactly one
+      // Running queued key on the triple. Otherwise silent, never wrong.
+      const workersByTriple = {};
+      Object.values(boardWorkers || {}).forEach(w => {
+        if (!w || !w.model || !w.task) return;
+        const tk = `${w.model}\u0001${(w.task || '').toLowerCase()}\u0001${w.effort || 'auto'}`;
+        (workersByTriple[tk] = workersByTriple[tk] || []).push(w);
+      });
+      const runningKeysByTriple = {};
+      Object.keys(queued).forEach(k => {
+        if (queued[k].status !== 'Running') return;
+        const parts = k.split('\u0001');
+        const tk = parts[0] + '\u0001' + parts[2] + '\u0001' + parts[1];
+        runningKeysByTriple[tk] = (runningKeysByTriple[tk] || 0) + 1;
+      });
+      const liveFor = (key, m, eff, tkTask) => {
+        const tk = `${m}\u0001${(tkTask || '').toLowerCase()}\u0001${eff || 'auto'}`;
+        const q = queued[key];
+        if (!q || q.status !== 'Running') return null;
+        const ws = workersByTriple[tk] || [];
+        if (ws.length !== 1 || (runningKeysByTriple[tk] || 0) !== 1) return null;
+        return ws[0];
+      };
+      const qModels = Object.keys(queued).map(k => k.split('\u0001')[0]);
+      const models = [...new Set(Object.values(canon).map(r => r.model).concat(qModels))].sort();
       const tasks = ['redis', 'binproto', 'http', 'pdf', 'proxy', 'pubsub', 'wal'];
       // Column aggregates: mean P@1, best model, rows run — over cells that ran.
       const colStats = tasks.map(() => ({ sum: 0, n: 0, best: null, bestV: -1 }));
       let rowCount = 0, filledCells = 0, grandSum = 0, grandN = 0;
-      const efforts = [...new Set(Object.values(canon).map(r => r.effort || 'auto'))].sort();
+      const qEfforts = Object.keys(queued).map(k => k.split('\u0001')[1] || 'auto');
+      const efforts = [...new Set(Object.values(canon).map(r => r.effort || 'auto').concat(qEfforts))].sort();
       head.innerHTML = '<th>Model</th>' + tasks.map(t => `<th>${escapeHtml(t)}</th>`).join('')
         + `<th title="Row summary: mean P@1 across tasks this row ran · cells at 100% · task coverage · summed spend">Row summary</th>`;
       tbody.innerHTML = '';
       models.forEach(m => {
         efforts.forEach(eff => {
-          const hhs = ['omp', 'opencode'].filter(hh => tasks.some(t => !!canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]));
+          const hhs = ['omp', 'opencode'].filter(hh => tasks.some(t => !!canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`] || !!queued[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]));
           if (!hhs.length) return;
           hhs.forEach(hh => {
           const tr = document.createElement('tr');
@@ -3296,7 +3346,21 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             + (stamp ? `<span style="font-size:.68rem;color:var(--text-muted);" title="Rules stamp + wave time">${escapeHtml(stamp)} · ${escapeHtml(wave)}</span>` : '')
             + `</div></td>`;
           tasks.forEach((t, ti) => {
-            const r = canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`];
+            const key = `${m}\u0001${eff}\u0001${t}\u0001${hh}`;
+            const r = canon[key];
+            const qi = queued[key];
+            if (!r && qi) {
+              // Queued but unrun: status cell, never an aggregate. Parked
+              // (not_before) and refused cells say so in the tooltip.
+              const parked = !!qi.notBefore;
+              const live = qi.status === 'Running' ? liveFor(key, m, eff, t) : null;
+              const prog = live ? ` trial ${(live.subrun ?? '?')}/${(live.total_subruns ?? '?')}` + (live.turns != null ? ` · ${live.turns}t` : '') : '';
+              const state = qi.status === 'Running' ? `▶ running${prog}` : (parked ? `⏸ parked` : `⏳ queued #${qi.pos}`);
+              const tip = `${qi.id} · ${qi.status}` + (parked ? ` · parked until ${qi.notBefore}` : '') + (qi.refusals ? ` · refused ×${qi.refusals}` : '') + (qi.note ? ` · ${qi.note}` : '') + ` · ${qi.trials} trials planned` + (live ? ' · live snapshot' : '');
+              const bg = qi.status === 'Running' ? 'rgba(88,166,255,.13)' : 'transparent';
+              cells += `<td style="text-align:center;background:${bg};color:var(--text-muted);font-size:.78rem;" title="${escapeHtml(tip)}">${escapeHtml(state)}</td>`;
+              return;
+            }
             if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
             if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click the cell to inspect, ＋ to rerun clean" style="cursor:pointer;" onclick="inspectRun('${escapeHtml(r.id || '')}')">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
 
@@ -3306,8 +3370,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const stamp = (r.rules_version || '').split('+')[0] || '';
             const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
             const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
+            const reQ = queued[key];
+            const liveRun = (reQ && reQ.status === 'Running') ? liveFor(key, m, eff, t) : null;
+            const liveTxt = liveRun ? ` ▶ trial ${(liveRun.subrun ?? '?')}/${(liveRun.total_subruns ?? '?')}` + (liveRun.turns != null ? ` · ${liveRun.turns}t` : '') : '';
+            const reMark = reQ ? ` <span title="${escapeHtml(`${reQ.status}: ${reQ.id}` + (liveRun ? ' · live snapshot' : ''))}">↻${escapeHtml(liveTxt)}</span>` : '';
             const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
-            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}</td>`;
+            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}</td>`;
             rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
             rowCost += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
             rowTip.push(`${t}: ${Math.round(p1)}% (n=${n})`);
@@ -3337,7 +3405,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           tfoot.innerHTML = `<tr style="border-top:2px solid var(--border);background:rgba(13,17,23,.5);">${corner}${cols}<td></td></tr>`;
         }
       }
-      if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks · ${rowCount} rows · ${filledCells} cells`;
+      const nPend = Object.values(queued).filter(x => x.status === 'Pending').length;
+      const nRun = Object.values(queued).filter(x => x.status === 'Running').length;
+      if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks · ${rowCount} rows · ${filledCells} cells` + (nPend || nRun ? ` · ⏳ ${nPend} queued · ▶ ${nRun} running` : '');
     }
 
     function renderTasks() {
