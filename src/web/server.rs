@@ -4403,7 +4403,7 @@ mod tests {
             "boardQueueItems",
             "boardWorkers",
             "liveFor",
-            "queued #",
+            "· #${qi.pos}",
             "live snapshot",
         ] {
             assert!(

@@ -3355,7 +3355,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               const parked = !!qi.notBefore;
               const live = qi.status === 'Running' ? liveFor(key, m, eff, t) : null;
               const prog = live ? ` trial ${(live.subrun ?? '?')}/${(live.total_subruns ?? '?')}` + (live.turns != null ? ` · ${live.turns}t` : '') : '';
-              const state = qi.status === 'Running' ? `▶ running${prog}` : (parked ? `⏸ parked` : `⏳ queued #${qi.pos}`);
+              const state = qi.status === 'Running' ? `▶ running${prog}` : (parked ? `⏸ ${qi.id}` : `⏳ ${qi.id} · #${qi.pos}`);
               const tip = `${qi.id} · ${qi.status}` + (parked ? ` · parked until ${qi.notBefore}` : '') + (qi.refusals ? ` · refused ×${qi.refusals}` : '') + (qi.note ? ` · ${qi.note}` : '') + ` · ${qi.trials} trials planned` + (live ? ' · live snapshot' : '');
               const bg = qi.status === 'Running' ? 'rgba(88,166,255,.13)' : 'transparent';
               cells += `<td style="text-align:center;background:${bg};color:var(--text-muted);font-size:.78rem;" title="${escapeHtml(tip)}">${escapeHtml(state)}</td>`;
