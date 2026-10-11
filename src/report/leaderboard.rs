@@ -383,18 +383,38 @@ impl BenchmarkRunResult {
             return Some(single);
         }
 
-        let n = subruns.len();
+        // Cheat exclusion: disqualified trials never enter aggregates. They
+        // stay in `subruns` (visible, auditable) but every mean, ratio,
+        // best-trial pick and the P@1 denominator below run over `agg`.
+        // Uniform-valid denominators: the row summarizes scored trials;
+        // cheat spend stays on the trial rows, not in the headline.
+        // All-cheat cells keep the old path (nothing valid to rank) and
+        // stay disqualified_cheat.
+        let has_cheat = subruns
+            .iter()
+            .any(|r| r.status.as_deref() == Some("disqualified_cheat"));
+        let valid: Vec<BenchmarkRunResult> = if has_cheat {
+            subruns
+                .iter()
+                .filter(|r| r.status.as_deref() != Some("disqualified_cheat"))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let agg: &[BenchmarkRunResult] = if valid.is_empty() { &subruns } else { &valid };
+        let n = agg.len();
 
         // 1. Conformance & Reliability Metrics
         let passing: Vec<&BenchmarkRunResult> =
-            subruns.iter().filter(|r| r.pass_rate >= 100.0).collect();
+            agg.iter().filter(|r| r.pass_rate >= 100.0).collect();
         let c = passing.len();
         let pass_at_1 = (c as f64 / n as f64) * 100.0;
         let pass_at_k = compute_pass_at_k(n, c, n) * 100.0;
-        let avg_pass_rate = subruns.iter().map(|r| r.pass_rate).sum::<f64>() / n as f64;
+        let avg_pass_rate = agg.iter().map(|r| r.pass_rate).sum::<f64>() / n as f64;
 
         // 2. Canonical best trial (shared helper: same trial review-run reads).
-        let best = Self::canonical_best(&subruns).unwrap_or(&subruns[0]);
+        let best = Self::canonical_best(agg).unwrap_or(&agg[0]);
 
         // 3. Fair Throughput: median among passing trials, but only when a
         // live/batch reference exists. Unanchored medians (wal/pdf/pubsub
@@ -434,8 +454,8 @@ impl BenchmarkRunResult {
         // 6.7x): failed trials still burn API + compute. The score already
         // prices failure via the Pass@1 multiplier (step 6); hiding failed
         // spend in the cost column double-counted success.
-        let sum_cost: f64 = subruns.iter().map(|r| r.total_cost_usd).sum();
-        let sum_eff: f64 = subruns
+        let sum_cost: f64 = agg.iter().map(|r| r.total_cost_usd).sum();
+        let sum_eff: f64 = agg
             .iter()
             .map(|r| r.effective_cost_usd.unwrap_or(r.total_cost_usd))
             .sum();
@@ -449,18 +469,14 @@ impl BenchmarkRunResult {
         // score already prices failure via Pass@1 (step 6), and
         // headline passed_stages stays an all-trial mean (step ~397).
         let (fair_dur, fair_turns, fair_prompt, fair_cached, fair_comp, fair_tot_tok, fair_savings) = {
-            let dur: f64 = subruns
-                .iter()
-                .filter_map(|r| r.duration_seconds)
-                .sum::<f64>()
-                / n as f64;
-            let turns: u32 = (subruns.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / n as f64)
-                .round() as u32;
-            let p: u64 = subruns.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
-            let ca: u64 = subruns.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
-            let co: u64 = subruns.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
-            let tot: u64 = subruns.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
-            let sav: f64 = subruns.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
+            let dur: f64 = agg.iter().filter_map(|r| r.duration_seconds).sum::<f64>() / n as f64;
+            let turns: u32 =
+                (agg.iter().filter_map(|r| r.turns).sum::<u32>() as f64 / n as f64).round() as u32;
+            let p: u64 = agg.iter().map(|r| r.prompt_tokens).sum::<u64>() / n as u64;
+            let ca: u64 = agg.iter().map(|r| r.cached_tokens).sum::<u64>() / n as u64;
+            let co: u64 = agg.iter().map(|r| r.completion_tokens).sum::<u64>() / n as u64;
+            let tot: u64 = agg.iter().map(|r| r.total_tokens).sum::<u64>() / n as u64;
+            let sav: f64 = agg.iter().map(|r| r.savings_percent).sum::<f64>() / n as f64;
             (Some(dur), Some(turns), p, ca, co, tot, sav)
         };
 
@@ -513,7 +529,7 @@ impl BenchmarkRunResult {
         // Honest headline: mean pass rate across trials. Best-of lives in
         // pass_at_k; the canonical workspace still comes from `best`.
         let headline_pass_rate = avg_pass_rate;
-        let mean_passed = subruns.iter().map(|r| r.passed_stages).sum::<u32>() as f64 / n as f64;
+        let mean_passed = agg.iter().map(|r| r.passed_stages).sum::<u32>() as f64 / n as f64;
         let headline_passed_stages = mean_passed.round() as u32;
         let (w_lo, w_hi) = wilson_interval_95(n, c);
 
@@ -586,10 +602,8 @@ impl BenchmarkRunResult {
             method_version: best.method_version.clone(),
             rules_version: merged_rules_version,
             graded_under: merged_graded_under,
-            status: if subruns
-                .iter()
-                .any(|s| s.status.as_deref() == Some("disqualified_cheat"))
-            {
+            status: if has_cheat && valid.is_empty() {
+                // No valid trial to rank (all-cheat cell): excluded, as before.
                 Some("disqualified_cheat".to_string())
             } else {
                 None
@@ -802,21 +816,18 @@ impl LeaderboardManager {
             return None;
         }
 
-        let mut merged = BenchmarkRunResult::merge_subruns(
-            parent_run_id,
-            subrun_results.to_vec(),
-            batch_drift,
-            Some(crate::report::rules::fingerprint()),
-        )?;
-        // Belt and suspenders with the manifest-file check below: trial
-        // manifests are authoritative for cheating (old result rows predate
-        // the status field), so a manifest verdict always wins here.
-        let manifest_cheat = subrun_results.iter().any(|sub| {
+        // Status sync: trial manifests are authoritative for cheating (old
+        // result rows predate the status field). Patch row statuses BEFORE
+        // merging so merge_subruns' exclusion sees one consistent verdict;
+        // no post-merge override (single mechanism). Missing/unreadable
+        // manifest counts as NOT cheat — unknown never nukes a parent.
+        let mut synced: Vec<BenchmarkRunResult> = subrun_results.to_vec();
+        for sub in synced.iter_mut() {
             let p = crate::config::get_repo_root()
                 .join("runs")
                 .join(&sub.id)
                 .join("manifest.json");
-            std::fs::read_to_string(p)
+            let manifest_cheat = std::fs::read_to_string(p)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .and_then(|v| {
@@ -824,11 +835,17 @@ impl LeaderboardManager {
                         .and_then(|x| x.as_str())
                         .map(|x| x.to_string())
                 })
-                == Some("disqualified_cheat".to_string())
-        });
-        if manifest_cheat {
-            merged.status = Some("disqualified_cheat".to_string());
+                == Some("disqualified_cheat".to_string());
+            if manifest_cheat {
+                sub.status = Some("disqualified_cheat".to_string());
+            }
         }
+        let merged = BenchmarkRunResult::merge_subruns(
+            parent_run_id,
+            synced,
+            batch_drift,
+            Some(crate::report::rules::fingerprint()),
+        )?;
 
         if save_results {
             let repo_root = crate::config::get_repo_root();
@@ -880,17 +897,15 @@ impl LeaderboardManager {
 
             let best_sub_dir = runs_dir.join(&best_sub.id);
 
-            // Check if any subrun was disqualified for cheating
-            let any_cheat = subrun_results.iter().any(|sub| {
-                let sub_manifest_path = runs_dir.join(&sub.id).join("manifest.json");
-                if let Ok(m_str) = fs::read_to_string(sub_manifest_path) {
-                    if let Ok(m_val) = serde_json::from_str::<serde_json::Value>(&m_str) {
-                        return m_val.get("status").and_then(|s| s.as_str())
-                            == Some("disqualified_cheat");
-                    }
-                }
-                false
-            });
+            // Parent verdict: disqualified only when NO valid trial remains
+            // (all-cheat cell). Mixed cells take completed/failed_tests from
+            // the valid trials; the cheat trials stay listed in subruns with
+            // their stamps (visible, excluded from score).
+            let n_valid = merged
+                .subruns
+                .iter()
+                .filter(|s| s.status.as_deref() != Some("disqualified_cheat"))
+                .count();
 
             // 1. Build genuine merged parent manifest (not a trial-1 clone)
             if let Ok(content) = fs::read_to_string(best_sub_dir.join("manifest.json")) {
@@ -898,7 +913,7 @@ impl LeaderboardManager {
                     serde_json::from_str::<crate::report::RunManifest>(&content)
                 {
                     manifest.run_id = parent_run_id.to_string();
-                    manifest.status = if any_cheat {
+                    manifest.status = if n_valid == 0 {
                         "disqualified_cheat".to_string()
                     } else if merged.avg_pass_rate.unwrap_or(merged.pass_rate) >= 100.0 {
                         "completed".to_string()
@@ -2670,6 +2685,129 @@ mod tests {
             "Reconsolidated {} historical multi-trial runs in results/",
             count
         );
+    }
+
+    /// Cheat exclusion (§K): DQ trials never enter aggregates but stay
+    /// listed; mixed parents rank on valid trials, all-cheat stay out.
+    #[test]
+    fn test_merge_excludes_cheat_trials_but_keeps_them_listed() {
+        let mk = |id: &str, pass: f64, status: Option<&str>| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "pdf".to_string(),
+            language: "Python".to_string(),
+            effort: Some("high".to_string()),
+            effort_effective: None,
+            status: status.map(|s| s.to_string()),
+            harness: None,
+            pass_rate: pass,
+            passed_stages: if pass >= 100.0 { 6 } else { 0 },
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-10-09T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: vec![],
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+        };
+        // 8 honest (6x100 + 2x0) + 1 cheat at 0%: the cheat must not move
+        // any aggregate, but must stay in subruns with its stamp.
+        let mut subs = vec![];
+        for i in 0..6 {
+            subs.push(mk(&format!("t{i}"), 100.0, Some("completed")));
+        }
+        subs.push(mk("t6", 0.0, Some("failed_tests")));
+        subs.push(mk("t7", 0.0, Some("failed_tests")));
+        subs.push(mk("t8", 0.0, Some("disqualified_cheat")));
+        let m = BenchmarkRunResult::merge_subruns("p", subs, None, None).unwrap();
+        // 6/8 over valid trials — the cheat (0%) is not in the denominator.
+        assert_eq!(m.total_trials, Some(8));
+        assert!((m.pass_at_1.unwrap() - 75.0).abs() < 1e-9);
+        assert!((m.avg_pass_rate.unwrap() - 75.0).abs() < 1e-9);
+        assert_eq!(m.subruns.len(), 9, "cheat stays listed");
+        assert!(m
+            .subruns
+            .iter()
+            .any(|s| s.status.as_deref() == Some("disqualified_cheat")));
+        assert_eq!(
+            m.status, None,
+            "mixed parent ranks (boards filter DQ rows, not parents)"
+        );
+    }
+
+    #[test]
+    fn test_merge_all_cheat_parent_stays_disqualified() {
+        let mk = |id: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "pdf".to_string(),
+            language: "Python".to_string(),
+            effort: None,
+            effort_effective: None,
+            status: Some("disqualified_cheat".to_string()),
+            harness: None,
+            pass_rate: 0.0,
+            passed_stages: 0,
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-10-09T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: vec![],
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+        };
+        let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
+        assert_eq!(m.status.as_deref(), Some("disqualified_cheat"));
     }
 
     #[test]

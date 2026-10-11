@@ -8,6 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-09.4`: trial-level cheat exclusion + proxy verifiability.
+///   Merges drop `disqualified_cheat` subruns from pass aggregates and
+///   rank parents on valid trials (visible DQ counts + tooltips; all-cheat
+///   parents stay excluded); cheat top-ups (trial10+) merge under the same
+///   rule. Proxy prompt port-templating narrowed to alias tokens (the
+///   whole-line "upstream" skip told models 8091 AND the worker port),
+///   plus a verify-time upstream health gate (host publishes decay under
+///   daemon churn) and stage-log prefix dedup. Rows stamped `2026-10-09.3`
+///   or earlier recompute under backfill; trial rows keep their stamps.
 /// - `2026-10-09.3`: machine effort parity + cutoff recovery. OMP passes
 ///   `--thinking=<requested>` unclamped (the CLI downgrades unsupported
 ///   levels itself — measured, no HTTP 400 on this path); OpenCode maps
@@ -111,7 +120,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-09.3";
+pub const RULES_VERSION: &str = "2026-10-09.4";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

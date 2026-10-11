@@ -97,17 +97,51 @@ pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> S
     let off = crate::web::server::worker_port(base_port, worker).to_string();
     // Word-boundary pattern around the bare port number.
     let word_pat = ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base))).unwrap();
+    // In-network aliases (upstream1:80, ref-redis -p 6379): their ports are
+    // fixed inside the run network and must survive rewriting — but any
+    // OTHER port on the same line (candidate-local) still must be rewritten.
+    // The old whole-line skip on "upstream" froze candidate ports too
+    // (measured: proxy prompt told the model 8391 AND 8091; the model
+    // picked 8091 and missed the same-port probe). Shield alias tokens
+    // (with colon- or flag-attached ports), rewrite the rest, restore.
+    // NOTE: adjacency matters — only ports directly attached to the alias
+    // (`alias:port`, `alias -p port`) are shielded; bare prose ("the
+    // upstreams") never matches, so candidate ports on alias lines are
+    // still rewritten.
+    let alias_pat = ::regex::Regex::new(
+        r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)((\s*(-p|--port)\s*[= ]?)?\s*:?\s*\d+)?",
+    )
+    .unwrap();
     content
         .lines()
         .map(|line| {
-            let low = line.to_lowercase();
-            if low.contains("ref-redis") || low.contains("ref-http") || low.contains("upstream") {
-                return line.to_string();
+            let mut stash: Vec<String> = Vec::new();
+            let shielded = alias_pat
+                .replace_all(line, |caps: &::regex::Captures| {
+                    stash.push(caps[0].to_string());
+                    format!("@@SDBALIAS{}@@", stash.len() - 1)
+                })
+                .to_string();
+            let rewritten = word_pat.replace_all(&shielded, off.as_str()).to_string();
+            let mut out = rewritten;
+            for (i, orig) in stash.iter().enumerate() {
+                out = out.replace(&format!("@@SDBALIAS{}@@", i), orig);
             }
-            word_pat.replace_all(line, off.as_str()).to_string()
+            out
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Display name for a stage log line: verifier stage names already embed
+/// their own `"Stage N: "` prefix, so logging `"Stage {n}: {name}"` reads
+/// `"Stage 1: Stage 1: ..."`. Strip the redundant prefix at display time;
+/// stored names (manifests, pages) stay untouched.
+fn stage_label(stage: u32, name: &str) -> String {
+    let prefix = format!("Stage {stage}: ");
+    name.strip_prefix(&prefix)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn hash_seed(s: &str) -> String {
@@ -749,7 +783,10 @@ impl BenchmarkPipeline {
                         let err_str = s.error.as_deref().unwrap_or("");
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
+                            s.stage,
+                            stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
                         ));
                     }
                     // Stage 6: AOF crash recovery on full pass (mirrors the WAL flow).
@@ -785,7 +822,7 @@ impl BenchmarkPipeline {
                                 logger.log(&format!(
                                     "  Stage {}: {} -> {} {}",
                                     st.stage,
-                                    st.name,
+                                    stage_label(st.stage, &st.name),
                                     status_str,
                                     st.error.as_deref().unwrap_or("")
                                 ));
@@ -800,7 +837,7 @@ impl BenchmarkPipeline {
                                 logger.log(&format!(
                                     "  Stage {}: {} -> FAIL {}",
                                     st.stage,
-                                    st.name,
+                                    stage_label(st.stage, &st.name),
                                     st.error.as_deref().unwrap_or("")
                                 ));
                                 stages.push(st);
@@ -841,7 +878,10 @@ impl BenchmarkPipeline {
                         let err_str = s.error.as_deref().unwrap_or("");
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
+                            s.stage,
+                            stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
                         ));
                     }
                     for s in verifier.run_robustness().await {
@@ -862,7 +902,10 @@ impl BenchmarkPipeline {
                             let err_str = s.error.as_deref().unwrap_or("");
                             logger.log(&format!(
                                 "  Stage {}: {} -> {} {}",
-                                s.stage, s.name, status_str, err_str
+                                s.stage,
+                                stage_label(s.stage, &s.name),
+                                status_str,
+                                err_str
                             ));
                         };
                     let fail = |n: u32, name: &str, err: String| crate::verifier::StageResult {
@@ -963,7 +1006,10 @@ impl BenchmarkPipeline {
                         let err_str = s.error.as_deref().unwrap_or("");
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
+                            s.stage,
+                            stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
                         ));
                     }
                     (
@@ -986,7 +1032,10 @@ impl BenchmarkPipeline {
                             let err_str = s.error.as_deref().unwrap_or("");
                             logger.log(&format!(
                                 "  Stage {}: {} -> {} {}",
-                                s.stage, s.name, status_str, err_str
+                                s.stage,
+                                stage_label(s.stage, &s.name),
+                                status_str,
+                                err_str
                             ));
                         };
                     let ups: Vec<(String, u16)> = (1u8..=3u8)
@@ -1000,6 +1049,40 @@ impl BenchmarkPipeline {
                             )
                         })
                         .collect();
+                    // Upstream health gate: host-published upstream bindings
+                    // decay under daemon churn between setup and verify
+                    // (measured: Ports:null at verify despite successful
+                    // start → every stage dialing them refused). Dial each;
+                    // on first refusal recreate the pool fresh and proceed.
+                    // No-op when healthy; a failed recreate degrades to
+                    // today's behavior (stages fail loudly, not silently).
+                    let mut pool_ok = true;
+                    for (_, up) in ups.iter() {
+                        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], *up));
+                        if std::net::TcpStream::connect_timeout(
+                            &addr,
+                            std::time::Duration::from_secs(2),
+                        )
+                        .is_err()
+                        {
+                            pool_ok = false;
+                            break;
+                        }
+                    }
+                    if !pool_ok {
+                        logger.log(
+                            "[SETUP] Upstream pool unreachable at verify; recreating fresh...",
+                        );
+                        match sandbox
+                            .start_upstream_pool(&worker_upstream_ports(config.worker))
+                        {
+                            Ok(()) => logger.log("[SETUP] Upstream pool recreated."),
+                            Err(e) => logger.log(&format!(
+                                "[SETUP] Warning: upstream pool recreate failed: {}. Proxy stages will fail.",
+                                e
+                            )),
+                        }
+                    }
                     let verifier = ProxyVerifier::new(port, Some(&verifier_seed), ups);
                     let routing = verifier.run_routing().await;
                     let mut stages = routing.stages.clone();
@@ -1038,7 +1121,10 @@ impl BenchmarkPipeline {
                         let err_str = s.error.as_deref().unwrap_or("");
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
+                            s.stage,
+                            stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
                         ));
                     }
                     if let Some(p99) = summary.soak_p99_ms {
@@ -1060,7 +1146,10 @@ impl BenchmarkPipeline {
                         let err_str = s.error.as_deref().unwrap_or("");
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
-                            s.stage, s.name, status_str, err_str
+                            s.stage,
+                            stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
                         ));
                     }
                     // Throughput probe (200-frame ECHO burst); unscored until
@@ -1705,6 +1794,61 @@ mod tests {
         assert_eq!(template_ports_for_worker(tricky, 6379, 1), tricky);
         // Worker 0 verbatim.
         assert_eq!(template_ports_for_worker(own, 6379, 0), own);
+        // Proxy contradiction (measured 2026-10-10): bare "upstream(s)"
+        // prose must NOT shield candidate ports — only alias tokens with
+        // attached ports are protected.
+        let proxy_listen =
+            "Your proxy listens on `0.0.0.0:8091` and forwards client `GET /` requests to the upstreams.";
+        let got = template_ports_for_worker(proxy_listen, 8091, 3);
+        assert!(got.contains("8391"), "{got}");
+        assert!(!got.contains("8091"), "{got}");
+        let proxy_docker = "1. **Working Dockerfile (Recommended)**: exposes port 8091.";
+        assert!(template_ports_for_worker(proxy_docker, 8091, 3).contains("8391"));
+        // Mixed line: candidate port rewritten, alias:port preserved.
+        let mixed = "serve on :8091, origin upstream1:80 end";
+        let got = template_ports_for_worker(mixed, 8091, 3);
+        assert!(got.contains(":8391"), "{got}");
+        assert!(got.contains("upstream1:80"), "{got}");
+    }
+
+    #[test]
+    fn test_all_task_prompts_template_cleanly_per_worker() {
+        // Every graded prompt, every worker: no stale canonical port may
+        // survive outside alias contexts. An alias line may keep base
+        // digits (fixed in-network ports); anything else is a prompt
+        // contradiction that sends the model to the wrong port.
+        use crate::config::TaskType;
+        let alias_pat =
+            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
+        for task in [
+            TaskType::Redis,
+            TaskType::Http,
+            TaskType::Pdf,
+            TaskType::Proxy,
+            TaskType::Pubsub,
+            TaskType::Wal,
+            TaskType::Binproto,
+        ] {
+            let path = crate::config::get_repo_root()
+                .join("tasks")
+                .join(task.to_string())
+                .join("prompt.md");
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let base = task.default_port().to_string();
+            let base_pat =
+                ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base))).unwrap();
+            for worker in [1u8, 2, 3] {
+                let out = template_ports_for_worker(&content, task.default_port(), worker);
+                for line in out.lines() {
+                    if base_pat.is_match(line) && !alias_pat.is_match(line) {
+                        panic!(
+                            "stale canonical port {base} on non-alias line (task {task}, worker {worker}): {line}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
