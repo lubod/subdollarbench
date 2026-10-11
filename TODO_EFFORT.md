@@ -265,3 +265,15 @@ gate, stage-label dedup). Awaiting: top-up trials land → deploy .4
 cheat-merge + visibility + proxy template fix + upstream health gate +
 stage-prefix cosmetic. Trial rows keep stamping pre-bump versions until
 deploy; merges recomputed after.
+
+## L. AGENTS.md port contradiction (found 2026-10-11 verifying the review,
+FIXED, undeployed)
+- Both runners wrote AGENTS.md with canonical ports while the brief
+  carried worker ports (live quote: "task brief says 8191, AGENTS.md says
+  8091 — cover both"). Same defect class as the prompt contradiction, one
+  file deeper. Fix: both composers render through alias-shielded
+  templating (helper moved config.rs); per-task render audits green;
+  RULES 2026-10-11.1. Ships at next idle (proxy reruns in flight).
+- Follow-up then: per-trial binding assessment (which port each proxy
+  candidate bound — session tool calls), targeted reruns for 8091-bound
+  trials only.
