@@ -133,6 +133,19 @@ pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> S
         .join("\n")
 }
 
+/// Probe host-published upstream ports; false on first refusal. Pure
+/// dial check (no docker): unit-testable against a bound listener.
+/// The recreate step stays docker-gated in the caller.
+fn upstreams_reachable(ports: &[u16]) -> bool {
+    for p in ports {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], *p));
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Display name for a stage log line: verifier stage names already embed
 /// their own `"Stage N: "` prefix, so logging `"Stage {n}: {name}"` reads
 /// `"Stage 1: Stage 1: ..."`. Strip the redundant prefix at display time;
@@ -1056,19 +1069,8 @@ impl BenchmarkPipeline {
                     // on first refusal recreate the pool fresh and proceed.
                     // No-op when healthy; a failed recreate degrades to
                     // today's behavior (stages fail loudly, not silently).
-                    let mut pool_ok = true;
-                    for (_, up) in ups.iter() {
-                        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], *up));
-                        if std::net::TcpStream::connect_timeout(
-                            &addr,
-                            std::time::Duration::from_secs(2),
-                        )
-                        .is_err()
-                        {
-                            pool_ok = false;
-                            break;
-                        }
-                    }
+                    let pool_ok =
+                        upstreams_reachable(&ups.iter().map(|(_, p)| *p).collect::<Vec<_>>());
                     if !pool_ok {
                         logger.log(
                             "[SETUP] Upstream pool unreachable at verify; recreating fresh...",
@@ -1775,6 +1777,39 @@ mod tests {
     struct DummyLogger;
     impl PipelineLogger for DummyLogger {
         fn log(&self, _msg: &str) {}
+    }
+
+    #[test]
+    fn test_stage_label_strips_redundant_prefix() {
+        assert_eq!(stage_label(1, "Stage 1: Basic routing"), "Basic routing");
+        assert_eq!(
+            stage_label(6, "Stage 6: AOF crash recovery"),
+            "AOF crash recovery"
+        );
+        // No/wrong prefix passes through untouched.
+        assert_eq!(stage_label(1, "Basic routing"), "Basic routing");
+        assert_eq!(
+            stage_label(2, "Stage 1: Basic routing"),
+            "Stage 1: Basic routing"
+        );
+        assert_eq!(stage_label(1, ""), "");
+    }
+
+    #[test]
+    fn test_upstreams_reachable_against_live_listener() {
+        // Healthy: bound listener answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("port").port();
+        assert!(upstreams_reachable(&[port]));
+        assert!(upstreams_reachable(&[port, port]));
+        drop(listener);
+        // Refused: reserve-then-drop guarantees nothing listens.
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let dead_port = dead.local_addr().expect("port").port();
+        drop(dead);
+        assert!(!upstreams_reachable(&[dead_port]));
+        assert!(!upstreams_reachable(&[port, dead_port]));
+        assert!(upstreams_reachable(&[]));
     }
 
     #[test]
