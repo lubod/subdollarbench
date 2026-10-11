@@ -235,7 +235,13 @@ halves — operational top-ups (no code) + merge-rule change (code, .4).
 - Post-drain: scan all cells (incl. opencode half) for remaining cheat
   gaps; repeat once if needed.
 
-### K2. Merge rule (code, post-drain, RULES .4)
+### K2. Merge rule (code DONE, deploy pending top-up landing)
+
+Implemented + committed under RULES .4 (uniform-valid aggregates,
+status all-cheat-only, matrix DQ markers, portal tags + methodology,
+merge tests, template alias-shielding + render audit, upstream health
+gate, stage-label dedup). Awaiting: top-up trials land → deploy .4
+(30s notice, idle) → backfill recompute → proxy rerun wave.
 - `merge_subruns`: drop `disqualified_cheat` subruns from pass
   aggregates (rate, P@1, counts). All-cheat parent → status
   `disqualified_cheat` (excluded, as today). Else status from valid
