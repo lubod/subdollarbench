@@ -267,13 +267,32 @@ stage-prefix cosmetic. Trial rows keep stamping pre-bump versions until
 deploy; merges recomputed after.
 
 ## L. AGENTS.md port contradiction (found 2026-10-11 verifying the review,
-FIXED, undeployed)
+FIXED + DEPLOYED 2026-10-11)
 - Both runners wrote AGENTS.md with canonical ports while the brief
   carried worker ports (live quote: "task brief says 8191, AGENTS.md says
   8091 — cover both"). Same defect class as the prompt contradiction, one
   file deeper. Fix: both composers render through alias-shielded
   templating (helper moved config.rs); per-task render audits green;
-  RULES 2026-10-11.1. Ships at next idle (proxy reruns in flight).
+  RULES 2026-10-11.1. SHIPPED 2026-10-11 (~17:40Z idle window; integrity + migrate clean).
 - Follow-up then: per-trial binding assessment (which port each proxy
   candidate bound — session tool calls), targeted reruns for 8091-bound
   trials only.
+
+## M. Proxy wave #2 results + upstream verdict (2026-10-11)
+- Scores: 4-5% -> 27-33% avg (template fix works: stage 3 framing now
+  passes, candidates bind worker ports). P@1 still 0.0 everywhere.
+- Health gate FIRED in 59/60 trials (detection works) but stages 1-2
+  still fail 106/108: recreation does not help. Daemon logs show clean
+  container starts, no proxy/iptables errors - bindings die between
+  recreation and dial with no daemon-side trace. Manual repro of the
+  exact setup works; in-network paths work (19/19 refs).
+- Conclusion: host-published docker fixtures are unreliable at verify
+  time on this box; retrying recreation is futile (already retried once
+  per trial by the gate). Structural fix required.
+- PROPOSED (needs go): in-process stubs for stages 1-2 (the verifier
+  already has serve_static; candidate-observable wire behavior
+  identical, so not a grading change - harness hardening), plus
+  stoppable in-process stub for stage 4 failover (replaces docker
+  kill + 10s recovery wait with a deterministic shutdown channel).
+  Then proxy wave #3 for clean data. Fallback if declined: accept proxy
+  as unscorable-by-fixture (report rates, rank nothing).
