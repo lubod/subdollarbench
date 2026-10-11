@@ -4407,6 +4407,8 @@ mod tests {
             "live snapshot",
             "matrixLiveStrip",
             "refreshMatrixLive",
+            "boardCurrentRun",
+            "top-ups queued",
         ] {
             assert!(
                 html.contains(marker),

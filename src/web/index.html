@@ -3139,6 +3139,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     // aggregates. Refreshed with boardRows (matrix re-reads both).
     let boardQueueItems = [];
     let boardWorkers = {};
+    let boardCurrentRun = null;
 
     async function ensureBoardData(force = false) {
       if (boardRows.length && !force) return boardRows;
@@ -3154,6 +3155,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         boardQueue = c;
         boardQueueItems = q || [];
         boardWorkers = (st && st.workers) || {};
+        boardCurrentRun = (st && st.current_run) || null;
       } catch (e) {
         const b = document.getElementById('modelsErrorBanner');
         if (b) { b.style.display = 'block'; b.textContent = `Board offline: ${e.message || e}`; }
@@ -3273,6 +3275,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         ]);
         boardQueueItems = q || [];
         boardWorkers = (st && st.workers) || {};
+        boardCurrentRun = (st && st.current_run) || null;
         const c = { Running: 0, Pending: 0, Done: 0 };
         (boardQueueItems || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
         boardQueue = c;
@@ -3283,15 +3286,29 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const badge = document.getElementById('matrixCountBadge');
       const strip = document.getElementById('matrixLiveStrip');
       if (strip) {
-        const live = Object.values(boardWorkers || {}).filter(w => w && w.model && w.task);
+        const live = (() => {
+          const seen = {};
+          const out = [];
+          Object.values(boardWorkers || {}).forEach(w => {
+            if (w && w.model && w.task && w.run_id && !seen[w.run_id]) { seen[w.run_id] = 1; out.push(w); }
+          });
+          if (boardCurrentRun && boardCurrentRun.run_id && !seen[boardCurrentRun.run_id]) out.push(boardCurrentRun);
+          return out.filter(w => w && w.model && w.task);
+        })();
         if (!live.length) {
           strip.style.display = 'none';
           strip.innerHTML = '';
         } else {
           strip.style.display = 'block';
+          const pend = (boardQueueItems || []).filter(qi => qi && qi.status === 'Pending' && qi.kind && qi.kind.Extend);
+          const pendTxt = pend.length ? ' · ↻ top-ups queued: ' + pend.map(qi => {
+            const e = qi.kind.Extend;
+            const task = String(e.parent_run_id || '').split('_')[0] || '?';
+            return `${qi.id} (+${e.trials ?? '?'} ${task})`;
+          }).join(', ') : '';
           strip.innerHTML = '▶ now running: ' + live.map(w =>
             `<span class="badge badge-info" style="margin-right:6px;" title="${escapeHtml(w.run_id || '')}">▶ ${escapeHtml(shortModelName(w.model))} ${(w.task || '').toLowerCase()} ${escapeHtml(w.effort || '')} · trial ${(w.subrun ?? '?')}/${(w.total_subruns ?? '?')}${(w.turns != null ? ` · ${w.turns}t` : '')}</span>`
-          ).join('');
+          ).join('') + pendTxt;
         }
       }
       const head = document.getElementById('matrixHeadRow');
@@ -3339,14 +3356,44 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const tk = parts[0] + '\u0001' + parts[2] + '\u0001' + parts[1];
         runningKeysByTriple[tk] = (runningKeysByTriple[tk] || 0) + 1;
       });
-      const liveFor = (key, m, eff, tkTask) => {
+      // Live sources: worker snapshot + engine current_run (direct-
+      // started extends have no queue row; workers dict lags dispatch).
+      // Deduped by run_id: current_run often duplicates a worker entry.
+      const livePool = (() => {
+        const seen = {};
+        const out = [];
+        Object.values(boardWorkers || {}).forEach(w => {
+          if (w && w.run_id && !seen[w.run_id]) { seen[w.run_id] = 1; out.push(w); }
+        });
+        if (boardCurrentRun && boardCurrentRun.run_id && !seen[boardCurrentRun.run_id]) {
+          out.push(boardCurrentRun);
+        }
+        return out;
+      })();
+      const liveFor = (key, m, eff, tkTask, rowId) => {
+        if (!livePool.length) return null;
+        // 1. Exact: worker trial stem == rendered row id (no ambiguity,
+        // harness-free). Covers direct-started trials with no queue row.
+        if (rowId) {
+          const hit = livePool.find(w => String(w.run_id || '').replace(/_trial\d+$/, '') === rowId);
+          if (hit) return hit;
+        }
+        // 2. Fallback: unique worker + unique Running queued key on triple.
         const tk = `${m}\u0001${(tkTask || '').toLowerCase()}\u0001${eff || 'auto'}`;
         const q = queued[key];
         if (!q || q.status !== 'Running') return null;
-        const ws = workersByTriple[tk] || [];
+        const ws = livePool.filter(w =>
+          `${w.model}\u0001${(w.task || '').toLowerCase()}\u0001${w.effort || 'auto'}` === tk);
         if (ws.length !== 1 || (runningKeysByTriple[tk] || 0) !== 1) return null;
         return ws[0];
       };
+      // Pending top-up extends attach to their parent cell (no kind.Run).
+      const extendMarks = {};
+      (boardQueueItems || []).forEach(qi => {
+        if (!qi || qi.status !== 'Pending' || !qi.kind || !qi.kind.Extend) return;
+        const e = qi.kind.Extend;
+        if (e && e.parent_run_id) extendMarks[e.parent_run_id] = { id: qi.id, n: e.trials ?? '?' };
+      });
       const qModels = Object.keys(queued).map(k => k.split('\u0001')[0]);
       const models = [...new Set(Object.values(canon).map(r => r.model).concat(qModels))].sort();
       const tasks = ['redis', 'binproto', 'http', 'pdf', 'proxy', 'pubsub', 'wal'];
@@ -3384,7 +3431,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               // Queued but unrun: status cell, never an aggregate. Parked
               // (not_before) and refused cells say so in the tooltip.
               const parked = !!qi.notBefore;
-              const live = qi.status === 'Running' ? liveFor(key, m, eff, t) : null;
+              const live = qi.status === 'Running' ? liveFor(key, m, eff, t, null) : null;
               const prog = live ? ` trial ${(live.subrun ?? '?')}/${(live.total_subruns ?? '?')}` + (live.turns != null ? ` · ${live.turns}t` : '') : '';
               const state = qi.status === 'Running' ? `▶ running${prog}` : (parked ? `⏸ ${qi.id}` : `⏳ ${qi.id} · #${qi.pos}`);
               const tip = `${qi.id} · ${qi.status}` + (parked ? ` · parked until ${qi.notBefore}` : '') + (qi.refusals ? ` · refused ×${qi.refusals}` : '') + (qi.note ? ` · ${qi.note}` : '') + ` · ${qi.trials} trials planned` + (live ? ' · live snapshot' : '');
@@ -3402,13 +3449,15 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
             const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
             const reQ = queued[key];
-            const liveRun = (reQ && reQ.status === 'Running') ? liveFor(key, m, eff, t) : null;
+            const liveRun = liveFor(key, m, eff, t, r ? r.id : null);
             const liveTxt = liveRun ? ` ▶ trial ${(liveRun.subrun ?? '?')}/${(liveRun.total_subruns ?? '?')}` + (liveRun.turns != null ? ` · ${liveRun.turns}t` : '') : '';
             const reMark = reQ ? ` <span title="${escapeHtml(`${reQ.status}: ${reQ.id}` + (liveRun ? ' · live snapshot' : ''))}">↻${escapeHtml(liveTxt)}</span>` : '';
+            const extQ = (r && r.id && extendMarks[r.id]) || null;
+            const extMark = extQ ? ` <span title="${escapeHtml(`top-up pending: ${extQ.id} (+${extQ.n} trial${extQ.n === 1 ? '' : 's'})`)}">↻+${escapeHtml(String(extQ.n))}</span>` : '';
             const dqSubs = (r.subruns || []).filter(s => (s.status || '') === 'disqualified_cheat');
             const dqMark = dqSubs.length ? ` <span title="${escapeHtml(`excluded from score, retained in record: ${dqSubs.map(s => s.id).join(', ')}`)}">DQ${dqSubs.length}</span>` : '';
             const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
-            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${dqMark}</td>`;
+            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}</td>`;
             rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
             rowCost += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
             rowTip.push(`${t}: ${Math.round(p1)}% (n=${n})`);
