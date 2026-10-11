@@ -8,6 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-11.1`: AGENTS.md worker ports. Both runners wrote the brief
+///   attachment with canonical ports while the prompt carried worker ports
+///   (measured live: a proxy trial read 8191 in the brief vs 8091 in
+///   AGENTS.md and hedged on both). AGENTS.md now renders through the
+///   same alias-shielded templating; `template_ports_for_worker` moved to
+///   config.rs (shared, no new import edges) with per-task render audits.
+///   Rows stamped `2026-10-09.4` or earlier keep their stamps; reruns pick
+///   up the fix.
 /// - `2026-10-09.4`: trial-level cheat exclusion + proxy verifiability.
 ///   Merges drop `disqualified_cheat` subruns from pass aggregates and
 ///   rank parents on valid trials (visible DQ counts + tooltips; all-cheat
@@ -120,7 +128,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-09.4";
+pub const RULES_VERSION: &str = "2026-10-11.1";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -321,6 +321,7 @@ impl OpenCodeRunner {
         port: u16,
         test: &str,
         effort: &str,
+        worker: u8,
     ) {
         let content = format!(
             r#"# Instructions for Autonomous Coding Agent
@@ -333,6 +334,10 @@ impl OpenCodeRunner {
 "#,
             snippet, port, test, effort
         );
+        // Worker-templated like the prompt: a canonical port here contradicts
+        // the templated brief (measured: proxy AGENTS.md said 8091 while the
+        // prompt said 8391; the model hedged on both). Alias-shielded.
+        let content = crate::config::template_ports_for_worker(&content, port, worker);
         let _ = std::fs::write(workdir.join("AGENTS.md"), content);
     }
 }
@@ -353,6 +358,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             task: _,
             run_id,
             cancel_flag,
+            worker,
         } = spec;
         let effort_level = effort.unwrap_or("high").trim().to_string();
         // Machine-level effort: `#variant` is active unless resolution fails
@@ -416,6 +422,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             target_port,
             test_cmd,
             &effort_level,
+            worker,
         );
         // Recovery prompt: attempts after a cutoff get the tool-first nudge
         // (the model already saw the full brief on turn 1). Selected in
@@ -993,6 +1000,66 @@ mod tests {
 
     fn ev(s: &str) -> serde_json::Value {
         serde_json::from_str(s).unwrap()
+    }
+
+    /// No stale canonical ports outside alias contexts (the proxy 8091-vs-worker
+    /// contradiction, measured live). Shared by both AGENTS.md render tests.
+    fn assert_agents_ports_clean(content: &str, base: u16, task: &str, worker: u8) {
+        let base_pat =
+            ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base.to_string()))).unwrap();
+        let alias_pat =
+            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
+        for line in content.lines() {
+            if base_pat.is_match(line) && !alias_pat.is_match(line) {
+                panic!(
+                    "stale canonical port {base} on non-alias line (task {task}, worker {worker}): {line}"
+                );
+            }
+        }
+    }
+
+    fn all_live_tasks() -> Vec<crate::config::TaskType> {
+        use crate::config::TaskType;
+        vec![
+            TaskType::Redis,
+            TaskType::Http,
+            TaskType::Pdf,
+            TaskType::Proxy,
+            TaskType::Pubsub,
+            TaskType::Wal,
+            TaskType::Binproto,
+        ]
+    }
+
+    #[test]
+    fn test_agents_md_renders_worker_ports() {
+        // End-to-end through the real writer (tempdir, never the candidate
+        // tree): every task, every worker. Catches the live incident where
+        // AGENTS.md said 8091 while the brief said the worker port.
+        for task in all_live_tasks() {
+            let base = task.default_port();
+            let (port, test_cmd, snippet) = OmpRunner::task_guidance(Some(task), "");
+            assert_eq!(port, base);
+            for worker in [1u8, 2, 3] {
+                let dir = std::env::temp_dir().join(format!(
+                    "agents_md_{}_{}_{}",
+                    std::process::id(),
+                    task,
+                    worker
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                OpenCodeRunner::write_agents_md(&dir, snippet, port, test_cmd, "high", worker);
+                let content = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+                let off = crate::web::server::worker_port(base, worker).to_string();
+                assert!(
+                    content.contains(&off),
+                    "worker port {off} missing (task {task}, worker {worker})"
+                );
+                assert_agents_ports_clean(&content, base, &task.to_string(), worker);
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
     }
 
     #[test]

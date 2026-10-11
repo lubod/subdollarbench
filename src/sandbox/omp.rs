@@ -279,6 +279,9 @@ pub struct AgentRunSpec<'a> {
     pub task: Option<crate::config::TaskType>,
     pub run_id: Option<&'a str>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Parallel worker index (0 = no templating). Carried so runners can
+    /// render worker-specific ports (AGENTS.md) identically to the prompt.
+    pub worker: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +356,7 @@ impl OmpRunner {
             task,
             run_id,
             cancel_flag,
+            worker,
         } = spec;
         info!(
             "Launching OMP agent in Docker sandbox with model: {}, effort: {:?}, limits: {:?}",
@@ -584,16 +588,16 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         // Write AGENTS.md into workspace so omp auto-loads instructions across all turns
         let agents_md_path = canonical_workdir.join("AGENTS.md");
-        let agents_md_content = format!(
-            r#"# Instructions for Autonomous Coding Agent
-1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
-2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
-{}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing. Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
-4. **CONCISE REASONING**: Keep internal thoughts brief (< 150 words). Do not exhaust output tokens on lengthy mental planning loops. Immediately invoke tools to write code and test it.
-"#,
-            guidance_snippet, target_port, test_cmd
+        let agents_md_content = crate::config::template_ports_for_worker(
+            &Self::compose_omp_agents_md(guidance_snippet, target_port, test_cmd),
+            target_port,
+            worker,
         );
+        // Worker-templated like the prompt: a canonical port here contradicts
+        // the templated brief (measured: proxy AGENTS.md said 8091 while the
+        // prompt said 8391). Alias-shielded; content otherwise byte-identical.
+        let agents_md_content =
+            crate::config::template_ports_for_worker(&agents_md_content, target_port, worker);
         let _ = std::fs::write(&agents_md_path, agents_md_content);
         #[cfg(unix)]
         {
@@ -1849,6 +1853,21 @@ impl OmpRunner {
     /// Per-task port, smoke-test command, and anti-cheat guidance snippet.
     /// Shared by the OMP and OpenCode runners so both harnesses grade the
     /// same task text and entrypoint contract.
+    /// AGENTS.md body (pure composer: byte-identical content, templated
+    /// by the caller per worker). Split for unit tests.
+    fn compose_omp_agents_md(snippet: &str, port: u16, test: &str) -> String {
+        format!(
+            r#"# Instructions for Autonomous Coding Agent
+1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
+2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
+{}
+3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing. Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
+4. **CONCISE REASONING**: Keep internal thoughts brief (< 150 words). Do not exhaust output tokens on lengthy mental planning loops. Immediately invoke tools to write code and test it.
+"#,
+            snippet, port, test
+        )
+    }
+
     pub fn task_guidance(
         task: Option<crate::config::TaskType>,
         prompt: &str,
@@ -2010,6 +2029,56 @@ mod session_disconnect_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No stale canonical ports outside alias contexts (the proxy 8091-vs-worker
+    /// contradiction, measured live). Shared by both AGENTS.md render tests.
+    fn assert_agents_ports_clean(content: &str, base: u16, task: &str, worker: u8) {
+        let base_pat =
+            ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base.to_string()))).unwrap();
+        let alias_pat =
+            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
+        for line in content.lines() {
+            if base_pat.is_match(line) && !alias_pat.is_match(line) {
+                panic!(
+                    "stale canonical port {base} on non-alias line (task {task}, worker {worker}): {line}"
+                );
+            }
+        }
+    }
+
+    fn all_live_tasks() -> Vec<crate::config::TaskType> {
+        use crate::config::TaskType;
+        vec![
+            TaskType::Redis,
+            TaskType::Http,
+            TaskType::Pdf,
+            TaskType::Proxy,
+            TaskType::Pubsub,
+            TaskType::Wal,
+            TaskType::Binproto,
+        ]
+    }
+
+    #[test]
+    fn test_omp_agents_md_renders_worker_ports() {
+        // Same audit on the OMP composer (pure fn, no disk): every task,
+        // every worker. Both runners must agree with the brief.
+        for task in all_live_tasks() {
+            let base = task.default_port();
+            let (port, test_cmd, snippet) = OmpRunner::task_guidance(Some(task), "");
+            assert_eq!(port, base);
+            for worker in [1u8, 2, 3] {
+                let content = OmpRunner::compose_omp_agents_md(snippet, port, test_cmd);
+                let content = crate::config::template_ports_for_worker(&content, port, worker);
+                let off = crate::web::server::worker_port(base, worker).to_string();
+                assert!(
+                    content.contains(&off),
+                    "worker port {off} missing (task {task}, worker {worker})"
+                );
+                assert_agents_ports_clean(&content, base, &task.to_string(), worker);
+            }
+        }
+    }
 
     #[test]
     fn test_convert_bench_event_to_tags() {
@@ -2718,6 +2787,7 @@ mod tests {
             task: None,
             run_id: None,
             cancel_flag: None,
+            worker: 0,
         });
 
         // omp should fail on nonexistent model with error
@@ -2748,6 +2818,7 @@ mod tests {
             task: None,
             run_id: None,
             cancel_flag: None,
+            worker: 0,
         });
 
         if let Err(e) = res {

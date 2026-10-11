@@ -82,81 +82,6 @@ impl PipelineLogger for BufferingPipelineLogger {
     }
 }
 
-/// Rewrite candidate-local port mentions for a parallel worker, leaving
-/// in-network reference aliases untouched.
-/// - Skipped entirely: lines containing ref-redis/ref-http/upstream
-///   (fixed in-network names/ports, same for every worker).
-/// - Rewritten with word boundaries: localhost:PORT, 0.0.0.0:PORT, -p PORT,
-///   port PORT, :PORT, exposes PORT. Bare-substring replace would corrupt
-///   coincidental digit runs (e.g. 16379) and ref lines.
-pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> String {
-    if worker == 0 {
-        return content.to_string();
-    }
-    let base = base_port.to_string();
-    let off = crate::web::server::worker_port(base_port, worker).to_string();
-    // Word-boundary pattern around the bare port number.
-    let word_pat = ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base))).unwrap();
-    // In-network aliases (upstream1:80, ref-redis -p 6379): their ports are
-    // fixed inside the run network and must survive rewriting — but any
-    // OTHER port on the same line (candidate-local) still must be rewritten.
-    // The old whole-line skip on "upstream" froze candidate ports too
-    // (measured: proxy prompt told the model 8391 AND 8091; the model
-    // picked 8091 and missed the same-port probe). Shield alias tokens
-    // (with colon- or flag-attached ports), rewrite the rest, restore.
-    // NOTE: adjacency matters — only ports directly attached to the alias
-    // (`alias:port`, `alias -p port`) are shielded; bare prose ("the
-    // upstreams") never matches, so candidate ports on alias lines are
-    // still rewritten.
-    let alias_pat = ::regex::Regex::new(
-        r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)((\s*(-p|--port)\s*[= ]?)?\s*:?\s*\d+)?",
-    )
-    .unwrap();
-    content
-        .lines()
-        .map(|line| {
-            let mut stash: Vec<String> = Vec::new();
-            let shielded = alias_pat
-                .replace_all(line, |caps: &::regex::Captures| {
-                    stash.push(caps[0].to_string());
-                    format!("@@SDBALIAS{}@@", stash.len() - 1)
-                })
-                .to_string();
-            let rewritten = word_pat.replace_all(&shielded, off.as_str()).to_string();
-            let mut out = rewritten;
-            for (i, orig) in stash.iter().enumerate() {
-                out = out.replace(&format!("@@SDBALIAS{}@@", i), orig);
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Probe host-published upstream ports; false on first refusal. Pure
-/// dial check (no docker): unit-testable against a bound listener.
-/// The recreate step stays docker-gated in the caller.
-fn upstreams_reachable(ports: &[u16]) -> bool {
-    for p in ports {
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], *p));
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).is_err() {
-            return false;
-        }
-    }
-    true
-}
-
-/// Display name for a stage log line: verifier stage names already embed
-/// their own `"Stage N: "` prefix, so logging `"Stage {n}: {name}"` reads
-/// `"Stage 1: Stage 1: ..."`. Strip the redundant prefix at display time;
-/// stored names (manifests, pages) stay untouched.
-fn stage_label(stage: u32, name: &str) -> String {
-    let prefix = format!("Stage {stage}: ");
-    name.strip_prefix(&prefix)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| name.to_string())
-}
-
 fn hash_seed(s: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in s.as_bytes() {
@@ -487,7 +412,11 @@ impl BenchmarkPipeline {
         let prompt_content = if config.worker == 0 {
             prompt_content
         } else {
-            template_ports_for_worker(&prompt_content, config.task.default_port(), config.worker)
+            crate::config::template_ports_for_worker(
+                &prompt_content,
+                config.task.default_port(),
+                config.worker,
+            )
         };
 
         // 5. Run agent harness (omp | opencode) unless eval_only.
@@ -546,6 +475,7 @@ impl BenchmarkPipeline {
                     task: Some(config.task),
                     run_id: Some(&run_id_c),
                     cancel_flag: cancel_flag_c,
+                    worker: config.worker,
                 };
                 match harness {
                     Harness::Omp => {
@@ -797,7 +727,7 @@ impl BenchmarkPipeline {
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
                             s.stage,
-                            stage_label(s.stage, &s.name),
+                            crate::config::stage_label(s.stage, &s.name),
                             status_str,
                             err_str
                         ));
@@ -835,7 +765,7 @@ impl BenchmarkPipeline {
                                 logger.log(&format!(
                                     "  Stage {}: {} -> {} {}",
                                     st.stage,
-                                    stage_label(st.stage, &st.name),
+                                    crate::config::stage_label(st.stage, &st.name),
                                     status_str,
                                     st.error.as_deref().unwrap_or("")
                                 ));
@@ -850,7 +780,7 @@ impl BenchmarkPipeline {
                                 logger.log(&format!(
                                     "  Stage {}: {} -> FAIL {}",
                                     st.stage,
-                                    stage_label(st.stage, &st.name),
+                                    crate::config::stage_label(st.stage, &st.name),
                                     st.error.as_deref().unwrap_or("")
                                 ));
                                 stages.push(st);
@@ -892,7 +822,7 @@ impl BenchmarkPipeline {
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
                             s.stage,
-                            stage_label(s.stage, &s.name),
+                            crate::config::stage_label(s.stage, &s.name),
                             status_str,
                             err_str
                         ));
@@ -916,7 +846,7 @@ impl BenchmarkPipeline {
                             logger.log(&format!(
                                 "  Stage {}: {} -> {} {}",
                                 s.stage,
-                                stage_label(s.stage, &s.name),
+                                crate::config::stage_label(s.stage, &s.name),
                                 status_str,
                                 err_str
                             ));
@@ -1020,7 +950,7 @@ impl BenchmarkPipeline {
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
                             s.stage,
-                            stage_label(s.stage, &s.name),
+                            crate::config::stage_label(s.stage, &s.name),
                             status_str,
                             err_str
                         ));
@@ -1046,7 +976,7 @@ impl BenchmarkPipeline {
                             logger.log(&format!(
                                 "  Stage {}: {} -> {} {}",
                                 s.stage,
-                                stage_label(s.stage, &s.name),
+                                crate::config::stage_label(s.stage, &s.name),
                                 status_str,
                                 err_str
                             ));
@@ -1069,8 +999,9 @@ impl BenchmarkPipeline {
                     // on first refusal recreate the pool fresh and proceed.
                     // No-op when healthy; a failed recreate degrades to
                     // today's behavior (stages fail loudly, not silently).
-                    let pool_ok =
-                        upstreams_reachable(&ups.iter().map(|(_, p)| *p).collect::<Vec<_>>());
+                    let pool_ok = crate::config::upstreams_reachable(
+                        &ups.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                    );
                     if !pool_ok {
                         logger.log(
                             "[SETUP] Upstream pool unreachable at verify; recreating fresh...",
@@ -1124,7 +1055,7 @@ impl BenchmarkPipeline {
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
                             s.stage,
-                            stage_label(s.stage, &s.name),
+                            crate::config::stage_label(s.stage, &s.name),
                             status_str,
                             err_str
                         ));
@@ -1149,7 +1080,7 @@ impl BenchmarkPipeline {
                         logger.log(&format!(
                             "  Stage {}: {} -> {} {}",
                             s.stage,
-                            stage_label(s.stage, &s.name),
+                            crate::config::stage_label(s.stage, &s.name),
                             status_str,
                             err_str
                         ));
@@ -1777,113 +1708,6 @@ mod tests {
     struct DummyLogger;
     impl PipelineLogger for DummyLogger {
         fn log(&self, _msg: &str) {}
-    }
-
-    #[test]
-    fn test_stage_label_strips_redundant_prefix() {
-        assert_eq!(stage_label(1, "Stage 1: Basic routing"), "Basic routing");
-        assert_eq!(
-            stage_label(6, "Stage 6: AOF crash recovery"),
-            "AOF crash recovery"
-        );
-        // No/wrong prefix passes through untouched.
-        assert_eq!(stage_label(1, "Basic routing"), "Basic routing");
-        assert_eq!(
-            stage_label(2, "Stage 1: Basic routing"),
-            "Stage 1: Basic routing"
-        );
-        assert_eq!(stage_label(1, ""), "");
-    }
-
-    #[test]
-    fn test_upstreams_reachable_against_live_listener() {
-        // Healthy: bound listener answers.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("port").port();
-        assert!(upstreams_reachable(&[port]));
-        assert!(upstreams_reachable(&[port, port]));
-        drop(listener);
-        // Refused: reserve-then-drop guarantees nothing listens.
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let dead_port = dead.local_addr().expect("port").port();
-        drop(dead);
-        assert!(!upstreams_reachable(&[dead_port]));
-        assert!(!upstreams_reachable(&[port, dead_port]));
-        assert!(upstreams_reachable(&[]));
-    }
-
-    #[test]
-    fn test_template_ports_for_worker() {
-        // Ref-alias lines untouched at any worker.
-        let redis_ref = "redis-cli -h ref-redis -p 6379 <cmd>";
-        assert_eq!(template_ports_for_worker(redis_ref, 6379, 2), redis_ref);
-        let ups = "dial upstream1:80, mirrors 127.0.0.1:8101";
-        assert_eq!(template_ports_for_worker(ups, 8091, 3), ups);
-        // Candidate-local lines rewritten with word boundaries.
-        let own = "listening on `0.0.0.0:6379`, test `curl localhost:6379`, `-p 6379`, port 6379";
-        let got = template_ports_for_worker(own, 6379, 1);
-        assert!(got.contains("6479"), "{got}");
-        assert!(!got.contains("6379"), "{got}");
-        // No coincidental digit-run corruption.
-        let tricky = "id 16379 and 63790 stay";
-        assert_eq!(template_ports_for_worker(tricky, 6379, 1), tricky);
-        // Worker 0 verbatim.
-        assert_eq!(template_ports_for_worker(own, 6379, 0), own);
-        // Proxy contradiction (measured 2026-10-10): bare "upstream(s)"
-        // prose must NOT shield candidate ports — only alias tokens with
-        // attached ports are protected.
-        let proxy_listen =
-            "Your proxy listens on `0.0.0.0:8091` and forwards client `GET /` requests to the upstreams.";
-        let got = template_ports_for_worker(proxy_listen, 8091, 3);
-        assert!(got.contains("8391"), "{got}");
-        assert!(!got.contains("8091"), "{got}");
-        let proxy_docker = "1. **Working Dockerfile (Recommended)**: exposes port 8091.";
-        assert!(template_ports_for_worker(proxy_docker, 8091, 3).contains("8391"));
-        // Mixed line: candidate port rewritten, alias:port preserved.
-        let mixed = "serve on :8091, origin upstream1:80 end";
-        let got = template_ports_for_worker(mixed, 8091, 3);
-        assert!(got.contains(":8391"), "{got}");
-        assert!(got.contains("upstream1:80"), "{got}");
-    }
-
-    #[test]
-    fn test_all_task_prompts_template_cleanly_per_worker() {
-        // Every graded prompt, every worker: no stale canonical port may
-        // survive outside alias contexts. An alias line may keep base
-        // digits (fixed in-network ports); anything else is a prompt
-        // contradiction that sends the model to the wrong port.
-        use crate::config::TaskType;
-        let alias_pat =
-            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
-        for task in [
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Pdf,
-            TaskType::Proxy,
-            TaskType::Pubsub,
-            TaskType::Wal,
-            TaskType::Binproto,
-        ] {
-            let path = crate::config::get_repo_root()
-                .join("tasks")
-                .join(task.to_string())
-                .join("prompt.md");
-            let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            let base = task.default_port().to_string();
-            let base_pat =
-                ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base))).unwrap();
-            for worker in [1u8, 2, 3] {
-                let out = template_ports_for_worker(&content, task.default_port(), worker);
-                for line in out.lines() {
-                    if base_pat.is_match(line) && !alias_pat.is_match(line) {
-                        panic!(
-                            "stale canonical port {base} on non-alias line (task {task}, worker {worker}): {line}"
-                        );
-                    }
-                }
-            }
-        }
     }
 
     #[tokio::test]
