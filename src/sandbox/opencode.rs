@@ -409,7 +409,11 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         }
 
         // Same task text + entrypoint contract as OMP (shared helper).
-        let (target_port, test_cmd, guidance_snippet) = OmpRunner::task_guidance(spec.task, prompt);
+        let (base_port, base_cmd, raw_guidance) = OmpRunner::task_guidance(spec.task, prompt);
+        let target_port = crate::web::server::worker_port(base_port, worker);
+        let test_cmd = crate::config::template_ports_for_worker(base_cmd, base_port, worker);
+        let guidance_snippet =
+            crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
         let effort_note = format!("reasoning effort requested: {}", effort_level);
         let effective_prompt = format!(
             "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
@@ -418,9 +422,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         );
         Self::write_agents_md(
             &canonical_workdir,
-            guidance_snippet,
+            &guidance_snippet,
             target_port,
-            test_cmd,
+            &test_cmd,
             &effort_level,
             worker,
         );

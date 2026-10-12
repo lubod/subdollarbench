@@ -35,9 +35,23 @@ fn client() -> reqwest::Client {
 /// server's `csrf_guard` layer checks, so CLI and curl agree. Empty when
 /// unset (tokenless local dev stays working).
 pub fn ui_token() -> Option<String> {
-    std::env::var("SDB_UI_TOKEN")
-        .ok()
-        .filter(|t| !t.trim().is_empty())
+    if let Ok(t) = std::env::var("SDB_UI_TOKEN") {
+        if !t.trim().is_empty() {
+            return Some(t);
+        }
+    }
+    let env_path = crate::config::get_repo_root().join(".env");
+    if let Ok(content) = std::fs::read_to_string(env_path) {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("SDB_UI_TOKEN=") {
+                let token = rest.trim().trim_matches('"').trim_matches('\'');
+                if !token.is_empty() {
+                    return Some(token.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn auth(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

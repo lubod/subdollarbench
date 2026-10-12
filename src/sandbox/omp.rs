@@ -574,7 +574,11 @@ impl OmpRunner {
             cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
         }
 
-        let (target_port, test_cmd, guidance_snippet) = Self::task_guidance(task, prompt);
+        let (base_port, base_cmd, raw_guidance) = Self::task_guidance(task, prompt);
+        let target_port = crate::web::server::worker_port(base_port, worker);
+        let test_cmd = crate::config::template_ports_for_worker(base_cmd, base_port, worker);
+        let guidance_snippet =
+            crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
         let effective_prompt = format!(
             "{}
 
@@ -592,16 +596,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         // Write AGENTS.md into workspace so omp auto-loads instructions across all turns
         let agents_md_path = canonical_workdir.join("AGENTS.md");
-        let agents_md_content = crate::config::template_ports_for_worker(
-            &Self::compose_omp_agents_md(guidance_snippet, target_port, test_cmd),
-            target_port,
-            worker,
-        );
-        // Worker-templated like the prompt: a canonical port here contradicts
-        // the templated brief (measured: proxy AGENTS.md said 8091 while the
-        // prompt said 8391). Alias-shielded; content otherwise byte-identical.
-        let agents_md_content =
-            crate::config::template_ports_for_worker(&agents_md_content, target_port, worker);
+        let agents_md_content = Self::compose_omp_agents_md(&guidance_snippet, target_port, &test_cmd);
         let _ = std::fs::write(&agents_md_path, agents_md_content);
         #[cfg(unix)]
         {
