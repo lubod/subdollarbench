@@ -1263,7 +1263,7 @@
         </div>
         <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
           <input type="checkbox" id="stopOnPass" checked style="width: auto;" />
-          <label for="stopOnPass" style="font-weight: normal; cursor: pointer;" title="Capability mode: evaluate up to 3 tries, stop immediately on first 100% pass; escalate to 5 only if all 3 fail.">Sequential Capability (stop on pass 3→5)</label>
+          <label for="stopOnPass" style="font-weight: normal; cursor: pointer;" title="Capability mode: evaluate up to 4 tries, stop immediately on first 100% pass; a 0/4 with every trial a harness fault auto-extends within the wave envelope, anything else is manual.">Sequential Capability (stop on pass, cap 4)</label>
         </div>
         <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
           <input type="checkbox" id="feedbackRepair" checked style="width: auto;" />
@@ -1479,8 +1479,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
                 <tr>
                   <th style="width: 3%;"></th>
                   <th style="width: 24%;">Model & Task</th>
-                  <th style="width: 14%;">Pass / P@1 (lo–hi)</th>
-                  <th style="width: 10%;">Trials / Stability</th>
+                  <th style="width: 13%;">Pass / P@1 (lo–hi)</th>
+                  <th style="width: 7%;" title="Capability: first 100% trial (✓@N) or unsolved after n (✗n). Descriptive only — P@1-lo stays the rank key.">Cap</th>
+                  <th style="width: 9%;">Trials / Stability</th>
                   <th style="width: 13%;">API cost / Effective</th>
                   <th style="width: 9%;">$/pass</th>
                   <th style="width: 11%;">Throughput</th>
@@ -3057,7 +3058,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const msg = (lbCache || []).length === 0
           ? 'No leaderboard rows yet — run the wave first.'
           : `No rows matched filter "${lbFilter}".`;
-        tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
         return;
       }
       tbody.innerHTML = '';
@@ -3098,6 +3099,15 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             ${r.poisoned ? '<span class="badge" style="background:#da3633;color:#fff;" title="Infra-killed: 429/404, not a model verdict">Poisoned</span>' : ''}            ${r.portal_hidden ? '<span class="badge" style="background:#6e7681;color:#fff;">Hidden</span>' : ''}
           </div></td>
           <td style="text-align:center;font-weight:700;">${Math.round(avg)}% / ${Math.round(p1)}%${ci}</td>
+          <td style="text-align:center;" title="Capability: first 100% trial under stop-on-pass (would halt here); P@1-lo stays the rank key">${(() => {
+            if (r.solved_at != null) return `✓@${r.solved_at}`;
+            if (r.solved === false) return `✗${n}`;
+            if (subs.length) {
+              const fi = subs.findIndex(t => (t.pass_rate ?? 0) >= 100);
+              return fi >= 0 ? `✓@${fi + 1}` : `✗${subs.length}`;
+            }
+            return '<span style="color:var(--text-muted);">-</span>';
+          })()}</td>
           <td style="text-align:center;">${n}× / ${stab}</td>
           <td style="text-align:center;">${api} / ${eff}</td>
           <td style="text-align:center;" title="API cost per passing trial">${cpp}</td>
@@ -3120,7 +3130,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         if (open) {
           const dr = document.createElement('tr');
           const dc = document.createElement('td');
-          dc.colSpan = 10;
+          dc.colSpan = 11;
           dc.style.cssText = 'background:rgba(13,17,23,0.6);padding:6px 12px 10px 34px;';
           if (!subs.length) {
             dc.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No per-trial detail in this row.</span>';

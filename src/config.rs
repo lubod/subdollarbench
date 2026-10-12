@@ -2,6 +2,17 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Screening cap for the stop-on-pass capability protocol: a cell runs at
+/// most this many trials, stopping at the first 100% pass. Calibrated on
+/// wave data (cap 4 catches every observed late solve — all first-passed at
+/// trial 4 — while keeping ~80% trial savings vs uniform n=9).
+pub const SCREEN_CAP_TRIALS: u32 = 4;
+
+/// Env var naming the wave-level auto-extend trial budget. Narrow auto-extend
+/// (0/cap with every trial a harness fault) draws from this envelope and
+/// stops when it's spent; 0/absent (default) means manual-only.
+pub const AUTO_EXTEND_BUDGET_ENV: &str = "SDB_AUTO_EXTEND_TRIALS";
+
 #[derive(Parser, Debug)]
 #[command(name = "subdollarbench")]
 #[command(about = "Autonomous Under-$1 System-Building Benchmark for Budget LLMs", long_about = None)]
@@ -88,8 +99,10 @@ pub enum Commands {
         #[arg(long, default_value_t = 9)]
         max_trials: u32,
 
-        /// Stop-on-pass capability protocol: run up to initial trials (default 3),
-        /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
+        /// Stop-on-pass capability protocol: run up to SCREEN_CAP_TRIALS (4),
+        /// stop immediately on 100% pass. A 0/4 with every trial a harness
+        /// fault auto-extends within the SDB_AUTO_EXTEND_TRIALS envelope
+        /// (0 = manual-only); anything else is manual.
         #[arg(long, default_value_t = false)]
         stop_on_pass: bool,
 
@@ -386,8 +399,10 @@ pub enum Commands {
         #[arg(long)]
         server: Option<String>,
 
-        /// Stop-on-pass capability protocol: run up to initial trials (default 3),
-        /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
+        /// Stop-on-pass capability protocol: run up to SCREEN_CAP_TRIALS (4),
+        /// stop immediately on 100% pass. A 0/4 with every trial a harness
+        /// fault auto-extends within the SDB_AUTO_EXTEND_TRIALS envelope
+        /// (0 = manual-only); anything else is manual.
         #[arg(long, default_value_t = false)]
         stop_on_pass: bool,
 
@@ -700,8 +715,10 @@ pub enum Commands {
         #[arg(long)]
         server: Option<String>,
 
-        /// Stop-on-pass capability protocol: run up to initial trials (default 3),
-        /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
+        /// Stop-on-pass capability protocol: run up to SCREEN_CAP_TRIALS (4),
+        /// stop immediately on 100% pass. A 0/4 with every trial a harness
+        /// fault auto-extends within the SDB_AUTO_EXTEND_TRIALS envelope
+        /// (0 = manual-only); anything else is manual.
         #[arg(long, default_value_t = false)]
         stop_on_pass: bool,
 

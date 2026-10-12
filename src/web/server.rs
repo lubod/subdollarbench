@@ -132,6 +132,10 @@ pub struct AppState {
     /// Pending rows stay queued, never deleted. Set by the 402/401 tripwire;
     /// cleared by explicit resume.
     pub queue_paused: Arc<AtomicBool>,
+    /// Spent narrow-auto-extend trials this process lifetime. Reserved
+    /// upfront per fire against the SDB_AUTO_EXTEND_TRIALS envelope so
+    /// concurrent workers can't overshoot it.
+    pub auto_extend_spent: Arc<AtomicU64>,
     pub store: Arc<Store>,
     /// Engine base URL in GUI-proxy mode (empty = single-process engine).
     pub engine_url: String,
@@ -493,6 +497,7 @@ impl UiServer {
             queue: Arc::new(std::sync::Mutex::new(VecDeque::from(replayed))),
             queue_seq: Arc::new(AtomicU64::new(seq_start)),
             queue_paused: Arc::new(AtomicBool::new(false)),
+            auto_extend_spent: Arc::new(AtomicU64::new(0)),
             running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
             worker_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -2643,6 +2648,7 @@ mod tests {
             queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             queue_seq: Arc::new(AtomicU64::new(0)),
             queue_paused: Arc::new(AtomicBool::new(false)),
+            auto_extend_spent: Arc::new(AtomicU64::new(0)),
             running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
             worker_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -4453,6 +4459,13 @@ mod tests {
             assert!(
                 html.contains(marker),
                 "matrix JS must contain the row/column summary logic ({marker})"
+            );
+        }
+        // Leaderboard capability co-column (display-only; P@1-lo stays rank key).
+        for marker in ["Cap</th>", "solved_at", "live snapshot", "Capability:"] {
+            assert!(
+                html.contains(marker),
+                "leaderboard JS must contain the capability column ({marker})"
             );
         }
         // Extract the single inline <script> block (shared.js loads

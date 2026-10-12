@@ -12,7 +12,7 @@ use crate::report::{assess_stability, BenchmarkRunResult, LeaderboardManager, St
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -67,6 +67,65 @@ pub fn default_max_trials() -> u32 {
 
 pub fn default_max_turns() -> u32 {
     100
+}
+
+/// Screening width for the stop-on-pass capability protocol: the initial
+/// batch runs at most this many trials, stopping at the first 100% pass.
+/// Shared by the engine and foreground paths so both runners speak one
+/// protocol.
+pub fn screen_initial_trials(req_trials: u32) -> u32 {
+    req_trials.clamp(1, crate::config::SCREEN_CAP_TRIALS)
+}
+
+/// Wave-level auto-extend trial budget, read from the environment per
+/// decision (not cached: operators raise it mid-wave without a restart).
+/// 0/absent (default) means manual-only — auto-extend never spends
+/// unapproved trials.
+pub fn auto_extend_envelope() -> u64 {
+    std::env::var(crate::config::AUTO_EXTEND_BUDGET_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Narrow auto-extend trigger (pure): 0 passing with every completed trial
+/// a harness fault is corrupted evidence, not a model verdict. Anything
+/// else — mixed signals, model failures, empty cells — stays manual.
+/// `planned <= cap` keeps it once-per-cell: after a fire, completed trials
+/// exceed the cap and it never refires (a human-owned extend also blocks
+/// refire, which is correct — a human took over).
+pub fn should_auto_extend(
+    passing: usize,
+    infra: usize,
+    completed: usize,
+    planned: u32,
+    cap: u32,
+) -> bool {
+    passing == 0
+        && completed > 0
+        && completed == planned as usize
+        && planned <= cap
+        && infra == completed
+}
+
+/// Reserve `want` trials from the envelope (CAS loop: concurrent workers
+/// can't overshoot). Grants partial (min(want, left)); None when spent.
+/// Reserved upfront with no refunds — an attempted trial is spent whether
+/// or not it produced evidence.
+pub fn reserve_auto_extend(spent: &AtomicU64, budget: u64, want: u32) -> Option<u32> {
+    use std::sync::atomic::Ordering;
+    let mut cur = spent.load(Ordering::SeqCst);
+    loop {
+        let left = budget.saturating_sub(cur);
+        if left == 0 {
+            return None;
+        }
+        let grant = (want as u64).min(left) as u32;
+        match spent.compare_exchange(cur, cur + grant as u64, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(grant),
+            Err(actual) => cur = actual,
+        }
+    }
 }
 
 pub fn default_budget() -> f64 {
@@ -1152,16 +1211,17 @@ pub async fn execute_run_body(
     let run_log_buf = state.log_buffer.clone();
     let stop_on_pass = req.stop_on_pass || req.protocol.as_deref() == Some("sequential_cap");
     let mut total_trials = if stop_on_pass {
-        req.trials.min(3).max(1)
+        screen_initial_trials(req.trials)
     } else {
         req.trials.max(1)
     };
-    let max_cap_trials = if stop_on_pass {
-        req.max_trials.max(5)
-    } else {
-        req.max_trials.max(total_trials)
-    };
-    let mut passing_trials = 0;
+    let mut passing_trials: usize = 0;
+    // Trials degraded by harness faults (infra_error), counted apart: they
+    // are corrupted evidence, the narrow-auto trigger's denominator.
+    let mut infra_trials: usize = 0;
+    // Drift contributed by a narrow-auto batch (declared here so the
+    // post-loop merge sees it alongside the initial bracket's).
+    let mut auto_drift = false;
     let mut subrun_results = Vec::new();
     // Millis + worker suffix: two workers dispatching in the same second
     // must not share one parent id — same-second collisions merged two
@@ -1376,6 +1436,11 @@ pub async fn execute_run_body(
 
         match pipe_res {
             Ok(output) => {
+                if output.infra_error {
+                    // Harness fault, not a model verdict: counted apart for
+                    // the narrow-auto trigger, still persisted in results.
+                    infra_trials += 1;
+                }
                 if output.benchmark_result.pass_rate == 100.0 {
                     passing_trials += 1;
                     if total_trials > 1 {
@@ -1438,13 +1503,116 @@ pub async fn execute_run_body(
             }
         }
 
-        // Capability escalation: 0 passing after initial try budget (e.g. 3) escalates to max_cap_trials (e.g. 5)
-        if stop_on_pass && passing_trials == 0 && trial_idx == total_trials && total_trials < max_cap_trials {
-            logger.log(&format!(
-                "[CAPABILITY] 0 passing after {} trials; escalating cell budget to {} trials.",
-                trial_idx, max_cap_trials
-            ));
-            total_trials = max_cap_trials;
+        // Narrow auto-extend: 0 passing with every completed trial a
+        // harness fault is corrupted evidence, not a model verdict —
+        // re-measure within the pre-approved envelope, once per cell.
+        // Mixed signals, model failures, and cancels stay manual. Billing
+        // needs no guard here: its arm always breaks the loop, so reaching
+        // this point proves no billing fired. The reserve is upfront (no
+        // refunds); the audit trail is the [AUTO-EXTEND] console lines.
+        // Every sub-path breaks: the batch IS the remainder (falling
+        // through would re-run duplicate trial numbers).
+        if stop_on_pass
+            && trial_idx == total_trials
+            && should_auto_extend(
+                passing_trials,
+                infra_trials,
+                subrun_results.len(),
+                total_trials,
+                crate::config::SCREEN_CAP_TRIALS,
+            )
+            && !state.cancel_requested.load(Ordering::SeqCst)
+        {
+            let budget = auto_extend_envelope();
+            match reserve_auto_extend(
+                &state.auto_extend_spent,
+                budget,
+                crate::config::SCREEN_CAP_TRIALS,
+            ) {
+                Some(granted) => {
+                    let spent = state.auto_extend_spent.load(Ordering::SeqCst);
+                    send_status(
+                        &tx,
+                        &run_log_buf,
+                        format!(
+                            "[AUTO-EXTEND] 0/{} passing, all {} harness-fault; firing +{} trial(s) (envelope {}/{}).",
+                            total_trials, infra_trials, granted, spent, budget
+                        ),
+                    );
+                    let out = run_extension_batch(
+                        &tx,
+                        &state.log_buffer,
+                        &state.current_run,
+                        &state.cancel_requested,
+                        &batch_log,
+                        ExtBatchSpec {
+                            model: req.model.clone(),
+                            task: task_type,
+                            effort: effort_setting.clone(),
+                            harness: req.harness.clone().unwrap_or_else(|| "omp".to_string()),
+                            max_turns: req.max_turns,
+                            budget_usd: req.budget_usd,
+                            timeout_min: req.timeout_min.unwrap_or(120),
+                            api_key: req.api_key.clone(),
+                            eval_only: req.eval_only,
+                            save_results: req.save_results.unwrap_or(true),
+                            review_model: req.review_model.clone(),
+                            parent_run_id: parent_run_id.clone(),
+                            start_idx: total_trials + 1,
+                            count: granted,
+                            display_total: total_trials + granted,
+                            feedback_rounds: req.feedback_rounds.unwrap_or(0),
+                        },
+                        worker,
+                        &state.worker_buffers,
+                        &state.worker_runs,
+                    )
+                    .await;
+                    if out.billing_tripped {
+                        send_status(
+                            &tx,
+                            &run_log_buf,
+                            "[BILLING] auto-extend hit provider billing error; pausing queue, trials discarded.".to_string(),
+                        );
+                        pause_queue(&state, "provider billing error in auto-extend batch");
+                        break;
+                    } else if out.results.is_empty() {
+                        send_status(
+                            &tx,
+                            &run_log_buf,
+                            "[AUTO-EXTEND] all auto trials failed; keeping current merge."
+                                .to_string(),
+                        );
+                        break;
+                    } else {
+                        let n_absorbed = out.results.len() as u32;
+                        total_trials += n_absorbed;
+                        passing_trials += out.passing;
+                        subrun_results.extend(out.results);
+                        auto_drift = auto_drift || out.drift.unwrap_or(false);
+                        send_status(
+                            &tx,
+                            &run_log_buf,
+                            format!(
+                                "[AUTO-EXTEND] absorbed {} trial(s); cell now {}/{}.",
+                                n_absorbed, passing_trials, total_trials
+                            ),
+                        );
+                        break;
+                    }
+                }
+                None => {
+                    send_status(
+                        &tx,
+                        &run_log_buf,
+                        format!(
+                            "[AUTO-EXTEND] 0/{} passing, all harness-fault, but envelope exhausted/disabled ({}=0 or spent) — manual extend or accept.",
+                            total_trials,
+                            crate::config::AUTO_EXTEND_BUDGET_ENV
+                        ),
+                    );
+                }
+            }
         }
 
         trial_idx += 1;
@@ -1458,8 +1626,11 @@ pub async fn execute_run_body(
         Some(b) => b.finish(&batch_log).await.drift,
         None => false,
     };
+    any_drift = any_drift || auto_drift;
 
-    let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1) && !subrun_results.is_empty() {
+    let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1)
+        && !subrun_results.is_empty()
+    {
         let mut m = LeaderboardManager::consolidate_multi_trial_run(
             &parent_run_id,
             &subrun_results,
@@ -1818,4 +1989,78 @@ pub fn push_queue_item(state: &AppState, kind: QueueKind) -> String {
         });
     }
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn test_screen_initial_trials_caps_at_four() {
+        // Flat cap 4 (was 3+escalate-5): min() binds large requests,
+        // max(1) floors degenerate ones.
+        assert_eq!(screen_initial_trials(9), 4);
+        assert_eq!(screen_initial_trials(4), 4);
+        assert_eq!(screen_initial_trials(2), 2);
+        assert_eq!(screen_initial_trials(1), 1);
+        assert_eq!(screen_initial_trials(0), 1);
+    }
+
+    #[test]
+    fn test_should_auto_extend_only_all_harness_fault() {
+        // The trigger case: 0 passing, every completed trial infra.
+        assert!(should_auto_extend(0, 4, 4, 4, 4));
+        // Mixed signals stay manual — one model failure vetoes.
+        assert!(!should_auto_extend(0, 3, 4, 4, 4));
+        // Any pass stays manual (solved is solved).
+        assert!(!should_auto_extend(1, 3, 4, 4, 4));
+        // Empty cell: nothing to re-measure.
+        assert!(!should_auto_extend(0, 0, 0, 4, 4));
+        // Early loop exit (fewer completed than planned): manual review,
+        // the shortfall itself needs explaining.
+        assert!(!should_auto_extend(0, 2, 2, 4, 4));
+        // Past-cap cell (already extended once, human or auto): no refire.
+        assert!(!should_auto_extend(0, 8, 8, 8, 4));
+        // All-infra but over cap for the same reason.
+        assert!(!should_auto_extend(0, 5, 5, 5, 4));
+    }
+
+    #[test]
+    fn test_reserve_auto_extend_cas_and_partial() {
+        // Disabled envelope: always None, never touches the counter.
+        let spent = AtomicU64::new(0);
+        assert_eq!(reserve_auto_extend(&spent, 0, 4), None);
+        assert_eq!(spent.load(Ordering::SeqCst), 0);
+        // Full grant within budget.
+        assert_eq!(reserve_auto_extend(&spent, 10, 4), Some(4));
+        assert_eq!(spent.load(Ordering::SeqCst), 4);
+        // Partial grant at the edge (6 left of 10, want 4 → tested below
+        // after consuming to 8).
+        assert_eq!(reserve_auto_extend(&spent, 10, 4), Some(4));
+        assert_eq!(spent.load(Ordering::SeqCst), 8);
+        // Partial: 2 left, want 4 → 2.
+        assert_eq!(reserve_auto_extend(&spent, 10, 4), Some(2));
+        assert_eq!(spent.load(Ordering::SeqCst), 10);
+        // Exhausted: None.
+        assert_eq!(reserve_auto_extend(&spent, 10, 4), None);
+        assert_eq!(spent.load(Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn test_auto_extend_envelope_env_parsing() {
+        // Single test owns the process-global env (parallel tests share
+        // env; cf. TEST_UI_TOKEN discipline in server.rs).
+        let prev = std::env::var(crate::config::AUTO_EXTEND_BUDGET_ENV).ok();
+        std::env::remove_var(crate::config::AUTO_EXTEND_BUDGET_ENV);
+        assert_eq!(auto_extend_envelope(), 0);
+        std::env::set_var(crate::config::AUTO_EXTEND_BUDGET_ENV, "12");
+        assert_eq!(auto_extend_envelope(), 12);
+        std::env::set_var(crate::config::AUTO_EXTEND_BUDGET_ENV, "nope");
+        assert_eq!(auto_extend_envelope(), 0);
+        match prev {
+            Some(v) => std::env::set_var(crate::config::AUTO_EXTEND_BUDGET_ENV, v),
+            None => std::env::remove_var(crate::config::AUTO_EXTEND_BUDGET_ENV),
+        }
+    }
 }

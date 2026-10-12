@@ -297,7 +297,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             feedback,
             feedback_rounds,
         } => {
-            let feedback_rounds = if feedback && feedback_rounds == 0 { 2 } else { feedback_rounds };
+            let feedback_rounds = if feedback && feedback_rounds == 0 {
+                2
+            } else {
+                feedback_rounds
+            };
             if queue {
                 let server = resolve_server_flag(&server);
                 // Engine path: identical payload to `enqueue`, so matrix
@@ -339,14 +343,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             let mut total_trials = if stop_on_pass {
-                trials.min(3).max(1)
+                subdollarbench::web::queue::screen_initial_trials(trials)
             } else {
                 trials.max(1)
-            };
-            let max_cap_trials = if stop_on_pass {
-                max_trials.max(5)
-            } else {
-                max_trials.max(total_trials)
             };
             // Trials that failed for infrastructure reasons, not model reasons.
             // Excluded from the pass@k denominator: counting them as failures
@@ -492,17 +491,23 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     }
                 }
 
-                if stop_on_pass && passing_trials == 0 && trial_idx == total_trials && total_trials < max_cap_trials {
+                if stop_on_pass
+                    && passing_trials == 0
+                    && subrun_results.is_empty()
+                    && infra_failed > 0
+                {
+                    // Foreground is interactive: no auto-fire (the operator
+                    // is watching). Engine waves auto-extend this shape
+                    // within SDB_AUTO_EXTEND_TRIALS; here, say so.
                     println!(
                         "{}",
                         format!(
-                            "  [CAPABILITY] 0 passing after {} trials; escalating cell budget to {} trials.",
-                            trial_idx, max_cap_trials
+                            "  [CAPABILITY] 0 passing, all {} harness-fault — no model evidence. Re-run, extend manually, or enqueue (engine auto-extends within its envelope).",
+                            infra_failed
                         )
                         .bold()
                         .yellow()
                     );
-                    total_trials = max_cap_trials;
                 }
 
                 trial_idx += 1;
@@ -513,7 +518,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 None => None,
             };
 
-            let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1) && !subrun_results.is_empty() {
+            let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1)
+                && !subrun_results.is_empty()
+            {
                 let mut m = LeaderboardManager::consolidate_multi_trial_run(
                     &parent_run_id,
                     &subrun_results,
@@ -1919,7 +1926,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             feedback,
             feedback_rounds,
         } => {
-            let feedback_rounds = if feedback && feedback_rounds == 0 { 2 } else { feedback_rounds };
+            let feedback_rounds = if feedback && feedback_rounds == 0 {
+                2
+            } else {
+                feedback_rounds
+            };
             let models: Vec<String> = models
                 .split(',')
                 .map(|m| m.trim().to_string())
@@ -2228,7 +2239,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             feedback,
             feedback_rounds,
         } => {
-            let feedback_rounds = if feedback && feedback_rounds == 0 { 2 } else { feedback_rounds };
+            let feedback_rounds = if feedback && feedback_rounds == 0 {
+                2
+            } else {
+                feedback_rounds
+            };
             main_queue::handle_enqueue(
                 model,
                 task,
