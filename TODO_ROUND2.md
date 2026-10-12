@@ -41,10 +41,14 @@ history; 5-trial top-up round 2 queued (063015:+2 started, q49 +1, q50
 - [ ] R5b. §J deep analysis (variant effect n=9, recovery incidence,
   effective-vs-requested audit, taxonomy, cost, cross-harness, probes).
 
-## R6. Small bugs noticed along the way (fix post-wave, low priority)
-- [ ] Extend-completion notes misreport ("all extension trials failed,
-  parent untouched" on q49/q50 whose trial10s passed 100%). Cosmetic,
-  engine-side note logic.
+## R6. Small bugs noticed along the way
+- [x] Extend-completion notes misreport — FIXED (1b6b818), root-caused
+  deeper than cosmetic: stranded scored trials (trials table complete,
+  parent missing them) + unconditional failure notes + len+1 numbering.
+  Now: trials-table orphan absorb (pre-batch for numbering, post-batch
+  race belt), max-N+1 numbering, honest notes (billing/cancel/N-errored/
+  setup-refused), outcome-true history notes. Engine + both foreground
+  extend paths. No scoring-math change: no rules bump.
 - [ ] `annotate-cutoff` re-run for q51+ rows (new trials unscanned).
 
 ## Standing decisions (do not re-litigate)
