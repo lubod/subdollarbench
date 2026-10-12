@@ -108,6 +108,121 @@ pub fn should_auto_extend(
         && infra == completed
 }
 
+/// Trial number from a `<parent>_trial<N>` id suffix. None when the id
+/// carries no numeric trial suffix (parent ids, legacy shapes).
+pub fn trial_no_of(id: &str) -> Option<u32> {
+    let (_, suffix) = id.rsplit_once("_trial")?;
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u32>().ok()
+}
+
+/// Scored model verdicts: trials that carry a real measurement. Anything
+/// else (agent_failed, infra_error, agent_killed, unknown) is a non-result
+/// by portal doctrine and is never absorbed as evidence.
+pub fn is_scored_status(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("completed") | Some("failed_tests") | Some("disqualified_cheat")
+    )
+}
+
+/// Next trial number for an extension batch: max existing + 1, so numbering
+/// never collides with absorbed orphans (len+1 collides once gaps exist).
+/// Falls back to len+1 when no id parses (legacy safety, never worse).
+pub fn next_trial_idx(subruns: &[BenchmarkRunResult]) -> u32 {
+    let max_n = subruns.iter().filter_map(|s| trial_no_of(&s.id)).max();
+    match max_n {
+        Some(n) => n + 1,
+        None if subruns.is_empty() => 1,
+        None => subruns.len() as u32 + 1,
+    }
+}
+
+/// Load stranded scored trials for a parent in one call: trials-table
+/// read (skipped entirely when the store is unavailable) + selection.
+/// `attempted` follows select_orphan_trials (None pre-batch, Some post).
+pub fn load_orphans(
+    parent_id: &str,
+    model: &str,
+    task: &str,
+    known_ids: &std::collections::HashSet<String>,
+    attempted: Option<std::ops::RangeInclusive<u32>>,
+) -> OrphanReport {
+    let empty = OrphanReport {
+        absorb: Vec::new(),
+        skipped_unscored: 0,
+        skipped_attempted: 0,
+        skipped_mismatch: 0,
+    };
+    let Some(store) = LeaderboardManager::open_store_if_exists() else {
+        return empty;
+    };
+    select_orphan_trials(
+        store.load_trials_for_parent(parent_id),
+        model,
+        task,
+        known_ids,
+        attempted,
+    )
+}
+
+/// Orphan absorb report: scored stored trials missing from the merged set.
+pub struct OrphanReport {
+    pub absorb: Vec<BenchmarkRunResult>,
+    pub skipped_unscored: usize,
+    pub skipped_attempted: usize,
+    pub skipped_mismatch: usize,
+}
+
+/// Select stranded scored trials for absorption. `stored` comes from the
+/// trials table (authoritative per-trial log, independent of merging);
+/// `known_ids` are trial ids already in the parent merge. A stored trial
+/// is absorbed only when: scored status, same model+task (no cross-talk),
+/// id unknown to the merge, and trial number NOT attempted by this batch
+/// (fresh evidence wins number conflicts; the skip is logged, never
+/// silent). Unparseable ids absorb on id-uniqueness alone.
+/// `attempted = None` pre-batch (nothing reserved yet — every unknown
+/// orphan surfaces); `Some(range)` post-batch as a race belt.
+pub fn select_orphan_trials(
+    stored: Vec<BenchmarkRunResult>,
+    model: &str,
+    task: &str,
+    known_ids: &std::collections::HashSet<String>,
+    attempted: Option<std::ops::RangeInclusive<u32>>,
+) -> OrphanReport {
+    let mut rep = OrphanReport {
+        absorb: Vec::new(),
+        skipped_unscored: 0,
+        skipped_attempted: 0,
+        skipped_mismatch: 0,
+    };
+    for t in stored {
+        if !is_scored_status(t.status.as_deref()) {
+            rep.skipped_unscored += 1;
+            continue;
+        }
+        if known_ids.contains(&t.id) {
+            continue;
+        }
+        if t.model != model || t.task != task {
+            rep.skipped_mismatch += 1;
+            continue;
+        }
+        match trial_no_of(&t.id) {
+            Some(n) if attempted.as_ref().is_some_and(|r| r.contains(&n)) => {
+                rep.skipped_attempted += 1;
+            }
+            _ => rep.absorb.push(t),
+        }
+    }
+    // Deterministic order: absorb by trial number, unparseable ids last.
+    rep.absorb
+        .sort_by_key(|t| trial_no_of(&t.id).unwrap_or(u32::MAX));
+    rep
+}
+
 /// Reserve `want` trials from the envelope (CAS loop: concurrent workers
 /// can't overshoot). Grants partial (min(want, left)); None when spent.
 /// Reserved upfront with no refunds — an attempted trial is spent whether
@@ -710,6 +825,10 @@ pub struct ExtBatchSpec {
 pub struct ExtBatchOut {
     pub(crate) results: Vec<BenchmarkRunResult>,
     pub(crate) passing: usize,
+    /// Trials that errored (non-cancel, non-billing): attempted but
+    /// unscored. Lets callers report "N errored" honestly instead of
+    /// blanket "all failed".
+    pub(crate) errors: u32,
     pub(crate) drift: Option<bool>,
     /// Provider billing trip during extensions: callers pause the queue.
     pub(crate) billing_tripped: bool,
@@ -755,6 +874,7 @@ pub async fn run_extension_batch(
                     return ExtBatchOut {
                         results: vec![],
                         passing: 0,
+                        errors: 0,
                         drift: None,
                         billing_tripped: false,
                     };
@@ -772,6 +892,7 @@ pub async fn run_extension_batch(
     };
     let mut results = Vec::new();
     let mut passing = 0usize;
+    let mut errors = 0u32;
     let mut billing_tripped = false;
     for i in 0..spec.count {
         if cancel.load(Ordering::SeqCst) {
@@ -866,6 +987,7 @@ pub async fn run_extension_batch(
                     "[SUBRUN ERROR] Extension subrun {} failed: {}",
                     trial_idx, e
                 ));
+                errors += 1;
                 break;
             }
         }
@@ -877,6 +999,7 @@ pub async fn run_extension_batch(
     ExtBatchOut {
         results,
         passing,
+        errors,
         drift,
         billing_tripped,
     }
@@ -1077,7 +1200,33 @@ pub async fn execute_extend_body(
         }
     };
     let count = ext.trials.max(1);
-    let start_idx = data.subruns.len() as u32 + 1;
+    // Pre-absorb BEFORE numbering: stranded scored trials rejoin the base
+    // first, so max-N+1 numbering skips their numbers (no workdir reuse)
+    // and the merge below sees every trial whether or not this batch ran.
+    let mut base_subruns = data.subruns.clone();
+    {
+        let known: std::collections::HashSet<String> =
+            base_subruns.iter().map(|s| s.id.clone()).collect();
+        let pre = load_orphans(&ext.parent_run_id, &data.model, &data.task, &known, None);
+        if !pre.absorb.is_empty() {
+            send_status(
+                &tx,
+                &log_buf,
+                format!(
+                    "[EXTEND-QUEUE] {queue_id}: pre-absorbed {} orphan scored trial(s) into the base (skipped: {} unscored, {} mismatch).",
+                    pre.absorb.len(),
+                    pre.skipped_unscored,
+                    pre.skipped_mismatch
+                ),
+            );
+            base_subruns.extend(pre.absorb);
+            base_subruns.sort_by_key(|r| trial_no_of(&r.id).unwrap_or(u32::MAX));
+        }
+    }
+    // max-N+1, not len+1: numbering gaps make len+1 collide with an
+    // existing trial dir (workdir reuse = data loss + confusion). Falls
+    // back to len+1 only when no id parses.
+    let start_idx = next_trial_idx(&base_subruns);
     let total = data.subruns.len() as u32 + count;
     let spec = ExtBatchSpec {
         model: data.model.clone(),
@@ -1123,9 +1272,41 @@ pub async fn execute_extend_body(
     if out.billing_tripped {
         pause_queue(&state, "provider billing error in extension batch");
     }
-    if !out.results.is_empty() {
-        let mut combined = data.subruns.clone();
-        combined.extend(out.results);
+    // Post-batch absorb (race belt): the pre-absorb above runs before the
+    // batch, but trials from a concurrent chain could land mid-batch. Same
+    // helper; the batch's own attempted numbers stay excluded.
+    let attempted = start_idx..=(start_idx.saturating_add(count).saturating_sub(1));
+    let known: std::collections::HashSet<String> = base_subruns
+        .iter()
+        .map(|s| s.id.clone())
+        .chain(out.results.iter().map(|r| r.id.clone()))
+        .collect();
+    let orphans = load_orphans(
+        &ext.parent_run_id,
+        &data.model,
+        &data.task,
+        &known,
+        Some(attempted),
+    );
+    if !orphans.absorb.is_empty() {
+        send_status(
+            &tx,
+            &log_buf,
+            format!(
+                "[EXTEND-QUEUE] {queue_id}: absorbed {} orphan scored trial(s) missing from the merge (skipped: {} unscored, {} batch-attempted, {} mismatch).",
+                orphans.absorb.len(),
+                orphans.skipped_unscored,
+                orphans.skipped_attempted,
+                orphans.skipped_mismatch
+            ),
+        );
+    }
+    let mut combined = base_subruns.clone();
+    combined.extend(out.results);
+    combined.extend(orphans.absorb);
+    // Deterministic trial order after absorb (orphans may fill gaps).
+    combined.sort_by_key(|r| trial_no_of(&r.id).unwrap_or(u32::MAX));
+    if combined.len() > data.subruns.len() {
         let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
         // Quarantine is sticky: the parent's stored drift OR the extension
         // drift. Passing only out.drift let a clean extension erase a drifted
@@ -1139,28 +1320,34 @@ pub async fn execute_extend_body(
         );
         let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
         let (stab2, reason2) = assess_stability(&parked);
-        send_status(
-            &tx,
-            &log_buf,
-            format!(
-                "[EXTEND-QUEUE] {queue_id}: {}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
-                ext.parent_run_id,
-                combined.len(),
-                compute_pass_at_k(combined.len(), passing, 1) * 100.0
-            ),
+        let summary = format!(
+            "[EXTEND-QUEUE] {queue_id}: {}: {} trials, {passing} passing, Pass@1 {:.1}% — {stab2:?} ({reason2})",
+            ext.parent_run_id,
+            combined.len(),
+            compute_pass_at_k(combined.len(), passing, 1) * 100.0
         );
+        send_status(&tx, &log_buf, summary.clone());
+        mark_queue_done(&state, &queue_id, Some(&summary));
     } else {
-        send_status(
-            &tx,
-            &log_buf,
-            format!("[EXTEND-QUEUE] {queue_id}: all extension trials failed; parent untouched."),
-        );
+        // Honest empty-branch: name the actual shape instead of blanket
+        // "all failed". Zero scored trials with zero errors and no billing
+        // or cancel means nothing was attempted (e.g. pdf batch-ref fatal);
+        // errors mean errored trials; billing/cancel speak for themselves.
+        let cancelled = state.cancel_requested.load(Ordering::SeqCst);
+        let note = if out.billing_tripped {
+            format!("[EXTEND-QUEUE] {queue_id}: batch billing-paused; no scored trials, parent untouched.")
+        } else if cancelled {
+            format!(
+                "[EXTEND-QUEUE] {queue_id}: batch cancelled; no scored trials, parent untouched."
+            )
+        } else if out.errors > 0 {
+            format!("[EXTEND-QUEUE] {queue_id}: batch produced no scored trials ({} errored); parent untouched.", out.errors)
+        } else {
+            format!("[EXTEND-QUEUE] {queue_id}: batch produced no scored trials and no errors (setup refused before any trial); parent untouched.")
+        };
+        send_status(&tx, &log_buf, note.clone());
+        mark_queue_done(&state, &queue_id, Some(&note));
     }
-    mark_queue_done(
-        &state,
-        &queue_id,
-        Some("extend finished: all extension trials failed, parent untouched"),
-    );
     release_slot(&state, worker);
     if !pump_queue(&state) {
         send_status(&tx, &log_buf, "[DONE]".to_string());
@@ -1514,24 +1701,65 @@ pub async fn execute_run_body(
         // through would re-run duplicate trial numbers).
         if stop_on_pass
             && trial_idx == total_trials
-            && should_auto_extend(
+            && !state.cancel_requested.load(Ordering::SeqCst)
+        {
+            // Pre-absorb: stranded scored trials rejoin before any trigger
+            // math. A passing orphan already answers the cell (solve-break,
+            // no spend); failing orphans join the denominator honestly.
+            {
+                let known: std::collections::HashSet<String> =
+                    subrun_results.iter().map(|s| s.id.clone()).collect();
+                let pre = load_orphans(&parent_run_id, &req.model, &req.task, &known, None);
+                if !pre.absorb.is_empty() {
+                    let pre_passing = pre.absorb.iter().filter(|r| r.pass_rate >= 100.0).count();
+                    let n_pre = pre.absorb.len() as u32;
+                    subrun_results.extend(pre.absorb);
+                    passing_trials += pre_passing;
+                    total_trials += n_pre;
+                    if pre_passing > 0 {
+                        send_status(
+                            &tx,
+                            &run_log_buf,
+                            format!(
+                                "[AUTO-EXTEND] cell already solved by {} stranded trial(s); no fire.",
+                                n_pre
+                            ),
+                        );
+                        break;
+                    }
+                    send_status(
+                        &tx,
+                        &run_log_buf,
+                        format!(
+                            "[AUTO-EXTEND] pre-absorbed {} failing orphan(s); re-evaluating trigger.",
+                            n_pre
+                        ),
+                    );
+                }
+            }
+            if !should_auto_extend(
                 passing_trials,
                 infra_trials,
                 subrun_results.len(),
                 total_trials,
                 crate::config::SCREEN_CAP_TRIALS,
-            )
-            && !state.cancel_requested.load(Ordering::SeqCst)
-        {
-            let budget = auto_extend_envelope();
-            match reserve_auto_extend(
-                &state.auto_extend_spent,
-                budget,
-                crate::config::SCREEN_CAP_TRIALS,
             ) {
-                Some(granted) => {
-                    let spent = state.auto_extend_spent.load(Ordering::SeqCst);
-                    send_status(
+                // Not all-harness-fault (a manual verdict or an orphan broke
+                // the shape): stay manual. total_trials may have grown via
+                // pre-absorb; the loop exits naturally below.
+                break;
+            }
+            {
+                let budget = auto_extend_envelope();
+                match reserve_auto_extend(
+                    &state.auto_extend_spent,
+                    budget,
+                    crate::config::SCREEN_CAP_TRIALS,
+                ) {
+                    Some(granted) => {
+                        let batch_start = next_trial_idx(&subrun_results);
+                        let spent = state.auto_extend_spent.load(Ordering::SeqCst);
+                        send_status(
                         &tx,
                         &run_log_buf,
                         format!(
@@ -1539,70 +1767,122 @@ pub async fn execute_run_body(
                             total_trials, infra_trials, granted, spent, budget
                         ),
                     );
-                    let out = run_extension_batch(
-                        &tx,
-                        &state.log_buffer,
-                        &state.current_run,
-                        &state.cancel_requested,
-                        &batch_log,
-                        ExtBatchSpec {
-                            model: req.model.clone(),
-                            task: task_type,
-                            effort: effort_setting.clone(),
-                            harness: req.harness.clone().unwrap_or_else(|| "omp".to_string()),
-                            max_turns: req.max_turns,
-                            budget_usd: req.budget_usd,
-                            timeout_min: req.timeout_min.unwrap_or(120),
-                            api_key: req.api_key.clone(),
-                            eval_only: req.eval_only,
-                            save_results: req.save_results.unwrap_or(true),
-                            review_model: req.review_model.clone(),
-                            parent_run_id: parent_run_id.clone(),
-                            start_idx: total_trials + 1,
-                            count: granted,
-                            display_total: total_trials + granted,
-                            feedback_rounds: req.feedback_rounds.unwrap_or(0),
-                        },
-                        worker,
-                        &state.worker_buffers,
-                        &state.worker_runs,
-                    )
-                    .await;
-                    if out.billing_tripped {
-                        send_status(
+                        let out = run_extension_batch(
+                            &tx,
+                            &state.log_buffer,
+                            &state.current_run,
+                            &state.cancel_requested,
+                            &batch_log,
+                            ExtBatchSpec {
+                                model: req.model.clone(),
+                                task: task_type,
+                                effort: effort_setting.clone(),
+                                harness: req.harness.clone().unwrap_or_else(|| "omp".to_string()),
+                                max_turns: req.max_turns,
+                                budget_usd: req.budget_usd,
+                                timeout_min: req.timeout_min.unwrap_or(120),
+                                api_key: req.api_key.clone(),
+                                eval_only: req.eval_only,
+                                save_results: req.save_results.unwrap_or(true),
+                                review_model: req.review_model.clone(),
+                                parent_run_id: parent_run_id.clone(),
+                                start_idx: batch_start,
+                                count: granted,
+                                display_total: total_trials + granted,
+                                feedback_rounds: req.feedback_rounds.unwrap_or(0),
+                            },
+                            worker,
+                            &state.worker_buffers,
+                            &state.worker_runs,
+                        )
+                        .await;
+                        if out.billing_tripped {
+                            send_status(
                             &tx,
                             &run_log_buf,
                             "[BILLING] auto-extend hit provider billing error; pausing queue, trials discarded.".to_string(),
                         );
-                        pause_queue(&state, "provider billing error in auto-extend batch");
-                        break;
-                    } else if out.results.is_empty() {
-                        send_status(
-                            &tx,
-                            &run_log_buf,
-                            "[AUTO-EXTEND] all auto trials failed; keeping current merge."
-                                .to_string(),
-                        );
-                        break;
-                    } else {
-                        let n_absorbed = out.results.len() as u32;
-                        total_trials += n_absorbed;
-                        passing_trials += out.passing;
-                        subrun_results.extend(out.results);
-                        auto_drift = auto_drift || out.drift.unwrap_or(false);
-                        send_status(
-                            &tx,
-                            &run_log_buf,
-                            format!(
-                                "[AUTO-EXTEND] absorbed {} trial(s); cell now {}/{}.",
-                                n_absorbed, passing_trials, total_trials
-                            ),
-                        );
-                        break;
+                            pause_queue(&state, "provider billing error in auto-extend batch");
+                            break;
+                        } else {
+                            // Post-batch absorb (race belt): a concurrent chain
+                            // on this parent could land trials mid-batch. Fresh
+                            // evidence keeps its numbers; the belt only takes
+                            // the rest.
+                            let attempted = batch_start
+                                ..=(batch_start.saturating_add(granted).saturating_sub(1));
+                            let known: std::collections::HashSet<String> = subrun_results
+                                .iter()
+                                .map(|s| s.id.clone())
+                                .chain(out.results.iter().map(|r| r.id.clone()))
+                                .collect();
+                            let post = load_orphans(
+                                &parent_run_id,
+                                &req.model,
+                                &req.task,
+                                &known,
+                                Some(attempted),
+                            );
+                            let n_new = (out.results.len() + post.absorb.len()) as u32;
+                            let mut post_skipped = String::new();
+                            if post.skipped_attempted > 0 {
+                                post_skipped = format!(
+                                    " ({} skipped: already attempted this batch)",
+                                    post.skipped_attempted
+                                );
+                            }
+                            if n_new == 0 {
+                                // Honest empty-branch: the batch ran but scored
+                                // nothing. Name the shape: billing and cancel
+                                // speak for themselves; errors are counted;
+                                // zero-of-everything means setup refused.
+                                let cancelled = state.cancel_requested.load(Ordering::SeqCst);
+                                if cancelled {
+                                    send_status(
+                                    &tx,
+                                    &run_log_buf,
+                                    "[AUTO-EXTEND] batch cancelled; no scored trials, parent untouched."
+                                        .to_string(),
+                                );
+                                } else if out.errors > 0 {
+                                    send_status(
+                                    &tx,
+                                    &run_log_buf,
+                                    format!(
+                                        "[AUTO-EXTEND] batch produced no scored trials ({} errored); parent untouched.",
+                                        out.errors
+                                    ),
+                                );
+                                } else {
+                                    send_status(
+                                    &tx,
+                                    &run_log_buf,
+                                    "[AUTO-EXTEND] batch produced no scored trials and no errors (setup refused before any trial); parent untouched."
+                                        .to_string(),
+                                );
+                                }
+                                break;
+                            }
+                            total_trials += n_new;
+                            passing_trials += out.passing
+                                + post.absorb.iter().filter(|r| r.pass_rate >= 100.0).count();
+                            subrun_results.extend(out.results);
+                            subrun_results.extend(post.absorb);
+                            subrun_results.sort_by_key(|r| trial_no_of(&r.id).unwrap_or(u32::MAX));
+                            auto_drift = auto_drift || out.drift.unwrap_or(false);
+                            send_status(
+                                &tx,
+                                &run_log_buf,
+                                format!(
+                                    "[AUTO-EXTEND] absorbed {} trial(s){}; cell now {}/{}.",
+                                    n_new, post_skipped, passing_trials, total_trials
+                                ),
+                            );
+                            break;
+                        }
                     }
-                }
-                None => {
-                    send_status(
+                    None => {
+                        send_status(
                         &tx,
                         &run_log_buf,
                         format!(
@@ -1611,6 +1891,7 @@ pub async fn execute_run_body(
                             crate::config::AUTO_EXTEND_BUDGET_ENV
                         ),
                     );
+                    }
                 }
             }
         }
@@ -2045,6 +2326,115 @@ mod tests {
         // Exhausted: None.
         assert_eq!(reserve_auto_extend(&spent, 10, 4), None);
         assert_eq!(spent.load(Ordering::SeqCst), 10);
+    }
+
+    fn trow(id: &str, status: &str, pass: f64) -> BenchmarkRunResult {
+        trow_mt(id, status, pass, "m", "redis")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trow_mt(id: &str, status: &str, pass: f64, model: &str, task: &str) -> BenchmarkRunResult {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "model": model,
+            "task": task,
+            "language": "Go",
+            "status": status,
+            "pass_rate": pass,
+            "passed_stages": if pass >= 100.0 { 6 } else { 0 },
+            "total_stages": 6,
+            "prompt_tokens": 0,
+            "cached_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "total_cost_usd": 0.01,
+            "savings_percent": 0.0,
+            "efficiency_score": 0.0,
+            "timestamp": "2026-10-12T00:00:00Z"
+        }))
+        .expect("test row")
+    }
+
+    #[test]
+    fn test_trial_no_of_parses_only_numeric_suffix() {
+        assert_eq!(trial_no_of("pdf_m_20261010_x_trial10"), Some(10));
+        assert_eq!(trial_no_of("pdf_m_20261010_x_trial1"), Some(1));
+        // Parent ids, empty suffixes, non-numeric suffixes: None.
+        assert_eq!(trial_no_of("pdf_m_20261010_x"), None);
+        assert_eq!(trial_no_of("pdf_m_20261010_x_trial"), None);
+        assert_eq!(trial_no_of("pdf_m_20261010_x_trialX"), None);
+        assert_eq!(trial_no_of("pdf_m_20261010_x_trial1x"), None);
+        // A model literally named trial-9b must not parse (rsplit + digits).
+        assert_eq!(trial_no_of("redis_openrouter_x_trial-9b_20261010_w0"), None);
+        assert_eq!(trial_no_of(""), None);
+    }
+
+    #[test]
+    fn test_is_scored_status_only_ranks_or_excludes() {
+        // completed / failed_tests rank; disqualified_cheat is excluded by
+        // merge rules but still evidence (listed, auditable).
+        for s in ["completed", "failed_tests", "disqualified_cheat"] {
+            assert!(is_scored_status(Some(s)), "{s}");
+        }
+        // Non-results by portal doctrine are never absorbed as evidence.
+        for s in [
+            Some("agent_failed"),
+            Some("infra_error"),
+            Some("agent_killed"),
+            Some("something_new"),
+            None,
+        ] {
+            assert!(!is_scored_status(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn test_next_trial_idx_skips_gaps() {
+        // Dense: len+1 either way.
+        let subs: Vec<BenchmarkRunResult> = (1..=9)
+            .map(|i| trow(&format!("p_trial{i}"), "completed", 100.0))
+            .collect();
+        assert_eq!(next_trial_idx(&subs), 10);
+        // Gap: max-N+1, not len+1 (len+1 would reuse trial10's dir).
+        let mut gapped = subs[..9].to_vec();
+        gapped.push(trow("p_trial11", "completed", 100.0));
+        assert_eq!(gapped.len(), 10);
+        assert_eq!(next_trial_idx(&gapped), 12);
+        // Empty and unparseable: safe fallbacks.
+        assert_eq!(next_trial_idx(&[]), 1);
+        assert_eq!(
+            next_trial_idx(&[trow("parent-no-suffix", "completed", 100.0)]),
+            2
+        );
+    }
+
+    #[test]
+    fn test_select_orphan_trials_filters_and_sorts() {
+        let stored = vec![
+            trow("p_trial10", "completed", 100.0),
+            trow("p_trial11", "failed_tests", 0.0),
+            trow("p_trial12", "disqualified_cheat", 0.0),
+            trow("p_trial13", "agent_failed", 0.0),
+            trow("p_trial14", "completed", 100.0),
+            // Same trial number, different cell: cross-talk guard.
+            trow_mt("q_trial10", "completed", 100.0, "other-model", "redis"),
+        ];
+        let mut known = std::collections::HashSet::new();
+        known.insert("p_trial11".to_string());
+        // No reservations: unknown scored same-cell trials absorb (sorted),
+        // unscored/mismatch/known skip with counts.
+        let rep = select_orphan_trials(stored.clone(), "m", "redis", &known, None);
+        let ids: Vec<&str> = rep.absorb.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["p_trial10", "p_trial12", "p_trial14"]);
+        assert_eq!(rep.skipped_unscored, 1);
+        assert_eq!(rep.skipped_mismatch, 1);
+        assert_eq!(rep.skipped_attempted, 0);
+        // Fresh evidence wins number conflicts: batch attempting 10..11
+        // excludes trial10 (skip logged, never silent).
+        let rep2 = select_orphan_trials(stored, "m", "redis", &known, Some(10..=11));
+        let ids2: Vec<&str> = rep2.absorb.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids2, vec!["p_trial12", "p_trial14"]);
+        assert_eq!(rep2.skipped_attempted, 1);
     }
 
     #[test]

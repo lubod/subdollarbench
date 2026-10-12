@@ -168,6 +168,10 @@ struct TrialBatchParams {
 struct TrialBatchOutput {
     results: Vec<BenchmarkRunResult>,
     passing: u32,
+    /// Trials that errored (non-infra Err arm): attempted but unscored.
+    /// Lets callers report "N errored" honestly instead of blanket
+    /// "all failed".
+    errors: u32,
     drift: Option<bool>,
 }
 
@@ -196,6 +200,7 @@ async fn run_trial_batch(
     };
     let mut results = Vec::new();
     let mut passing = 0;
+    let mut errors = 0u32;
     for i in 0..p.count {
         let idx = p.start_idx + i;
         println!(
@@ -250,6 +255,7 @@ async fn run_trial_batch(
             }
             Err(e) => {
                 eprintln!("  [ERROR] Extension subrun {} failed: {}", idx, e);
+                errors += 1;
             }
         }
     }
@@ -260,6 +266,7 @@ async fn run_trial_batch(
     Ok(TrialBatchOutput {
         results,
         passing,
+        errors,
         drift,
     })
 }
@@ -591,7 +598,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 eval_only,
                                 review_model: review_model.clone(),
                                 parent_run_id: parent_run_id.clone(),
-                                start_idx: total_trials + 1,
+                                start_idx: subdollarbench::web::queue::next_trial_idx(
+                                    &subrun_results,
+                                ),
                                 count: add,
                                 feedback_rounds,
                             },
@@ -599,9 +608,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         )
                         .await?;
                         if batch.results.is_empty() {
-                            eprintln!(
-                                "[EXTEND] all extension trials failed; keeping current merge."
-                            );
+                            if batch.errors > 0 {
+                                eprintln!(
+                                    "[EXTEND] batch produced no scored trials ({} errored); keeping current merge.",
+                                    batch.errors
+                                );
+                            } else {
+                                eprintln!(
+                                    "[EXTEND] batch produced no scored trials and no errors (setup refused before any trial); keeping current merge."
+                                );
+                            }
                             break;
                         }
                         total_trials += batch.results.len() as u32;
@@ -2164,6 +2180,32 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 subdollarbench::config::get_repo_root().join(&workdir)
             };
             let logger = Arc::new(CliPipelineLogger);
+            // Pre-absorb BEFORE numbering: stranded scored trials rejoin
+            // first so max-N+1 skips their numbers (no workdir reuse), and
+            // the merge below sees every trial whether or not this batch ran.
+            let mut base_subruns = merged.subruns.clone();
+            {
+                use std::collections::HashSet;
+                let known: HashSet<String> = base_subruns.iter().map(|s| s.id.clone()).collect();
+                let pre = subdollarbench::web::queue::load_orphans(
+                    pid.as_str(),
+                    &merged.model,
+                    &merged.task,
+                    &known,
+                    None,
+                );
+                if !pre.absorb.is_empty() {
+                    eprintln!(
+                        "  [EXTEND] pre-absorbed {} orphan scored trial(s) into the base.",
+                        pre.absorb.len()
+                    );
+                    base_subruns.extend(pre.absorb);
+                    base_subruns.sort_by_key(|r| {
+                        subdollarbench::web::queue::trial_no_of(&r.id).unwrap_or(u32::MAX)
+                    });
+                }
+            }
+            let batch_start = subdollarbench::web::queue::next_trial_idx(&base_subruns);
             let batch = run_trial_batch(
                 TrialBatchParams {
                     model: model.unwrap_or_else(|| merged.model.clone()),
@@ -2180,18 +2222,49 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     eval_only,
                     review_model,
                     parent_run_id: pid.clone(),
-                    start_idx: merged.subruns.len() as u32 + 1,
+                    start_idx: batch_start,
                     count: trials.max(1),
                     feedback_rounds: merged.feedback_rounds.unwrap_or(0),
                 },
                 logger,
             )
             .await?;
-            if batch.results.is_empty() {
-                anyhow::bail!("all extension trials failed; parent merge untouched");
-            }
-            let mut combined = merged.subruns.clone();
+            // Post-batch absorb (race belt) + honest empty-branch: the batch
+            // may have scored nothing while stranded trials exist, and an
+            // empty batch with zero errors means setup refused — all three
+            // read differently from blanket "all failed".
+            let attempted =
+                batch_start..=(batch_start.saturating_add(trials.max(1)).saturating_sub(1));
+            let known: std::collections::HashSet<String> = base_subruns
+                .iter()
+                .map(|s| s.id.clone())
+                .chain(batch.results.iter().map(|r| r.id.clone()))
+                .collect();
+            let post = subdollarbench::web::queue::load_orphans(
+                pid.as_str(),
+                &merged.model,
+                &merged.task,
+                &known,
+                Some(attempted),
+            );
+            let n_new = (batch.results.len() + post.absorb.len()) as u32;
+            let mut combined = base_subruns.clone();
             combined.extend(batch.results);
+            combined.extend(post.absorb);
+            combined.sort_by_key(|r| {
+                subdollarbench::web::queue::trial_no_of(&r.id).unwrap_or(u32::MAX)
+            });
+            if n_new == 0 {
+                if batch.errors > 0 {
+                    anyhow::bail!(
+                        "extend produced no scored trials ({} errored); parent merge untouched",
+                        batch.errors
+                    );
+                }
+                anyhow::bail!(
+                    "extend produced no scored trials and no errors (setup refused before any trial); parent merge untouched"
+                );
+            }
             let total = combined.len();
             let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
             let final_merged =

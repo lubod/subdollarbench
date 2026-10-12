@@ -232,6 +232,36 @@ impl Store {
             .collect()
     }
 
+    /// Scored trial rows for one parent, parsed from the trials-table
+    /// docs (each trial persists its BenchmarkRunResult on completion,
+    /// independent of merging). Unparseable rows are skipped with a
+    /// warning, mirroring load_all_parents — a corrupt trial must not
+    /// sink the absorb scan.
+    pub fn load_trials_for_parent(&self, parent_id: &str) -> Vec<BenchmarkRunResult> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn
+            .prepare("SELECT id, doc FROM trials WHERE parent_id = ?1 ORDER BY trial_no")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map([parent_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|row| row.ok())
+            .filter_map(|(id, doc)| match serde_json::from_str(&doc) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    warn!("store: skipping corrupt trial row {id}: {e}");
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn parent_count(&self) -> usize {
         let conn = self.conn.lock();
         conn.query_row("SELECT COUNT(*) FROM parents", [], |row| {
@@ -602,6 +632,40 @@ mod tests {
             "files": []
         }))
         .expect("sample manifest")
+    }
+
+    #[test]
+    fn load_trials_for_parent_returns_scored_rows() {
+        // Orphan-absorb source: trials persist per-trial result docs
+        // independent of merging; corrupt rows skip without sinking.
+        let db = std::env::temp_dir().join(format!("store-trials-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let store = Store::open(&db).expect("open");
+        let mut parent = sample_result("p1");
+        let mut t1 = sample_result("p1_trial1");
+        t1.status = Some("completed".to_string());
+        let mut t2 = sample_result("p1_trial2");
+        t2.status = Some("failed_tests".to_string());
+        t2.pass_rate = 0.0;
+        parent.subruns = vec![t1, t2];
+        parent.total_trials = Some(2);
+        store.upsert_parent(&parent).expect("upsert");
+        let got = store.load_trials_for_parent("p1");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].id, "p1_trial1");
+        assert_eq!(got[1].status.as_deref(), Some("failed_tests"));
+        assert!(store.load_trials_for_parent("nope").is_empty());
+        // Corrupt doc row: skipped, others survive.
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT OR REPLACE INTO trials (id, parent_id, trial_no, pass_rate, status, cost_usd, duration_s, turns, doc) VALUES ('p1_trial9', 'p1', 9, 0, 'completed', 0, 0, 0, '{not json')",
+                [],
+            )
+            .expect("inject bad trial");
+        assert_eq!(store.load_trials_for_parent("p1").len(), 2);
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]
