@@ -2511,6 +2511,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: stab.map(|s| s.to_string()),
             frontier_fraction: None,
+            protocol: None,
+            solved: Some(pass >= 100.0),
+            solved_at: if pass >= 100.0 { Some(1) } else { None },
+            best_stage_score: Some(pass),
         }
     }
 

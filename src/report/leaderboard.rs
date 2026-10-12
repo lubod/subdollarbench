@@ -106,6 +106,18 @@ pub struct BenchmarkRunResult {
     /// None when this row or the best row has no anchored throughput.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontier_fraction: Option<f64>,
+    /// Evaluation protocol (e.g. "sequential_cap" or "fixed_n")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// True if any trial achieved 100% stage pass rate
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solved: Option<bool>,
+    /// 1-indexed trial number that first achieved 100% pass (None if unsolved)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solved_at: Option<u32>,
+    /// Highest stage pass rate achieved across trials
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_stage_score: Option<f64>,
 }
 
 pub fn format_duration(secs: f64) -> String {
@@ -360,6 +372,9 @@ impl BenchmarkRunResult {
             single.pass_at_1_lo = Some(w_lo);
             single.pass_at_1_hi = Some(w_hi);
             single.stability = Some("stable".to_string());
+            single.solved = Some(c == 1);
+            single.solved_at = if c == 1 { Some(1) } else { None };
+            single.best_stage_score = Some(single.pass_rate);
             // Recompute the score under unified semantics: base at 100%,
             // scaled by P@1 (0 or 1 here). Keeps the trial's own cost,
             // duration, tokens — only the score formula unifies.
@@ -563,6 +578,11 @@ impl BenchmarkRunResult {
             Stability::Unstable => "unstable",
         }
         .to_string();
+        let passing_idx = agg.iter().position(|r| r.pass_rate >= 100.0);
+        let solved = passing_idx.is_some();
+        let solved_at = passing_idx.map(|idx| (idx + 1) as u32);
+        let best_stage_score = agg.iter().map(|r| r.pass_rate).fold(0.0, f64::max);
+        let merged_protocol: Option<String> = subruns.iter().find_map(|s| s.protocol.clone());
         Some(BenchmarkRunResult {
             id: parent_id.to_string(),
             model: best.model.clone(),
@@ -619,6 +639,10 @@ impl BenchmarkRunResult {
             // Filled by recompute_frontier_fractions over the comparison
             // set (needs same-task peers); unknown at merge time.
             frontier_fraction: None,
+            protocol: merged_protocol,
+            solved: Some(solved),
+            solved_at,
+            best_stage_score: Some(best_stage_score),
         })
     }
 
@@ -928,6 +952,10 @@ impl LeaderboardManager {
                     manifest.stability = merged.stability.clone();
                     manifest.trial_pass_rates =
                         merged.subruns.iter().map(|s| s.pass_rate).collect();
+                    manifest.protocol = merged.protocol.clone();
+                    manifest.solved = merged.solved;
+                    manifest.solved_at = merged.solved_at;
+                    manifest.best_stage_score = merged.best_stage_score;
                     manifest.passed_stages = merged.passed_stages;
                     manifest.total_stages = merged.total_stages;
                     manifest.duration_seconds = merged.duration_seconds.unwrap_or(0.0);
@@ -1778,6 +1806,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
         let mut pinned = base;
@@ -1834,6 +1866,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         }
     }
 
@@ -1980,6 +2016,10 @@ mod tests {
                 pass_at_1_hi: None,
                 stability: None,
                 frontier_fraction: None,
+                protocol: None,
+                solved: None,
+                solved_at: None,
+                best_stage_score: None,
             };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
@@ -2044,6 +2084,21 @@ mod tests {
         assert!((mixed.pass_at_1.unwrap() - 66.66666666666667).abs() < 1e-6);
         assert!(mixed.efficiency_score > 0.0);
         assert!(mixed.throughput_score.unwrap() > 0.0);
+        assert_eq!(mixed.solved, Some(true));
+        assert_eq!(mixed.solved_at, Some(1));
+        assert_eq!(mixed.best_stage_score, Some(100.0));
+
+        // Sequential capability protocol test with unsolved trials
+        let mut u1 = make_run("u1", 0.0, 40.0, 8, 0.001, 25.0);
+        u1.protocol = Some("sequential_cap".to_string());
+        let mut u2 = make_run("u2", 0.0, 30.0, 7, 0.002, 50.0);
+        u2.protocol = Some("sequential_cap".to_string());
+        let unsolved =
+            BenchmarkRunResult::merge_subruns("run_unsolved", vec![u1, u2], None, None).unwrap();
+        assert_eq!(unsolved.protocol.as_deref(), Some("sequential_cap"));
+        assert_eq!(unsolved.solved, Some(false));
+        assert_eq!(unsolved.solved_at, None);
+        assert_eq!(unsolved.best_stage_score, Some(50.0));
     }
 
     #[test]
@@ -2091,6 +2146,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
         // Candidate rate survives (real measurement); denominator, source
@@ -2146,6 +2205,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         // One crashed trial (0.0) + two real readings: median of the real two.
         let m = BenchmarkRunResult::merge_subruns(
@@ -2219,6 +2282,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let m = BenchmarkRunResult::merge_subruns(
             "w",
@@ -2282,6 +2349,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let subs = vec![trial("a"), trial("b"), trial("c")];
 
@@ -2462,6 +2533,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -2522,6 +2597,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         }
     }
 
@@ -2574,6 +2653,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -2620,6 +2703,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();
@@ -2734,6 +2821,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         // 8 honest (6x100 + 2x0) + 1 cheat at 0%: the cheat must not move
         // any aggregate, but must stay in subruns with its stamp.
@@ -2805,6 +2896,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
         assert_eq!(m.status.as_deref(), Some("disqualified_cheat"));
@@ -2857,6 +2952,10 @@ mod tests {
             pass_at_1_hi: Some(100.0),
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let out = LeaderboardManager::finalize_results(vec![
             mk("dq1", Some("disqualified_cheat")),
@@ -2947,6 +3046,10 @@ mod tests {
                 pass_at_1_hi: None,
                 stability: None,
                 frontier_fraction: None,
+                protocol: None,
+                solved: None,
+                solved_at: None,
+                best_stage_score: None,
             }],
             total_trials: Some(1),
             pass_at_1: Some(100.0),
@@ -2956,6 +3059,10 @@ mod tests {
             pass_at_1_hi: Some(100.0),
             stability: Some("stable".to_string()),
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let mut rows = vec![
             mk("fast", Some(40000.0), Some(70000.0)),
@@ -3024,6 +3131,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let one =
             BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None, None).unwrap();
@@ -3128,6 +3239,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         // test_ ids are refused: Ok, but nothing written.
         LeaderboardManager::save_result(temp.to_str().unwrap(), &mk("test_probe_1")).unwrap();

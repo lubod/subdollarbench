@@ -186,6 +186,8 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             }
             if msg.contains("rate limit")
                 || msg.contains("rate_limit")
+                || msg.contains("rate-limit")
+                || msg.contains("rate-limited")
                 || msg.contains("too many requests")
             {
                 return Some("provider rate-limited (HTTP 429)".to_string());
@@ -231,6 +233,8 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
     if limit_line
         || low.contains("rate limit")
         || low.contains("rate_limit")
+        || low.contains("rate-limit")
+        || low.contains("rate-limited")
         || low.contains("too many requests")
     {
         return Some("provider rate-limited (HTTP 429)".to_string());

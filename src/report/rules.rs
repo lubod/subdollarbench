@@ -8,6 +8,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-12.1`: sequential capability protocol. Headline protocol evaluates
+///   models up to 3 tries, stopping at first 100% pass (capping compute),
+///   and escalates to 5 tries only if all 3 fail (discriminating hard tasks).
+///   Captures `solved`, `solved_at` (1..5), `best_stage_score`, and `protocol`.
+///   Reliability and harness metrics are reported alongside as harness diagnostics.
 /// - `2026-10-11.2`: proxy fixture determinism. Stages 1-2 learn markers
 ///   from identical in-process stubs when host publishes decay (docker
 ///   pool unchanged for the candidate path); dead containers fail loud
@@ -136,7 +141,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-11.2";
+pub const RULES_VERSION: &str = "2026-10-12.1";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

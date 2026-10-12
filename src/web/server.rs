@@ -2482,6 +2482,8 @@ mod tests {
             max_trials: 1,
             save_results: Some(false),
             review_model: None,
+            stop_on_pass: false,
+            protocol: None,
         };
         spawn_run_body(&state, req, Some("q-test-cancel".to_string()), 0);
         assert!(!state.cancel_requested.load(Ordering::SeqCst));
@@ -2719,6 +2721,8 @@ mod tests {
             review_model: None,
             extend_if_unstable: false,
             max_trials: 9,
+            stop_on_pass: false,
+            protocol: None,
         }
     }
 
@@ -3900,6 +3904,8 @@ mod tests {
             review_model: None,
             extend_if_unstable: false,
             max_trials: 9,
+            stop_on_pass: false,
+            protocol: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -3942,6 +3948,8 @@ mod tests {
             review_model: None,
             extend_if_unstable: false,
             max_trials: 9,
+            stop_on_pass: false,
+            protocol: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -4059,6 +4067,10 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let manifest_b = RunManifest {
             run_id: run_b_id.to_string(),
@@ -4118,6 +4130,10 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
 
         fs::write(
@@ -4254,6 +4270,8 @@ mod tests {
             review_model: None,
             extend_if_unstable: false,
             max_trials: 9,
+            stop_on_pass: false,
+            protocol: None,
         };
         let res = client
             .post(format!("{}/api/run", base))

@@ -134,6 +134,18 @@ pub struct RunManifest {
     /// Per-trial pass rates for consolidated parents (trial order).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trial_pass_rates: Vec<f64>,
+    /// Evaluation protocol (e.g. "sequential_cap" or "fixed_n")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// True if any trial achieved 100% stage pass rate
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solved: Option<bool>,
+    /// 1-indexed trial number that first achieved 100% pass (None if unsolved)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solved_at: Option<u32>,
+    /// Highest stage pass rate achieved across trials
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_stage_score: Option<f64>,
     #[serde(default)]
     pub is_published: Option<bool>,
     #[serde(default)]
@@ -535,6 +547,10 @@ mod tests {
             omp_version: None,
             harness_version: None,
             rules_version: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
 
         let console_log = "[06:30:00] [INIT] Starting test run\n[06:31:00] [DONE] Finished!\n";
@@ -703,6 +719,10 @@ mod tests {
             omp_version: None,
             harness_version: None,
             rules_version: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();
         assert!(!runs_dir.join("live_run.tmp").exists());

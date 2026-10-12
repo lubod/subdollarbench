@@ -116,6 +116,10 @@ func main() {
         prompt_sha: None,
         omp_version: None,
         harness_version: None,
+        protocol: None,
+        solved: None,
+        solved_at: None,
+        best_stage_score: None,
     };
 
     let console_log = r#"[12:00:00] [INIT] Starting benchmark for google/gemini-2.5-flash on task 'redis'...

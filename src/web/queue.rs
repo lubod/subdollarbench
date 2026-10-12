@@ -396,6 +396,8 @@ pub fn test_queue_item(id: &str) -> QueuedRun {
             max_trials: 9,
             save_results: None,
             review_model: None,
+            stop_on_pass: false,
+            protocol: None,
         }),
     }
 }
@@ -439,6 +441,10 @@ pub struct RunRequest {
     pub save_results: Option<bool>,
     #[serde(default)]
     pub review_model: Option<String>,
+    #[serde(default)]
+    pub stop_on_pass: bool,
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 /// Forward a mutation to the engine in GUI-proxy mode.
 /// Returns Some(response) when proxying applied; None in single-process mode.
@@ -856,8 +862,25 @@ pub fn pump_queue(state: &AppState) -> bool {
     let next = {
         let mut q = state.queue.lock().unwrap();
         let now_sel = now_rfc3339();
+        let running_free = state
+            .worker_runs
+            .read()
+            .unwrap()
+            .values()
+            .filter(|w| w.model.ends_with(":free"))
+            .count();
         q.iter_mut()
-            .find(|i| i.status == QueueStatus::Pending && dispatch_ready(i, &now_sel))
+            .find(|i| {
+                if i.status != QueueStatus::Pending || !dispatch_ready(i, &now_sel) {
+                    return false;
+                }
+                if let QueueKind::Run(ref r) = i.kind {
+                    if r.model.ends_with(":free") && running_free >= 2 {
+                        return false;
+                    }
+                }
+                true
+            })
             .map(|item| {
                 item.status = QueueStatus::Running;
                 (item.kind.clone(), item.id.clone())
@@ -1121,7 +1144,17 @@ pub async fn execute_run_body(
 ) {
     let tx = state.log_sender.clone();
     let run_log_buf = state.log_buffer.clone();
-    let mut total_trials = req.trials.max(1);
+    let stop_on_pass = req.stop_on_pass || req.protocol.as_deref() == Some("sequential_cap");
+    let mut total_trials = if stop_on_pass {
+        req.trials.min(3).max(1)
+    } else {
+        req.trials.max(1)
+    };
+    let max_cap_trials = if stop_on_pass {
+        req.max_trials.max(5)
+    } else {
+        req.max_trials.max(total_trials)
+    };
     let mut passing_trials = 0;
     let mut subrun_results = Vec::new();
     // Millis + worker suffix: two workers dispatching in the same second
@@ -1150,7 +1183,7 @@ pub async fn execute_run_body(
     };
     // Batch reference: one shared denominator for all trials.
     // Fallback is live per-trial measurement inside the pipeline.
-    let batch_ref = if total_trials > 1 {
+    let batch_ref = if total_trials > 1 || stop_on_pass {
         let task_type_pre = match req.task.as_str() {
             "redis" => TaskType::Redis,
             "http" => TaskType::Http,
@@ -1211,7 +1244,8 @@ pub async fn execute_run_body(
         None
     };
 
-    for trial_idx in 1..=total_trials {
+    let mut trial_idx = 1;
+    while trial_idx <= total_trials {
         if run_cancel.load(Ordering::SeqCst) || state.cancel_requested.load(Ordering::SeqCst) {
             send_status(
                 &tx,
@@ -1222,7 +1256,7 @@ pub async fn execute_run_body(
         }
 
         let started_at = Utc::now().to_rfc3339();
-        let run_id = if total_trials > 1 {
+        let run_id = if total_trials > 1 || stop_on_pass {
             format!("{}_trial{}", parent_run_id, trial_idx)
         } else {
             parent_run_id.clone()
@@ -1345,7 +1379,7 @@ pub async fn execute_run_body(
                     } else {
                         logger.log("[PIPELINE SUCCESS] Benchmark run PASSED (100.0%)");
                     }
-                } else if total_trials > 1 {
+                } else if total_trials > 1 || stop_on_pass {
                     logger.log(&format!(
                         "[SUBRUN] ━━━ Subrun {}/{} COMPLETED (Pass Rate: {:.1}%) ━━━",
                         trial_idx, total_trials, output.benchmark_result.pass_rate
@@ -1356,7 +1390,17 @@ pub async fn execute_run_body(
                         output.benchmark_result.pass_rate
                     ));
                 }
+                let passed_full = output.benchmark_result.pass_rate >= 100.0;
                 subrun_results.push(output.benchmark_result);
+
+                // Stop-on-pass: first 100% stage pass solves the cell and terminates trials
+                if stop_on_pass && passed_full {
+                    logger.log(&format!(
+                        "[CAPABILITY] Solved at trial {} (100.0% stages passed)! Stopping cell (stop-on-pass protocol).",
+                        trial_idx
+                    ));
+                    break;
+                }
             }
             Err(e) => {
                 if state.cancel_requested.load(Ordering::SeqCst) {
@@ -1386,6 +1430,17 @@ pub async fn execute_run_body(
                 break;
             }
         }
+
+        // Capability escalation: 0 passing after initial try budget (e.g. 3) escalates to max_cap_trials (e.g. 5)
+        if stop_on_pass && passing_trials == 0 && trial_idx == total_trials && total_trials < max_cap_trials {
+            logger.log(&format!(
+                "[CAPABILITY] 0 passing after {} trials; escalating cell budget to {} trials.",
+                trial_idx, max_cap_trials
+            ));
+            total_trials = max_cap_trials;
+        }
+
+        trial_idx += 1;
     }
 
     // Any untrusted denominator quarantines the parent: initial + extension
@@ -1397,13 +1452,22 @@ pub async fn execute_run_body(
         None => false,
     };
 
-    let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
-        LeaderboardManager::consolidate_multi_trial_run(
+    let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1) && !subrun_results.is_empty() {
+        let mut m = LeaderboardManager::consolidate_multi_trial_run(
             &parent_run_id,
             &subrun_results,
             req.save_results.unwrap_or(true),
             Some(any_drift),
-        )
+        );
+        if stop_on_pass {
+            if let Some(ref mut res) = m {
+                res.protocol = Some("sequential_cap".to_string());
+                if let Some(store) = LeaderboardManager::open_store_if_exists() {
+                    let _ = store.upsert_parent(res);
+                }
+            }
+        }
+        m
     } else {
         None
     };
@@ -1417,7 +1481,7 @@ pub async fn execute_run_body(
             .filter(|r| r.pass_rate >= 100.0)
             .count()
             <= 1;
-    if dead_cell {
+    if dead_cell && !stop_on_pass {
         send_status(
             &tx,
             &run_log_buf,
@@ -1432,7 +1496,7 @@ pub async fn execute_run_body(
             ),
         );
     }
-    if req.extend_if_unstable && total_trials >= 2 && !dead_cell {
+    if req.extend_if_unstable && total_trials >= 2 && !dead_cell && !stop_on_pass {
         let max_total = req.max_trials.max(total_trials);
         let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
         let task_type_ext = match req.task.as_str() {
@@ -1532,6 +1596,18 @@ pub async fn execute_run_body(
             &run_log_buf,
             "[STATUS] No trials completed (cancelled or all errored); nothing persisted."
                 .to_string(),
+        );
+    } else if stop_on_pass {
+        let solved = passing_trials > 0;
+        send_status(
+            &tx,
+            &run_log_buf,
+            format!(
+                "[CAPABILITY] Protocol: sequential stop-on-pass | Solved: {} (attempt {}/{})",
+                if solved { "YES" } else { "NO" },
+                subrun_results.len(),
+                total_trials
+            ),
         );
     } else if total_trials > 1 {
         let pass_at_1 = compute_pass_at_k(total_trials as usize, passing_trials, 1) * 100.0;

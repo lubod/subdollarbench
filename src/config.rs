@@ -87,6 +87,11 @@ pub enum Commands {
         /// (`max_total = max_trials.max(total_trials)` never grows).
         #[arg(long, default_value_t = 9)]
         max_trials: u32,
+
+        /// Stop-on-pass capability protocol: run up to initial trials (default 3),
+        /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
+        #[arg(long, default_value_t = false)]
+        stop_on_pass: bool,
     },
 
     /// Directly run verification test suite against a running server
@@ -372,6 +377,11 @@ pub enum Commands {
         /// `ui` engine base URL (enqueue mode only).
         #[arg(long)]
         server: Option<String>,
+
+        /// Stop-on-pass capability protocol: run up to initial trials (default 3),
+        /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
+        #[arg(long, default_value_t = false)]
+        stop_on_pass: bool,
     },
 
     /// [operate] Run 3 more trials for an unstable parent and re-merge
@@ -673,6 +683,11 @@ pub enum Commands {
         /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
         #[arg(long)]
         server: Option<String>,
+
+        /// Stop-on-pass capability protocol: run up to initial trials (default 3),
+        /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
+        #[arg(long, default_value_t = false)]
+        stop_on_pass: bool,
     },
 
     /// [operate] Queue an extension behind the live job (POST /api/runs/:id/extend)

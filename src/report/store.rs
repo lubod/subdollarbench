@@ -536,6 +536,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: Some(true),
+            solved_at: Some(1),
+            best_stage_score: Some(100.0),
         }
     }
 
@@ -562,6 +566,8 @@ mod tests {
                 max_trials: 9,
                 save_results: None,
                 review_model: None,
+                stop_on_pass: false,
+                protocol: None,
             }),
         }
     }

@@ -291,6 +291,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             review_model,
             extend_if_unstable,
             max_trials,
+            stop_on_pass,
         } => {
             if queue {
                 let server = resolve_server_flag(&server);
@@ -311,6 +312,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     max_trials,
                     no_save,
                     review_model.as_deref(),
+                    stop_on_pass,
                 );
                 let resp = remote::post_json(&server, "/api/queue", &body).await?;
                 let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
@@ -330,7 +332,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 }
                 return Ok(());
             }
-            let mut total_trials = trials.max(1);
+            let mut total_trials = if stop_on_pass {
+                trials.min(3).max(1)
+            } else {
+                trials.max(1)
+            };
+            let max_cap_trials = if stop_on_pass {
+                max_trials.max(5)
+            } else {
+                max_trials.max(total_trials)
+            };
             // Trials that failed for infrastructure reasons, not model reasons.
             // Excluded from the pass@k denominator: counting them as failures
             // is how a flaky host turns into a published model score.
@@ -374,8 +385,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 None
             };
 
-            for trial_idx in 1..=total_trials {
-                if total_trials > 1 {
+            let mut trial_idx = 1;
+            while trial_idx <= total_trials {
+                if total_trials > 1 || stop_on_pass {
                     println!(
                         "{}",
                         format!("=== Starting Subrun {}/{} ===", trial_idx, total_trials)
@@ -384,7 +396,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     );
                 }
 
-                let run_id = if total_trials > 1 {
+                let run_id = if total_trials > 1 || stop_on_pass {
                     format!("{}_trial{}", parent_run_id, trial_idx)
                 } else {
                     parent_run_id.clone()
@@ -427,12 +439,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 trial_idx, total_trials, output.manifest.status
                             );
                             infra_failed += 1;
+                            trial_idx += 1;
                             continue;
                         }
                         if passing {
                             passing_trials += 1;
                         }
-                        if total_trials > 1 {
+                        if total_trials > 1 || stop_on_pass {
                             println!(
                                 "{}",
                                 format!(
@@ -444,6 +457,19 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             );
                         }
                         subrun_results.push(output.benchmark_result);
+
+                        if stop_on_pass && passing {
+                            println!(
+                                "{}",
+                                format!(
+                                    "  [CAPABILITY] Solved at trial {} (100.0% stages passed)! Stopping cell (stop-on-pass protocol).",
+                                    trial_idx
+                                )
+                                .bold()
+                                .green()
+                            );
+                            break;
+                        }
                     }
                     Err(e) => {
                         // An infrastructure failure is not evidence about the
@@ -458,6 +484,21 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         infra_failed += 1;
                     }
                 }
+
+                if stop_on_pass && passing_trials == 0 && trial_idx == total_trials && total_trials < max_cap_trials {
+                    println!(
+                        "{}",
+                        format!(
+                            "  [CAPABILITY] 0 passing after {} trials; escalating cell budget to {} trials.",
+                            trial_idx, max_cap_trials
+                        )
+                        .bold()
+                        .yellow()
+                    );
+                    total_trials = max_cap_trials;
+                }
+
+                trial_idx += 1;
             }
 
             let batch_drift = match batch_ref {
@@ -465,18 +506,27 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 None => None,
             };
 
-            let mut merged_opt = if total_trials > 1 && !subrun_results.is_empty() {
-                LeaderboardManager::consolidate_multi_trial_run(
+            let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1) && !subrun_results.is_empty() {
+                let mut m = LeaderboardManager::consolidate_multi_trial_run(
                     &parent_run_id,
                     &subrun_results,
                     !no_save,
                     batch_drift,
-                )
+                );
+                if stop_on_pass {
+                    if let Some(ref mut res) = m {
+                        res.protocol = Some("sequential_cap".to_string());
+                        if let Some(store) = LeaderboardManager::open_store_if_exists() {
+                            let _ = store.upsert_parent(res);
+                        }
+                    }
+                }
+                m
             } else {
                 None
             };
 
-            if extend_if_unstable {
+            if extend_if_unstable && !stop_on_pass {
                 if total_trials < 2 {
                     println!("[EXTEND] single-trial run: nothing to assess; use --trials 2+ for auto-extend.");
                 } else if total_trials <= 3
@@ -1857,6 +1907,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             max_trials,
             server,
             harness,
+            stop_on_pass,
         } => {
             let models: Vec<String> = models
                 .split(',')
@@ -1934,6 +1985,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 max_trials,
                                 false,
                                 None,
+                                stop_on_pass,
                             );
                             match remote::post_json(&server, "/api/queue", &body).await {
                                 Ok(resp) => {
@@ -1961,6 +2013,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!(
                 "# analysis after the wave: subdollarbench matrix-report --results-dir ./results"
             );
+            let stop_flag = if stop_on_pass { " --stop-on-pass" } else { "" };
             for m in &models {
                 for e in &efforts {
                     for t in &tasks {
@@ -1970,8 +2023,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             format!(" {}", extra.trim())
                         };
                         println!(
-                            "subdollarbench run --model {} --task {} --effort {} --harness {} --trials {}{}",
-                            m, t, e, harness, trials, ex
+                            "subdollarbench run --model {} --task {} --effort {} --harness {} --trials {}{}{}",
+                            m, t, e, harness, trials, ex, stop_flag
                         );
                     }
                 }
@@ -2158,6 +2211,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             no_save,
             review_model,
             server,
+            stop_on_pass,
         } => {
             main_queue::handle_enqueue(
                 model,
@@ -2175,6 +2229,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 no_save,
                 review_model,
                 server,
+                stop_on_pass,
             )
             .await?
         }
@@ -2527,6 +2582,10 @@ mod tests {
             avg_pass_rate: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         let _ = LeaderboardManager::save_result(&temp_dir.to_string_lossy(), &result);
 
@@ -2629,6 +2688,10 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
         };
         fs::write(
             run_dir.join("manifest.json"),
@@ -2649,7 +2712,8 @@ mod tests {
             // Must be >= portal::PUBLISH_FREEZE_TS or the exporter drops the row
             // by design and the index assertion below cannot pass. Naive ISO,
             // matching the row format the freeze is stored in.
-            "timestamp": "2026-09-28T12:01:00", "method_version": "0.1.0"
+            "timestamp": "2026-09-28T12:01:00", "method_version": "0.1.0",
+            "total_trials": 1
         });
         fs::write(
             results_dir.join(format!("{}.json", run_id)),
@@ -2729,6 +2793,7 @@ mod tests {
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
+                stop_on_pass: false,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -2768,6 +2833,7 @@ mod tests {
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
+                stop_on_pass: false,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -2802,6 +2868,7 @@ mod tests {
                 review_model: None,
                 extend_if_unstable: false,
                 max_trials: 9,
+                stop_on_pass: false,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());

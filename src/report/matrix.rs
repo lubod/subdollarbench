@@ -177,6 +177,10 @@ mod tests {
             pass_at_1_hi: None,
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: Some(true),
+            solved_at: Some(1),
+            best_stage_score: Some(100.0),
         }
     }
 

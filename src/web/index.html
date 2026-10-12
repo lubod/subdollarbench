@@ -1262,6 +1262,10 @@
           <label for="evalOnly" style="font-weight: normal; cursor: pointer;">Eval only (skip OMP agent)</label>
         </div>
         <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
+          <input type="checkbox" id="stopOnPass" checked style="width: auto;" />
+          <label for="stopOnPass" style="font-weight: normal; cursor: pointer;" title="Capability mode: evaluate up to 3 tries, stop immediately on first 100% pass; escalate to 5 only if all 3 fail.">Sequential Capability (stop on pass 3→5)</label>
+        </div>
+        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
           <input type="checkbox" id="extendUnstable" style="width: auto;" />
           <label for="extendUnstable" style="font-weight: normal; cursor: pointer;" title="While the merged result is unstable, keep adding trials in batches of 3 (up to the cap) and re-merge">Auto-extend if unstable (+3 trials)</label>
           <label for="maxTrials" style="font-weight: normal;">cap</label>
@@ -1533,10 +1537,10 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           <div style="width: 100%; overflow-x: auto;">
             <table class="responsive-runs-table">
               <thead><tr>
-                <th>Task</th><th>Models</th><th>Best</th><th>Spread</th><th>Avg pass</th><th>Health</th>
+                <th>Task</th><th>Models</th><th>Solved</th><th>Best</th><th>Spread</th><th>Avg pass</th><th>Health</th>
               </tr></thead>
               <tbody id="tasksTableBody">
-                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading tasks...</td></tr>
+                <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading tasks...</td></tr>
               </tbody>
             </table>
           </div>
@@ -3411,7 +3415,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           if (!hhs.length) return;
           hhs.forEach(hh => {
           const tr = document.createElement('tr');
-          let rowSum = 0, rowRun = 0, rowFull = 0, rowCost = 0;
+          let rowSum = 0, rowRun = 0, rowFull = 0, rowCost = 0, rowSolved = 0, rowFirstTry = 0;
           const rowTip = [];
           const htag = `<span class="badge ${hh === 'omp' ? 'badge-info' : 'badge-effort'}" title="Agent harness (ranks never mix harnesses)">harness: ${hh}</span>`;
           const stampRow = tasks.map(t => canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]).find(Boolean);
@@ -3439,14 +3443,16 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               cells += `<td style="text-align:center;background:${bg};color:var(--text-muted);font-size:.78rem;" title="${escapeHtml(tip)}">${escapeHtml(state)}</td>`;
               return;
             }
-            if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
-            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click the cell to inspect, ＋ to rerun clean" style="cursor:pointer;" onclick="inspectRun('${escapeHtml(r.id || '')}')">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff} ×9">＋</button></td>`; return; }
+            if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff}">＋</button></td>`; return; }
+            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click the cell to inspect, ＋ to rerun clean" style="cursor:pointer;" onclick="inspectRun('${escapeHtml(r.id || '')}')">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff}">＋</button></td>`; return; }
 
+            const isCap = r.protocol === 'sequential_cap' || (r.solved !== undefined && r.solved !== null);
+            const isSolved = r.solved === true || (!isCap && (r.pass_at_1 ?? r.pass_rate ?? 0) >= 100);
             const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
             const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-            const bg = p1 >= 80 ? 'rgba(63,185,80,.15)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
+            const bg = isSolved ? 'rgba(63,185,80,.18)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
             const stamp = (r.rules_version || '').split('+')[0] || '';
-            const thin = n < 9 ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up to 9 trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
+            const thin = (!isCap && n < 9) ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
             const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
             const reQ = queued[key];
             const liveRun = liveFor(key, m, eff, t, r ? r.id : null);
@@ -3456,16 +3462,21 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const extMark = extQ ? ` <span title="${escapeHtml(`top-up pending: ${extQ.id} (+${extQ.n} trial${extQ.n === 1 ? '' : 's'})`)}">↻+${escapeHtml(String(extQ.n))}</span>` : '';
             const dqSubs = (r.subruns || []).filter(s => (s.status || '') === 'disqualified_cheat');
             const dqMark = dqSubs.length ? ` <span title="${escapeHtml(`excluded from score, retained in record: ${dqSubs.map(s => s.id).join(', ')}`)}">DQ${dqSubs.length}</span>` : '';
-            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'} · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
-            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${Math.round(p1)}% <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}</td>`;
+            const cellLabel = isCap ? (isSolved ? `<b style="color:var(--text-pass,#3fb950);">✓${r.solved_at || 1}</b>` : `<span style="color:#f85149;">✗ ${Math.round(r.best_stage_score ?? p1)}%</span>`) : `${Math.round(p1)}%`;
+            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'}` + (isCap ? ` · capability protocol: solved ${isSolved}${r.solved_at ? ` at trial ${r.solved_at}` : ''} (best stage: ${Math.round(r.best_stage_score ?? p1)}%)` : '') + ` · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
+            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${cellLabel} <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}</td>`;
             rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
+            if (isSolved) { rowSolved++; if ((r.solved_at || 1) === 1) rowFirstTry++; }
             rowCost += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
-            rowTip.push(`${t}: ${Math.round(p1)}% (n=${n})`);
+            rowTip.push(`${t}: ${isCap ? (isSolved ? `✓ solved@${r.solved_at || 1}` : `✗ best ${Math.round(r.best_stage_score ?? p1)}%`) : `${Math.round(p1)}%`} (n=${n})`);
             const cs = colStats[ti];
-            cs.sum += p1; cs.n++; if (p1 > cs.bestV) { cs.bestV = p1; cs.best = m; }
+            cs.sum += p1; cs.n++;
+            if (isSolved) cs.solved = (cs.solved || 0) + 1;
+            if (p1 > cs.bestV) { cs.bestV = p1; cs.best = m; }
           });
           const rowAvg = rowRun ? Math.round(rowSum / rowRun) : 0;
-          cells += `<td style="font-size:.75rem;white-space:nowrap;" title="${escapeHtml(rowTip.join('\n'))}">${rowAvg}% avg · ${rowFull}/${tasks.length} @100% · cov ${rowRun}/${tasks.length} · $${rowCost.toFixed(4)}</td>`;
+          const capText = rowSolved ? `${rowSolved}/${tasks.length} solved (${rowFirstTry} 1st-try)` : `${rowFull}/${tasks.length} @100%`;
+          cells += `<td style="font-size:.75rem;white-space:nowrap;" title="${escapeHtml(rowTip.join('\n'))}">${capText} · ${rowAvg}% avg · cov ${rowRun}/${tasks.length} · $${rowCost.toFixed(4)}</td>`;
           rowCount++; filledCells += rowRun; grandSum += rowSum; grandN += rowRun;
           tr.innerHTML = cells;
           tbody.appendChild(tr);
@@ -3481,8 +3492,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
           const cols = tasks.map((t, ti) => {
             const cs = colStats[ti];
             if (!cs.n) return `<td style="text-align:center;color:var(--text-muted);">—</td>`;
-            const tip = `mean P@1 across the ${cs.n} row(s) that ran ${t}; best row shown`;
-            return `<td style="text-align:center;font-size:.75rem;" title="${escapeHtml(tip)}">${Math.round(cs.sum / cs.n)}% avg<br><span style="color:var(--text-muted);">best ${escapeHtml(shortModelName(cs.best))} ${Math.round(cs.bestV)}% · n=${cs.n}</span></td>`;
+            const solvePct = Math.round(((cs.solved || 0) / cs.n) * 100);
+            const tip = `${cs.solved || 0}/${cs.n} solved (${solvePct}%) across the ${cs.n} row(s) that ran ${t}; mean P@1 ${Math.round(cs.sum / cs.n)}%`;
+            return `<td style="text-align:center;font-size:.75rem;" title="${escapeHtml(tip)}">${cs.solved || 0}/${cs.n} solved (${solvePct}%)<br><span style="color:var(--text-muted);">${Math.round(cs.sum / cs.n)}% avg · best ${escapeHtml(shortModelName(cs.best))}</span></td>`;
           }).join('');
           tfoot.innerHTML = `<tr style="border-top:2px solid var(--border);background:rgba(13,17,23,.5);">${corner}${cols}<td></td></tr>`;
         }
@@ -3512,14 +3524,18 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
       const list = Object.values(byTask).map(b => {
         const avgs = b.rows.map(r => r.avg_pass_rate ?? r.pass_rate);
+        const solvedCount = b.rows.filter(r => r.solved === true || (r.pass_at_1 ?? r.pass_rate ?? 0) >= 100).length;
+        const solveRate = b.rows.length ? Math.round((solvedCount / b.rows.length) * 100) : 0;
         const mx = Math.max(...avgs), mn = Math.min(...avgs);
         const best = b.rows[avgs.indexOf(mx)];
         // Health: identical low scores across models smell like verifier cliff.
         const uniq = [...new Set(avgs.map(a => Math.round(a)))];
-        const health = (uniq.length === 1 && mx < 50) ? 'verifier? (identical ' + Math.round(mx) + '%)'
-          : (mx - mn > 40) ? 'discriminates' : 'flat-ish';
+        const health = (uniq.length === 1 && mx < 50) ? 'verifier cliff? (identical ' + Math.round(mx) + '%)'
+          : (solveRate === 100) ? 'saturates (100% solved)'
+          : (solveRate === 0 && b.rows.length >= 3) ? 'cliff (0% solved)'
+          : (mx - mn > 40 || (solveRate > 0 && solveRate < 100)) ? 'discriminates (' + solveRate + '% solved)' : 'flat-ish';
         return { task: b.task, n: b.rows.length, best: shortModelName(best.model), bestAvg: mx, spread: mx - mn,
-          avg: avgs.reduce((a, x) => a + x, 0) / avgs.length, health };
+          avg: avgs.reduce((a, x) => a + x, 0) / avgs.length, solvedCount, solveRate, health };
       }).sort((a, b) => b.spread - a.spread);
       if (badge) badge.textContent = `${list.length} tasks`;
       tbody.innerHTML = '';
@@ -3538,6 +3554,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         tr.innerHTML = `
           <td><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-task="${escapeHtml(t.task)}" onclick="toggleTasksRow(this.dataset.task)" title="${tkids.length ? 'Show trials' : 'No trial detail'}">${open ? '▾' : '▸'}</button> <span class="badge badge-info">${escapeHtml(t.task)}</span> <span style="color:var(--text-muted);font-size:.72rem;">${tkids.length} trials</span></td>
           <td style="text-align:center;">${t.n}</td>
+          <td style="text-align:center;">${t.solvedCount}/${t.n} <span style="color:var(--text-muted);font-size:.72rem;">(${t.solveRate}%)</span></td>
           <td>${escapeHtml(t.best)} <span style="color:var(--text-muted);font-size:.75rem;">(${Math.round(t.bestAvg)}%)</span></td>
           <td style="text-align:center;">${Math.round(t.spread)}pp</td>
           <td style="text-align:center;">${Math.round(t.avg)}%</td>
@@ -3546,7 +3563,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         if (open) {
           const cr = document.createElement('tr');
           const shown = tkids.slice(0, 200);
-          cr.innerHTML = `<td colspan="6" style="padding:6px 6px 6px 28px;background:rgba(0,0,0,0.2);">`
+          cr.innerHTML = `<td colspan="7" style="padding:6px 6px 6px 28px;background:rgba(0,0,0,0.2);">`
             + `<div style="display:flex;gap:6px;flex-wrap:wrap;">`
             + shown.map(({ trial: s, parent: r }) => {
               const ok = (s.pass_rate || 0) >= 100;
@@ -4841,6 +4858,7 @@ function copyRunId() {
     }
 
     function buildRunPayload() {
+      const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : false;
       return {
         model: document.getElementById('model').value.trim(),
         task: document.getElementById('task').value,
@@ -4850,10 +4868,12 @@ function copyRunId() {
         budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
         max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
         timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 120,
-        trials: parseInt(document.getElementById('trials').value, 10) || 9,
+        trials: parseInt(document.getElementById('trials').value, 10) || (stopOnPass ? 3 : 9),
         eval_only: document.getElementById('evalOnly').checked,
+        stop_on_pass: stopOnPass,
+        protocol: stopOnPass ? 'sequential_cap' : null,
         extend_if_unstable: document.getElementById('extendUnstable').checked,
-        max_trials: parseInt(document.getElementById('maxTrials').value, 10) || 9,
+        max_trials: parseInt(document.getElementById('maxTrials').value, 10) || (stopOnPass ? 5 : 9),
         review_model: document.getElementById("reviewModel").value.trim() || null
       };
     }
@@ -4931,6 +4951,7 @@ function copyRunId() {
         return;
       }
       const selHarness = ((document.getElementById('harnessSelect') || {}).value || 'omp');
+      const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : true;
       const payload = {
         model, task, effort,
         harness: harness || selHarness,
@@ -4938,8 +4959,10 @@ function copyRunId() {
         budget_usd: parseFloat((document.getElementById('budget') || {}).value) || 1.00,
         max_turns: parseInt((document.getElementById('turns') || {}).value, 10) || 100,
         timeout_min: parseInt((document.getElementById('timeout_min') || {}).value, 10) || 120,
-        trials: 9, eval_only: false,
-        extend_if_unstable: false, max_trials: 9,
+        trials: stopOnPass ? 3 : 9, eval_only: false,
+        stop_on_pass: stopOnPass,
+        protocol: stopOnPass ? 'sequential_cap' : null,
+        extend_if_unstable: false, max_trials: stopOnPass ? 5 : 9,
         review_model: (document.getElementById('reviewModel') || {}).value || null
       };
       try {
@@ -5010,8 +5033,8 @@ function copyRunId() {
       const task = document.getElementById('task').value;
       const budget = parseFloat(document.getElementById('budget').value) || 1.00;
       const turns = parseInt(document.getElementById('turns').value, 10) || 100;
-      const timeoutMin = parseInt(document.getElementById('timeout_min').value, 10) || 120;
-      const trials = parseInt(document.getElementById('trials').value, 10) || 9;
+      const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : false;
+      const trials = parseInt(document.getElementById('trials').value, 10) || (stopOnPass ? 3 : 9);
       const evalOnly = document.getElementById('evalOnly').checked;
 
       const startBtn = document.getElementById('startBtn');
@@ -5030,8 +5053,10 @@ function copyRunId() {
             timeout_min: timeoutMin,
             trials,
             eval_only: evalOnly,
+            stop_on_pass: stopOnPass,
+            protocol: stopOnPass ? 'sequential_cap' : null,
             extend_if_unstable: document.getElementById('extendUnstable').checked,
-            max_trials: parseInt(document.getElementById('maxTrials').value, 10) || 9,
+            max_trials: parseInt(document.getElementById('maxTrials').value, 10) || (stopOnPass ? 5 : 9),
             review_model: document.getElementById("reviewModel").value.trim() || null
           })
         });

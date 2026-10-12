@@ -1521,6 +1521,10 @@ impl BenchmarkPipeline {
             pass_at_1_hi: None,
             stability: None,
             trial_pass_rates: Vec::new(),
+            protocol: None,
+            solved: Some(pass_rate >= 100.0),
+            solved_at: if pass_rate >= 100.0 { Some(1) } else { None },
+            best_stage_score: Some(pass_rate),
             is_published: None,
             method_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };
@@ -1581,6 +1585,10 @@ impl BenchmarkPipeline {
             }),
             stability: None,
             frontier_fraction: None,
+            protocol: None,
+            solved: Some(pass_rate >= 100.0),
+            solved_at: if pass_rate >= 100.0 { Some(1) } else { None },
+            best_stage_score: Some(pass_rate),
         };
 
         logger.log(&format!(
