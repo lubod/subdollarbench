@@ -120,6 +120,8 @@ func main() {
         solved: None,
         solved_at: None,
         best_stage_score: None,
+        repaired: None,
+        feedback_rounds: None,
     };
 
     let console_log = r#"[12:00:00] [INIT] Starting benchmark for google/gemini-2.5-flash on task 'redis'...

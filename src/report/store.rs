@@ -540,6 +540,8 @@ mod tests {
             solved: Some(true),
             solved_at: Some(1),
             best_stage_score: Some(100.0),
+            repaired: None,
+            feedback_rounds: None,
         }
     }
 
@@ -568,6 +570,7 @@ mod tests {
                 review_model: None,
                 stop_on_pass: false,
                 protocol: None,
+                feedback_rounds: None,
             }),
         }
     }

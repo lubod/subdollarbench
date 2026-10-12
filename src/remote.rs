@@ -215,6 +215,7 @@ pub fn run_request(
     no_save: bool,
     review_model: Option<&str>,
     stop_on_pass: bool,
+    feedback_rounds: u32,
 ) -> serde_json::Value {
     serde_json::json!({
         "model": model,
@@ -233,6 +234,7 @@ pub fn run_request(
         "review_model": review_model,
         "stop_on_pass": stop_on_pass,
         "protocol": if stop_on_pass { Some("sequential_cap") } else { None },
+        "feedback_rounds": feedback_rounds,
     })
 }
 
@@ -770,6 +772,7 @@ mod tests {
             false,
             None,
             false,
+            0,
         );
         assert_eq!(v["model"], "openrouter/m");
         assert_eq!(v["task"], "redis");
@@ -777,6 +780,7 @@ mod tests {
         assert_eq!(v["harness"], "omp");
         assert_eq!(v["save_results"], true);
         assert_eq!(v["stop_on_pass"], false);
+        assert_eq!(v["feedback_rounds"], 0);
         assert!(v["api_key"].is_null());
         let v2 = run_request(
             "m",
@@ -794,6 +798,7 @@ mod tests {
             true,
             Some("r"),
             true,
+            2,
         );
         assert_eq!(v2["trials"], 1);
         assert_eq!(v2["harness"], "opencode");
@@ -801,6 +806,7 @@ mod tests {
         assert_eq!(v2["review_model"], "r");
         assert_eq!(v2["stop_on_pass"], true);
         assert_eq!(v2["protocol"], "sequential_cap");
+        assert_eq!(v2["feedback_rounds"], 2);
     }
 
     #[test]

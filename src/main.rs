@@ -162,6 +162,7 @@ struct TrialBatchParams {
     parent_run_id: String,
     start_idx: u32,
     count: u32,
+    feedback_rounds: u32,
 }
 
 struct TrialBatchOutput {
@@ -228,6 +229,7 @@ async fn run_trial_batch(
             review_model: p.review_model.clone(),
             batch_reference: batch_ref.as_ref().map(|b| b.reference()),
             worker: 0,
+            feedback_rounds: p.feedback_rounds,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await {
             Ok(output) => {
@@ -292,7 +294,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             extend_if_unstable,
             max_trials,
             stop_on_pass,
+            feedback,
+            feedback_rounds,
         } => {
+            let feedback_rounds = if feedback && feedback_rounds == 0 { 2 } else { feedback_rounds };
             if queue {
                 let server = resolve_server_flag(&server);
                 // Engine path: identical payload to `enqueue`, so matrix
@@ -313,6 +318,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     no_save,
                     review_model.as_deref(),
                     stop_on_pass,
+                    feedback_rounds,
                 );
                 let resp = remote::post_json(&server, "/api/queue", &body).await?;
                 let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
@@ -418,6 +424,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     review_model: review_model.clone(),
                     batch_reference: batch_ref.as_ref().map(|b| b.reference()),
                     worker: 0,
+                    feedback_rounds,
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;
@@ -579,6 +586,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 parent_run_id: parent_run_id.clone(),
                                 start_idx: total_trials + 1,
                                 count: add,
+                                feedback_rounds,
                             },
                             logger.clone(),
                         )
@@ -1908,7 +1916,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             server,
             harness,
             stop_on_pass,
+            feedback,
+            feedback_rounds,
         } => {
+            let feedback_rounds = if feedback && feedback_rounds == 0 { 2 } else { feedback_rounds };
             let models: Vec<String> = models
                 .split(',')
                 .map(|m| m.trim().to_string())
@@ -1986,6 +1997,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                                 false,
                                 None,
                                 stop_on_pass,
+                                feedback_rounds,
                             );
                             match remote::post_json(&server, "/api/queue", &body).await {
                                 Ok(resp) => {
@@ -2159,6 +2171,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     parent_run_id: pid.clone(),
                     start_idx: merged.subruns.len() as u32 + 1,
                     count: trials.max(1),
+                    feedback_rounds: merged.feedback_rounds.unwrap_or(0),
                 },
                 logger,
             )
@@ -2212,7 +2225,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             review_model,
             server,
             stop_on_pass,
+            feedback,
+            feedback_rounds,
         } => {
+            let feedback_rounds = if feedback && feedback_rounds == 0 { 2 } else { feedback_rounds };
             main_queue::handle_enqueue(
                 model,
                 task,
@@ -2230,6 +2246,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 review_model,
                 server,
                 stop_on_pass,
+                feedback_rounds,
             )
             .await?
         }
@@ -2586,6 +2603,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let _ = LeaderboardManager::save_result(&temp_dir.to_string_lossy(), &result);
 
@@ -2692,6 +2711,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         fs::write(
             run_dir.join("manifest.json"),
@@ -2794,6 +2815,8 @@ mod tests {
                 extend_if_unstable: false,
                 max_trials: 9,
                 stop_on_pass: false,
+                feedback: false,
+                feedback_rounds: 0,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -2834,6 +2857,8 @@ mod tests {
                 extend_if_unstable: false,
                 max_trials: 9,
                 stop_on_pass: false,
+                feedback: false,
+                feedback_rounds: 0,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());
@@ -2869,6 +2894,8 @@ mod tests {
                 extend_if_unstable: false,
                 max_trials: 9,
                 stop_on_pass: false,
+                feedback: false,
+                feedback_rounds: 0,
             },
         };
         assert!(run_cli(cli_run).await.is_ok());

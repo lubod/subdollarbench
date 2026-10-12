@@ -2515,6 +2515,8 @@ mod tests {
             solved: Some(pass >= 100.0),
             solved_at: if pass >= 100.0 { Some(1) } else { None },
             best_stage_score: Some(pass),
+            repaired: None,
+            feedback_rounds: None,
         }
     }
 

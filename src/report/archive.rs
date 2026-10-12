@@ -146,6 +146,12 @@ pub struct RunManifest {
     /// Highest stage pass rate achieved across trials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_stage_score: Option<f64>,
+    /// Whether this run succeeded via feedback repair (true) vs initial attempt (false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaired: Option<bool>,
+    /// Number of feedback repair rounds configured / used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_rounds: Option<u32>,
     #[serde(default)]
     pub is_published: Option<bool>,
     #[serde(default)]
@@ -551,6 +557,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
 
         let console_log = "[06:30:00] [INIT] Starting test run\n[06:31:00] [DONE] Finished!\n";
@@ -723,6 +731,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();
         assert!(!runs_dir.join("live_run.tmp").exists());

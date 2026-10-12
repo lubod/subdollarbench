@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -113,6 +113,10 @@ pub struct BenchmarkConfig {
     /// Parallel worker id (0..SDB_WORKERS). Offsets candidate/verifier ports
     /// by worker*100 so concurrent cells never collide. 0 = legacy ports.
     pub worker: u8,
+    /// Number of feedback repair rounds within this trial (0 = single-shot).
+    /// If initial verification fails, verifier diagnostics are fed back to the
+    /// agent in the same workspace to surgically fix bugs.
+    pub feedback_rounds: u32,
 }
 
 #[derive(Debug)]
@@ -202,9 +206,646 @@ async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
     Ok(acks)
 }
 
+#[derive(Debug, Clone)]
+pub struct VerificationOutcome {
+    pub pass_rate: f64,
+    pub passed_stages: u32,
+    pub total_stages: u32,
+    pub stage_results: Vec<crate::verifier::StageResult>,
+    pub extra_robustness: Vec<crate::verifier::StageResult>,
+    pub extra_throughput: Option<f64>,
+    pub candidate_logs: String,
+    pub disqualified: bool,
+    pub disqualification_reason: Option<String>,
+    pub infra_error: bool,
+}
+
 pub struct BenchmarkPipeline;
 
 impl BenchmarkPipeline {
+    pub fn format_feedback_prompt(
+        task: TaskType,
+        passed_stages: u32,
+        total_stages: u32,
+        stages: &[crate::verifier::StageResult],
+        candidate_logs: &str,
+    ) -> String {
+        let mut out = String::new();
+        out.push_str("# Automated Verification Failure Report\n\n");
+        out.push_str(&format!(
+            "Your previous implementation of the **{}** service passed {} of {} stages ({:.1}%).\n\n",
+            task,
+            passed_stages,
+            total_stages,
+            if total_stages > 0 {
+                (passed_stages as f64 / total_stages as f64) * 100.0
+            } else {
+                0.0
+            }
+        ));
+        out.push_str("## Verifier Test Results:\n");
+        for s in stages {
+            let status = if s.passed { "PASS" } else { "FAIL" };
+            out.push_str(&format!("- [{status}] Stage {}: {}\n", s.stage, s.name));
+            if let Some(ref err) = s.error {
+                out.push_str(&format!("  * Diagnostic details: {}\n", err.trim()));
+            }
+        }
+        let trimmed_logs = candidate_logs.trim();
+        if !trimmed_logs.is_empty() {
+            out.push_str("\n## Service Container Runtime Output:\n```\n");
+            let lines: Vec<&str> = trimmed_logs.lines().collect();
+            let start = lines.len().saturating_sub(60);
+            for l in &lines[start..] {
+                out.push_str(l);
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
+        out.push_str("\n## Directives for Surgical Bug Fixing:\n");
+        out.push_str("1. DO NOT wipe your workspace or start from scratch. Your existing implementation files are in `/workspace`.\n");
+        out.push_str("2. Carefully analyze the verifier test errors and container logs above.\n");
+        out.push_str("3. Use `edit`, `write`, or `bash` to surgically fix the failing edge cases, protocol handling, or logic errors.\n");
+        out.push_str("4. Verify your fix locally by testing compilation and execution with `bash`.\n");
+        out.push_str("5. Ensure `./start.sh` or `Dockerfile` remains fully executable and properly starts the server.\n");
+        out
+    }
+
+    async fn run_agent_session(
+        config: &BenchmarkConfig,
+        run_id: &str,
+        prompt: &str,
+        limits: AgentExecutionLimits,
+        sandbox: &SandboxManager,
+        logger: &Arc<dyn PipelineLogger>,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OmpSessionStats> {
+        let logger_sub = logger.clone();
+        let model_c = config.model.clone();
+        let prompt_c = prompt.to_string();
+        let work_path_buf = config.workdir.clone();
+        let api_key_c = config.api_key.clone();
+        let effort_c = config.effort.clone();
+        let run_id_c = run_id.to_string();
+        let net_name = sandbox.network_name();
+
+        let cancel_flag_c = cancel_flag.clone();
+        let cancel_flag_watcher = cancel_flag.clone();
+        let sandbox_clone = SandboxManager::with_id(&run_id_c);
+        let harness = config.harness;
+        let task = config.task;
+        let worker = config.worker;
+
+        let mut blocking_handle = tokio::task::spawn_blocking(move || {
+            let spec = AgentRunSpec {
+                model: &model_c,
+                prompt: &prompt_c,
+                workdir: &work_path_buf,
+                api_key: api_key_c.as_deref(),
+                limits,
+                effort: Some(&effort_c),
+                network: Some(net_name.as_str()),
+                task: Some(task),
+                run_id: Some(&run_id_c),
+                cancel_flag: cancel_flag_c,
+                worker,
+            };
+            match harness {
+                Harness::Omp => {
+                    <OmpRunner as AgentRunner>::run_agent_with_logger(spec, move |line| {
+                        logger_sub.log(&line);
+                    })
+                }
+                Harness::Opencode => {
+                    <OpenCodeRunner as AgentRunner>::run_agent_with_logger(spec, move |line| {
+                        logger_sub.log(&line);
+                    })
+                }
+            }
+        });
+
+        tokio::select! {
+            res = &mut blocking_handle => match res {
+                Ok(inner) => inner,
+                Err(e) => Err(anyhow!("Task execution error: {}", e)),
+            },
+            _ = async {
+                if let Some(ref cf) = cancel_flag_watcher {
+                    loop {
+                        if cf.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                blocking_handle.abort();
+                sandbox_clone.cleanup_instance();
+                Err(anyhow!("Benchmark run was cancelled by user"))
+            }
+        }
+    }
+
+    fn run_verification<'a>(
+        task: TaskType,
+        workdir: &'a Path,
+        sandbox: &'a SandboxManager,
+        port: u16,
+        verifier_seed: &'a str,
+        agent_failed: bool,
+        worker: u8,
+        logger: &'a Arc<dyn PipelineLogger>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = VerificationOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            logger.log("[VERIFY] Checking anti-cheat compliance (no prebuilt frameworks/daemons)...");
+        let mut disqualified = false;
+        let mut disqualification_reason = None;
+        if let Err(violation) = ComplianceChecker::check_no_frameworks(workdir) {
+            logger.log(&format!("[ANTI-CHEAT VIOLATION] {}", violation));
+            disqualified = true;
+            disqualification_reason = Some(violation);
+        } else {
+            logger.log("[VERIFY] Anti-cheat compliance passed.");
+        }
+
+        let (has_runnable, candidate_check_error) =
+            match sandbox.ensure_runnable_candidate(workdir) {
+                Ok(v) => (v, None),
+                Err(e) => (false, Some(e.to_string())),
+            };
+
+        let mut extra_throughput: Option<f64> = None;
+        let mut extra_robustness: Vec<crate::verifier::StageResult> = Vec::new();
+        let mut infra_error = false;
+
+        let (pass_rate, passed_stages, total_stages, stage_results) = if disqualified {
+            let reason = disqualification_reason
+                .clone()
+                .unwrap_or_else(|| "Anti-cheat compliance violation".to_string());
+            let stages = vec![crate::verifier::StageResult {
+                stage: 0,
+                name: "Anti-Cheat Compliance".to_string(),
+                passed: false,
+                error: Some(reason),
+            }];
+            (0.0, 0, task.total_stages(), stages)
+        } else if !has_runnable {
+            infra_error = candidate_check_error.is_some();
+            if let Some(e) = &candidate_check_error {
+                logger.log(&format!(
+                    "[INFRA] Could not inspect the candidate workspace ({e}). This is a harness fault, not a model result."
+                ));
+            } else if agent_failed {
+                logger.log("[SETUP] Candidate did not produce runnable code. Skipping verification.");
+            } else {
+                logger.log("[SETUP] No runnable start.sh or Dockerfile found in ./workspace! Skipping verification.");
+            }
+            (0.0, 0, task.total_stages(), Vec::new())
+        } else {
+            if let Err(e) = sandbox.start_candidate_in_docker(workdir, port) {
+                if crate::sandbox::docker::SandboxManager::is_model_packaging_error(&e.to_string()) {
+                    logger.log(&format!(
+                        "[MODEL-FAULT] Candidate container failed to start ({e}); scoring as model failure."
+                    ));
+                } else {
+                    logger.log(&format!(
+                        "[INFRA] Candidate container failed to start ({e}); verifiers would fail on transport, not on the candidate."
+                    ));
+                    infra_error = true;
+                }
+            }
+
+            if matches!(task, TaskType::Proxy | TaskType::Redis | TaskType::Http) {
+                if let Err(e) = sandbox.connect_candidate_to_network() {
+                    logger.log(&format!(
+                        "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
+                        e
+                    ));
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+
+            let ready = if infra_error {
+                logger.log(&format!(
+                    "[SETUP] Candidate never started; skipping port {} wait (stages will fail fast on transport).",
+                    port
+                ));
+                false
+            } else {
+                logger.log(&format!(
+                    "[SETUP] Waiting for server port {} to become ready (timeout: 25s)...",
+                    port
+                ));
+                sandbox.wait_for_port(port, 25).await
+            };
+
+            if ready {
+                logger.log(&format!(
+                    "[SETUP] Server on port {} is online! Proceeding to verifier.",
+                    port
+                ));
+            } else {
+                logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
+            }
+
+            let log_robust = |logger: &Arc<dyn PipelineLogger>,
+                              rs: &[crate::verifier::StageResult]| {
+                for s in rs {
+                    logger.log(&format!(
+                        "  [ROBUST] Stage {}: {} -> {} {} (advisory, unscored)",
+                        s.stage,
+                        s.name,
+                        if s.passed { "PASS" } else { "FAIL" },
+                        s.error.as_deref().unwrap_or("")
+                    ));
+                }
+            };
+
+            match task {
+                TaskType::Redis => {
+                    let verifier = RedisVerifier::new(port, Some(verifier_seed));
+                    let summary = verifier.run_all().await;
+                    let mut stages = summary.stages.clone();
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            crate::config::stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
+                        ));
+                    }
+                    if summary.pass_rate == 100.0 {
+                        let fail6 = |e: String| crate::verifier::StageResult {
+                            stage: 6,
+                            name: "Stage 6: AOF crash recovery".to_string(),
+                            passed: false,
+                            error: Some(e),
+                        };
+                        match verifier.write_probe_key().await {
+                            Ok(()) => {
+                                logger.log("[BENCH] AOF probe written; SIGKILLing candidate...");
+                                let st = match sandbox.kill_candidate() {
+                                    Ok(()) => {
+                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                        match sandbox.restart_candidate() {
+                                            Ok(()) => {
+                                                if sandbox.wait_for_port(port, 25).await {
+                                                    verifier.check_persistence().await
+                                                } else {
+                                                    fail6("candidate did not reopen port after restart".to_string())
+                                                }
+                                            }
+                                            Err(e) => fail6(format!("restart failed: {}", e)),
+                                        }
+                                    }
+                                    Err(e) => fail6(format!("SIGKILL failed: {}", e)),
+                                };
+                                let status_str = if st.passed { "PASS" } else { "FAIL" };
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> {} {}",
+                                    st.stage,
+                                    crate::config::stage_label(st.stage, &st.name),
+                                    status_str,
+                                    st.error.as_deref().unwrap_or("")
+                                ));
+                                stages.push(st);
+                            }
+                            Err(e) => {
+                                let st = fail6(format!("AOF probe write failed: {}", e));
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> FAIL {}",
+                                    st.stage,
+                                    crate::config::stage_label(st.stage, &st.name),
+                                    st.error.as_deref().unwrap_or("")
+                                ));
+                                stages.push(st);
+                            }
+                        }
+                    } else {
+                        let st = crate::verifier::StageResult {
+                            stage: 6,
+                            name: "Stage 6: AOF crash recovery".to_string(),
+                            passed: false,
+                            error: Some("skipped due to failure in earlier stages".to_string()),
+                        };
+                        logger.log("  Stage 6: AOF crash recovery -> FAIL skipped due to failure in earlier stages");
+                        stages.push(st);
+                    }
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    let pr = ps as f64 / ts as f64 * 100.0;
+                    for s in verifier.run_robustness().await {
+                        log_robust(logger, std::slice::from_ref(&s));
+                        extra_robustness.push(s);
+                    }
+                    let ref_port = crate::web::server::worker_port(6380, worker);
+                    for s in verifier.run_differential(ref_port).await {
+                        log_robust(logger, std::slice::from_ref(&s));
+                        extra_robustness.push(s);
+                    }
+                    (pr, ps, ts, stages)
+                }
+                TaskType::Http => {
+                    let verifier = HttpVerifier::new(port, Some(verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            crate::config::stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
+                        ));
+                    }
+                    for s in verifier.run_robustness().await {
+                        log_robust(logger, std::slice::from_ref(&s));
+                        extra_robustness.push(s);
+                    }
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
+                TaskType::Wal => {
+                    let log_stage =
+                        |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                            let status_str = if s.passed { "PASS" } else { "FAIL" };
+                            let err_str = s.error.as_deref().unwrap_or("");
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                s.stage,
+                                crate::config::stage_label(s.stage, &s.name),
+                                status_str,
+                                err_str
+                            ));
+                        };
+                    let fail = |n: u32, name: &str, err: String| crate::verifier::StageResult {
+                        stage: n,
+                        name: name.to_string(),
+                        passed: false,
+                        error: Some(err),
+                    };
+                    let verifier = WalVerifier::new(port, Some(verifier_seed));
+                    let basic = verifier.run_basic().await;
+                    let mut stages = basic.stages.clone();
+                    for s in &basic.stages {
+                        log_stage(logger, s);
+                    }
+                    let mut probe_acks = 0usize;
+                    match publish_wal_probe(port).await {
+                        Ok(n) => {
+                            probe_acks = n;
+                            logger.log(&format!("  Probe: {}/2000 acks on recovery_probe", n));
+                        }
+                        Err(e) => logger.log(&format!(
+                            "  Probe publish failed (recovery unlikely): {}",
+                            e
+                        )),
+                    }
+                    let rec = if probe_acks >= 1500 {
+                        match sandbox.kill_candidate() {
+                            Ok(()) => {
+                                logger.log("[BENCH] Candidate SIGKILLed; restarting...");
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                match sandbox.restart_candidate() {
+                                    Ok(()) => {
+                                        if sandbox.wait_for_port(port, 25).await {
+                                            logger.log(
+                                                "[BENCH] Candidate back; checking recovery...",
+                                            );
+                                            verifier.check_recovery(probe_acks).await
+                                        } else {
+                                            fail(
+                                                4,
+                                                "Stage 4: Crash recovery",
+                                                "candidate did not reopen port after restart".to_string(),
+                                            )
+                                        }
+                                    }
+                                    Err(e) => fail(
+                                        4,
+                                        "Stage 4: Crash recovery",
+                                        format!("restart failed: {}", e),
+                                    ),
+                                }
+                            }
+                            Err(e) => fail(
+                                4,
+                                "Stage 4: Crash recovery",
+                                format!("SIGKILL failed: {}", e),
+                            ),
+                        }
+                    } else {
+                        fail(
+                            4,
+                            "Stage 4: Crash recovery",
+                            "probe had no full acks; skipping kill".to_string(),
+                        )
+                    };
+                    log_stage(logger, &rec);
+                    stages.push(rec);
+                    let tp = verifier.measure_throughput().await;
+                    extra_throughput = tp;
+                    let tp_stage = crate::verifier::StageResult {
+                        stage: 5,
+                        name: "Stage 5: PUB burst throughput".to_string(),
+                        passed: tp.is_some(),
+                        error: match tp {
+                            Some(v) => {
+                                logger.log(&format!("  Candidate burst: {:.0} msgs/sec", v));
+                                None
+                            }
+                            None => Some("no throughput measurement".to_string()),
+                        },
+                    };
+                    log_stage(logger, &tp_stage);
+                    stages.push(tp_stage);
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    let pr = ps as f64 / ts as f64 * 100.0;
+                    (pr, ps, ts, stages)
+                }
+                TaskType::Pdf => {
+                    let verifier = PdfVerifier::new(port, Some(verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            crate::config::stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
+                        ));
+                    }
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
+                TaskType::Proxy => {
+                    let log_stage =
+                        |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                            let status_str = if s.passed { "PASS" } else { "FAIL" };
+                            let err_str = s.error.as_deref().unwrap_or("");
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                s.stage,
+                                crate::config::stage_label(s.stage, &s.name),
+                                status_str,
+                                err_str
+                            ));
+                        };
+                    let ups: Vec<(String, u16)> = (1u8..=3u8)
+                        .map(|i| {
+                            (
+                                sandbox.upstream_name(i),
+                                crate::web::server::worker_port(
+                                    PROXY_UPSTREAM_PORTS[(i - 1) as usize],
+                                    worker,
+                                ),
+                            )
+                        })
+                        .collect();
+                    let pool_ok = crate::config::upstreams_reachable(
+                        &ups.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                    );
+                    if !pool_ok {
+                        logger.log(
+                            "[SETUP] Upstream pool unreachable at verify; recreating fresh...",
+                        );
+                        match sandbox
+                            .start_upstream_pool(&worker_upstream_ports(worker))
+                        {
+                            Ok(()) => logger.log("[SETUP] Upstream pool recreated."),
+                            Err(e) => logger.log(&format!(
+                                "[SETUP] Warning: upstream pool recreate failed: {}. Proxy stages will fail.",
+                                e
+                            )),
+                        }
+                    }
+                    let verifier = ProxyVerifier::new(port, Some(verifier_seed), ups);
+                    let routing = verifier.run_routing().await;
+                    let mut stages = routing.stages.clone();
+                    for s in &routing.stages {
+                        log_stage(logger, s);
+                    }
+                    let fo = verifier.run_failover().await;
+                    log_stage(logger, &fo);
+                    stages.push(fo);
+                    let tp = verifier.measure_throughput().await;
+                    extra_throughput = tp;
+                    let tp_stage = crate::verifier::StageResult {
+                        stage: 5,
+                        name: "Stage 5: Concurrent GET throughput".to_string(),
+                        passed: tp.is_some(),
+                        error: match tp {
+                            Some(v) => {
+                                logger.log(&format!("  Candidate load: {:.0} req/sec", v));
+                                None
+                            }
+                            None => Some("no throughput measurement".to_string()),
+                        },
+                    };
+                    log_stage(logger, &tp_stage);
+                    stages.push(tp_stage);
+                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                    let ts = stages.len() as u32;
+                    let pr = ps as f64 / ts as f64 * 100.0;
+                    (pr, ps, ts, stages)
+                }
+                TaskType::Pubsub => {
+                    let verifier = PubsubVerifier::new(port, Some(verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            crate::config::stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
+                        ));
+                    }
+                    if let Some(p99) = summary.soak_p99_ms {
+                        logger.log(&format!("  Soak p99 broadcast latency: {:.1}ms", p99));
+                    }
+                    extra_throughput = summary.soak_msgs_per_sec;
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
+                TaskType::Binproto => {
+                    let verifier = BinprotoVerifier::new(port, Some(verifier_seed));
+                    let summary = verifier.run_all().await;
+                    for s in &summary.stages {
+                        let status_str = if s.passed { "PASS" } else { "FAIL" };
+                        let err_str = s.error.as_deref().unwrap_or("");
+                        logger.log(&format!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            crate::config::stage_label(s.stage, &s.name),
+                            status_str,
+                            err_str
+                        ));
+                    }
+                    if let Some(tp) = verifier.measure_throughput().await {
+                        logger.log(&format!("  Candidate Throughput: {tp:.0} ops/sec"));
+                        extra_throughput = Some(tp);
+                    }
+                    (
+                        summary.pass_rate,
+                        summary.passed_count,
+                        summary.total_stages,
+                        summary.stages,
+                    )
+                }
+            }
+        };
+
+        let candidate_logs = if pass_rate < 100.0 {
+            let diag = sandbox.get_candidate_logs();
+            logger.log("[DIAGNOSTICS] Candidate container runtime output:");
+            for line in diag.lines() {
+                logger.log(&format!("  | {}", line));
+            }
+            diag
+        } else {
+            String::new()
+        };
+
+            VerificationOutcome {
+                pass_rate,
+                passed_stages,
+                total_stages,
+                stage_results,
+                extra_robustness,
+                extra_throughput,
+                candidate_logs,
+                disqualified,
+                disqualification_reason,
+                infra_error,
+            }
+        })
+    }
+
     pub async fn execute(
         mut config: BenchmarkConfig,
         logger: Arc<dyn PipelineLogger>,
@@ -425,7 +1066,7 @@ impl BenchmarkPipeline {
             Harness::Opencode => "OPENCODE",
         };
         let mut agent_failed = false;
-        let (omp_stats, prompt_tokens, cached_tokens, completion_tokens) = if !config.eval_only {
+        let (mut omp_stats, mut prompt_tokens, mut cached_tokens, mut completion_tokens) = if !config.eval_only {
             logger.log(&format!(
                 "[{htag}] Spawning {htag} agent inside isolated Docker sandbox with model '{}' (Effort: {})...",
                 config.model, config.effort
@@ -449,72 +1090,17 @@ impl BenchmarkPipeline {
                 },
             };
 
-            let logger_sub = logger.clone();
-            let model_c = config.model.clone();
-            let prompt_c = prompt_content.clone();
-            let work_path_buf = config.workdir.clone();
-            let api_key_c = config.api_key.clone();
-            let effort_c = config.effort.clone();
-            let run_id_c = run_id.clone();
-            let net_name = sandbox.network_name();
-
-            let cancel_flag_c = cancel_flag.clone();
-            let cancel_flag_watcher = cancel_flag.clone();
-            let sandbox_clone = SandboxManager::with_id(&run_id_c);
-            let harness = config.harness;
-
-            let mut blocking_handle = tokio::task::spawn_blocking(move || {
-                let spec = AgentRunSpec {
-                    model: &model_c,
-                    prompt: &prompt_c,
-                    workdir: &work_path_buf,
-                    api_key: api_key_c.as_deref(),
-                    limits,
-                    effort: Some(&effort_c),
-                    network: Some(net_name.as_str()),
-                    task: Some(config.task),
-                    run_id: Some(&run_id_c),
-                    cancel_flag: cancel_flag_c,
-                    worker: config.worker,
-                };
-                match harness {
-                    Harness::Omp => {
-                        <OmpRunner as AgentRunner>::run_agent_with_logger(spec, move |line| {
-                            logger_sub.log(&line);
-                        })
-                    }
-                    Harness::Opencode => {
-                        <OpenCodeRunner as AgentRunner>::run_agent_with_logger(spec, move |line| {
-                            logger_sub.log(&line);
-                        })
-                    }
-                }
-            });
-
-            let omp_res: Result<OmpSessionStats> = tokio::select! {
-                res = &mut blocking_handle => match res {
-                    Ok(inner) => inner,
-                    Err(e) => Err(anyhow!("OMP task execution error: {}", e)),
-                },
-                _ = async {
-                    if let Some(ref cf) = cancel_flag_watcher {
-                        loop {
-                            if cf.load(Ordering::SeqCst) {
-                                break;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        }
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    blocking_handle.abort();
-                    sandbox_clone.cleanup_instance();
-                    Err(anyhow!("Benchmark run was cancelled by user"))
-                }
-            };
-
-            match omp_res {
+            match Self::run_agent_session(
+                &config,
+                &run_id,
+                &prompt_content,
+                limits,
+                &sandbox,
+                &logger,
+                cancel_flag.clone(),
+            )
+            .await
+            {
                 Ok(stats) => {
                     logger.log(&format!(
                         "[{htag}] Finished! Tokens: prompt={}, cached={}, completion={}",
@@ -532,7 +1118,7 @@ impl BenchmarkPipeline {
                             return Err(anyhow!("Benchmark run was cancelled by user"));
                         }
                     }
-                    logger.log(&format!("[OMP ERROR] Agent execution failed: {}", e));
+                    logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
                     agent_failed = true;
                     let partial_stats = e
                         .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
@@ -559,774 +1145,387 @@ impl BenchmarkPipeline {
             }
         }
 
-        // 6. Anti-cheat compliance verification
-        logger.log("[VERIFY] Checking anti-cheat compliance (no prebuilt frameworks/daemons)...");
-        let mut disqualified = false;
-        let mut disqualification_reason = None;
-        if let Err(violation) = ComplianceChecker::check_no_frameworks(&config.workdir) {
-            logger.log(&format!("[ANTI-CHEAT VIOLATION] {}", violation));
-            disqualified = true;
-            disqualification_reason = Some(violation);
-        } else {
-            logger.log("[VERIFY] Anti-cheat compliance passed.");
+        // 6 & 7. Verification & Interactive Repair
+        let port = crate::web::server::worker_port(config.task.default_port(), config.worker);
+        let mut v_outcome = Self::run_verification(
+            config.task,
+            &config.workdir,
+            &sandbox,
+            port,
+            &verifier_seed,
+            agent_failed,
+            config.worker,
+            &logger,
+        )
+        .await;
+
+        let mut was_repaired = false;
+        let mut feedback_rounds_used = 0u32;
+        let mut best_pass_rate = v_outcome.pass_rate;
+
+        if v_outcome.pass_rate < 100.0
+            && config.feedback_rounds > 0
+            && !v_outcome.disqualified
+            && !v_outcome.infra_error
+            && !config.eval_only
+        {
+            logger.log(&format!(
+                "[FEEDBACK] Initial attempt passed {} of {} stages ({:.1}%). Starting interactive repair loop (max {} rounds)...",
+                v_outcome.passed_stages,
+                v_outcome.total_stages,
+                v_outcome.pass_rate,
+                config.feedback_rounds
+            ));
+
+            for round in 1..=config.feedback_rounds {
+                feedback_rounds_used = round;
+                if let Some(ref cf) = cancel_flag {
+                    if cf.load(Ordering::SeqCst) {
+                        sandbox.cleanup();
+                        return Err(anyhow!("Benchmark run was cancelled by user"));
+                    }
+                }
+
+                // 1. Stop candidate container to release ports and candidate name
+                let _ = sandbox.stop_candidate();
+
+                // 2. Format feedback prompt and save FEEDBACK_REPORT.md in workspace
+                let feedback_prompt = Self::format_feedback_prompt(
+                    config.task,
+                    v_outcome.passed_stages,
+                    v_outcome.total_stages,
+                    &v_outcome.stage_results,
+                    &v_outcome.candidate_logs,
+                );
+                let _ = fs::write(config.workdir.join("FEEDBACK_REPORT.md"), &feedback_prompt);
+
+                logger.log(&format!(
+                    "[FEEDBACK] ━━━ Repair Round {}/{} (Model: {}) ━━━",
+                    round, config.feedback_rounds, config.model
+                ));
+
+                // 3. Launch agent for surgical fix with feedback prompt
+                let round_limits = AgentExecutionLimits {
+                    max_turns: if config.max_turns > 0 {
+                        Some(config.max_turns)
+                    } else {
+                        None
+                    },
+                    max_budget_usd: if config.budget_usd > 0.0 {
+                        Some(config.budget_usd)
+                    } else {
+                        None
+                    },
+                    timeout_seconds: if config.timeout_min > 0 {
+                        Some(config.timeout_min * 60)
+                    } else {
+                        None
+                    },
+                };
+
+                let round_run_id = format!("{}_r{}", run_id, round);
+                let round_res = Self::run_agent_session(
+                    &config,
+                    &round_run_id,
+                    &feedback_prompt,
+                    round_limits,
+                    &sandbox,
+                    &logger,
+                    cancel_flag.clone(),
+                )
+                .await;
+
+                match round_res {
+                    Ok(r_stats) => {
+                        prompt_tokens += r_stats.prompt_tokens;
+                        cached_tokens += r_stats.cached_tokens;
+                        completion_tokens += r_stats.completion_tokens;
+                        omp_stats.steps_taken += r_stats.steps_taken;
+                        omp_stats.total_tokens += r_stats.total_tokens;
+                        logger.log(&format!(
+                            "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
+                            round, r_stats.steps_taken, r_stats.prompt_tokens, r_stats.completion_tokens
+                        ));
+                    }
+                    Err(e) => {
+                        logger.log(&format!("[FEEDBACK ERROR] Round {} agent failed: {}", round, e));
+                    }
+                }
+
+                if let Some(ref cf) = cancel_flag {
+                    if cf.load(Ordering::SeqCst) {
+                        sandbox.cleanup();
+                        return Err(anyhow!("Benchmark run was cancelled by user"));
+                    }
+                }
+
+                // 4. Re-verify the updated candidate
+                let next_outcome = Self::run_verification(
+                    config.task,
+                    &config.workdir,
+                    &sandbox,
+                    port,
+                    &verifier_seed,
+                    false,
+                    config.worker,
+                    &logger,
+                )
+                .await;
+
+                logger.log(&format!(
+                    "[FEEDBACK] Round {} test result: {} of {} stages passed ({:.1}%)",
+                    round,
+                    next_outcome.passed_stages,
+                    next_outcome.total_stages,
+                    next_outcome.pass_rate
+                ));
+
+                if next_outcome.pass_rate > best_pass_rate {
+                    best_pass_rate = next_outcome.pass_rate;
+                }
+
+                if next_outcome.pass_rate >= 100.0 {
+                    logger.log(&format!(
+                        "[FEEDBACK] SUCCESS! Candidate surgically repaired to 100.0% stage pass in round {}!",
+                        round
+                    ));
+                    was_repaired = true;
+                    v_outcome = next_outcome;
+                    break;
+                } else {
+                    v_outcome = next_outcome;
+                }
+            }
         }
 
-        // 7. Start candidate and run test suite.
-        // Worker offset keeps parallel cells on disjoint ports
-        // (worker 0 = legacy ports, byte-identical to single mode).
-        let port = crate::web::server::worker_port(config.task.default_port(), config.worker);
-        // An Err here is an I/O or Docker fault, not a statement about the
-        // candidate. Collapsing it to `false` made the run log "no runnable
-        // start.sh or Dockerfile found" - a fabricated cause that reads as a
-        // model failure - and then score it 0%.
-        let (has_runnable, candidate_check_error) =
-            match sandbox.ensure_runnable_candidate(&config.workdir) {
-                Ok(v) => (v, None),
-                Err(e) => (false, Some(e.to_string())),
-            };
+        let pass_rate = v_outcome.pass_rate;
+        let passed_stages = v_outcome.passed_stages;
+        let total_stages = v_outcome.total_stages;
+        let stage_results = v_outcome.stage_results;
+        let extra_robustness = v_outcome.extra_robustness;
+        let extra_throughput = v_outcome.extra_throughput;
+        let disqualified = v_outcome.disqualified;
+        let _disqualification_reason = v_outcome.disqualification_reason;
+        let infra_error = v_outcome.infra_error;
 
+        // 8. Load testing if 100% pass
         let mut throughput = None;
         let mut reference_throughput = None;
-        // Verifier-measured rate (wal/proxy/pubsub soak); step 8 prefers it.
-        let mut extra_throughput: Option<f64> = None;
-        // Advisory robustness probes (redis/http only): run AFTER the scored
-        // stages, logged under [ROBUST], never counted in the pass rate.
-        // Stored on the manifest for later analysis. Declared out here
-        // because the arms below do not share a scope (same reason as
-        // infra_error above).
-        let mut extra_robustness: Vec<crate::verifier::StageResult> = Vec::new();
         let mut baseline_source: Option<String> = None;
-        // Latched by whichever setup path hits a harness fault. Declared out
-        // here because the two sites live in different arms of the expression
-        // below and therefore do not share a scope.
-        let mut infra_error = false;
-        let (pass_rate, passed_stages, total_stages, stage_results) = if disqualified {
-            let reason = disqualification_reason
-                .unwrap_or_else(|| "Anti-cheat compliance violation".to_string());
-            let stages = vec![crate::verifier::StageResult {
-                stage: 0,
-                name: "Anti-Cheat Compliance".to_string(),
-                passed: false,
-                error: Some(reason),
-            }];
-            (0.0, 0, config.task.total_stages(), stages)
-        } else if !has_runnable {
-            // A workspace-inspection Err is a harness fault, not a model that
-            // produced nothing. Latched so the run is reported as a non-result
-            // rather than a 0% trial.
-            infra_error = candidate_check_error.is_some();
-            if let Some(e) = &candidate_check_error {
-                // Report the real fault. This is infrastructure, not a model
-                // that failed to produce code.
-                logger.log(&format!(
-                    "[INFRA] Could not inspect the candidate workspace ({e}). \
-                     This is a harness fault, not a model result."
-                ));
-            } else if agent_failed {
-                logger
-                    .log("[SETUP] Candidate did not produce runnable code. Skipping verification.");
-            } else {
-                logger.log("[SETUP] No runnable start.sh or Dockerfile found in ./workspace! Skipping verification.");
-            }
-            (0.0, 0, config.task.total_stages(), Vec::new())
-        } else {
-            // A candidate that will not start is an infrastructure fault, not
-            // a model that scored zero: the error used to be discarded, and
-            // every verifier then failed on transport.
-            if let Err(e) = sandbox.start_candidate_in_docker(&config.workdir, port) {
-                // Model packaging faults (bad entrypoint, missing +x) are
-                // failed_tests, not infra: the model built something
-                // unrunnable. Only daemon-side failures latch infra_error.
-                if crate::sandbox::docker::SandboxManager::is_model_packaging_error(&e.to_string())
-                {
-                    logger.log(&format!(
-                        "[MODEL-FAULT] Candidate container failed to start ({e}); scoring as model failure."
-                    ));
-                } else {
-                    logger.log(&format!(
-                        "[INFRA] Candidate container failed to start ({e}); \
-                         verifiers would fail on transport, not on the candidate."
-                    ));
-                    // Latched below via `infra_error`; declared here so both paths
-                    // converge on one flag.
-                    infra_error = true;
-                }
-            }
-
-            // Proxy needs its upstream pool, which lives on the private run
-            // network the candidate only joins here (default bridge has
-            // neither alias). Redis and Http join too: their throughput is
-            // now measured with the bench client on this network, addressed
-            // by the `candidate` alias. Without the attach the alias never
-            // exists and the measurement fails silently. This also aligns the
-            // sandbox with the redis prompt, which already tells the model
-            // that a reference server is reachable at `ref-redis` on this
-            // network - previously unreachable, because the candidate launched
-            // on the default bridge.
-            if matches!(
-                config.task,
-                TaskType::Proxy | TaskType::Redis | TaskType::Http
-            ) {
-                if let Err(e) = sandbox.connect_candidate_to_network() {
-                    logger.log(&format!(
-                        "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
-                        e
-                    ));
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-
-            // A candidate that never started (infra_error latched above) gets
-            // no 25s port wait and no doomed stages: transport failures are
-            // already proven. Stages still record as failed below so scoring
-            // shape is unchanged; only the wasted wait is skipped.
-            let ready = if infra_error {
-                logger.log(&format!(
-                    "[SETUP] Candidate never started; skipping port {} wait (stages will fail fast on transport).",
-                    port
-                ));
-                false
-            } else {
-                logger.log(&format!(
-                    "[SETUP] Waiting for server port {} to become ready (timeout: 25s)...",
-                    port
-                ));
-                sandbox.wait_for_port(port, 25).await
-            };
-
-            if ready {
-                logger.log(&format!(
-                    "[SETUP] Server on port {} is online! Proceeding to verifier.",
-                    port
-                ));
-            } else {
-                logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
-            }
-
-            let log_robust = |logger: &Arc<dyn PipelineLogger>,
-                              rs: &[crate::verifier::StageResult]| {
-                for s in rs {
-                    logger.log(&format!(
-                        "  [ROBUST] Stage {}: {} -> {} {} (advisory, unscored)",
-                        s.stage,
-                        s.name,
-                        if s.passed { "PASS" } else { "FAIL" },
-                        s.error.as_deref().unwrap_or("")
-                    ));
-                }
-            };
-            let (pr, ps, ts, sr) = match config.task {
+        if pass_rate == 100.0 {
+            logger.log(
+                "[BENCH] 100% tests passed! Running live throughput load test on candidate...",
+            );
+            match config.task {
                 TaskType::Redis => {
-                    let verifier = RedisVerifier::new(port, Some(&verifier_seed));
-                    let summary = verifier.run_all().await;
-                    let mut stages = summary.stages.clone();
-                    for s in &summary.stages {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
-                        logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage,
-                            crate::config::stage_label(s.stage, &s.name),
-                            status_str,
-                            err_str
-                        ));
-                    }
-                    // Stage 6: AOF crash recovery on full pass (mirrors the WAL flow).
-                    // Denominator stays 6 either way: a skipped crash stage is
-                    // recorded failed, never silently dropped.
-                    if summary.pass_rate == 100.0 {
-                        let fail6 = |e: String| crate::verifier::StageResult {
-                            stage: 6,
-                            name: "Stage 6: AOF crash recovery".to_string(),
-                            passed: false,
-                            error: Some(e),
-                        };
-                        match verifier.write_probe_key().await {
-                            Ok(()) => {
-                                logger.log("[BENCH] AOF probe written; SIGKILLing candidate...");
-                                let st = match sandbox.kill_candidate() {
-                                    Ok(()) => {
-                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        match sandbox.restart_candidate() {
-                                            Ok(()) => {
-                                                if sandbox.wait_for_port(port, 25).await {
-                                                    verifier.check_persistence().await
-                                                } else {
-                                                    fail6("candidate did not reopen port after restart".to_string())
-                                                }
-                                            }
-                                            Err(e) => fail6(format!("restart failed: {}", e)),
-                                        }
-                                    }
-                                    Err(e) => fail6(format!("SIGKILL failed: {}", e)),
-                                };
-                                let status_str = if st.passed { "PASS" } else { "FAIL" };
-                                logger.log(&format!(
-                                    "  Stage {}: {} -> {} {}",
-                                    st.stage,
-                                    crate::config::stage_label(st.stage, &st.name),
-                                    status_str,
-                                    st.error.as_deref().unwrap_or("")
-                                ));
-                                stages.push(st);
-                            }
-                            Err(e) => {
-                                // Same denominator-manipulation class as the
-                                // WAL fix: a broken probe must score 5/6, not
-                                // 5/5=100%. Push the failed stage like the
-                                // adjacent else-branch does.
-                                let st = fail6(format!("AOF probe write failed: {}", e));
-                                logger.log(&format!(
-                                    "  Stage {}: {} -> FAIL {}",
-                                    st.stage,
-                                    crate::config::stage_label(st.stage, &st.name),
-                                    st.error.as_deref().unwrap_or("")
-                                ));
-                                stages.push(st);
-                            }
-                        }
-                    } else {
-                        let st = crate::verifier::StageResult {
-                            stage: 6,
-                            name: "Stage 6: AOF crash recovery".to_string(),
-                            passed: false,
-                            error: Some("skipped due to failure in earlier stages".to_string()),
-                        };
-                        logger.log("  Stage 6: AOF crash recovery -> FAIL skipped due to failure in earlier stages");
-                        stages.push(st);
-                    }
-                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
-                    let ts = stages.len() as u32;
-                    let pr = ps as f64 / ts as f64 * 100.0;
-                    for s in verifier.run_robustness().await {
-                        log_robust(&logger, std::slice::from_ref(&s));
-                        extra_robustness.push(s);
-                    }
-                    // Differential oracle vs the live reference (advisory,
-                    // unscored): the same seeded op stream runs on both
-                    // servers; hardcoded tables cannot answer random keys.
-                    let ref_port = crate::web::server::worker_port(6380, config.worker);
-                    for s in verifier.run_differential(ref_port).await {
-                        log_robust(&logger, std::slice::from_ref(&s));
-                        extra_robustness.push(s);
-                    }
-                    (pr, ps, ts, stages)
-                }
-                TaskType::Http => {
-                    let verifier = HttpVerifier::new(port, Some(&verifier_seed));
-                    let summary = verifier.run_all().await;
-                    for s in &summary.stages {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
-                        logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage,
-                            crate::config::stage_label(s.stage, &s.name),
-                            status_str,
-                            err_str
-                        ));
-                    }
-                    for s in verifier.run_robustness().await {
-                        log_robust(&logger, std::slice::from_ref(&s));
-                        extra_robustness.push(s);
-                    }
-                    (
-                        summary.pass_rate,
-                        summary.passed_count,
-                        summary.total_stages,
-                        summary.stages,
+                    if let Ok(tp) = BenchmarkRunner::run_redis_benchmark_async(
+                        &sandbox.network_name(),
+                        "candidate",
+                        port,
                     )
-                }
-                TaskType::Wal => {
-                    let log_stage =
-                        |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
-                            let status_str = if s.passed { "PASS" } else { "FAIL" };
-                            let err_str = s.error.as_deref().unwrap_or("");
-                            logger.log(&format!(
-                                "  Stage {}: {} -> {} {}",
-                                s.stage,
-                                crate::config::stage_label(s.stage, &s.name),
-                                status_str,
-                                err_str
-                            ));
-                        };
-                    let fail = |n: u32, name: &str, err: String| crate::verifier::StageResult {
-                        stage: n,
-                        name: name.to_string(),
-                        passed: false,
-                        error: Some(err),
-                    };
-                    let verifier = WalVerifier::new(port, Some(&verifier_seed));
-                    let basic = verifier.run_basic().await;
-                    let mut stages = basic.stages.clone();
-                    for s in &basic.stages {
-                        log_stage(&logger, s);
+                    .await
+                    {
+                        logger.log(&format!(
+                            "  Candidate Throughput (median of 3): {:.0} req/sec",
+                            tp
+                        ));
+                        throughput = Some(tp);
                     }
-                    // Seed crash state, SIGKILL, restart, verify.
-                    let mut probe_acks = 0usize;
-                    match publish_wal_probe(port).await {
-                        Ok(n) => {
-                            probe_acks = n;
-                            logger.log(&format!("  Probe: {}/2000 acks on recovery_probe", n));
-                        }
-                        Err(e) => logger.log(&format!(
-                            "  Probe publish failed (recovery unlikely): {}",
-                            e
-                        )),
-                    }
-                    // Proceed on majority quorum (fsync-storm losses stay visible:
-                    // check_recovery demands every acked message back).
-                    let rec = if probe_acks >= 1500 {
-                        match sandbox.kill_candidate() {
-                            Ok(()) => {
-                                logger.log("[BENCH] Candidate SIGKILLed; restarting...");
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                match sandbox.restart_candidate() {
-                                    Ok(()) => {
-                                        if sandbox.wait_for_port(port, 25).await {
-                                            logger.log(
-                                                "[BENCH] Candidate back; checking recovery...",
-                                            );
-                                            verifier.check_recovery(probe_acks).await
-                                        } else {
-                                            fail(
-                                                4,
-                                                "Stage 4: Crash recovery",
-                                                "candidate did not reopen port after restart"
-                                                    .to_string(),
-                                            )
-                                        }
-                                    }
-                                    Err(e) => fail(
-                                        4,
-                                        "Stage 4: Crash recovery",
-                                        format!("restart failed: {}", e),
-                                    ),
-                                }
-                            }
-                            Err(e) => fail(
-                                4,
-                                "Stage 4: Crash recovery",
-                                format!("SIGKILL failed: {}", e),
-                            ),
-                        }
-                    } else {
-                        fail(
-                            4,
-                            "Stage 4: Crash recovery",
-                            "probe had no full acks; skipping kill".to_string(),
+                    if config.batch_reference.is_none() {
+                        logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
+                        match BenchmarkRunner::run_redis_benchmark_async(
+                            &sandbox.network_name(),
+                            "ref-redis",
+                            6379,
                         )
-                    };
-                    log_stage(&logger, &rec);
-                    stages.push(rec);
-                    let tp = verifier.measure_throughput().await;
-                    extra_throughput = tp;
-                    let tp_stage = crate::verifier::StageResult {
-                        stage: 5,
-                        name: "Stage 5: PUB burst throughput".to_string(),
-                        passed: tp.is_some(),
-                        error: match tp {
-                            Some(v) => {
-                                logger.log(&format!("  Candidate burst: {:.0} msgs/sec", v));
-                                None
-                            }
-                            None => Some("no throughput measurement".to_string()),
-                        },
-                    };
-                    log_stage(&logger, &tp_stage);
-                    stages.push(tp_stage);
-                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
-                    let ts = stages.len() as u32;
-                    let pr = ps as f64 / ts as f64 * 100.0;
-                    (pr, ps, ts, stages)
-                }
-                TaskType::Pdf => {
-                    let verifier = PdfVerifier::new(port, Some(&verifier_seed));
-                    let summary = verifier.run_all().await;
-                    for s in &summary.stages {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
-                        logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage,
-                            crate::config::stage_label(s.stage, &s.name),
-                            status_str,
-                            err_str
-                        ));
-                    }
-                    (
-                        summary.pass_rate,
-                        summary.passed_count,
-                        summary.total_stages,
-                        summary.stages,
-                    )
-                }
-                TaskType::Proxy => {
-                    // No second attach: the setup gate above already joined
-                    // the run network (single attach point). `network connect`
-                    // is idempotent, but a second call here would re-sleep 2s
-                    // and widen the window where a sibling's cleanup can reap
-                    // a half-attached endpoint. Alias propagation was covered
-                    // by the 500ms setup-gate sleep.
-                    let log_stage =
-                        |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
-                            let status_str = if s.passed { "PASS" } else { "FAIL" };
-                            let err_str = s.error.as_deref().unwrap_or("");
-                            logger.log(&format!(
-                                "  Stage {}: {} -> {} {}",
-                                s.stage,
-                                crate::config::stage_label(s.stage, &s.name),
-                                status_str,
-                                err_str
-                            ));
-                        };
-                    let ups: Vec<(String, u16)> = (1u8..=3u8)
-                        .map(|i| {
-                            (
-                                sandbox.upstream_name(i),
-                                crate::web::server::worker_port(
-                                    PROXY_UPSTREAM_PORTS[(i - 1) as usize],
-                                    config.worker,
-                                ),
-                            )
-                        })
-                        .collect();
-                    // Upstream health gate: host-published upstream bindings
-                    // decay under daemon churn between setup and verify
-                    // (measured: Ports:null at verify despite successful
-                    // start → every stage dialing them refused). Dial each;
-                    // on first refusal recreate the pool fresh and proceed.
-                    // No-op when healthy; a failed recreate degrades to
-                    // today's behavior (stages fail loudly, not silently).
-                    let pool_ok = crate::config::upstreams_reachable(
-                        &ups.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
-                    );
-                    if !pool_ok {
-                        logger.log(
-                            "[SETUP] Upstream pool unreachable at verify; recreating fresh...",
-                        );
-                        match sandbox
-                            .start_upstream_pool(&worker_upstream_ports(config.worker))
+                        .await
                         {
-                            Ok(()) => logger.log("[SETUP] Upstream pool recreated."),
+                            Ok(ref_tp) => {
+                                logger.log(&format!(
+                                    "  Official Reference Redis: {:.0} req/sec",
+                                    ref_tp
+                                ));
+                                reference_throughput = Some(ref_tp);
+                            }
+                            // Never silent. A reference that fails to
+                            // measure leaves throughput_req_sec populated
+                            // with nothing to divide by, and the row looks
+                            // merely unanchored - indistinguishable from a
+                            // task that has no reference by design.
                             Err(e) => logger.log(&format!(
-                                "[SETUP] Warning: upstream pool recreate failed: {}. Proxy stages will fail.",
-                                e
+                                "  [BENCH] live Redis reference FAILED: {e:#}. \
+                                 Throughput will be reported but NOT ranked."
                             )),
                         }
                     }
-                    let verifier = ProxyVerifier::new(port, Some(&verifier_seed), ups);
-                    let routing = verifier.run_routing().await;
-                    let mut stages = routing.stages.clone();
-                    for s in &routing.stages {
-                        log_stage(&logger, s);
+                }
+                TaskType::Http => {
+                    if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark_async(
+                        &sandbox.network_name(),
+                        "candidate",
+                        port,
+                    )
+                    .await
+                    {
+                        logger.log(&format!(
+                            "  Candidate Throughput (median of 3): {:.0} req/sec",
+                            tp
+                        ));
+                        throughput = Some(tp);
                     }
-                    let fo = verifier.run_failover().await;
-                    log_stage(&logger, &fo);
-                    stages.push(fo);
-                    let tp = verifier.measure_throughput().await;
-                    extra_throughput = tp;
-                    let tp_stage = crate::verifier::StageResult {
-                        stage: 5,
-                        name: "Stage 5: Concurrent GET throughput".to_string(),
-                        passed: tp.is_some(),
-                        error: match tp {
-                            Some(v) => {
-                                logger.log(&format!("  Candidate load: {:.0} req/sec", v));
-                                None
+                    if config.batch_reference.is_none() {
+                        logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
+                        match BenchmarkRunner::run_wrk_benchmark_async(
+                            &sandbox.network_name(),
+                            "ref-http",
+                            80,
+                        )
+                        .await
+                        {
+                            Ok(ref_tp) => {
+                                logger.log(&format!(
+                                    "  Official Reference Nginx: {:.0} req/sec",
+                                    ref_tp
+                                ));
+                                reference_throughput = Some(ref_tp);
                             }
-                            None => Some("no throughput measurement".to_string()),
-                        },
-                    };
-                    log_stage(&logger, &tp_stage);
-                    stages.push(tp_stage);
-                    let ps = stages.iter().filter(|s| s.passed).count() as u32;
-                    let ts = stages.len() as u32;
-                    let pr = ps as f64 / ts as f64 * 100.0;
-                    (pr, ps, ts, stages)
+                            // See the Redis arm: a swallowed failure here
+                            // is indistinguishable from having no reference.
+                            Err(e) => logger.log(&format!(
+                                "  [BENCH] live Nginx reference FAILED: {e:#}. \
+                                 Throughput will be reported but NOT ranked."
+                            )),
+                        }
+                    }
                 }
-                TaskType::Pubsub => {
-                    let verifier = PubsubVerifier::new(port, Some(&verifier_seed));
-                    let summary = verifier.run_all().await;
-                    for s in &summary.stages {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
+                TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
+                    if let Some(tp) = extra_throughput {
+                        let unit = match config.task {
+                            TaskType::Wal => "msgs/sec",
+                            TaskType::Pubsub => "deliveries/sec",
+                            _ => "ops/sec",
+                        };
                         logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage,
-                            crate::config::stage_label(s.stage, &s.name),
-                            status_str,
-                            err_str
+                            "  Candidate Throughput (verifier soak, median-grade): {:.0} {}",
+                            tp, unit
                         ));
+                        throughput = Some(tp);
                     }
-                    if let Some(p99) = summary.soak_p99_ms {
-                        logger.log(&format!("  Soak p99 broadcast latency: {:.1}ms", p99));
-                    }
-                    extra_throughput = summary.soak_msgs_per_sec;
-                    (
-                        summary.pass_rate,
-                        summary.passed_count,
-                        summary.total_stages,
-                        summary.stages,
+                    // Verifier-timed, no external reference: reported but
+                    // unscored until a reference harness exists.
+                    logger.log(
+                        "[BENCH] No reference implementation for this task; timing reported, score unscored.",
+                    );
+                }
+                TaskType::Proxy => {
+                    if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark_async(
+                        &sandbox.network_name(),
+                        "candidate",
+                        port,
                     )
-                }
-                TaskType::Binproto => {
-                    let verifier = BinprotoVerifier::new(port, Some(&verifier_seed));
-                    let summary = verifier.run_all().await;
-                    for s in &summary.stages {
-                        let status_str = if s.passed { "PASS" } else { "FAIL" };
-                        let err_str = s.error.as_deref().unwrap_or("");
+                    .await
+                    {
                         logger.log(&format!(
-                            "  Stage {}: {} -> {} {}",
-                            s.stage,
-                            crate::config::stage_label(s.stage, &s.name),
-                            status_str,
-                            err_str
+                            "  Candidate Throughput (median of 3): {:.0} req/sec",
+                            tp
                         ));
+                        throughput = Some(tp);
                     }
-                    // Throughput probe (200-frame ECHO burst); unscored until
-                    // a reference harness exists (same rule as pubsub soak).
+                    if config.batch_reference.is_none() {
+                        // Same nginx denominator as http: a proxy cannot
+                        // beat direct. Live per-trial when no batch ref.
+                        logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
+                        match BenchmarkRunner::run_wrk_benchmark_async(
+                            &sandbox.network_name(),
+                            "ref-http",
+                            80,
+                        )
+                        .await
+                        {
+                            Ok(ref_tp) => {
+                                logger.log(&format!(
+                                    "  Official Reference Nginx: {:.0} req/sec",
+                                    ref_tp
+                                ));
+                                reference_throughput = Some(ref_tp);
+                            }
+                            // See the Redis arm: a swallowed failure here
+                            // is indistinguishable from having no reference.
+                            Err(e) => logger.log(&format!(
+                                "  [BENCH] live Nginx reference FAILED: {e:#}. \
+                                 Throughput will be reported but NOT ranked."
+                            )),
+                        }
+                    }
+                }
+                TaskType::Pdf => {
+                    let verifier = PdfVerifier::new(port, Some(&verifier_seed));
                     if let Some(tp) = verifier.measure_throughput().await {
-                        logger.log(&format!("  Candidate Throughput: {tp:.0} ops/sec"));
-                        extra_throughput = Some(tp);
+                        logger.log(&format!("  Candidate Throughput: {:.0} pages/sec", tp));
+                        throughput = Some(tp);
                     }
-                    (
-                        summary.pass_rate,
-                        summary.passed_count,
-                        summary.total_stages,
-                        summary.stages,
-                    )
+                    // No external PDF reference exists; candidate timing is
+                    // reported but unscored (throughput_score stays None).
+                    logger.log(
+                        "[BENCH] No reference implementation for PDF; timing reported, score unscored.",
+                    );
                 }
+            }
+
+            // Batch denominator wins when present: every trial of the batch
+            // scores against the same pre-batch median; the per-trial live
+            // measurement above is skipped in that case.
+            if let Some(batch) = config.batch_reference {
+                logger.log(&format!(
+                    "  Batch reference (shared pre-batch median): {:.0} req/sec",
+                    batch
+                ));
+                reference_throughput = Some(batch);
+            }
+
+            // Two tasks have no valid throughput denominator, and ranking
+            // them on one asserts a comparison that cannot exist:
+            //
+            //   proxy - divided by DIRECT nginx while it has to forward to
+            //     a three-upstream pool. It is capped below 1.0 by
+            //     construction, so every proxy row reads as a deficit
+            //     against a ceiling it was never racing.
+            //   pdf   - the reference is our own ~275-line Python
+            //     extractor. That is a parity oracle, not a ceiling: it is
+            //     expected to be SLOWER than candidates, so the ratio
+            //     rewards distance from our own slow implementation.
+            //
+            // The candidate's raw rate is still reported - it is a real
+            // measurement - but it is not ranked, and the board shows no
+            // percentage for these tasks rather than a wrong one.
+            if matches!(config.task, TaskType::Proxy | TaskType::Pdf)
+                && reference_throughput.is_some()
+            {
+                logger.log(
+                    "[BENCH] No valid throughput denominator for this task \
+                     (reference is structurally unreachable); rate reported, not ranked.",
+                );
+                reference_throughput = None;
+            }
+            // `baseline_source` describes where the denominator came from,
+            // so it must follow reference_throughput: a batch reference
+            // that was just discarded is not a "batch" baseline.
+            baseline_source = match (config.batch_reference.is_some(), reference_throughput) {
+                (true, Some(_)) => Some("batch".to_string()),
+                (false, Some(_)) => Some("live".to_string()),
+                _ => None,
             };
 
-            // Container diagnostics if any failures
-            if pr < 100.0 {
-                let diag = sandbox.get_candidate_logs();
-                logger.log("[DIAGNOSTICS] Candidate container runtime output:");
-                for line in diag.lines() {
-                    logger.log(&format!("  | {}", line));
-                }
-            }
-
-            // 8. Load testing if 100% pass
-            if pr == 100.0 {
-                logger.log(
-                    "[BENCH] 100% tests passed! Running live throughput load test on candidate...",
-                );
-                match config.task {
-                    TaskType::Redis => {
-                        if let Ok(tp) = BenchmarkRunner::run_redis_benchmark_async(
-                            &sandbox.network_name(),
-                            "candidate",
-                            port,
-                        )
-                        .await
-                        {
-                            logger.log(&format!(
-                                "  Candidate Throughput (median of 3): {:.0} req/sec",
-                                tp
-                            ));
-                            throughput = Some(tp);
-                        }
-                        if config.batch_reference.is_none() {
-                            logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");
-                            match BenchmarkRunner::run_redis_benchmark_async(
-                                &sandbox.network_name(),
-                                "ref-redis",
-                                6379,
-                            )
-                            .await
-                            {
-                                Ok(ref_tp) => {
-                                    logger.log(&format!(
-                                        "  Official Reference Redis: {:.0} req/sec",
-                                        ref_tp
-                                    ));
-                                    reference_throughput = Some(ref_tp);
-                                }
-                                // Never silent. A reference that fails to
-                                // measure leaves throughput_req_sec populated
-                                // with nothing to divide by, and the row looks
-                                // merely unanchored - indistinguishable from a
-                                // task that has no reference by design.
-                                Err(e) => logger.log(&format!(
-                                    "  [BENCH] live Redis reference FAILED: {e:#}. \
-                                     Throughput will be reported but NOT ranked."
-                                )),
-                            }
-                        }
-                    }
-                    TaskType::Http => {
-                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark_async(
-                            &sandbox.network_name(),
-                            "candidate",
-                            port,
-                        )
-                        .await
-                        {
-                            logger.log(&format!(
-                                "  Candidate Throughput (median of 3): {:.0} req/sec",
-                                tp
-                            ));
-                            throughput = Some(tp);
-                        }
-                        if config.batch_reference.is_none() {
-                            logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            match BenchmarkRunner::run_wrk_benchmark_async(
-                                &sandbox.network_name(),
-                                "ref-http",
-                                80,
-                            )
-                            .await
-                            {
-                                Ok(ref_tp) => {
-                                    logger.log(&format!(
-                                        "  Official Reference Nginx: {:.0} req/sec",
-                                        ref_tp
-                                    ));
-                                    reference_throughput = Some(ref_tp);
-                                }
-                                // See the Redis arm: a swallowed failure here
-                                // is indistinguishable from having no reference.
-                                Err(e) => logger.log(&format!(
-                                    "  [BENCH] live Nginx reference FAILED: {e:#}. \
-                                     Throughput will be reported but NOT ranked."
-                                )),
-                            }
-                        }
-                    }
-                    TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
-                        if let Some(tp) = extra_throughput {
-                            let unit = match config.task {
-                                TaskType::Wal => "msgs/sec",
-                                TaskType::Pubsub => "deliveries/sec",
-                                _ => "ops/sec",
-                            };
-                            logger.log(&format!(
-                                "  Candidate Throughput (verifier soak, median-grade): {:.0} {}",
-                                tp, unit
-                            ));
-                            throughput = Some(tp);
-                        }
-                        // Verifier-timed, no external reference: reported but
-                        // unscored until a reference harness exists.
-                        logger.log(
-                            "[BENCH] No reference implementation for this task; timing reported, score unscored.",
-                        );
-                    }
-                    TaskType::Proxy => {
-                        if let Ok(tp) = BenchmarkRunner::run_wrk_benchmark_async(
-                            &sandbox.network_name(),
-                            "candidate",
-                            port,
-                        )
-                        .await
-                        {
-                            logger.log(&format!(
-                                "  Candidate Throughput (median of 3): {:.0} req/sec",
-                                tp
-                            ));
-                            throughput = Some(tp);
-                        }
-                        if config.batch_reference.is_none() {
-                            // Same nginx denominator as http: a proxy cannot
-                            // beat direct. Live per-trial when no batch ref.
-                            logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                            match BenchmarkRunner::run_wrk_benchmark_async(
-                                &sandbox.network_name(),
-                                "ref-http",
-                                80,
-                            )
-                            .await
-                            {
-                                Ok(ref_tp) => {
-                                    logger.log(&format!(
-                                        "  Official Reference Nginx: {:.0} req/sec",
-                                        ref_tp
-                                    ));
-                                    reference_throughput = Some(ref_tp);
-                                }
-                                // See the Redis arm: a swallowed failure here
-                                // is indistinguishable from having no reference.
-                                Err(e) => logger.log(&format!(
-                                    "  [BENCH] live Nginx reference FAILED: {e:#}. \
-                                     Throughput will be reported but NOT ranked."
-                                )),
-                            }
-                        }
-                    }
-                    TaskType::Pdf => {
-                        let verifier = PdfVerifier::new(port, Some(&verifier_seed));
-                        if let Some(tp) = verifier.measure_throughput().await {
-                            logger.log(&format!("  Candidate Throughput: {:.0} pages/sec", tp));
-                            throughput = Some(tp);
-                        }
-                        // No external PDF reference exists; candidate timing is
-                        // reported but unscored (throughput_score stays None).
-                        logger.log(
-                            "[BENCH] No reference implementation for PDF; timing reported, score unscored.",
-                        );
-                    }
-                }
-
-                // Batch denominator wins when present: every trial of the batch
-                // scores against the same pre-batch median; the per-trial live
-                // measurement above is skipped in that case.
-                if let Some(batch) = config.batch_reference {
+            if let (Some(cand_tp), Some(ref_tp)) = (throughput, reference_throughput) {
+                if ref_tp > 0.0 {
+                    let ratio = (cand_tp / ref_tp) * 100.0;
                     logger.log(&format!(
-                        "  Batch reference (shared pre-batch median): {:.0} req/sec",
-                        batch
+                        "  ⚡ Relative Performance: {:.1}% of official reference",
+                        ratio
                     ));
-                    reference_throughput = Some(batch);
-                }
-
-                // Two tasks have no valid throughput denominator, and ranking
-                // them on one asserts a comparison that cannot exist:
-                //
-                //   proxy - divided by DIRECT nginx while it has to forward to
-                //     a three-upstream pool. It is capped below 1.0 by
-                //     construction, so every proxy row reads as a deficit
-                //     against a ceiling it was never racing.
-                //   pdf   - the reference is our own ~275-line Python
-                //     extractor. That is a parity oracle, not a ceiling: it is
-                //     expected to be SLOWER than candidates, so the ratio
-                //     rewards distance from our own slow implementation.
-                //
-                // The candidate's raw rate is still reported - it is a real
-                // measurement - but it is not ranked, and the board shows no
-                // percentage for these tasks rather than a wrong one.
-                if matches!(config.task, TaskType::Proxy | TaskType::Pdf)
-                    && reference_throughput.is_some()
-                {
-                    logger.log(
-                        "[BENCH] No valid throughput denominator for this task \
-                         (reference is structurally unreachable); rate reported, not ranked.",
-                    );
-                    reference_throughput = None;
-                }
-                // `baseline_source` describes where the denominator came from,
-                // so it must follow reference_throughput: a batch reference
-                // that was just discarded is not a "batch" baseline.
-                baseline_source = match (config.batch_reference.is_some(), reference_throughput) {
-                    (true, Some(_)) => Some("batch".to_string()),
-                    (false, Some(_)) => Some("live".to_string()),
-                    _ => None,
-                };
-
-                if let (Some(cand_tp), Some(ref_tp)) = (throughput, reference_throughput) {
-                    if ref_tp > 0.0 {
-                        let ratio = (cand_tp / ref_tp) * 100.0;
-                        logger.log(&format!(
-                            "  ⚡ Relative Performance: {:.1}% of official reference",
-                            ratio
-                        ));
-                    }
                 }
             }
-
-            (pr, ps, ts, sr)
-        };
+        }
 
         // 9. Clean up containers
         sandbox.cleanup();
@@ -1523,8 +1722,28 @@ impl BenchmarkPipeline {
             trial_pass_rates: Vec::new(),
             protocol: None,
             solved: Some(pass_rate >= 100.0),
-            solved_at: if pass_rate >= 100.0 { Some(1) } else { None },
-            best_stage_score: Some(pass_rate),
+            solved_at: if pass_rate >= 100.0 {
+                if was_repaired {
+                    Some(feedback_rounds_used + 1)
+                } else {
+                    Some(1)
+                }
+            } else {
+                None
+            },
+            best_stage_score: Some(best_pass_rate),
+            repaired: if was_repaired {
+                Some(true)
+            } else if pass_rate >= 100.0 {
+                Some(false)
+            } else {
+                None
+            },
+            feedback_rounds: if config.feedback_rounds > 0 {
+                Some(feedback_rounds_used)
+            } else {
+                None
+            },
             is_published: None,
             method_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };
@@ -1587,8 +1806,28 @@ impl BenchmarkPipeline {
             frontier_fraction: None,
             protocol: None,
             solved: Some(pass_rate >= 100.0),
-            solved_at: if pass_rate >= 100.0 { Some(1) } else { None },
-            best_stage_score: Some(pass_rate),
+            solved_at: if pass_rate >= 100.0 {
+                if was_repaired {
+                    Some(feedback_rounds_used + 1)
+                } else {
+                    Some(1)
+                }
+            } else {
+                None
+            },
+            best_stage_score: Some(best_pass_rate),
+            repaired: if was_repaired {
+                Some(true)
+            } else if pass_rate >= 100.0 {
+                Some(false)
+            } else {
+                None
+            },
+            feedback_rounds: if config.feedback_rounds > 0 {
+                Some(feedback_rounds_used)
+            } else {
+                None
+            },
         };
 
         logger.log(&format!(
@@ -1737,6 +1976,7 @@ mod tests {
             batch_reference: None,
             worker: 0,
             harness: Harness::Omp,
+            feedback_rounds: 0,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -1767,6 +2007,7 @@ mod tests {
             batch_reference: None,
             worker: 0,
             harness: Harness::Omp,
+            feedback_rounds: 0,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);
@@ -1830,5 +2071,39 @@ mod tests {
             .await
             .expect("probe keeps partial acks on EOF");
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn test_format_feedback_prompt() {
+        let stages = vec![
+            crate::verifier::StageResult {
+                stage: 1,
+                name: "PING / PONG".to_string(),
+                passed: true,
+                error: None,
+            },
+            crate::verifier::StageResult {
+                stage: 2,
+                name: "SET / GET".to_string(),
+                passed: false,
+                error: Some("expected +OK, got -ERR".to_string()),
+            },
+        ];
+        let prompt = BenchmarkPipeline::format_feedback_prompt(
+            TaskType::Redis,
+            1,
+            2,
+            &stages,
+            "server started on port 6379\ncommand error: SET foo bar",
+        );
+        assert!(prompt.contains("# Automated Verification Failure Report"));
+        assert!(prompt.contains("redis"));
+        assert!(prompt.contains("passed 1 of 2 stages (50.0%)"));
+        assert!(prompt.contains("[PASS] Stage 1: PING / PONG"));
+        assert!(prompt.contains("[FAIL] Stage 2: SET / GET"));
+        assert!(prompt.contains("Diagnostic details: expected +OK, got -ERR"));
+        assert!(prompt.contains("server started on port 6379"));
+        assert!(prompt.contains("Directives for Surgical Bug Fixing:"));
+        assert!(prompt.contains("DO NOT wipe your workspace"));
     }
 }

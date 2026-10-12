@@ -398,6 +398,7 @@ pub fn test_queue_item(id: &str) -> QueuedRun {
             review_model: None,
             stop_on_pass: false,
             protocol: None,
+            feedback_rounds: None,
         }),
     }
 }
@@ -445,6 +446,8 @@ pub struct RunRequest {
     pub stop_on_pass: bool,
     #[serde(default)]
     pub protocol: Option<String>,
+    #[serde(default)]
+    pub feedback_rounds: Option<u32>,
 }
 /// Forward a mutation to the engine in GUI-proxy mode.
 /// Returns Some(response) when proxying applied; None in single-process mode.
@@ -643,6 +646,7 @@ pub struct ExtBatchSpec {
     pub(crate) start_idx: u32,
     pub(crate) count: u32,
     pub(crate) display_total: u32,
+    pub(crate) feedback_rounds: u32,
 }
 pub struct ExtBatchOut {
     pub(crate) results: Vec<BenchmarkRunResult>,
@@ -772,6 +776,7 @@ pub async fn run_extension_batch(
             review_model: spec.review_model.clone(),
             batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
             worker,
+            feedback_rounds: spec.feedback_rounds,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), Some(Arc::clone(cancel)))
             .await
@@ -1031,6 +1036,7 @@ pub async fn execute_extend_body(
         start_idx,
         count,
         display_total: total,
+        feedback_rounds: data.feedback_rounds.unwrap_or(0),
     };
     state.cancel_requested.store(false, Ordering::SeqCst);
     send_status(
@@ -1358,6 +1364,7 @@ pub async fn execute_run_body(
             review_model: req.review_model.clone(),
             batch_reference: batch_ref.as_ref().map(|b| b.reference()),
             worker,
+            feedback_rounds: req.feedback_rounds.unwrap_or(0),
         };
 
         let pipe_res = BenchmarkPipeline::execute(
@@ -1554,6 +1561,7 @@ pub async fn execute_run_body(
                     start_idx: total_trials + 1,
                     count: add,
                     display_total: total_trials + add,
+                    feedback_rounds: req.feedback_rounds.unwrap_or(0),
                 },
                 worker,
                 &state.worker_buffers,

@@ -511,6 +511,13 @@ impl SandboxManager {
         }
     }
 
+    /// Stop and forcibly remove any running candidate container for this instance.
+    pub fn stop_candidate(&self) -> Result<()> {
+        let name = self.candidate_container_name();
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        Ok(())
+    }
+
     pub fn upstream_name(&self, idx: u8) -> String {
         format!("subdollar-upstream{}-{}", idx, self.instance_id)
     }
@@ -1118,15 +1125,29 @@ impl SandboxManager {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs);
         while start.elapsed() < timeout {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                // Give a 500ms stabilization window
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                return true;
+            if let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                // When published via Docker, docker-proxy immediately accepts the TCP handshake on
+                // 127.0.0.1 even if the service inside the container is not yet listening (e.g. compiling).
+                // If the container service is not listening, docker-proxy immediately resets or closes the connection.
+                // We sleep 80ms and perform a try_read:
+                // - Err(WouldBlock): Socket is open and backend is listening waiting for request -> Ready!
+                // - Ok(n) if n > 0: Backend sent a banner/greeting -> Ready!
+                // - Ok(0) or Err(_): Backend is not listening; docker-proxy closed/reset -> Not ready yet.
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                let mut buf = [0u8; 1];
+                match stream.try_read(&mut buf) {
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        return true;
+                    }
+                    Ok(n) if n > 0 => {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        return true;
+                    }
+                    _ => {}
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
         false
     }
@@ -1830,6 +1851,17 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let ok2 = sm.wait_for_port(port, 2).await;
         assert!(ok2);
+
+        // 3. Port that accepts and immediately closes (simulating dead backend across proxy)
+        let listener_rst = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_rst = listener_rst.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener_rst.accept().await {
+                drop(stream); // Immediate close / EOF
+            }
+        });
+        let ok3 = sm.wait_for_port(port_rst, 1).await;
+        assert!(!ok3, "Port that drops connections immediately should not be considered ready");
     }
 
     #[test]

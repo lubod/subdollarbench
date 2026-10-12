@@ -92,6 +92,14 @@ pub enum Commands {
         /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
         #[arg(long, default_value_t = false)]
         stop_on_pass: bool,
+
+        /// Enable interactive feedback repair if initial attempt fails
+        #[arg(long, default_value_t = false)]
+        feedback: bool,
+
+        /// Number of interactive feedback repair rounds (default 0; defaults to 2 if --feedback is set)
+        #[arg(long, default_value_t = 0)]
+        feedback_rounds: u32,
     },
 
     /// Directly run verification test suite against a running server
@@ -382,6 +390,14 @@ pub enum Commands {
         /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
         #[arg(long, default_value_t = false)]
         stop_on_pass: bool,
+
+        /// Enable interactive feedback repair if initial attempt fails
+        #[arg(long, default_value_t = false)]
+        feedback: bool,
+
+        /// Number of interactive feedback repair rounds (default 0; defaults to 2 if --feedback is set)
+        #[arg(long, default_value_t = 0)]
+        feedback_rounds: u32,
     },
 
     /// [operate] Run 3 more trials for an unstable parent and re-merge
@@ -688,6 +704,14 @@ pub enum Commands {
         /// stop immediately on 100% pass, escalate to max_trials (default 5) on 0/3.
         #[arg(long, default_value_t = false)]
         stop_on_pass: bool,
+
+        /// Enable interactive feedback repair if initial attempt fails
+        #[arg(long, default_value_t = false)]
+        feedback: bool,
+
+        /// Number of interactive feedback repair rounds (default 0; defaults to 2 if --feedback is set)
+        #[arg(long, default_value_t = 0)]
+        feedback_rounds: u32,
     },
 
     /// [operate] Queue an extension behind the live job (POST /api/runs/:id/extend)

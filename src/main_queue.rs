@@ -81,6 +81,7 @@ pub async fn handle_enqueue(
     review_model: Option<String>,
     server: Option<String>,
     stop_on_pass: bool,
+    feedback_rounds: u32,
 ) -> Result<()> {
     let server = resolve_server_flag(&server);
     let body = remote::run_request(
@@ -99,6 +100,7 @@ pub async fn handle_enqueue(
         no_save,
         review_model.as_deref(),
         stop_on_pass,
+        feedback_rounds,
     );
     let resp = remote::post_json(&server, "/api/queue", &body).await?;
     let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");

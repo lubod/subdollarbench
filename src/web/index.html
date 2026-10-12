@@ -1266,6 +1266,12 @@
           <label for="stopOnPass" style="font-weight: normal; cursor: pointer;" title="Capability mode: evaluate up to 3 tries, stop immediately on first 100% pass; escalate to 5 only if all 3 fail.">Sequential Capability (stop on pass 3→5)</label>
         </div>
         <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
+          <input type="checkbox" id="feedbackRepair" checked style="width: auto;" />
+          <label for="feedbackRepair" style="font-weight: normal; cursor: pointer;" title="Interactive feedback repair: if verification fails (&lt; 100%), supply failure diagnostics and container logs back to agent to fix in the same workspace.">Interactive Feedback Repair</label>
+          <label for="feedbackRounds" style="font-weight: normal;">rounds</label>
+          <input type="number" id="feedbackRounds" value="2" min="1" max="5" style="width: 56px;" />
+        </div>
+        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
           <input type="checkbox" id="extendUnstable" style="width: auto;" />
           <label for="extendUnstable" style="font-weight: normal; cursor: pointer;" title="While the merged result is unstable, keep adding trials in batches of 3 (up to the cap) and re-merge">Auto-extend if unstable (+3 trials)</label>
           <label for="maxTrials" style="font-weight: normal;">cap</label>
@@ -3461,9 +3467,10 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const extQ = (r && r.id && extendMarks[r.id]) || null;
             const extMark = extQ ? ` <span title="${escapeHtml(`top-up pending: ${extQ.id} (+${extQ.n} trial${extQ.n === 1 ? '' : 's'})`)}">↻+${escapeHtml(String(extQ.n))}</span>` : '';
             const dqSubs = (r.subruns || []).filter(s => (s.status || '') === 'disqualified_cheat');
-            const dqMark = dqSubs.length ? ` <span title="${escapeHtml(`excluded from score, retained in record: ${dqSubs.map(s => s.id).join(', ')}`)}">DQ${dqSubs.length}</span>` : '';
-            const cellLabel = isCap ? (isSolved ? `<b style="color:var(--text-pass,#3fb950);">✓${r.solved_at || 1}</b>` : `<span style="color:#f85149;">✗ ${Math.round(r.best_stage_score ?? p1)}%</span>`) : `${Math.round(p1)}%`;
-            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'}` + (isCap ? ` · capability protocol: solved ${isSolved}${r.solved_at ? ` at trial ${r.solved_at}` : ''} (best stage: ${Math.round(r.best_stage_score ?? p1)}%)` : '') + ` · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
+            const repLabel = (r.repaired ? '🔧' : '');
+            const cellLabel = isCap ? (isSolved ? `<b style="color:var(--text-pass,#3fb950);">${repLabel}✓${r.solved_at || 1}</b>` : `<span style="color:#f85149;">✗ ${Math.round(r.best_stage_score ?? p1)}%</span>`) : (isSolved && r.repaired ? `🔧${Math.round(p1)}%` : `${Math.round(p1)}%`);
+            const repTip = r.repaired ? ` · repaired via feedback (round ${r.feedback_rounds || 1})` : (isSolved && r.repaired === false ? ` · zero-shot pass on attempt 1` : '');
+            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'}` + (isCap ? ` · capability protocol: solved ${isSolved}${r.solved_at ? ` at trial ${r.solved_at}` : ''} (best stage: ${Math.round(r.best_stage_score ?? p1)}%)` : '') + repTip + ` · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
             cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${cellLabel} <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}</td>`;
             rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
             if (isSolved) { rowSolved++; if ((r.solved_at || 1) === 1) rowFirstTry++; }
@@ -3706,7 +3713,10 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             </td>
             <td>
               <div style="display: flex; flex-direction: column; gap: 4px;">
-                <div>${passBadge}</div>
+                <div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
+                  ${passBadge}
+                  ${r.repaired ? `<span class="badge" style="background: rgba(56, 139, 253, 0.15); color: #58a6ff; font-size: 0.7rem;" title="Repaired via interactive feedback (round ${r.feedback_rounds || 1})">🔧 Repaired (${r.feedback_rounds || 1})</span>` : (r.pass_rate === 100 && r.repaired === false ? `<span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success); font-size: 0.7rem;" title="Zero-shot 100% on initial attempt">🎯 Zero-shot</span>` : '')}
+                </div>
                 <div>${effBadge}</div>
                 ${(() => { const subs = r.subruns || []; return subs.length ? `<span class="badge" style="background: rgba(210,168,255,0.15); color: #d2a8ff; font-size: 0.7rem;" title="Trial outcomes: ${subs.map(k => Math.round(k.pass_rate) + '%').join(' / ')}">📦 ${subs.length} subruns</span>` : ''; })()}
               </div>
@@ -3768,7 +3778,10 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; background: #090d13; padding: 8px; border-radius: 6px; text-align: center;">
               <div>
                 <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Pass Rate</div>
-                <div style="font-weight: 600; font-size: 0.78rem; margin-top: 2px;">${r.pass_rate}% (${r.passed_stages}/${r.total_stages})</div>
+                <div style="font-weight: 600; font-size: 0.78rem; margin-top: 2px;">
+                  ${r.pass_rate}% (${r.passed_stages}/${r.total_stages})
+                  ${r.repaired ? `<br><span style="font-size:0.68rem; color:#58a6ff;">🔧 Repaired (${r.feedback_rounds || 1})</span>` : (r.pass_rate === 100 && r.repaired === false ? `<br><span style="font-size:0.68rem; color:var(--success);">🎯 Zero-shot</span>` : '')}
+                </div>
               </div>
               <div>
                 <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Score / ¢</div>
@@ -4859,6 +4872,8 @@ function copyRunId() {
 
     function buildRunPayload() {
       const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : false;
+      const feedbackRepair = document.getElementById('feedbackRepair') ? document.getElementById('feedbackRepair').checked : false;
+      const feedbackRounds = feedbackRepair ? (parseInt(document.getElementById('feedbackRounds').value, 10) || 2) : 0;
       return {
         model: document.getElementById('model').value.trim(),
         task: document.getElementById('task').value,
@@ -4872,6 +4887,7 @@ function copyRunId() {
         eval_only: document.getElementById('evalOnly').checked,
         stop_on_pass: stopOnPass,
         protocol: stopOnPass ? 'sequential_cap' : null,
+        feedback_rounds: feedbackRounds,
         extend_if_unstable: document.getElementById('extendUnstable').checked,
         max_trials: parseInt(document.getElementById('maxTrials').value, 10) || (stopOnPass ? 5 : 9),
         review_model: document.getElementById("reviewModel").value.trim() || null
@@ -4952,6 +4968,8 @@ function copyRunId() {
       }
       const selHarness = ((document.getElementById('harnessSelect') || {}).value || 'omp');
       const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : true;
+      const feedbackRepair = document.getElementById('feedbackRepair') ? document.getElementById('feedbackRepair').checked : true;
+      const feedbackRounds = feedbackRepair ? (parseInt((document.getElementById('feedbackRounds') || {}).value, 10) || 2) : 0;
       const payload = {
         model, task, effort,
         harness: harness || selHarness,
@@ -4962,6 +4980,7 @@ function copyRunId() {
         trials: stopOnPass ? 3 : 9, eval_only: false,
         stop_on_pass: stopOnPass,
         protocol: stopOnPass ? 'sequential_cap' : null,
+        feedback_rounds: feedbackRounds,
         extend_if_unstable: false, max_trials: stopOnPass ? 5 : 9,
         review_model: (document.getElementById('reviewModel') || {}).value || null
       };
@@ -5028,37 +5047,13 @@ function copyRunId() {
     }
 
     async function startBenchmark() {
-      const model = document.getElementById('model').value.trim();
-      const effort = document.getElementById('effortSelect').value;
-      const task = document.getElementById('task').value;
-      const budget = parseFloat(document.getElementById('budget').value) || 1.00;
-      const turns = parseInt(document.getElementById('turns').value, 10) || 100;
-      const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : false;
-      const trials = parseInt(document.getElementById('trials').value, 10) || (stopOnPass ? 3 : 9);
-      const evalOnly = document.getElementById('evalOnly').checked;
-
       const startBtn = document.getElementById('startBtn');
       if (startBtn) startBtn.disabled = true;
       try {
         const res = await fetch('/api/run', {
           method: 'POST',
           headers: authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({
-            model,
-            task,
-            effort,
-            api_key: null, // server .env key bills the run
-            budget_usd: budget,
-            max_turns: turns,
-            timeout_min: timeoutMin,
-            trials,
-            eval_only: evalOnly,
-            stop_on_pass: stopOnPass,
-            protocol: stopOnPass ? 'sequential_cap' : null,
-            extend_if_unstable: document.getElementById('extendUnstable').checked,
-            max_trials: parseInt(document.getElementById('maxTrials').value, 10) || (stopOnPass ? 5 : 9),
-            review_model: document.getElementById("reviewModel").value.trim() || null
-          })
+          body: JSON.stringify(buildRunPayload())
         });
 
         if (!res.ok) {

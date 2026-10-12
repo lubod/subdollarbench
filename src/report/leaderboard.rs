@@ -118,6 +118,12 @@ pub struct BenchmarkRunResult {
     /// Highest stage pass rate achieved across trials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_stage_score: Option<f64>,
+    /// Whether this run succeeded via feedback repair (true) vs initial attempt (false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaired: Option<bool>,
+    /// Number of feedback repair rounds configured / used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_rounds: Option<u32>,
 }
 
 pub fn format_duration(secs: f64) -> String {
@@ -582,6 +588,8 @@ impl BenchmarkRunResult {
         let solved = passing_idx.is_some();
         let solved_at = passing_idx.map(|idx| (idx + 1) as u32);
         let best_stage_score = agg.iter().map(|r| r.pass_rate).fold(0.0, f64::max);
+        let any_repaired = agg.iter().any(|r| r.repaired == Some(true));
+        let max_feedback_rounds = agg.iter().filter_map(|r| r.feedback_rounds).max();
         let merged_protocol: Option<String> = subruns.iter().find_map(|s| s.protocol.clone());
         Some(BenchmarkRunResult {
             id: parent_id.to_string(),
@@ -643,6 +651,14 @@ impl BenchmarkRunResult {
             solved: Some(solved),
             solved_at,
             best_stage_score: Some(best_stage_score),
+            repaired: if any_repaired {
+                Some(true)
+            } else if solved {
+                Some(false)
+            } else {
+                None
+            },
+            feedback_rounds: max_feedback_rounds,
         })
     }
 
@@ -956,6 +972,8 @@ impl LeaderboardManager {
                     manifest.solved = merged.solved;
                     manifest.solved_at = merged.solved_at;
                     manifest.best_stage_score = merged.best_stage_score;
+                    manifest.repaired = merged.repaired;
+                    manifest.feedback_rounds = merged.feedback_rounds;
                     manifest.passed_stages = merged.passed_stages;
                     manifest.total_stages = merged.total_stages;
                     manifest.duration_seconds = merged.duration_seconds.unwrap_or(0.0);
@@ -1810,6 +1828,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
         let mut pinned = base;
@@ -1870,6 +1890,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         }
     }
 
@@ -2020,6 +2042,8 @@ mod tests {
                 solved: None,
                 solved_at: None,
                 best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
             };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
@@ -2150,6 +2174,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
         // Candidate rate survives (real measurement); denominator, source
@@ -2209,6 +2235,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         // One crashed trial (0.0) + two real readings: median of the real two.
         let m = BenchmarkRunResult::merge_subruns(
@@ -2286,6 +2314,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let m = BenchmarkRunResult::merge_subruns(
             "w",
@@ -2353,6 +2383,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let subs = vec![trial("a"), trial("b"), trial("c")];
 
@@ -2537,6 +2569,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         LeaderboardManager::print_table(&[r]);
         LeaderboardManager::print_table(&[]);
@@ -2601,6 +2635,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         }
     }
 
@@ -2657,6 +2693,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
 
         // r2 has 100% pass rate, efficiency score (200.0)
@@ -2707,6 +2745,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
 
         LeaderboardManager::save_result(temp.to_str().unwrap(), &r1).unwrap();
@@ -2825,6 +2865,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         // 8 honest (6x100 + 2x0) + 1 cheat at 0%: the cheat must not move
         // any aggregate, but must stay in subruns with its stamp.
@@ -2900,6 +2942,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
         assert_eq!(m.status.as_deref(), Some("disqualified_cheat"));
@@ -2956,6 +3000,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let out = LeaderboardManager::finalize_results(vec![
             mk("dq1", Some("disqualified_cheat")),
@@ -3050,6 +3096,8 @@ mod tests {
                 solved: None,
                 solved_at: None,
                 best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
             }],
             total_trials: Some(1),
             pass_at_1: Some(100.0),
@@ -3063,6 +3111,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let mut rows = vec![
             mk("fast", Some(40000.0), Some(70000.0)),
@@ -3135,6 +3185,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let one =
             BenchmarkRunResult::merge_subruns("one", vec![mk("a", 100.0)], None, None).unwrap();
@@ -3243,6 +3295,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         // test_ ids are refused: Ok, but nothing written.
         LeaderboardManager::save_result(temp.to_str().unwrap(), &mk("test_probe_1")).unwrap();

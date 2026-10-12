@@ -1985,6 +1985,7 @@ pub(crate) async fn extend_parent_run(
         start_idx: data.subruns.len() as u32 + 1,
         count,
         display_total: total,
+        feedback_rounds: data.feedback_rounds.unwrap_or(0),
     };
     let state_clone = state.clone();
     let clean_for_task = clean.clone();
@@ -2484,6 +2485,7 @@ mod tests {
             review_model: None,
             stop_on_pass: false,
             protocol: None,
+            feedback_rounds: None,
         };
         spawn_run_body(&state, req, Some("q-test-cancel".to_string()), 0);
         assert!(!state.cancel_requested.load(Ordering::SeqCst));
@@ -2723,6 +2725,7 @@ mod tests {
             max_trials: 9,
             stop_on_pass: false,
             protocol: None,
+            feedback_rounds: None,
         }
     }
 
@@ -3906,6 +3909,7 @@ mod tests {
             max_trials: 9,
             stop_on_pass: false,
             protocol: None,
+            feedback_rounds: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -3950,6 +3954,7 @@ mod tests {
             max_trials: 9,
             stop_on_pass: false,
             protocol: None,
+            feedback_rounds: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
@@ -4071,6 +4076,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
         let manifest_b = RunManifest {
             run_id: run_b_id.to_string(),
@@ -4134,6 +4141,8 @@ mod tests {
             solved: None,
             solved_at: None,
             best_stage_score: None,
+            repaired: None,
+            feedback_rounds: None,
         };
 
         fs::write(
@@ -4272,6 +4281,7 @@ mod tests {
             max_trials: 9,
             stop_on_pass: false,
             protocol: None,
+            feedback_rounds: None,
         };
         let res = client
             .post(format!("{}/api/run", base))
