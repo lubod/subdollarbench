@@ -289,10 +289,14 @@ FIXED + DEPLOYED 2026-10-11)
 - Conclusion: host-published docker fixtures are unreliable at verify
   time on this box; retrying recreation is futile (already retried once
   per trial by the gate). Structural fix required.
-- PROPOSED (needs go): in-process stubs for stages 1-2 (the verifier
-  already has serve_static; candidate-observable wire behavior
-  identical, so not a grading change - harness hardening), plus
-  stoppable in-process stub for stage 4 failover (replaces docker
-  kill + 10s recovery wait with a deterministic shutdown channel).
-  Then proxy wave #3 for clean data. Fallback if declined: accept proxy
-  as unscorable-by-fixture (report rates, rank nothing).
+- IMPLEMENTED + DEPLOYED 2026-10-11 (user go-ahead; idle window,
+  integrity + migrate clean): stages 1-2 learn markers from identical
+  in-process stubs on publish decay (docker path untouched when healthy;
+  dead containers fail loud naming the fixture); stage 4 kills via
+  pause/unpause (immune to stop/start re-publish + concurrent-rm races)
+  with rejoin proven end-to-end via proxy (strictly stronger - slow
+  rejoin now fails; documented). Bumped to 2026-10-11.2 anyway
+  (consistency + visibility). Verified: marker parity, local-markers
+  order, dead-fixture naming, live docker decay-simulation integration
+  test (green), full suite 355/0, clippy clean.
+- NEXT: proxy wave #3 for clean data (6 cells, fresh .2 rows).
