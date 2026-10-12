@@ -8,6 +8,31 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-12.3`: screening cap 4 + narrow auto-extend. Stop-on-pass
+///   cells run at most 4 trials (was 3+escalate-to-5), stopping at the
+///   first 100% pass — calibrated on wave data (every observed late solve
+///   first-passed at trial 4). A 0/4 with every trial a harness fault
+///   auto-extends within the SDB_AUTO_EXTEND_TRIALS envelope (once per
+///   cell, audit-logged); mixed signals and model failures stay manual.
+///   Trial counts change denominators, so rows stamped `2026-10-12.2` or
+///   earlier are not comparable. Rank key unchanged (P@1-lo); capability
+///   (solved@N) is a display co-column only.
+/// - `2026-10-12.2`: READY early-exit + pooled turn budgets. Every task
+///   prompt (and the feedback-repair prompt) gains a READY-signal section:
+///   models touch `/workspace/READY` when done and verification starts
+///   immediately instead of burning the full turn budget. Initial attempts
+///   are capped at min(max_turns, 50) with feedback_rounds > 0; repair
+///   rounds draw from the shared pool remainder (cap 25/round), and failed
+///   repair rounds now count their partial turns/tokens against the pool.
+///   Opencode READY exits break Ok (omp parity): an empty workspace after
+///   a model-signaled finish records failed_tests, not agent_failed.
+///   Also records the robust port-readiness probing shipped in 3e6ca67
+///   (candidates are probed until actually listening instead of scored
+///   0% on premature probes: docker-proxy accepts the handshake before
+///   the in-container service is up, so compile-on-start candidates were
+///   false negatives — check suspect rows via replay). Early exits shift
+///   pass rates vs full-budget runs; rows stamped `2026-10-12.1` or
+///   earlier are not comparable.
 /// - `2026-10-12.1`: sequential capability protocol. Headline protocol evaluates
 ///   models up to 3 tries, stopping at first 100% pass (capping compute),
 ///   and escalates to 5 tries only if all 3 fail (discriminating hard tasks).
@@ -141,7 +166,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-12.1";
+pub const RULES_VERSION: &str = "2026-10-12.3";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
