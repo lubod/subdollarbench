@@ -634,6 +634,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         let mut attempt: u32 = 0;
         let outcome: Result<OmpSessionStats> = loop {
             let rate_limited = Arc::new(AtomicBool::new(false));
+            let mut ready_fired = false;
             let attempt_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             // Tool calls THIS attempt (fresh per iteration: no reset races
             // with the previous reader). Feeds the cutoff-recovery trigger.
@@ -825,10 +826,10 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                             .as_ref()
                             .map(|f| f.load(Ordering::SeqCst))
                             .unwrap_or(false);
-                        if canonical_workdir.join("READY").exists() {
-                            let _ = std::fs::remove_file(canonical_workdir.join("READY"));
+                        if crate::sandbox::omp::take_ready_signal(&canonical_workdir) {
                             let _ = tx.send("[LIVE] Model signaled completion via /workspace/READY! Triggering verification...".to_string());
                             running.store(false, Ordering::SeqCst);
+                            ready_fired = true;
                             let _ = Command::new("docker")
                                 .args(["rm", "-f", &container_name])
                                 .output();
@@ -964,6 +965,14 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     }
                     attempt += 1;
                     continue;
+                }
+                _ if ready_fired => {
+                    // Model-signaled completion scores exactly like a normal
+                    // exit (omp parity): verify as-is, so an empty workspace
+                    // records failed_tests, not a harness fault. Placed after
+                    // the rate-limit arm so a simultaneous throttle still
+                    // resumes instead of concluding on possibly-cut output.
+                    break Ok(st);
                 }
                 _ => {
                     break Err(anyhow!(OmpExecutionError {

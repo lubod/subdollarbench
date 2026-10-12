@@ -105,6 +105,23 @@ fn resolve_thinking_level(effort: Option<&str>, _effective_model: &str) -> (Stri
     (level, String::new())
 }
 
+/// Consume a model-signaled early-completion flag: true once when
+/// `<workdir>/READY` exists, removing it so a stale flag can never fire
+/// twice (or fire for a later trial reusing the dir). Both runners poll
+/// this; the pipeline also clears it at setup and around each verify.
+/// Missing dir or missing file reads as absent, never an error.
+///
+/// A directory named READY is deliberately not a signal (touch creates
+/// files; a dir is pathological, and the old exists()-check would have
+/// killed the agent loop over it).
+pub(crate) fn take_ready_signal(workdir: &std::path::Path) -> bool {
+    let p = workdir.join("READY");
+    if !p.is_file() {
+        return false;
+    }
+    std::fs::remove_file(&p).is_ok()
+}
+
 /// Billing tripwire: classify provider session errors that must pause the
 /// wave instead of scoring a 0% model failure. Matches HTTP billing/auth/
 /// throttle statuses in session JSON or stderr text (402/401/429 + phrases).
@@ -596,7 +613,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         // Write AGENTS.md into workspace so omp auto-loads instructions across all turns
         let agents_md_path = canonical_workdir.join("AGENTS.md");
-        let agents_md_content = Self::compose_omp_agents_md(&guidance_snippet, target_port, &test_cmd);
+        let agents_md_content =
+            Self::compose_omp_agents_md(&guidance_snippet, target_port, &test_cmd);
         let _ = std::fs::write(&agents_md_path, agents_md_content);
         #[cfg(unix)]
         {
@@ -789,8 +807,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             }
 
             // Check if model signaled completion early via /workspace/READY
-            if canonical_workdir.join("READY").exists() {
-                let _ = std::fs::remove_file(canonical_workdir.join("READY"));
+            if take_ready_signal(&canonical_workdir) {
                 log_fn("[LIVE] Model signaled completion via /workspace/READY! Triggering verification...".to_string());
                 kill_agent();
                 let _ = child.kill();
@@ -2037,6 +2054,27 @@ mod session_disconnect_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_take_ready_signal_fires_once_then_consumed() {
+        let dir = std::env::temp_dir().join(format!("ready_sig_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Absent (including wholly missing dir): silent no.
+        assert!(!take_ready_signal(&dir));
+        assert!(!take_ready_signal(&dir.join("nope")));
+        std::fs::write(dir.join("READY"), "done").unwrap();
+        assert!(take_ready_signal(&dir));
+        // Consumed: file gone, second poll silent.
+        assert!(!dir.join("READY").exists());
+        assert!(!take_ready_signal(&dir));
+        // A directory named READY is not a signal (touch creates files;
+        // a dir is pathological, and the old exists()-check would have
+        // killed the agent loop over it).
+        std::fs::create_dir_all(dir.join("READY")).unwrap();
+        assert!(!take_ready_signal(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// No stale canonical ports outside alias contexts (the proxy 8091-vs-worker
     /// contradiction, measured live). Shared by both AGENTS.md render tests.
