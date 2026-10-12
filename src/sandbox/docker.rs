@@ -539,11 +539,18 @@ impl SandboxManager {
         self.start_upstream_on(idx, port, &net)
     }
 
+    /// Marker body served by upstream containers (`upstream-N marker`).
+    /// Canonical source shared with the proxy verifier's in-process stubs:
+    /// both must serve byte-identical bodies or marker attribution breaks.
+    pub fn upstream_marker_body(idx: u8) -> String {
+        format!("upstream-{} marker\n", idx)
+    }
+
     fn start_upstream_on(&self, idx: u8, port: u16, net: &str) -> Result<()> {
         let name = self.upstream_name(idx);
         fs::write(
             self.upstream_marker_path(idx),
-            format!("upstream-{} marker\n", idx),
+            Self::upstream_marker_body(idx),
         )?;
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
         let out = Command::new("docker")

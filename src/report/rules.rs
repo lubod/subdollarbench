@@ -8,6 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-11.2`: proxy fixture determinism. Stages 1-2 learn markers
+///   from identical in-process stubs when host publishes decay (docker
+///   pool unchanged for the candidate path); dead containers fail loud
+///   naming the fixture. Stage 4 kills via pause/unpause (no re-publish
+///   races) with rejoin proven end-to-end via proxy (stricter than the
+///   direct dial: slow rejoin now fails). Candidate-observable wire
+///   behavior otherwise identical; verdicts change only where fixtures,
+///   not models, were failing.
 /// - `2026-10-11.1`: AGENTS.md worker ports. Both runners wrote the brief
 ///   attachment with canonical ports while the prompt carried worker ports
 ///   (measured live: a proxy trial read 8191 in the brief vs 8091 in
@@ -128,7 +136,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-11.1";
+pub const RULES_VERSION: &str = "2026-10-11.2";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

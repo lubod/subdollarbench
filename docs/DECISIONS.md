@@ -84,3 +84,15 @@ gets annotated, never rescored). Turn-telemetry fix (steps_taken
 propagation, 171/171 opencode rows read 0) rides along with no grading
 impact. Ref: `src/sandbox/opencode.rs`, `src/sandbox/omp.rs`,
 `TODO_EFFORT.md`.
+
+## 10. Proxy fixtures go deterministic (2026-10-11.2)
+Stages 1–2 learn upstream markers from identical in-process stubs when
+host publishes decay (fallback, docker path untouched when healthy);
+dead containers fail loud naming the fixture instead of misattributing.
+Stage 4 kills via pause/unpause (immune to stop/start re-publish and
+concurrent-rm races) with rejoin proven via proxy rather than direct
+dial — strictly stronger (slow rejoin now fails) and documented as such.
+Bumped (not silent) because stage-4 verdicts can differ: consistency with
+the file's every-change-bumps history outweighs the "same wire behavior"
+argument, and the strictness delta deserves visibility. Ref:
+`src/verifier/proxy.rs`, `TODO_EFFORT.md §M`.

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
 use super::StageResult;
@@ -250,16 +251,116 @@ impl ProxyVerifier {
         if self.upstreams.len() < 3 {
             return Err(format!("Need 3 upstreams, have {}", self.upstreams.len()));
         }
+        // Primary: the docker pool (unchanged healthy path — same strings,
+        // same verdicts as always).
+        let mut docker_err = None;
         let mut markers = Vec::new();
+        let mut docker_ok = true;
         for (_, port) in &self.upstreams {
-            let (_, resp) = Self::fetch(*port).await?;
+            match Self::fetch(*port).await {
+                Ok((_, resp)) => {
+                    if resp.status != 200 {
+                        docker_ok = false;
+                        docker_err = Some(format!(
+                            "Upstream 127.0.0.1:{} returned {}",
+                            port, resp.status
+                        ));
+                        break;
+                    }
+                    markers.push(resp.body_text());
+                }
+                Err(e) => {
+                    docker_ok = false;
+                    docker_err = Some(e);
+                    break;
+                }
+            }
+        }
+        if docker_ok && !markers.iter().any(|m| m.is_empty()) {
+            return Ok(markers);
+        }
+        // Fallback: host-published docker fixtures decay under daemon churn
+        // (measured: Ports:null + refused at verify despite clean starts),
+        // while the containers keep serving in-network aliases. Distinguish
+        // the two before degrading: a dead container is a harness fault with
+        // the culprit named; a live-but-unpublished one degrades to
+        // identical in-process stubs (byte-identical bodies via the shared
+        // const — attribution unaffected).
+        let mut dead = Vec::new();
+        for (name, _) in &self.upstreams {
+            if !Self::upstream_running(name) {
+                dead.push(name.clone());
+            }
+        }
+        if !dead.is_empty() {
+            return Err(format!(
+                "harness fixture fault: upstream container(s) not running: {}",
+                dead.join(", ")
+            ));
+        }
+        eprintln!(
+            "[FIXTURE] host publish decayed ({}); markers from identical in-process stubs",
+            docker_err.unwrap_or_default()
+        );
+        Self::learn_markers_local().await
+    }
+
+    /// True when the named container exists and is running (daemon-local
+    /// inspect — immune to the publish decay that breaks host dials).
+    fn upstream_running(name: &str) -> bool {
+        std::process::Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", name])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false)
+    }
+
+    /// Marker bodies without docker: one ephemeral stub per upstream,
+    /// serving the byte-identical bodies the nginx pool serves (shared
+    /// const — divergence is a compile-time-visible choice, not drift).
+    async fn learn_markers_local() -> Result<Vec<String>, String> {
+        let mut markers = Vec::new();
+        let mut guards = Vec::new();
+        for idx in 1u8..=3u8 {
+            let body =
+                crate::sandbox::docker::SandboxManager::upstream_marker_body(idx).into_bytes();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(|e| format!("stub bind failed: {}", e))?;
+            let port = listener
+                .local_addr()
+                .map_err(|e| format!("stub addr failed: {}", e))?
+                .port();
+            guards.push(tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        let _ = s.read(&mut buf).await;
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = s.write_all(&head.into_bytes()).await;
+                        let _ = s.write_all(&body).await;
+                    });
+                }
+            }));
+            let (_, resp) = Self::fetch(port).await?;
             if resp.status != 200 {
-                return Err(format!(
-                    "Upstream 127.0.0.1:{} returned {}",
-                    port, resp.status
-                ));
+                for g in guards {
+                    g.abort();
+                }
+                return Err(format!("local stub {} returned {}", port, resp.status));
             }
             markers.push(resp.body_text());
+        }
+        for g in guards {
+            g.abort();
         }
         if markers.iter().any(|m| m.is_empty()) {
             return Err("Upstream returned empty body".to_string());
@@ -417,19 +518,36 @@ impl ProxyVerifier {
             let n = self.upstreams.len();
             return stage_fail(4, name, format!("Need 3 upstreams, have {}", n));
         }
+        // Markers for the rejoin check: learned in-process (deterministic),
+        // never host-dialed.
+        let markers = match Self::learn_markers_local().await {
+            Ok(m) => m,
+            Err(e) => return stage_fail(4, name, format!("fixture markers: {}", e)),
+        };
         let mid_name = self.upstreams[1].0.clone();
-        let mid_port = self.upstreams[1].1;
+        // Fixture pre-check: killing a dead container proves nothing and the
+        // failure that follows would misattribute. Name the culprit.
+        if !Self::upstream_running(&mid_name) {
+            return stage_fail(
+                4,
+                name,
+                format!("harness fixture fault: {} not running pre-kill", mid_name),
+            );
+        }
+        // Pause (not stop): freezing hung-connections tests slow-failover
+        // too, dodges stop/start re-publish races, and unpauses instantly —
+        // no 10s nginx boot wait, no removal races with concurrent sweeps.
         match std::process::Command::new("docker")
-            .arg("stop")
+            .arg("pause")
             .arg(&mid_name)
             .output()
         {
             Ok(o) if o.status.success() => {}
             Ok(o) => {
                 let detail = String::from_utf8_lossy(&o.stderr);
-                return stage_fail(4, name, format!("docker stop {}: {}", mid_name, detail));
+                return stage_fail(4, name, format!("docker pause {}: {}", mid_name, detail));
             }
-            Err(e) => return stage_fail(4, name, format!("docker stop {}: {}", mid_name, e)),
+            Err(e) => return stage_fail(4, name, format!("docker pause {}: {}", mid_name, e)),
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
         let mut burst_err: Option<String> = None;
@@ -447,23 +565,32 @@ impl ProxyVerifier {
             }
         }
         let _ = std::process::Command::new("docker")
-            .arg("start")
+            .arg("unpause")
             .arg(&mid_name)
             .output();
         if let Some(e) = burst_err {
             return stage_fail(4, name, format!("Proxy must fail over, {}", e));
         }
+        // Rejoin proven end-to-end (via proxy), not by direct dial: the
+        // direct path is the decay-prone one, and rejoining rotation is the
+        // scored behavior. Same 10s backstop.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let healthy = Self::fetch(mid_port)
-                .await
-                .map(|(_, r)| r.status == 200)
-                .unwrap_or(false);
-            if healthy {
+            let rejoined = match Self::fetch(self.target_port).await {
+                Ok((_, resp)) => {
+                    resp.status == 200 && Self::body_marker(&resp.body_text(), &markers) == Some(1)
+                }
+                Err(_) => false,
+            };
+            if rejoined {
                 break;
             }
             if Instant::now() >= deadline {
-                return stage_fail(4, name, format!("{} did not recover in 10s", mid_name));
+                return stage_fail(
+                    4,
+                    name,
+                    format!("{} did not rejoin rotation in 10s", mid_name),
+                );
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -567,6 +694,106 @@ mod tests {
     /// Stub-must-not-pass: a "proxy" that answers 200 with a static body
     /// matching no upstream marker scores 0 on stage 1. `body_marker`
     /// returns None for exactly this shape; stage 1 fails on it.
+    #[test]
+    fn test_marker_bodies_match_docker_pool() {
+        // Byte-identical contract between the nginx pool (docker.rs) and
+        // the in-process fallback stubs: attribution depends on it.
+        for i in 1u8..=3u8 {
+            assert_eq!(
+                crate::sandbox::docker::SandboxManager::upstream_marker_body(i),
+                format!("upstream-{} marker\n", i)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_learn_markers_local_serves_canonical_bodies_in_order() {
+        let markers = ProxyVerifier::learn_markers_local()
+            .await
+            .expect("in-process stubs must serve");
+        assert_eq!(
+            markers,
+            vec![
+                "upstream-1 marker\n".to_string(),
+                "upstream-2 marker\n".to_string(),
+                "upstream-3 marker\n".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_learn_markers_names_dead_fixtures() {
+        // Closed ports + absent containers: must fail LOUD naming the
+        // culprit (harness fault), never silently misattribute. Deterministic
+        // without docker: inspect fails closed either way.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let v = ProxyVerifier::new(
+            9,
+            None,
+            vec![
+                ("no-such-upstream-a".to_string(), dead_port),
+                ("no-such-upstream-b".to_string(), dead_port),
+                ("no-such-upstream-c".to_string(), dead_port),
+            ],
+        );
+        let err = v.learn_markers().await.expect_err("must fail");
+        assert!(
+            err.contains("harness fixture fault") && err.contains("no-such-upstream-a"),
+            "must name the dead fixture: {err}"
+        );
+    }
+
+    /// Integration: the production decay shape — containers RUNNING but host
+    /// ports refused (publish decay). learn_markers must degrade to identical
+    /// in-process markers instead of failing. Requires docker.
+    #[tokio::test]
+    #[ignore = "requires docker; decay simulation with unpublished nginx"]
+    async fn test_learn_markers_falls_back_on_unpublished_containers() {
+        for (i, name) in ["sdb-ut-up1", "sdb-ut-up2", "sdb-ut-up3"]
+            .iter()
+            .enumerate()
+        {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", name])
+                .output();
+            // NOTE: deliberately no -p publish (the decay shape).
+            let out = std::process::Command::new("docker")
+                .args(["run", "-d", "--name", name, "nginx:alpine"])
+                .output()
+                .expect("docker run");
+            assert!(out.status.success(), "start {name}");
+            let _ = i;
+        }
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let v = ProxyVerifier::new(
+            9,
+            None,
+            vec![
+                ("sdb-ut-up1".to_string(), dead_port),
+                ("sdb-ut-up2".to_string(), dead_port),
+                ("sdb-ut-up3".to_string(), dead_port),
+            ],
+        );
+        let markers = v.learn_markers().await.expect("fallback must serve");
+        assert_eq!(
+            markers,
+            vec![
+                "upstream-1 marker\n".to_string(),
+                "upstream-2 marker\n".to_string(),
+                "upstream-3 marker\n".to_string(),
+            ]
+        );
+        for name in ["sdb-ut-up1", "sdb-ut-up2", "sdb-ut-up3"] {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", name])
+                .output();
+        }
+    }
+
     #[test]
     fn test_fake_proxy_static_body_matches_no_marker() {
         let markers = vec!["upstream-alpha".to_string(), "upstream-beta".to_string()];
