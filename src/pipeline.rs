@@ -268,6 +268,7 @@ impl BenchmarkPipeline {
         out.push_str("3. Use `edit`, `write`, or `bash` to surgically fix the failing edge cases, protocol handling, or logic errors.\n");
         out.push_str("4. Verify your fix locally by testing compilation and execution with `bash`.\n");
         out.push_str("5. Ensure `./start.sh` or `Dockerfile` remains fully executable and properly starts the server.\n");
+        out.push_str("6. When your surgical fix is complete, signal that you are ready for re-verification by creating `/workspace/READY` (e.g. `touch READY`), or conclude your session.\n");
         out
     }
 
@@ -1059,6 +1060,13 @@ impl BenchmarkPipeline {
                 config.worker,
             )
         };
+        let prompt_content = format!(
+            "{}\n\n### READY FOR VERIFICATION SIGNAL\nWhen you believe your implementation is complete and properly running on the requested port, signal that you are ready for evaluation by creating `/workspace/READY` (for example, run `touch READY` or `touch /workspace/READY`), or simply conclude your session. The benchmark framework will immediately detect this and run the automated verification suite!\n",
+            prompt_content
+        );
+
+        // Clean any stale signal file from previous runs
+        let _ = fs::remove_file(config.workdir.join("READY"));
 
         // 5. Run agent harness (omp | opencode) unless eval_only.
         let htag = match config.harness {
@@ -1072,12 +1080,20 @@ impl BenchmarkPipeline {
                 config.model, config.effort
             ));
 
-            let limits = AgentExecutionLimits {
-                max_turns: if config.max_turns > 0 {
-                    Some(config.max_turns)
+            let initial_turn_cap = if config.max_turns > 0 {
+                if config.feedback_rounds > 0 {
+                    // Checkpoint: allow up to 50 turns (or max_turns) for initial attempt
+                    // so looping models get verification feedback early rather than burning the full budget.
+                    Some(std::cmp::min(config.max_turns, 50))
                 } else {
-                    None
-                },
+                    Some(config.max_turns)
+                }
+            } else {
+                None
+            };
+
+            let limits = AgentExecutionLimits {
+                max_turns: initial_turn_cap,
                 max_budget_usd: if config.budget_usd > 0.0 {
                     Some(config.budget_usd)
                 } else {
@@ -1146,6 +1162,7 @@ impl BenchmarkPipeline {
         }
 
         // 6 & 7. Verification & Interactive Repair
+        let _ = fs::remove_file(config.workdir.join("READY"));
         let port = crate::web::server::worker_port(config.task.default_port(), config.worker);
         let mut v_outcome = Self::run_verification(
             config.task,
@@ -1204,13 +1221,28 @@ impl BenchmarkPipeline {
                     round, config.feedback_rounds, config.model
                 ));
 
+                let global_max = config.max_turns;
+                let turns_remaining = if global_max > 0 {
+                    let left = global_max.saturating_sub(omp_stats.steps_taken);
+                    if left == 0 {
+                        logger.log(&format!(
+                            "[LIMIT] Global turn budget ({} turns) reached across attempts. Concluding run.",
+                            global_max
+                        ));
+                        break;
+                    }
+                    // For surgical repair, cap this round at min(left, 25) turns
+                    Some(std::cmp::min(left, 25))
+                } else {
+                    None
+                };
+
+                // Clean any lingering signal file before launching repair session
+                let _ = fs::remove_file(config.workdir.join("READY"));
+
                 // 3. Launch agent for surgical fix with feedback prompt
                 let round_limits = AgentExecutionLimits {
-                    max_turns: if config.max_turns > 0 {
-                        Some(config.max_turns)
-                    } else {
-                        None
-                    },
+                    max_turns: turns_remaining,
                     max_budget_usd: if config.budget_usd > 0.0 {
                         Some(config.budget_usd)
                     } else {
@@ -1260,6 +1292,7 @@ impl BenchmarkPipeline {
                 }
 
                 // 4. Re-verify the updated candidate
+                let _ = fs::remove_file(config.workdir.join("READY"));
                 let next_outcome = Self::run_verification(
                     config.task,
                     &config.workdir,

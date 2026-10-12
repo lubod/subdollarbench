@@ -788,6 +788,15 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 }
             }
 
+            // Check if model signaled completion early via /workspace/READY
+            if canonical_workdir.join("READY").exists() {
+                let _ = std::fs::remove_file(canonical_workdir.join("READY"));
+                log_fn("[LIVE] Model signaled completion via /workspace/READY! Triggering verification...".to_string());
+                kill_agent();
+                let _ = child.kill();
+                break None;
+            }
+
             // Check if turn or budget limit was reached
             if limit_reached.load(Ordering::SeqCst) {
                 if let Ok(lock) = limit_reason.lock() {

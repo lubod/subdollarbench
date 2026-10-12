@@ -72,12 +72,12 @@ export default function (pi) {
         try {
           if (typeof pi.sendUserMessage === "function") {
             await pi.sendUserMessage(
-              "Wrap up: finish the implementation, test the entrypoint, then stop planning new work.",
+              "Wrap up: finish the implementation, test the entrypoint, then touch /workspace/READY or conclude your session to trigger verification.",
               { deliverAs: "steer" }
             );
           } else if (typeof pi.sendMessage === "function") {
             await pi.sendMessage(
-              { content: "Wrap up now: finish and test.", customType: "steer" },
+              { content: "Wrap up now: finish, test, and touch /workspace/READY.", customType: "steer" },
               { deliverAs: "steer" }
             );
           } else {

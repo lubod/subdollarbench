@@ -825,13 +825,22 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                             .as_ref()
                             .map(|f| f.load(Ordering::SeqCst))
                             .unwrap_or(false);
+                        if canonical_workdir.join("READY").exists() {
+                            let _ = std::fs::remove_file(canonical_workdir.join("READY"));
+                            let _ = tx.send("[LIVE] Model signaled completion via /workspace/READY! Triggering verification...".to_string());
+                            running.store(false, Ordering::SeqCst);
+                            let _ = Command::new("docker")
+                                .args(["rm", "-f", &container_name])
+                                .output();
+                            break None;
+                        }
                         if timed_out || cancelled || !running.load(Ordering::SeqCst) {
                             let _ = Command::new("docker")
                                 .args(["rm", "-f", &container_name])
                                 .output();
                             break None;
                         }
-                        std::thread::sleep(Duration::from_millis(200));
+                        std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(_) => break None,
                 }
