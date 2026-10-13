@@ -108,15 +108,10 @@ pub fn should_auto_extend(
         && infra == completed
 }
 
-/// Trial number from a `<parent>_trial<N>` id suffix. None when the id
-/// carries no numeric trial suffix (parent ids, legacy shapes).
-pub fn trial_no_of(id: &str) -> Option<u32> {
-    let (_, suffix) = id.rsplit_once("_trial")?;
-    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    suffix.parse::<u32>().ok()
-}
+/// Re-exported from config.rs (single parse implementation shared with
+/// the scoring merge); kept here so existing queue/main callers move
+/// untouched.
+pub use crate::config::trial_no_of;
 
 /// Scored model verdicts: trials that carry a real measurement. Anything
 /// else (agent_failed, infra_error, agent_killed, unknown) is a non-result

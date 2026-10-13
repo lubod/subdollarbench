@@ -1861,7 +1861,10 @@ mod tests {
             }
         });
         let ok3 = sm.wait_for_port(port_rst, 1).await;
-        assert!(!ok3, "Port that drops connections immediately should not be considered ready");
+        assert!(
+            !ok3,
+            "Port that drops connections immediately should not be considered ready"
+        );
     }
 
     #[test]

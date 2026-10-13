@@ -3142,7 +3142,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               subs.map((t, i) => {
                 const ok = (t.pass_rate ?? 0) >= 100;
                 const tc = t.total_cost_usd ?? t.effective_cost_usd;
-                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : 'var(--danger)'};">${(t.status === 'disqualified_cheat' ? '<span title="Excluded from parent score, retained in record">DQ</span> ' : '') + Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td><td>${t.throughput_req_sec != null ? fmtTp(t.throughput_req_sec) : '<span title="Probe produced no measurement">no probe</span>'}</td></tr>`;
+                const isFault = ['agent_failed', 'agent_killed', 'infra_error'].includes((t.status || ''));
+                const trialMark = (t.status === 'disqualified_cheat' ? '<span title="Excluded from parent score, retained in record">DQ</span> ' : '') + (isFault ? '<span title="Harness/agent fault: excluded from parent score (neutral, not a model failure)">⚠</span> ' : '');
+                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : (isFault ? 'var(--text-muted)' : 'var(--danger)')};">${trialMark + Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td><td>${t.throughput_req_sec != null ? fmtTp(t.throughput_req_sec) : '<span title="Probe produced no measurement">no probe</span>'}</td></tr>`;
               }).join('') + '</tbody></table>';
           }
           dr.appendChild(dc);
@@ -3477,11 +3479,14 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             const extQ = (r && r.id && extendMarks[r.id]) || null;
             const extMark = extQ ? ` <span title="${escapeHtml(`top-up pending: ${extQ.id} (+${extQ.n} trial${extQ.n === 1 ? '' : 's'})`)}">↻+${escapeHtml(String(extQ.n))}</span>` : '';
             const dqSubs = (r.subruns || []).filter(s => (s.status || '') === 'disqualified_cheat');
+            const faultSubs = (r.subruns || []).filter(s => ['agent_failed', 'agent_killed', 'infra_error'].includes((s.status || '')));
+            const dqMark = dqSubs.length ? ` <span style="color:var(--text-muted);font-size:.72rem;" title="${escapeHtml('excluded from score, retained in record: ' + dqSubs.map(s => s.id).join(', '))}">DQ${dqSubs.length}</span>` : '';
+            const faultMark = faultSubs.length ? ` <span style="color:var(--text-muted);font-size:.72rem;" title="${escapeHtml('harness/agent fault, excluded from score (neutral, not a model failure): ' + faultSubs.map(s => s.id).join(', '))}">⚠${faultSubs.length}</span>` : '';
             const repLabel = (r.repaired ? '🔧' : '');
             const cellLabel = isCap ? (isSolved ? `<b style="color:var(--text-pass,#3fb950);">${repLabel}✓${r.solved_at || 1}</b>` : `<span style="color:#f85149;">✗ ${Math.round(r.best_stage_score ?? p1)}%</span>`) : (isSolved && r.repaired ? `🔧${Math.round(p1)}%` : `${Math.round(p1)}%`);
-            const repTip = r.repaired ? ` · repaired via feedback (round ${r.feedback_rounds || 1})` : (isSolved && r.repaired === false ? ` · zero-shot pass on attempt 1` : '');
+            const repTip = r.repaired ? ` · repaired via feedback (round ${r.feedback_rounds || 1})` : (r.repair_attempted ? ` · repair attempted (${r.feedback_rounds ?? 0} rounds) but unconverted` : (isSolved && r.repaired === false ? ` · zero-shot pass on attempt 1` : ''));
             const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'}` + (isCap ? ` · capability protocol: solved ${isSolved}${r.solved_at ? ` at trial ${r.solved_at}` : ''} (best stage: ${Math.round(r.best_stage_score ?? p1)}%)` : '') + repTip + ` · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
-            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${cellLabel} <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}</td>`;
+            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${cellLabel} <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}${faultMark}</td>`;
             rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
             if (isSolved) { rowSolved++; if ((r.solved_at || 1) === 1) rowFirstTry++; }
             rowCost += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
@@ -4322,7 +4327,7 @@ function copyRunId() {
       if (s === 'completed' && (passRate ?? 0) >= 100) return ['Passed', 'badge-pass'];
       if (s === 'completed') return ['Tests failed', 'badge-fail'];
       if (s === 'failed_tests') return ['Tests failed', 'badge-fail'];
-      if (s === 'agent_failed' || s === 'agent_killed') return ['Agent died', 'badge-fail'];
+      if (s === 'agent_failed' || s === 'agent_killed') return ['Agent died', 'badge-info'];
       if (s === 'disqualified_cheat') return ['Cheat-flagged', 'badge-fail'];
       if (s === 'infra_error') return ['Harness fault', 'badge-info'];
       return [status || 'unknown', 'badge-info'];

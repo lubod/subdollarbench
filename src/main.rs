@@ -2692,6 +2692,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let _ = LeaderboardManager::save_result(&temp_dir.to_string_lossy(), &result);
@@ -2800,6 +2801,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         fs::write(

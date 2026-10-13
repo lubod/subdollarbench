@@ -8,6 +8,20 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-13`: non-result exclusion + repair-attempt telemetry. Merges
+///   drop harness/agent non-results (`agent_failed`, `agent_killed`,
+///   `infra_error`, unknown futures) from every pass aggregate alongside
+///   cheats — a fault's stages were never measured, so scoring it 0%
+///   understated models (two archived 9-trial cells move 33.3%→50% and
+///   66.7%→75% on re-merge). Parents rank on measured trials (fault counts
+///   badged, trials retained in subruns); cells with no measurement stay
+///   visible but unranked, and `solved_at` reports the trial number (not
+///   the aggregate position). New `repair_attempted` flag on trial, parent,
+///   and manifest rows: repair that ran but never converted is now visible
+///   from the board (`repaired` still reports converted repairs only). Trial
+///   pills for faults render neutral, never red. Rows stamped `2026-10-12.3`
+///   or earlier are not comparable without `backfill --yes`; archived waves
+///   keep their stamps (annotation only, never retroactive rescoring).
 /// - `2026-10-12.3`: screening cap 4 + narrow auto-extend. Stop-on-pass
 ///   cells run at most 4 trials (was 3+escalate-to-5), stopping at the
 ///   first 100% pass — calibrated on wave data (every observed late solve
@@ -166,7 +180,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-12.3";
+pub const RULES_VERSION: &str = "2026-10-13";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

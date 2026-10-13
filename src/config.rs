@@ -1274,6 +1274,18 @@ pub fn upstreams_reachable(ports: &[u16]) -> bool {
     true
 }
 
+/// Trial number from a `<parent>_trial<N>` id suffix. None when the id
+/// carries no numeric trial suffix (parent ids, legacy shapes).
+/// Shared helper (config.rs, no new import edges): the queue and the
+/// scoring merge both key on trial order, so they parse ids one way.
+pub fn trial_no_of(id: &str) -> Option<u32> {
+    let (_, suffix) = id.rsplit_once("_trial")?;
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u32>().ok()
+}
+
 /// Display name for a stage log line: verifier stage names already embed
 /// their own `"Stage N: "` prefix, so logging `"Stage {n}: {name}"` reads
 /// `"Stage 1: Stage 1: ..."`. Strip the redundant prefix at display time;

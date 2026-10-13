@@ -118,10 +118,25 @@ pub struct BenchmarkRunResult {
     /// Highest stage pass rate achieved across trials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_stage_score: Option<f64>,
-    /// Whether this run succeeded via feedback repair (true) vs initial attempt (false)
+    /// Whether this run succeeded via feedback repair (true) vs initial attempt (false).
+    /// None = unsolved (no trial converted) or unknown. A repair that was
+    /// attempted but never converted reads None here — see
+    /// `repair_attempted` for the attempt signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repaired: Option<bool>,
-    /// Number of feedback repair rounds configured / used
+    /// True when at least one repair round ran (trial level: this trial ran
+    /// ≥1 round; parent level: any scored trial did). False = feedback was
+    /// enabled but every scored trial passed or failed on the initial
+    /// attempt with zero rounds used. None = feedback disabled or unknown
+    /// (pre-field row). Unlike `repaired` (which only reports a converted
+    /// repair), this answers "how much did repair run" from the board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_attempted: Option<bool>,
+    /// Feedback repair rounds used: trial level = rounds this trial ran;
+    /// parent level = max across scored trials. None = feedback disabled or
+    /// unknown (pre-field row); Some(0) = enabled but unused. Named
+    /// `feedback_rounds` for row compatibility; it has always stored used
+    /// rounds, never the configured cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_rounds: Option<u32>,
 }
@@ -267,6 +282,25 @@ pub fn assess_stability(subruns: &[BenchmarkRunResult]) -> (Stability, String) {
     (Stability::Stable, format!("{} trials agree", subruns.len()))
 }
 
+/// A trial that carries a real model measurement and enters pass
+/// aggregates. `completed` / `failed_tests` are verdicts; None is a legacy
+/// row predating the status field (real evidence, must keep ranking —
+/// every archived row without a stamp is one of these).
+/// Cheat (`disqualified_cheat`) and harness/agent faults (`agent_failed`,
+/// `agent_killed`, `infra_error`, unknown futures) are NOT valid: cheats
+/// are excluded by the cheat rule, faults are neutral pills by portal
+/// doctrine (their stages were never meaningfully measured).
+pub fn is_valid_trial(status: Option<&str>) -> bool {
+    matches!(status, None | Some("completed") | Some("failed_tests"))
+}
+
+/// A parent row may rank only when it summarizes at least one measurement:
+/// legacy (None) or an explicit model verdict. Cheat, fault, and future
+/// statuses are visible in runs pages but never ranked.
+pub fn is_rankable_status(status: Option<&str>) -> bool {
+    matches!(status, None | Some("completed") | Some("failed_tests"))
+}
+
 impl BenchmarkRunResult {
     pub fn effective_cost(&self) -> f64 {
         self.effective_cost_usd.unwrap_or(self.total_cost_usd)
@@ -404,26 +438,25 @@ impl BenchmarkRunResult {
             return Some(single);
         }
 
-        // Cheat exclusion: disqualified trials never enter aggregates. They
-        // stay in `subruns` (visible, auditable) but every mean, ratio,
-        // best-trial pick and the P@1 denominator below run over `agg`.
-        // Uniform-valid denominators: the row summarizes scored trials;
-        // cheat spend stays on the trial rows, not in the headline.
-        // All-cheat cells keep the old path (nothing valid to rank) and
-        // stay disqualified_cheat.
-        let has_cheat = subruns
+        // Trial-level exclusion: cheats (`disqualified_cheat`) and
+        // harness/agent non-results (`agent_failed`, `agent_killed`,
+        // `infra_error`, unknown futures) never enter aggregates. A cheat
+        // is not a measurement; a fault's stages were never meaningfully
+        // measured, so scoring it 0% understates the model (measured live:
+        // two archived 9-trial cells read 33.3%/66.7% instead of 50%/75%).
+        // Excluded trials stay in `subruns` (visible, auditable) but every
+        // mean, ratio, best-trial pick and the P@1 denominator below run
+        // over `agg`. Legacy trials (no status) are real evidence and stay.
+        // No valid trial (all-cheat / all-fault cells): fall back to the
+        // old path over all trials for display continuity, stamped with a
+        // non-ranked status so no board can read it as a score.
+        let agg_owned: Vec<BenchmarkRunResult> = subruns
             .iter()
-            .any(|r| r.status.as_deref() == Some("disqualified_cheat"));
-        let valid: Vec<BenchmarkRunResult> = if has_cheat {
-            subruns
-                .iter()
-                .filter(|r| r.status.as_deref() != Some("disqualified_cheat"))
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let agg: &[BenchmarkRunResult] = if valid.is_empty() { &subruns } else { &valid };
+            .filter(|r| is_valid_trial(r.status.as_deref()))
+            .cloned()
+            .collect();
+        let agg_empty = agg_owned.is_empty();
+        let agg: &[BenchmarkRunResult] = if agg_empty { &subruns } else { &agg_owned };
         let n = agg.len();
 
         // 1. Conformance & Reliability Metrics
@@ -577,18 +610,41 @@ impl BenchmarkRunResult {
         // value through, and a parent without one stays None (honest
         // unknown), never a trial stamp, never the fresh score stamp.
         let merged_graded_under: Option<String> = graded_under;
-        let (stab, _) = assess_stability(&subruns);
+        // Stability over measured trials: a harness fault is not a model
+        // verdict, so it must not tip a cell to unstable. (`agg` falls back
+        // to all trials only when nothing measured — display continuity.)
+        let (stab, _) = assess_stability(agg);
         let stab_str = match stab {
             Stability::Stable => "stable",
             Stability::Watch => "watch",
             Stability::Unstable => "unstable",
         }
         .to_string();
-        let passing_idx = agg.iter().position(|r| r.pass_rate >= 100.0);
-        let solved = passing_idx.is_some();
-        let solved_at = passing_idx.map(|idx| (idx + 1) as u32);
+        // solved_at is the TRIAL NUMBER that first passed, not the position
+        // in the aggregate: exclusions shift positions (a fault at trial 1
+        // must not make a trial-2 solve read @1). Dense trials from 1 parse
+        // to the same value, so legacy cells are unaffected.
+        let passing_pos = agg.iter().position(|r| r.pass_rate >= 100.0);
+        let solved = passing_pos.is_some();
+        let solved_at = passing_pos
+            .map(|idx| crate::config::trial_no_of(&agg[idx].id).unwrap_or((idx + 1) as u32));
         let best_stage_score = agg.iter().map(|r| r.pass_rate).fold(0.0, f64::max);
         let any_repaired = agg.iter().any(|r| r.repaired == Some(true));
+        // Attempt signal (defect 2): `repaired` only reports a CONVERTED
+        // repair, so an attempted-but-failed loop read None — identical to
+        // "no repair ran". Any scored trial with ≥1 round used (or a
+        // converted repair) marks the cell attempted; all-Some(0) marks
+        // enabled-but-unused; anything with unknown rounds stays None.
+        let any_repair_attempted = agg
+            .iter()
+            .any(|r| r.repaired == Some(true) || r.feedback_rounds.unwrap_or(0) > 0);
+        let repair_attempted = if any_repair_attempted {
+            Some(true)
+        } else if !agg.is_empty() && agg.iter().all(|r| r.feedback_rounds.is_some()) {
+            Some(false)
+        } else {
+            None
+        };
         let max_feedback_rounds = agg.iter().filter_map(|r| r.feedback_rounds).max();
         let merged_protocol: Option<String> = subruns.iter().find_map(|s| s.protocol.clone());
         Some(BenchmarkRunResult {
@@ -630,9 +686,21 @@ impl BenchmarkRunResult {
             method_version: best.method_version.clone(),
             rules_version: merged_rules_version,
             graded_under: merged_graded_under,
-            status: if has_cheat && valid.is_empty() {
-                // No valid trial to rank (all-cheat cell): excluded, as before.
-                Some("disqualified_cheat".to_string())
+            status: if agg_empty {
+                // No measurable trial: visible, never ranked. All-cheat
+                // keeps its verdict; all-fault (or cheat+fault mixes) carry
+                // the first fault's status as a neutral pill.
+                Some(
+                    subruns
+                        .iter()
+                        .find(|r| {
+                            !is_valid_trial(r.status.as_deref())
+                                && r.status.as_deref() != Some("disqualified_cheat")
+                        })
+                        .and_then(|r| r.status.clone())
+                        .or_else(|| subruns.iter().find_map(|r| r.status.clone()))
+                        .unwrap_or_else(|| "infra_error".to_string()),
+                )
             } else {
                 None
             },
@@ -658,6 +726,7 @@ impl BenchmarkRunResult {
             } else {
                 None
             },
+            repair_attempted,
             feedback_rounds: max_feedback_rounds,
         })
     }
@@ -916,20 +985,22 @@ impl LeaderboardManager {
                 let _ = crate::report::portal::set_hidden(&trial_runs_dir, &sub.id, true);
             }
 
-            // Select the best trial (highest pass rate, then highest score)
-            let best_sub = subrun_results
+            // Select the best scored trial (highest pass rate, then highest
+            // score) — the same canonical_best the merge uses, over the same
+            // valid pool. A fault at 0% must never win a tie over a scored
+            // 0%: its workspace has no runnable code. Falls back to all
+            // trials only when nothing measured (excluded parent anyway).
+            let valid_pool: Vec<BenchmarkRunResult> = subrun_results
                 .iter()
-                .max_by(|a, b| {
-                    a.pass_rate
-                        .partial_cmp(&b.pass_rate)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            let s_a = a.throughput_score.unwrap_or(a.efficiency_score);
-                            let s_b = b.throughput_score.unwrap_or(b.efficiency_score);
-                            s_a.partial_cmp(&s_b).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                })
-                .unwrap_or(&subrun_results[0]);
+                .filter(|r| is_valid_trial(r.status.as_deref()))
+                .cloned()
+                .collect();
+            let pool: &[BenchmarkRunResult] = if valid_pool.is_empty() {
+                subrun_results
+            } else {
+                &valid_pool
+            };
+            let best_sub = BenchmarkRunResult::canonical_best(pool).unwrap_or(&subrun_results[0]);
 
             let runs_dir = crate::report::RunArchiver::resolve_runs_dir();
             let parent_dir = runs_dir.join(parent_run_id);
@@ -937,14 +1008,17 @@ impl LeaderboardManager {
 
             let best_sub_dir = runs_dir.join(&best_sub.id);
 
-            // Parent verdict: disqualified only when NO valid trial remains
-            // (all-cheat cell). Mixed cells take completed/failed_tests from
-            // the valid trials; the cheat trials stay listed in subruns with
-            // their stamps (visible, excluded from score).
+            // Parent verdict: the merge stamped the reason when nothing
+            // measured (all-cheat stays disqualified_cheat, all-fault
+            // carries the first fault) — the manifest carries it so runs
+            // pages pill it honestly instead of failed_tests. Measured
+            // cells take completed/failed_tests from the valid trials; the
+            // excluded trials stay listed in subruns with their stamps
+            // (visible, excluded from score).
             let n_valid = merged
                 .subruns
                 .iter()
-                .filter(|s| s.status.as_deref() != Some("disqualified_cheat"))
+                .filter(|s| is_valid_trial(s.status.as_deref()))
                 .count();
 
             // 1. Build genuine merged parent manifest (not a trial-1 clone)
@@ -953,12 +1027,27 @@ impl LeaderboardManager {
                     serde_json::from_str::<crate::report::RunManifest>(&content)
                 {
                     manifest.run_id = parent_run_id.to_string();
-                    manifest.status = if n_valid == 0 {
-                        "disqualified_cheat".to_string()
-                    } else if merged.avg_pass_rate.unwrap_or(merged.pass_rate) >= 100.0 {
-                        "completed".to_string()
-                    } else {
-                        "failed_tests".to_string()
+                    manifest.status = match merged.status.as_deref() {
+                        // No measurable trial: carry the merge's stamp
+                        // (cheat / first fault), never failed_tests — a
+                        // harness fault is not a model verdict.
+                        Some(s) if !is_rankable_status(Some(s)) => s.to_string(),
+                        _ => {
+                            if n_valid == 0 {
+                                // Belt: merge stamps every all-excluded cell,
+                                // so this is unreachable — but an unstamped
+                                // no-evidence parent must never read
+                                // failed_tests either.
+                                merged
+                                    .status
+                                    .clone()
+                                    .unwrap_or_else(|| "infra_error".to_string())
+                            } else if merged.avg_pass_rate.unwrap_or(merged.pass_rate) >= 100.0 {
+                                "completed".to_string()
+                            } else {
+                                "failed_tests".to_string()
+                            }
+                        }
                     };
                     manifest.pass_rate = merged.avg_pass_rate.unwrap_or(merged.pass_rate);
                     manifest.total_trials = merged.total_trials;
@@ -973,6 +1062,7 @@ impl LeaderboardManager {
                     manifest.solved_at = merged.solved_at;
                     manifest.best_stage_score = merged.best_stage_score;
                     manifest.repaired = merged.repaired;
+                    manifest.repair_attempted = merged.repair_attempted;
                     manifest.feedback_rounds = merged.feedback_rounds;
                     manifest.passed_stages = merged.passed_stages;
                     manifest.total_stages = merged.total_stages;
@@ -1014,14 +1104,25 @@ impl LeaderboardManager {
                 if let Ok(mut rev_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     let p1 = merged.pass_at_1.unwrap_or(100.0);
                     let pk = merged.pass_at_k.unwrap_or(100.0);
-                    let n = subrun_results.len();
-                    let passing = subrun_results
+                    let n_all = subrun_results.len();
+                    // Honest denominator: scored trials only. A fault trial
+                    // at 0% is not a failed measurement, so it leaves both
+                    // the passing count and the denominator (it stays named
+                    // in the exclusion note, never silently dropped).
+                    let n = merged.total_trials.unwrap_or(n_all as u32) as usize;
+                    let passing = merged
+                        .subruns
                         .iter()
-                        .filter(|r| r.pass_rate >= 100.0)
+                        .filter(|r| is_valid_trial(r.status.as_deref()) && r.pass_rate >= 100.0)
                         .count();
+                    let excl = if n_all > n {
+                        format!(", {} excluded non-measurement", n_all - n)
+                    } else {
+                        String::new()
+                    };
                     rev_val["multi_trial_disclosure"] = serde_json::Value::String(format!(
-                        "Evaluated best workspace of {} subruns ({}/{} passed, Pass@1: {:.0}%, Pass@{}: {:.0}%). Best subrun: {}",
-                        n, passing, n, p1, n, pk, best_sub.id
+                        "Evaluated best workspace of {} scored subruns ({}/{} passed, Pass@1: {:.0}%, Pass@{}: {:.0}%{}). Best subrun: {}",
+                        n, passing, n, p1, n, pk, excl, best_sub.id
                     ));
                     let _ = fs::write(
                         parent_dir.join("review.json"),
@@ -1277,15 +1378,17 @@ impl LeaderboardManager {
         if cut > 0 {
             eprintln!("[LEADERBOARD] finalize: filtered {cut} junk row(s) (test_/0-trial)");
         }
-        // Cheat verdicts are not measurements: disqualified parents never
-        // rank (runs pages and the inspector still show them with the badge).
-        // Genuine cheats stay out; false-positive cures re-enter via repair.
+        // Only measurements rank: cheat verdicts and harness/agent
+        // non-results never do (runs pages and the inspector still show
+        // them with badges). Genuine cheats stay out; false-positive cures
+        // re-enter via repair. Legacy rows (no status) and model verdicts
+        // still rank.
         let pre_dq = list.len();
-        list.retain(|r| r.status.as_deref() != Some("disqualified_cheat"));
+        list.retain(|r| is_rankable_status(r.status.as_deref()));
         let cut_dq = pre_dq - list.len();
         if cut_dq > 0 {
             eprintln!(
-                "[LEADERBOARD] finalize: excluded {cut_dq} disqualified_cheat row(s) from ranking"
+                "[LEADERBOARD] finalize: excluded {cut_dq} non-ranked row(s) (cheat/fault verdicts) from ranking"
             );
         }
         for res in &mut list {
@@ -1337,6 +1440,11 @@ impl LeaderboardManager {
         }
 
         list = consolidated;
+        // Read-path merges above mint fault/cheat-status parents for
+        // all-excluded loose groups; ranked boards never show them — same
+        // predicate as the stored-row filter above (belt, the pre-regroup
+        // filter normally starves such groups first).
+        list.retain(|r| is_rankable_status(r.status.as_deref()));
         // Secondary denominator: per-task frontier fractions over this
         // comparison set (same rules_version grouping inside). Runs before
         // the rank sort; unanchored rows keep None.
@@ -1829,6 +1937,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
@@ -1891,6 +2000,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         }
     }
@@ -2042,8 +2152,9 @@ mod tests {
                 solved: None,
                 solved_at: None,
                 best_stage_score: None,
-            repaired: None,
-            feedback_rounds: None,
+                repaired: None,
+                repair_attempted: None,
+                feedback_rounds: None,
             };
 
         let t1 = make_run("run_trial1", 5000.0, 40.0, 8, 0.001, 100.0);
@@ -2175,6 +2286,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
@@ -2236,6 +2348,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         // One crashed trial (0.0) + two real readings: median of the real two.
@@ -2315,6 +2428,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let m = BenchmarkRunResult::merge_subruns(
@@ -2384,6 +2498,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let subs = vec![trial("a"), trial("b"), trial("c")];
@@ -2570,6 +2685,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         LeaderboardManager::print_table(&[r]);
@@ -2636,6 +2752,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         }
     }
@@ -2694,6 +2811,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
 
@@ -2746,6 +2864,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
 
@@ -2866,6 +2985,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         // 8 honest (6x100 + 2x0) + 1 cheat at 0%: the cheat must not move
@@ -2943,10 +3063,382 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let m = BenchmarkRunResult::merge_subruns("p", vec![mk("a"), mk("b")], None, None).unwrap();
         assert_eq!(m.status.as_deref(), Some("disqualified_cheat"));
+    }
+
+    /// Non-result exclusion (2026-10-13): harness/agent faults never enter
+    /// aggregates but stay listed; parents rank on measured trials only.
+    #[test]
+    fn test_merge_excludes_fault_trials_but_keeps_them_listed() {
+        let mk = |id: &str, pass: f64, status: Option<&str>| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: Some("high".to_string()),
+            effort_effective: None,
+            status: status.map(|s| s.to_string()),
+            harness: None,
+            pass_rate: pass,
+            passed_stages: if pass >= 100.0 {
+                6
+            } else if pass > 0.0 {
+                4
+            } else {
+                0
+            },
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-10-13T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: vec![],
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
+            repaired: None,
+            repair_attempted: None,
+            feedback_rounds: None,
+        };
+        // Canary shape: two scored 0s + one scored 66.7 + one billing-fault
+        // 0%. The fault must not enter the denominator or the mean.
+        let m = BenchmarkRunResult::merge_subruns(
+            "p",
+            vec![
+                mk("p_trial1", 0.0, Some("failed_tests")),
+                mk("p_trial2", 0.0, Some("failed_tests")),
+                mk("p_trial3", 66.66666666666667, Some("failed_tests")),
+                mk("p_trial4", 0.0, Some("agent_failed")),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.total_trials, Some(3));
+        assert_eq!(m.pass_at_1, Some(0.0));
+        assert!((m.avg_pass_rate.unwrap() - 22.22222222222222).abs() < 1e-9);
+        assert!((m.best_stage_score.unwrap() - 66.66666666666667).abs() < 1e-9);
+        assert_eq!(m.subruns.len(), 4, "fault stays listed");
+        assert_eq!(m.status, None, "measured parent ranks");
+        assert_eq!(m.solved, Some(false));
+        // Archived shape (2026-10-10): 3 scored passes in 9 with 3 faults
+        // reads 3/6, not 3/9.
+        let mut subs = vec![];
+        for i in 1..=3 {
+            subs.push(mk(&format!("q_trial{i}"), 100.0, Some("completed")));
+        }
+        for i in 4..=6 {
+            subs.push(mk(&format!("q_trial{i}"), 0.0, Some("failed_tests")));
+        }
+        for i in 7..=9 {
+            subs.push(mk(&format!("q_trial{i}"), 0.0, Some("agent_failed")));
+        }
+        let m2 = BenchmarkRunResult::merge_subruns("q", subs, None, None).unwrap();
+        assert_eq!(m2.total_trials, Some(6));
+        assert!((m2.pass_at_1.unwrap() - 50.0).abs() < 1e-9);
+        assert_eq!(m2.subruns.len(), 9);
+    }
+
+    #[test]
+    fn test_merge_solved_at_uses_trial_numbers_across_fault_gap() {
+        let mk = |id: &str, pass: f64, status: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            effort_effective: None,
+            status: Some(status.to_string()),
+            harness: None,
+            pass_rate: pass,
+            passed_stages: if pass >= 100.0 { 6 } else { 0 },
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-10-13T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: vec![],
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
+            repaired: None,
+            repair_attempted: None,
+            feedback_rounds: None,
+        };
+        // Fault at trial 1, solve at trial 2: solved_at is the trial number
+        // (2), not the aggregate position (1). n counts measured trials.
+        let m = BenchmarkRunResult::merge_subruns(
+            "p",
+            vec![
+                mk("p_trial1", 0.0, "agent_failed"),
+                mk("p_trial2", 100.0, "completed"),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.total_trials, Some(1));
+        assert_eq!(m.pass_at_1, Some(100.0));
+        assert_eq!(m.solved, Some(true));
+        assert_eq!(m.solved_at, Some(2));
+        // Cheat + fault + solve: same rule, trial 3.
+        let m2 = BenchmarkRunResult::merge_subruns(
+            "q",
+            vec![
+                mk("q_trial1", 0.0, "disqualified_cheat"),
+                mk("q_trial2", 0.0, "infra_error"),
+                mk("q_trial3", 100.0, "completed"),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m2.total_trials, Some(1));
+        assert_eq!(m2.solved_at, Some(3));
+        assert_eq!(m2.subruns.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_all_fault_parent_carries_neutral_status() {
+        let mk = |id: &str, status: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            effort_effective: None,
+            status: Some(status.to_string()),
+            harness: None,
+            pass_rate: 0.0,
+            passed_stages: 0,
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-10-13T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: vec![],
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
+            repaired: None,
+            repair_attempted: None,
+            feedback_rounds: None,
+        };
+        // Nothing measured: the parent carries the first fault's status
+        // (neutral pill downstream), never failed_tests, and keeps every
+        // trial listed for audit.
+        let m = BenchmarkRunResult::merge_subruns(
+            "p",
+            vec![
+                mk("p_trial1", "agent_failed"),
+                mk("p_trial2", "infra_error"),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.status.as_deref(), Some("agent_failed"));
+        assert!(!is_rankable_status(m.status.as_deref()));
+        assert_eq!(m.subruns.len(), 2);
+        // Trial-validity contract: legacy (None) + verdicts score; every
+        // explicit non-verdict is excluded. Rankability matches validity
+        // for verdicts and legacy; cheats stay visible but unranked.
+        assert!(is_valid_trial(None));
+        assert!(is_valid_trial(Some("completed")));
+        assert!(is_valid_trial(Some("failed_tests")));
+        for s in [
+            Some("disqualified_cheat"),
+            Some("agent_failed"),
+            Some("agent_killed"),
+            Some("infra_error"),
+            Some("future_status"),
+        ] {
+            assert!(!is_valid_trial(s), "{s:?}");
+        }
+        assert!(is_rankable_status(None));
+        assert!(is_rankable_status(Some("completed")));
+        assert!(is_rankable_status(Some("failed_tests")));
+        for s in [
+            Some("disqualified_cheat"),
+            Some("agent_failed"),
+            Some("agent_killed"),
+            Some("infra_error"),
+            Some("future_status"),
+        ] {
+            assert!(!is_rankable_status(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn test_merge_repair_attempted_survives_without_conversion() {
+        let mk = |id: &str, pass: f64, fb: Option<u32>| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            effort_effective: None,
+            status: Some("failed_tests".to_string()),
+            harness: None,
+            pass_rate: pass,
+            passed_stages: if pass >= 100.0 { 6 } else { 0 },
+            total_stages: 6,
+            throughput_req_sec: None,
+            reference_throughput_req_sec: None,
+            baseline_source: None,
+            ref_drift: None,
+            ref_image: None,
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: None,
+            duration_seconds: None,
+            turns: None,
+            savings_percent: 0.0,
+            efficiency_score: 0.0,
+            throughput_score: None,
+            timestamp: "2026-10-13T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: vec![],
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
+            repaired: None,
+            repair_attempted: None,
+            feedback_rounds: fb,
+        };
+        // Repair ran twice per trial, never converted: the attempt must
+        // survive on the parent even though `repaired` stays None.
+        let m = BenchmarkRunResult::merge_subruns(
+            "p",
+            vec![mk("p_trial1", 0.0, Some(2)), mk("p_trial2", 66.0, Some(2))],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.repaired, None);
+        assert_eq!(m.repair_attempted, Some(true));
+        assert_eq!(m.feedback_rounds, Some(2));
+        // Enabled but unused throughout: explicit false, not unknown.
+        let m2 = BenchmarkRunResult::merge_subruns(
+            "q",
+            vec![mk("q_trial1", 0.0, Some(0)), mk("q_trial2", 0.0, Some(0))],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m2.repair_attempted, Some(false));
+        assert_eq!(m2.feedback_rounds, Some(0));
+        // Pre-field rows: unknown stays unknown.
+        let m3 = BenchmarkRunResult::merge_subruns(
+            "r",
+            vec![mk("r_trial1", 0.0, None), mk("r_trial2", 0.0, None)],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m3.repair_attempted, None);
+        assert_eq!(m3.feedback_rounds, None);
     }
 
     #[test]
@@ -3001,6 +3493,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let out = LeaderboardManager::finalize_results(vec![
@@ -3096,8 +3589,9 @@ mod tests {
                 solved: None,
                 solved_at: None,
                 best_stage_score: None,
-            repaired: None,
-            feedback_rounds: None,
+                repaired: None,
+                repair_attempted: None,
+                feedback_rounds: None,
             }],
             total_trials: Some(1),
             pass_at_1: Some(100.0),
@@ -3112,6 +3606,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let mut rows = vec![
@@ -3186,6 +3681,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         let one =
@@ -3296,6 +3792,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         // test_ ids are refused: Ok, but nothing written.

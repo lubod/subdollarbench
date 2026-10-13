@@ -121,6 +121,7 @@ func main() {
         solved_at: None,
         best_stage_score: None,
         repaired: None,
+        repair_attempted: None,
         feedback_rounds: None,
     };
 

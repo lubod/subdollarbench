@@ -338,3 +338,30 @@ P@1-lo stays rank key, Cap co-column). Narrow auto-extend stays
 manual-only (envelope unset). Canary: 3 models (ling baseline,
 inkling:free, nemotron:free) x redis x high x {omp, opencode} = 6
 cells (q68-q73), all verified stop_on_pass + fb=2 at enqueue.
+
+## P. Scoring fix (2026-10-13, RULES 2026-10-13) — non-result exclusion + repair telemetry
+
+Two live defects, both in the scoring path (`merge_subruns`), fixed in one
+bundle with one RULES bump:
+
+1. Non-result trials scored as 0% failures. `agent_failed`/`agent_killed`/
+   `infra_error`/future statuses entered P@1 denominators and means.
+   Live impact: nemotron/omp canary parent read n=4 P@1=0/4 (trial 4 was a
+   billing-throttle `agent_failed`); honest is n=3 P@1=0/3. Archive impact
+   (annotated, NOT rescored): two ling 9-trial cells read 33.3%/66.7%,
+   honest 50%/75%. Fix: `is_valid_trial` (None legacy + completed +
+   failed_tests) gates every aggregate; excluded trials stay in subruns;
+   `solved_at` uses trial numbers; all-excluded cells carry a neutral
+   non-ranked status; boards (leaderboard finalize + both portal filters +
+   post-regroup) exclude non-rankable parents; fault pills render neutral.
+
+2. Repair attempts invisible unless converted. Parent `repaired` read None
+   for the omp canary cell despite 8 fired repair rounds. Fix: new
+   `repair_attempted` (trial + parent + manifest + result rows); `repaired`
+   keeps converted-only semantics; `feedback_rounds` documented as rounds
+   used. Same bundle also defines the previously-undefined `dqMark` matrix
+   badge (latent ReferenceError) and adds ⚠ fault badges + repair tooltips.
+
+Cutover: live canary parents re-merged via `backfill --yes` (scores move
+only on the omp cell; 12.3→13 re-stamp, graders preserved). Archives keep
+their stamps per doctrine.

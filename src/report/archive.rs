@@ -146,10 +146,18 @@ pub struct RunManifest {
     /// Highest stage pass rate achieved across trials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_stage_score: Option<f64>,
-    /// Whether this run succeeded via feedback repair (true) vs initial attempt (false)
+    /// Whether this run succeeded via feedback repair (true) vs initial attempt (false).
+    /// None = unsolved or unknown; an attempted-but-unconverted repair reads
+    /// None here (see `repair_attempted`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repaired: Option<bool>,
-    /// Number of feedback repair rounds configured / used
+    /// True when ≥1 repair round ran (trial = this trial; parent = any
+    /// scored trial). False = feedback enabled but unused; None = disabled
+    /// or unknown (pre-field row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_attempted: Option<bool>,
+    /// Feedback repair rounds used (trial = this trial; parent = max across
+    /// scored trials). None = disabled/unknown; Some(0) = enabled but unused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_rounds: Option<u32>,
     #[serde(default)]
@@ -558,6 +566,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
 
@@ -732,6 +741,7 @@ mod tests {
             solved_at: None,
             best_stage_score: None,
             repaired: None,
+            repair_attempted: None,
             feedback_rounds: None,
         };
         RunArchiver::archive_run(&runs_dir, &manifest, &ws, "log").unwrap();
