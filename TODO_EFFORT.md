@@ -320,3 +320,21 @@ nothing until SDB_AUTO_EXTEND_TRIALS is approved), rank key unchanged
 live catalog) x redis x high x {omp, opencode} = 6 cells (q62-q67).
 Requested --trials 9 clamps to 4 initial per cell. Expand to full
 breadth on canary green.
+
+## O. Capability-method canary (2026-10-13, RUNNING) + second reset record
+
+Pre-wave ops: stopped the screening canary mid-wave (1 trial running,
+5 done — archived first), full archive to
+`~/bench-archive/20261013-0800-screening-canary/` (db 7/6/16/0,
+16/16 manifests, 7/7 results, spot-reads pass); wiped bench.db +
+runs/ + results/ to zero (migrate-check clean, API 0 rows, queue
+cleaned to the 6 new cells); portal/ archived but left live (stale
+until new data lands).
+
+Wave spec (new method + score system): stop-on-pass screening (cap 4)
++ feedback repair ON (--feedback = 2 rounds, same workspace, shared
+turn pool, failure diagnostics) + capability scoring (solved@N,
+P@1-lo stays rank key, Cap co-column). Narrow auto-extend stays
+manual-only (envelope unset). Canary: 3 models (ling baseline,
+inkling:free, nemotron:free) x redis x high x {omp, opencode} = 6
+cells (q68-q73), all verified stop_on_pass + fb=2 at enqueue.
