@@ -365,3 +365,19 @@ bundle with one RULES bump:
 Cutover: live canary parents re-merged via `backfill --yes` (scores move
 only on the omp cell; 12.3→13 re-stamp, graders preserved). Archives keep
 their stamps per doctrine.
+
+## Q. Fresh re-run under fixed binary (2026-10-13, RUNNING) + third reset record
+
+Pre-wave ops: archived the post-fix canary state to
+`~/bench-archive/20261013-1058-fixed-canary/` (db 6/4/15/0, 15/15
+manifests, 6/6 results, spot-reads pass — includes the n=3 re-merged omp
+parent under RULES 2026-10-13); wiped bench.db + runs/ + results/ to zero
+(migrate-check clean, API 0 rows, queue already empty after restart).
+Portal/ archived but left live (stale until new data lands).
+
+Wave spec: identical canary re-run (q1-q6 — queue seq reset with the DB
+wipe): 3 models (ling baseline, inkling:free, nemotron:free) x redis x
+high x {omp, opencode}, all verified stop_on_pass + fb=2 at enqueue.
+First wave where the fix is live from trial 1: `repair_attempted`
+recorded natively on every trial row, non-result exclusion active from
+the first merge. Expect 4 running + 2 pending to drain in ~1h.
