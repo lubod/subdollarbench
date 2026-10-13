@@ -300,3 +300,23 @@ FIXED + DEPLOYED 2026-10-11)
   order, dead-fixture naming, live docker decay-simulation integration
   test (green), full suite 355/0, clippy clean.
 - NEXT: proxy wave #3 for clean data (6 cells, fresh .2 rows).
+
+## N. Fresh screening wave (2026-10-13, RUNNING) + reset record
+
+Pre-wave ops (all verified): full archive to
+`~/bench-archive/20261013-0645-pre-reset/` (db 50/431/482/58 identical,
+482/482 manifests, 50/50 results, spot-reads pass); wiped bench.db +
+runs/ + results/ to zero (migrate-check clean, API 0 rows, queue 0);
+portal/ archived but left live (stale until new wave lands — do NOT
+regen/push an empty board). Engine binary verified live: built after
+all screening commits, serves 2026-10-12.3 + SCREEN_CAP/auto-extend
+strings; no restart needed.
+
+Wave spec (new method): stop-on-pass screening (cap 4, flat — no
+escalation), narrow auto-extend MANUAL-only (envelope unset: auto fires
+nothing until SDB_AUTO_EXTEND_TRIALS is approved), rank key unchanged
+(P@1-lo) + capability co-column. Canary first: 3 models
+(ling-3.1-flash baseline, inkling:free, nemotron:free — all $0/$0 in
+live catalog) x redis x high x {omp, opencode} = 6 cells (q62-q67).
+Requested --trials 9 clamps to 4 initial per cell. Expand to full
+breadth on canary green.
