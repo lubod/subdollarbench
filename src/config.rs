@@ -62,6 +62,11 @@ pub enum CampaignAction {
         /// (no API calls; useful for suite development)
         #[arg(long, default_value_t = false)]
         eval_only: bool,
+        /// Seed the campaign workspace from this directory (contents copied,
+        /// .git excluded). Eval-only replays of archived candidates use this;
+        /// future brownfield campaigns will too.
+        #[arg(long)]
+        workspace: Option<String>,
     },
 }
 

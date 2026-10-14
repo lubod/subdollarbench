@@ -1947,6 +1947,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 timeout_min,
                 api_key,
                 eval_only,
+                workspace,
             } => {
                 main_campaign::run(
                     name,
@@ -1957,6 +1958,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     timeout_min,
                     api_key,
                     eval_only,
+                    workspace,
                 )
                 .await?
             }

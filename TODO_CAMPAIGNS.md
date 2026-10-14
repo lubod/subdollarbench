@@ -68,8 +68,15 @@ non-redis acceptance adapters.
   records `over_budget`, never a model failure.
 - [x] A6. Tests: mock-executor orchestrator tests; loader/validation;
   git helper; e2e eval-only CLI smoke (evidence tree verified).
-- [ ] Gate: canary campaign (1 model, stages 0-3); break stage 0 manually
-  to prove the regression alarm fires. (Needs spend approval.)
+- [x] Gate, part 1 (no spend): `--workspace` seed + full-ladder eval-only
+  replay of the archived ling Go candidate — 4 tickets passed
+  cumulatively (3/3 -> 4/4 -> 5/5 -> 6/6), non-accepted suites excluded,
+  destructive AOF kill only at s3, git commits + patches + rollup
+  (reached 3, tickets/$ computed). Regression logic proven by
+  mock-executor tests (pass->fail flips, fault status, budget stop).
+- [ ] Gate, part 2 (spend): live agent campaign (1 model, stages 0-3).
+  A real mid-campaign regression is the only missing end-to-end proof of
+  the alarm — workspace changes between stages require the agent.
 
 ## Slice B — stage suites (expiry, pubsub)
 

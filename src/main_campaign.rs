@@ -103,6 +103,7 @@ pub async fn run(
     timeout_min: u64,
     api_key: Option<String>,
     eval_only: bool,
+    workspace: Option<String>,
 ) -> Result<()> {
     let lc = campaign::load_campaign(&name).context("load campaign")?;
     // Foreground campaigns use the canonical worker-0 ports (6379/6380/…);
@@ -125,6 +126,15 @@ pub async fn run(
     let cdir = runs_dir.join(&campaign_id);
     std::fs::create_dir_all(&cdir)?;
     let workdir = cdir.join("workspace");
+
+    if let Some(src) = &workspace {
+        let src = Path::new(src);
+        if !src.is_dir() {
+            anyhow::bail!("--workspace {} is not a directory", src.display());
+        }
+        copy_workspace(src, &workdir)?;
+        println!("workspace seeded from {}", src.display());
+    }
 
     println!(
         "{}",
@@ -290,6 +300,28 @@ async fn run_one_stage(
         git_commit,
         git_stat,
     })
+}
+
+/// Recursive copy of a seed workspace; `.git` is excluded so the campaign
+/// starts its own stage history (archived candidates may carry their own).
+fn copy_workspace(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_workspace(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn print_rollup(r: &CampaignRollup) {
