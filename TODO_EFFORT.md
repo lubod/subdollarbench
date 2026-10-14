@@ -381,3 +381,38 @@ high x {omp, opencode}, all verified stop_on_pass + fb=2 at enqueue.
 First wave where the fix is live from trial 1: `repair_attempted`
 recorded natively on every trial row, non-result exclusion active from
 the first merge. Expect 4 running + 2 pending to drain in ~1h.
+
+## R. Review round (2026-10-14) — scoring + measurement fixes, RULES 2026-10-14
+
+Independent code review of the q1-q6 canary found two live scoring defects
+and the denominator-noise evidence DECISIONS #1 was waiting for. All fixed
+in one bundle, one RULES bump:
+
+1. n=1 merge dropped the batch drift bracket (stop-on-pass cells are
+   usually n=1, so the quarantined path was exactly the common pass shape).
+   Live: ling/opencode w3 ranked #2/12.58 on a 142k->201k drifted bracket;
+   its 2-trial sibling was correctly unscored. Fix: n=1 path propagates
+   `batch_drift` and suppresses `throughput_score` like the n>=2 path;
+   regression test `single_trial_drift_is_not_dropped`.
+2. OpenCode turned persistent provider throttles into model verdicts:
+   4 nemotron trials x ~50 min of free-tier 429 backoff each exited 0,
+   recorded `failed_tests` with 0 tokens, ranked P@1 0% with $0.09 of
+   compute floor. Fix: `is_throttled_noop` (per-attempt 429 flag + zero
+   tokens + zero tools) resumes while attempts remain, then fails in the
+   OMP billing envelope (non-result); pipeline gains a zero-token +
+   empty-workspace guard to `agent_failed` as defense in depth. Tests:
+   `test_throttled_noop_classification`, `test_zero_output_guard_stays_narrow`.
+3. Denominator noise: same pinned ref measured 87.7k vs 142.2k between two
+   concurrent batches; n=5000 windows spread 2.31x/CV 27.5%, n=100k
+   1.26x/CV 5.8% (10 windows each, same client/path). Redis windows
+   n -> 100000; `src/bench/mod.rs` + `batch_ref.rs` join GRADED_FILES
+   (apparatus was unhashed). Curve unchanged per DECISIONS #1.
+4. Smaller: protocol now set before the merge save (JSON/DB parity; all
+   re-merge paths pass it through); "median of 3" logs read BENCH_REPS;
+   CLI leaderboard tags rows with their harness (omp vs opencode no longer
+   reads as duplicate rows); leaked 42h sandbox container reaped.
+
+Suite 375/0, fmt, clippy clean. Existing q1-q6 rows keep their 2026-10-13
+stamp (no retroactive edits); the canary needs a re-run under the new
+stamp before any numbers are quoted. Engine/gui restart + re-run left to
+the operator (deploy gate).

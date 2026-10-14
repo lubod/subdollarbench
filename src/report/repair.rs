@@ -247,9 +247,21 @@ fn consolidate_and_remerge(
             }
         }
         let merged = if apply {
-            LeaderboardManager::consolidate_multi_trial_run(parent_id, &trial_rows, true, None)
+            LeaderboardManager::consolidate_multi_trial_run(
+                parent_id,
+                &trial_rows,
+                true,
+                None,
+                None,
+            )
         } else {
-            LeaderboardManager::consolidate_multi_trial_run(parent_id, &trial_rows, false, None)
+            LeaderboardManager::consolidate_multi_trial_run(
+                parent_id,
+                &trial_rows,
+                false,
+                None,
+                None,
+            )
         };
         match merged {
             Some(_) => {
@@ -285,9 +297,21 @@ fn consolidate_and_remerge(
             std::fs::write(results_dir.join(format!("{pid}.json")), text)?;
         }
         let merged = if apply {
-            LeaderboardManager::consolidate_multi_trial_run(&pid, &parent.subruns, true, old_drift)
+            LeaderboardManager::consolidate_multi_trial_run(
+                &pid,
+                &parent.subruns,
+                true,
+                old_drift,
+                parent.protocol.clone(),
+            )
         } else {
-            LeaderboardManager::consolidate_multi_trial_run(&pid, &parent.subruns, false, old_drift)
+            LeaderboardManager::consolidate_multi_trial_run(
+                &pid,
+                &parent.subruns,
+                false,
+                old_drift,
+                parent.protocol.clone(),
+            )
         };
         if merged.is_some() {
             remerged.push(pid.clone());

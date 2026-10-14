@@ -415,6 +415,15 @@ impl BenchmarkRunResult {
             single.solved = Some(c == 1);
             single.solved_at = if c == 1 { Some(1) } else { None };
             single.best_stage_score = Some(single.pass_rate);
+            // Batch bracket quarantine applies at n=1 exactly as it does to
+            // the n>=2 path below — the single-trial early return used to
+            // drop the `batch_drift` argument entirely, so stop-on-pass cells
+            // (the common 100% shape) published a throughput score divided by
+            // a denominator the batch itself had flagged as untrustworthy
+            // (live: ling/opencode w3 scored 12.58 on a 142k->201k drifted
+            // bracket while its 2-trial sibling was correctly quarantined).
+            // The candidate's own reading stays reported; only the score goes.
+            single.ref_drift = batch_drift.or(single.ref_drift);
             // Recompute the score under unified semantics: base at 100%,
             // scaled by P@1 (0 or 1 here). Keeps the trial's own cost,
             // duration, tokens — only the score formula unifies.
@@ -432,7 +441,7 @@ impl BenchmarkRunResult {
                 )
                 .unwrap_or(0.0)
             });
-            if single.throughput_score == Some(0.0) {
+            if single.throughput_score == Some(0.0) || single.ref_drift == Some(true) {
                 single.throughput_score = None;
             }
             return Some(single);
@@ -920,6 +929,7 @@ impl LeaderboardManager {
         subrun_results: &[BenchmarkRunResult],
         save_results: bool,
         batch_drift: Option<bool>,
+        protocol: Option<String>,
     ) -> Option<BenchmarkRunResult> {
         if subrun_results.is_empty() {
             return None;
@@ -955,6 +965,16 @@ impl LeaderboardManager {
             batch_drift,
             Some(crate::report::rules::fingerprint()),
         )?;
+        // Protocol is a batch-level property (stopping rule), not a trial
+        // field, so merge_subruns cannot reconstruct it from subruns. The
+        // caller passes the row's own value through re-merges (repair and
+        // extend do this, mirroring `batch_drift`); None means "not
+        // recorded", never a silent reset. Set BEFORE the save below so the
+        // results JSON and the DB row carry the same value — the old
+        // post-save upsert left the JSON without protocol (live: w3 JSON
+        // protocol=None vs DB sequential_cap).
+        let mut merged = merged;
+        merged.protocol = protocol.or(merged.protocol);
 
         if save_results {
             let repo_root = crate::config::get_repo_root();
@@ -1181,8 +1201,14 @@ impl LeaderboardManager {
                 let mut count = 0;
                 for run in store.load_all_parents() {
                     if !run.subruns.is_empty() {
-                        if Self::consolidate_multi_trial_run(&run.id, &run.subruns, true, None)
-                            .is_some()
+                        if Self::consolidate_multi_trial_run(
+                            &run.id,
+                            &run.subruns,
+                            true,
+                            None,
+                            run.protocol.clone(),
+                        )
+                        .is_some()
                         {
                             count += 1;
                         }
@@ -1205,6 +1231,7 @@ impl LeaderboardManager {
                                     &run.subruns,
                                     true,
                                     None,
+                                    run.protocol.clone(),
                                 ) {
                                     count += 1;
                                 }
@@ -1664,16 +1691,25 @@ impl LeaderboardManager {
             let (icon, model_color) = Self::get_model_cli_meta(&r.model);
             let short_model = Self::short_model_name(&r.model);
             let badge = Self::pricing_badge(&r.model);
+            // Harness is a rank dimension (frontier keys separate it), so the
+            // row must say which harness produced it: two identical-looking
+            // rows for one model are one omp cell and one opencode cell.
+            // Legacy pre-harness rows carry None and stay untagged.
+            let harness_tag = match r.harness.as_deref() {
+                Some(h) => format!(" [{h}]"),
+                None => String::new(),
+            };
             let model_display = if !r.subruns.is_empty() {
                 format!(
-                    "{} {}{} [{} trials · Fair E[Score]]",
+                    "{} {}{}{} [{} trials · Fair E[Score]]",
                     icon,
                     short_model,
                     badge,
+                    harness_tag,
                     r.subruns.len()
                 )
             } else {
-                format!("{} {}{}", icon, short_model, badge)
+                format!("{} {}{}{}", icon, short_model, badge, harness_tag)
             };
             let savings_str = format!("{:.0}%", r.savings_percent);
             let eff_str = r.effort.clone().unwrap_or_else(|| "auto".to_string());
@@ -2530,6 +2566,102 @@ mod tests {
 
         // Same trials, unknown bracket: not scored, not silently trusted.
         let unknown = BenchmarkRunResult::merge_subruns("unknown", subs, None, None).unwrap();
+        assert!(unknown.throughput_score.unwrap_or(0.0) > 0.0);
+    }
+
+    /// The n=1 early return must honor the batch bracket too: with
+    /// stop-on-pass, a 100% cell is usually a single trial, so the drifted
+    /// denominator bug hit exactly the most common passing shape. (Live:
+    /// ling/opencode w3 ranked #2 on a 142k->201k drifted bracket.)
+    #[test]
+    fn single_trial_drift_is_not_dropped() {
+        let trial = |id: &str| BenchmarkRunResult {
+            id: id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            language: "Go".to_string(),
+            effort: None,
+            effort_effective: None,
+            status: Some("completed".to_string()),
+            harness: Some("opencode".to_string()),
+            pass_rate: 100.0,
+            passed_stages: 4,
+            total_stages: 4,
+            throughput_req_sec: Some(35_000.0),
+            reference_throughput_req_sec: Some(142_000.0),
+            baseline_source: Some("batch".to_string()),
+            ref_drift: None,
+            ref_image: Some("docker.io/library/redis@sha256:abc".to_string()),
+            prompt_tokens: 1000,
+            cached_tokens: 0,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            total_cost_usd: 0.01,
+            cost_source: None,
+            cost_formula_usd: None,
+            effective_cost_usd: Some(0.02),
+            duration_seconds: Some(60.0),
+            turns: Some(10),
+            savings_percent: 0.0,
+            efficiency_score: 50.0,
+            throughput_score: Some(1.0),
+            timestamp: "2026-09-30T00:00:00Z".to_string(),
+            method_version: None,
+            rules_version: None,
+            graded_under: None,
+            subruns: Vec::new(),
+            total_trials: None,
+            pass_at_1: None,
+            pass_at_k: None,
+            avg_pass_rate: None,
+            pass_at_1_lo: None,
+            pass_at_1_hi: None,
+            stability: None,
+            frontier_fraction: None,
+            protocol: None,
+            solved: None,
+            solved_at: None,
+            best_stage_score: None,
+            repaired: None,
+            repair_attempted: None,
+            feedback_rounds: None,
+        };
+
+        let clean =
+            BenchmarkRunResult::merge_subruns("one-clean", vec![trial("a")], Some(false), None)
+                .unwrap();
+        assert_eq!(clean.ref_drift, Some(false));
+        assert!(
+            clean.throughput_score.unwrap_or(0.0) > 0.0,
+            "an un-drifted single trial must still score"
+        );
+
+        let drifted =
+            BenchmarkRunResult::merge_subruns("one-drift", vec![trial("a")], Some(true), None)
+                .unwrap();
+        assert_eq!(
+            drifted.ref_drift,
+            Some(true),
+            "n=1 must carry the batch bracket verdict, not drop it"
+        );
+        assert_eq!(
+            drifted.throughput_score, None,
+            "a drifted bracket must not yield a ranked throughput score at n=1"
+        );
+        assert_eq!(
+            drifted.throughput_req_sec,
+            Some(35_000.0),
+            "the candidate's own reading is still valid and must be reported"
+        );
+        assert!(
+            drifted.efficiency_score > 0.0,
+            "efficiency is cost/pass-based and must survive drift quarantine"
+        );
+
+        // Unknown bracket stays unknown: not silently trusted, not invented.
+        let unknown =
+            BenchmarkRunResult::merge_subruns("one-unknown", vec![trial("a")], None, None).unwrap();
+        assert_eq!(unknown.ref_drift, None);
         assert!(unknown.throughput_score.unwrap_or(0.0) > 0.0);
     }
 

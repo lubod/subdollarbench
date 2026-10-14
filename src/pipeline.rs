@@ -136,6 +136,17 @@ fn hash_seed(s: &str) -> String {
     format!("{:08x}", (hash ^ (hash >> 32)) as u32)
 }
 
+/// A trial with zero model tokens and an empty workspace is not a
+/// measurement: no model call ever landed and nothing runnable exists, so a
+/// 0% here is a harness/provider artifact, never a model verdict. Defense
+/// in depth for agent paths that can end `Ok` without the model running
+/// (live: opencode free-tier quota retries surfaced as `failed_tests` with
+/// 0 tokens and ranked 0%). Eval-only runs have no agent by design; a run
+/// with any real output keeps its own status.
+fn is_zero_output_non_result(eval_only: bool, total_tokens: u64, workspace_files: usize) -> bool {
+    !eval_only && total_tokens == 0 && workspace_files == 0
+}
+
 #[derive(Clone)]
 pub struct BenchmarkConfig {
     pub model: String,
@@ -1433,7 +1444,8 @@ impl BenchmarkPipeline {
                     .await
                     {
                         logger.log(&format!(
-                            "  Candidate Throughput (median of 3): {:.0} req/sec",
+                            "  Candidate Throughput (median of {}): {:.0} req/sec",
+                            crate::bench::BENCH_REPS,
                             tp
                         ));
                         throughput = Some(tp);
@@ -1475,7 +1487,8 @@ impl BenchmarkPipeline {
                     .await
                     {
                         logger.log(&format!(
-                            "  Candidate Throughput (median of 3): {:.0} req/sec",
+                            "  Candidate Throughput (median of {}): {:.0} req/sec",
+                            crate::bench::BENCH_REPS,
                             tp
                         ));
                         throughput = Some(tp);
@@ -1533,7 +1546,8 @@ impl BenchmarkPipeline {
                     .await
                     {
                         logger.log(&format!(
-                            "  Candidate Throughput (median of 3): {:.0} req/sec",
+                            "  Candidate Throughput (median of {}): {:.0} req/sec",
+                            crate::bench::BENCH_REPS,
                             tp
                         ));
                         throughput = Some(tp);
@@ -1735,7 +1749,15 @@ impl BenchmarkPipeline {
             // candidate. agent_failed stays on PipelineOutput for
             // telemetry; the status reflects the verdict.
             "completed".to_string()
-        } else if agent_failed {
+        } else if agent_failed
+            || is_zero_output_non_result(config.eval_only, total_run_tokens, scanned_files.len())
+        {
+            // Defense in depth: a session that ended Ok with zero model
+            // tokens and an empty workspace never ran the model — that is a
+            // harness/provider fault, not a 0% verdict. (Live: opencode
+            // free-tier quota retries once surfaced exactly this shape as
+            // `failed_tests` and ranked 0%.) Eval-only runs and any run with
+            // real output stay on their own paths.
             "agent_failed".to_string()
         } else {
             "failed_tests".to_string()
@@ -2099,6 +2121,21 @@ mod tests {
         // exhausted, never negative).
         assert_eq!(repair_round_allowance(100, 100), RepairAllowance::Exhausted);
         assert_eq!(repair_round_allowance(100, 140), RepairAllowance::Exhausted);
+    }
+
+    /// Zero model output + empty workspace is a provider/harness fault, not
+    /// a 0% verdict. The guard must stay narrow: eval-only runs and any run
+    /// with tokens or files are untouched (live regression: opencode quota
+    /// retries ranked as failed_tests with 0 tokens).
+    #[test]
+    fn test_zero_output_guard_stays_narrow() {
+        assert!(is_zero_output_non_result(false, 0, 0));
+        // Real output keeps its own status.
+        assert!(!is_zero_output_non_result(false, 1, 0));
+        assert!(!is_zero_output_non_result(false, 0, 1));
+        assert!(!is_zero_output_non_result(false, 1500, 2));
+        // Eval-only has no agent by design.
+        assert!(!is_zero_output_non_result(true, 0, 0));
     }
 
     #[tokio::test]

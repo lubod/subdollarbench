@@ -528,21 +528,21 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1)
                 && !subrun_results.is_empty()
             {
-                let mut m = LeaderboardManager::consolidate_multi_trial_run(
+                // Protocol is set BEFORE the merge/save so the JSON export
+                // and the DB row agree (the old post-save upsert wrote only
+                // the DB; it also ignored `no_save`).
+                let protocol = if stop_on_pass {
+                    Some("sequential_cap".to_string())
+                } else {
+                    None
+                };
+                LeaderboardManager::consolidate_multi_trial_run(
                     &parent_run_id,
                     &subrun_results,
                     !no_save,
                     batch_drift,
-                );
-                if stop_on_pass {
-                    if let Some(ref mut res) = m {
-                        res.protocol = Some("sequential_cap".to_string());
-                        if let Some(store) = LeaderboardManager::open_store_if_exists() {
-                            let _ = store.upsert_parent(res);
-                        }
-                    }
-                }
-                m
+                    protocol,
+                )
             } else {
                 None
             };
@@ -632,6 +632,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             .as_ref()
                             .and_then(|m| m.ref_drift)
                             .or(batch.drift);
+                        // Protocol rides the same way as drift: the parent's
+                        // stopping rule survives an extension re-merge.
+                        let kept_protocol = merged_opt.as_ref().and_then(|m| m.protocol.clone());
                         // Take ownership back for the reassignment below
                         // (borrow ends here; NLL releases it).
                         let _ = &kept_drift;
@@ -640,6 +643,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             &subrun_results,
                             !no_save,
                             kept_drift,
+                            kept_protocol,
                         );
                     }
                 }
@@ -2267,8 +2271,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
             let total = combined.len();
             let passing = combined.iter().filter(|r| r.pass_rate >= 100.0).count();
-            let final_merged =
-                LeaderboardManager::consolidate_multi_trial_run(&pid, &combined, true, batch.drift);
+            let final_merged = LeaderboardManager::consolidate_multi_trial_run(
+                &pid,
+                &combined,
+                true,
+                batch.drift,
+                merged.protocol.clone(),
+            );
             let pass_at_1 = compute_pass_at_k(total, passing, 1) * 100.0;
             let pass_at_k = compute_pass_at_k(total, passing, total) * 100.0;
             println!("extended {pid}: {total} trials, {passing} passing, Pass@1 {pass_at_1:.1}% Pass@{total} {pass_at_k:.1}%");

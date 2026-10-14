@@ -1312,6 +1312,7 @@ pub async fn execute_extend_body(
             &combined,
             true,
             drift,
+            data.protocol.clone(),
         );
         let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
         let (stab2, reason2) = assess_stability(&parked);
@@ -1907,21 +1908,20 @@ pub async fn execute_run_body(
     let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1)
         && !subrun_results.is_empty()
     {
-        let mut m = LeaderboardManager::consolidate_multi_trial_run(
+        // Protocol is set BEFORE the merge/save so the JSON export and the
+        // DB row agree (the old post-save upsert wrote only the DB).
+        let protocol = if stop_on_pass {
+            Some("sequential_cap".to_string())
+        } else {
+            None
+        };
+        LeaderboardManager::consolidate_multi_trial_run(
             &parent_run_id,
             &subrun_results,
             req.save_results.unwrap_or(true),
             Some(any_drift),
-        );
-        if stop_on_pass {
-            if let Some(ref mut res) = m {
-                res.protocol = Some("sequential_cap".to_string());
-                if let Some(store) = LeaderboardManager::open_store_if_exists() {
-                    let _ = store.upsert_parent(res);
-                }
-            }
-        }
-        m
+            protocol,
+        )
     } else {
         None
     };
@@ -2041,6 +2041,8 @@ pub async fn execute_run_body(
                 &subrun_results,
                 req.save_results.unwrap_or(true),
                 Some(any_drift),
+                // Auto-extend only runs inside stop-on-pass cells.
+                Some("sequential_cap".to_string()),
             );
         }
     }

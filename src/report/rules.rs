@@ -8,6 +8,25 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14`: review-round fixes (scoring + measurement). (1) The n=1
+///   merge path in `merge_subruns` now honors the batch drift bracket
+///   instead of dropping it — stop-on-pass cells (a 100% cell is usually a
+///   single trial) published throughput scores divided by denominators the
+///   batch itself had flagged (live: one opencode cell scored 12.58 on a
+///   142k->201k drifted bracket while its 2-trial sibling was correctly
+///   quarantined). (2) Persistent provider throttles under the opencode
+///   harness are no longer model verdicts: a session with zero model tokens
+///   and zero tool calls behind a 429/quota wall fails in the OMP billing
+///   envelope (non-result), and the pipeline gates any zero-token +
+///   empty-workspace session to `agent_failed` as defense in depth (live:
+///   free-tier daily quota recorded 4 trials x ~50 min as ranked P@1 0%).
+///   (3) Redis load windows n=5000 -> 100000 (measured 2.31x/CV 27.5% ->
+///   1.26x/CV 5.8% spread, 10 windows each) because the r(1+2r) multiplier
+///   amplifies denominator noise quadratically; `src/bench/mod.rs` and
+///   `src/bench/batch_ref.rs` join GRADED_FILES so apparatus drift is
+///   hashed like verifier drift. Rows stamped `2026-10-13` or earlier are
+///   not comparable without `backfill --yes`; archived waves keep their
+///   stamps (annotation only, never retroactive rescoring).
 /// - `2026-10-13`: non-result exclusion + repair-attempt telemetry. Merges
 ///   drop harness/agent non-results (`agent_failed`, `agent_killed`,
 ///   `infra_error`, unknown futures) from every pass aggregate alongside
@@ -180,7 +199,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-13";
+pub const RULES_VERSION: &str = "2026-10-14";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
@@ -206,6 +225,10 @@ const GRADED_FILES: &[&str] = &[
     // The scoring and ranking path, not just the judging.
     "src/cost/calculator.rs",
     "src/report/leaderboard.rs",
+    // The measurement apparatus: load-test shape and batch-bracket math
+    // move every recorded denominator, so they are graded inputs too.
+    "src/bench/mod.rs",
+    "src/bench/batch_ref.rs",
 ];
 
 /// Hash of the graded inputs, as `"{RULES_VERSION}+{hex8}"`.

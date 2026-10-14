@@ -125,6 +125,20 @@ impl OpenCodeRunner {
         true
     }
 
+    /// A "clean exit" that never ran the model: the provider answered the
+    /// attempt with a rate-limit/quota signal (per-attempt flag) and the
+    /// whole session produced zero model tokens and zero tool calls. The
+    /// process exit code says nothing about the model on a 429 wall —
+    /// opencode's internal retry ladder can exit 0 — so this must never
+    /// conclude as a model verdict. Live defect this fixes: the free-tier
+    /// `free-models-per-day-high-balance` quota, 4 trials x ~50 min of
+    /// backoff, each recorded as `failed_tests` with 0 tokens and ranked
+    /// P@1 0% — the exact provider-fault-as-model-failure this repo's
+    /// non-result doctrine (RULES 2026-10-13) exists to exclude.
+    fn is_throttled_noop(rate_limited: bool, total_tokens: u64, tools: u32) -> bool {
+        rate_limited && total_tokens == 0 && tools == 0
+    }
+
     fn cap_line(s: &str) -> String {
         const MAX: usize = 1500;
         if s.len() > MAX {
@@ -891,7 +905,61 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 )),
             );
             let tail = attempt_tail.lock().unwrap().join(" | ");
+            // Snapshot the throttle-wall signal once: fixed for this
+            // iteration (per-attempt flag + whole-session token/tool counts).
+            let throttled_noop = Self::is_throttled_noop(
+                rate_limited.load(Ordering::SeqCst),
+                st.prompt_tokens + st.completion_tokens + st.cached_tokens,
+                attempt_tools.load(Ordering::SeqCst),
+            );
             match waited {
+                // Deadline/cancel first: when the wall clock ran out, that is
+                // the operative fact — a simultaneously-set throttle flag
+                // must not drive a resume whose backoff would be cut short.
+                _ if timed_out || cancelled => {
+                    break Err(anyhow!(OmpExecutionError {
+                        message: if cancelled {
+                            "opencode run cancelled by user".to_string()
+                        } else {
+                            "opencode timeout reached".to_string()
+                        },
+                        partial_stats: st,
+                    }))
+                }
+                // Provider throttle with zero model output is not a model
+                // verdict, whatever the exit code: resume while attempts
+                // remain, then fail loudly in the OMP billing envelope so
+                // the trial is a non-result (neutral fault, excluded from
+                // aggregates), never a ranked 0% that reads as a capability
+                // result. Must be matched before the success arm: opencode's
+                // retry ladder exits 0 on a quota wall.
+                _ if throttled_noop && attempt < MAX_RESUMES => {
+                    let wait_s = (60u64.saturating_mul(1u64 << attempt.min(4))).min(900);
+                    let _ = retry_tx.send(format!(
+                        "[RETRY] provider rate-limited with zero model output (attempt {}/{}); backing off {}s then resuming session {}",
+                        attempt + 1,
+                        MAX_RESUMES + 1,
+                        wait_s,
+                        session_id
+                    ));
+                    if !Self::backoff_sleep(attempt, deadline, &cancel_flag) {
+                        break Err(anyhow!(OmpExecutionError {
+                            message: "opencode backoff interrupted (timeout/cancel)".to_string(),
+                            partial_stats: st,
+                        }));
+                    }
+                    attempt += 1;
+                    continue;
+                }
+                _ if throttled_noop => {
+                    break Err(anyhow::Error::new(OmpBillingError {
+                        reason: format!(
+                            "opencode provider rate-limited for all {} attempts with zero model output (quota/throttle); trial recorded as a non-result",
+                            MAX_RESUMES + 1
+                        ),
+                        partial_stats: st,
+                    }))
+                }
                 Some(status) if status.success() && !limited => {
                     // Cutoff recovery: a clean exit that never acted (0
                     // tools, empty workspace) is a truncated turn, not a
@@ -922,16 +990,6 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     // (see pipeline status chain); cost still prices the run.
                     let _ = msg;
                     break Ok(st);
-                }
-                _ if timed_out || cancelled => {
-                    break Err(anyhow!(OmpExecutionError {
-                        message: if cancelled {
-                            "opencode run cancelled by user".to_string()
-                        } else {
-                            "opencode timeout reached".to_string()
-                        },
-                        partial_stats: st,
-                    }))
                 }
                 _ if variant_failed.load(Ordering::SeqCst)
                     && !variant_disabled.load(Ordering::SeqCst) =>
@@ -1303,5 +1361,23 @@ mod tests {
             &serde_json::Value::Null,
             "output 429 tokens used"
         ));
+    }
+
+    /// A throttled no-op is a provider fault, never a model verdict. The
+    /// condition must stay narrow: any real model output (tokens or tool
+    /// calls) disqualifies it, and a clean session without a rate-limit
+    /// stays a normal (model-failure) shape — the cutoff-recovery path
+    /// owns that case.
+    #[test]
+    fn test_throttled_noop_classification() {
+        // The live nemotron shape: 429 wall, 0 tokens, 0 tools.
+        assert!(OpenCodeRunner::is_throttled_noop(true, 0, 0));
+        // Any model interaction is real work — never reclassified.
+        assert!(!OpenCodeRunner::is_throttled_noop(true, 1, 0));
+        assert!(!OpenCodeRunner::is_throttled_noop(true, 0, 1));
+        assert!(!OpenCodeRunner::is_throttled_noop(true, 5000, 3));
+        // No rate-limit signal: a genuinely empty session is the
+        // cutoff-recovery arm's case, not billing.
+        assert!(!OpenCodeRunner::is_throttled_noop(false, 0, 0));
     }
 }

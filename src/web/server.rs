@@ -2042,6 +2042,7 @@ pub(crate) async fn extend_parent_run(
                 &combined,
                 true,
                 drift,
+                data.protocol.clone(),
             );
             let parked: Vec<BenchmarkRunResult> = merged.map(|m| m.subruns).unwrap_or_default();
             let (stab2, reason2) = assess_stability(&parked);

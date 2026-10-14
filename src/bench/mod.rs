@@ -12,7 +12,18 @@ use std::time::{Duration, Instant};
 /// changing these moves every recorded denominator, so they are constants,
 /// not flags. `-q` keeps redis-benchmark output to the parseable summary
 /// lines the regex depends on.
-pub const REDIS_BENCH_N: &str = "5000";
+///
+/// n=100000, not 5000: a 5k window is ~60ms of load, and the observed
+/// spread at n=5000 is 2.31x (CV 27.5%, 10 windows, pinned ref, same
+/// client/path; long-run medians at n=100k: 1.26x, CV 5.8% — measured
+/// 2026-10-14 on this box). The batch bracket's 10% tolerance cannot
+/// stabilize a 27%-CV instrument, and the throughput score multiplies the
+/// ratio by r(1+2r), so denominator noise was amplified quadratically.
+/// A 100k window is ~0.8s of load per rep; 5 reps + warmup adds seconds
+/// per measurement, not minutes. Absolute medians rise with n (startup
+/// amortization, 155k -> 261k median here); numerator and denominator use
+/// the same n, so the ratio stays the measured quantity.
+pub const REDIS_BENCH_N: &str = "100000";
 pub const REDIS_BENCH_C: &str = "10";
 pub const WRK_THREADS: &str = "2";
 pub const WRK_CONNS: &str = "20";

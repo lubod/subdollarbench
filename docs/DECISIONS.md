@@ -2,11 +2,17 @@
 
 One entry each; 5 lines max. Status + next trigger, not essays.
 
-## 1. Throughput curve deliberately unchanged (2026-10-03.5)
+## 1. Throughput curve deliberately unchanged (2026-10-03.5, updated 2026-10-14)
 `src/report/rules.rs` regime notes: verifier pins shipped, curve untouched —
 zero anchored ratios in the fresh wave (5/5 drifted), so any retune is unverifiable.
-Revisit when a wave yields anchored redis/http ratios under the bench lock.
-Ref: `6891313`, `src/report/rules.rs:20-35`.
+2026-10-14: reproducibility evidence arrived by the batch — the same pinned ref
+measured 87.7k vs 142.2k within seconds (two concurrent batches), tracking the
+n=5000 window's 2.31x spread/CV 27.5%; n=100k windows measure 1.26x/CV 5.8%
+(10 windows, same client/path). Fix landed: windows lengthened + bench files
+hashed (RULES 2026-10-14). Curve still unchanged — now it has a stable
+instrument to validate against.
+Revisit when a wave yields anchored redis/http ratios under the 2026-10-14 stamp.
+Ref: `6891313`, `src/report/rules.rs`, `src/bench/mod.rs`.
 
 ## 2. DNS task removed, rows archived (2026-10-05)
 Lenient verifier (hard-coded-table satisfiable) + unmeasurable mock denominator
