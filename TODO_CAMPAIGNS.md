@@ -291,8 +291,18 @@ non-redis acceptance adapters.
   an args unit test. Live plumbing validation (candidate container with
   the published port + the stage-10 block) still needs a run that reaches
   t7 — no model has passed t3 yet.** Nemotron cell at 2026-10-15 00:05
-  runs the 8-ticket spec; its path through t0-t6 is behavior-identical to
-  earlier cells (stage 10 gates on acceptance only).
+  runs the 9-ticket spec; its path through t0-t6 is behavior-identical to
+  earlier cells (stages 10/11 gate on acceptance only).
+- **Ticket 8 (security) built** (2026-10-14 late, RULES `2026-10-14.9`):
+  stage 11 verifier — RESP auth gate (`SDB_PASSWORD`), dashboard Basic
+  auth (401 bare), oversized-frame probes under a 64MB memory cap
+  (64MB bulk header / 2M-arg multibulk must react without buffering), an
+  8-payload fuzz corpus with liveness after each, a 12-connection
+  slow-loris probe, and a 2000-line container-log scan for the secret.
+  Pipeline restarts the candidate with the secret env + `64m` cap and
+  restores it afterwards. **Validation: threaded mock test (faithful
+  pass / skipped-auth fail / buffered-oversize fail); live plumbing
+  awaits a t8-reaching run.**
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
   **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
   25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
