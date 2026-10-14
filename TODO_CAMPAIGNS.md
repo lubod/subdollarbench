@@ -208,6 +208,19 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **Harness validation — eval-only replay** (2026-10-14, `..._151415`, no
+  model calls): seeded the run-3 workspace through the full 0-6 spec.
+  t0-t3 **PASS** (3/3, 4/4, 5/5, 6/6 — the AOF SIGKILL/restart is clean on
+  the fixed binary), t4 **FAIL 6/7**: **stage 8 executed live for the
+  first time** — the fault container (8MB tmpfs `/data`, `SDB_DATA_DIR`)
+  started, served, and swallowed the verifier's 240KB fill with a hang.
+  Reproduced standalone on a workspace copy: the candidate wedges
+  permanently on any `SET` >= 64KB (60s+ no reply; 1KB works), i.e., a
+  genuine candidate bug caught by the ticket, not a verifier timeout.
+  All three advisory probes **PASS** (slow-sender self-seed fix,
+  differential vs ref-redis, malformed survival); anchors keep every
+  stage network alive. Stage 7 (INFO) and stage 9 (tests&CI) remain
+  unexecuted live; canary run 5 in flight chases them.
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
   **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
   25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
