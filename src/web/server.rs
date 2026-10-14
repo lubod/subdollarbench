@@ -1384,6 +1384,96 @@ pub(crate) async fn get_run_log(AxumPath(run_id): AxumPath<String>) -> Response 
     }
 }
 
+/// Campaign list for the GUI: every `runs/campaign_*` directory with its
+/// live `status.json` (the foreground CLI publishes it at ticket
+/// boundaries) and, once finished, the `campaign.json` rollup.
+/// Newest-first, capped.
+pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
+    let runs_dir = RunArchiver::resolve_runs_dir();
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&runs_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let dir = e.path();
+            if !name.starts_with("campaign_") || !dir.is_dir() {
+                continue;
+            }
+            let mut v = std::fs::read_to_string(dir.join("status.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or_else(
+                    || serde_json::json!({"state": "unknown", "rollup": serde_json::Value::Null}),
+                );
+            if let Ok(t) = std::fs::read_to_string(dir.join("campaign.json")) {
+                if let Ok(r) = serde_json::from_str::<serde_json::Value>(&t) {
+                    v["state"] = serde_json::json!("done");
+                    v["rollup"] = r;
+                }
+            }
+            v["id"] = serde_json::json!(name);
+            out.push(v);
+        }
+    }
+    out.sort_by(|a, b| {
+        b["id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["id"].as_str().unwrap_or(""))
+    });
+    out.truncate(50);
+    Json(out)
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct CampaignLogQuery {
+    /// Max lines to return (newest). Defaults to 400.
+    tail: Option<usize>,
+}
+
+/// Live campaign console: `live.log` while/after a run (append-only, written
+/// by the campaign CLI), falling back to the newest stage `console.log`
+/// (campaigns recorded before live logging existed).
+pub(crate) async fn get_campaign_log(
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<CampaignLogQuery>,
+) -> Response {
+    let clean = match clean_run_id(&id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid campaign id").into_response(),
+    };
+    let dir = RunArchiver::resolve_runs_dir().join(&clean);
+    let mut path = dir.join("live.log");
+    if !path.is_file() {
+        let mut best: Option<(u32, std::path::PathBuf)> = None;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if let Some(rest) = n.strip_prefix('s') {
+                    if let Ok(stage) = rest.parse::<u32>() {
+                        let p = e.path().join("console.log");
+                        if p.is_file() && best.as_ref().map(|(b, _)| stage > *b).unwrap_or(true) {
+                            best = Some((stage, p));
+                        }
+                    }
+                }
+            }
+        }
+        match best {
+            Some((_, p)) => path = p,
+            None => return (StatusCode::NOT_FOUND, "no campaign log yet").into_response(),
+        }
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let tail = q.tail.unwrap_or(400).max(1);
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(tail);
+            lines[start..].join("\n").into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "campaign log unreadable").into_response(),
+    }
+}
+
 pub(crate) async fn get_run_files(
     AxumPath(run_id): AxumPath<String>,
 ) -> Result<Json<Vec<FileInfo>>, Response> {

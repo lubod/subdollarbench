@@ -21,9 +21,11 @@ use subdollarbench::config::{Harness, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use subdollarbench::report::RunArchiver;
 
-/// Tee logger: live output for the operator + the buffered stage console.
+/// Tee logger: live output for the operator + a buffered stage console +
+/// an append-only `live.log` the GUI tails while the campaign runs.
 struct CampaignLogger {
     buf: Arc<Mutex<Vec<String>>>,
+    live: std::path::PathBuf,
 }
 
 impl PipelineLogger for CampaignLogger {
@@ -33,7 +35,63 @@ impl PipelineLogger for CampaignLogger {
         if let Ok(mut b) = self.buf.lock() {
             b.push(format!("[{ts}] {msg}"));
         }
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.live)
+            {
+                let _ = writeln!(f, "[{ts}] {msg}");
+            }
+        }
     }
+}
+
+/// Atomic-ish JSON write (tmp + rename): the GUI polls these files while
+/// the campaign runs, so it must never observe a torn document.
+fn atomic_write_json(path: &Path, v: &serde_json::Value) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+fn status_path(cdir: &Path) -> std::path::PathBuf {
+    cdir.join("status.json")
+}
+
+/// Publish the live campaign view: state + current ticket + rollup-so-far.
+fn write_status(
+    cdir: &Path,
+    state: &str,
+    current_stage: Option<u32>,
+    rollup: Option<&CampaignRollup>,
+) {
+    let mut v = serde_json::json!({
+        "state": state,
+        "current_stage": current_stage,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Some(r) = rollup {
+        v["rollup"] = serde_json::to_value(r).unwrap_or(serde_json::Value::Null);
+    }
+    atomic_write_json(&status_path(cdir), &v);
+}
+
+/// Mark the ticket as running without discarding the rollup written so far.
+fn bump_current_stage(cdir: &Path, stage: u32) {
+    let mut v = std::fs::read_to_string(status_path(cdir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["state"] = serde_json::json!("running");
+    v["current_stage"] = serde_json::json!(stage);
+    v["updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    if v.get("rollup").is_none() {
+        v["rollup"] = serde_json::Value::Null;
+    }
+    atomic_write_json(&status_path(cdir), &v);
 }
 
 pub fn list() -> Result<()> {
@@ -161,34 +219,43 @@ pub async fn run(
         budget_usd,
     };
 
-    let rollup = campaign::run_campaign(&lc, &opts, |stage| {
-        let stage = stage.clone();
-        let lc = lc.clone();
-        let model = model.clone();
-        let effort = effort.clone();
-        let api_key = api_key.clone();
-        let cdir = cdir.clone();
-        let workdir = workdir.clone();
-        let campaign_id = campaign_id.clone();
-        async move {
-            run_one_stage(
-                &lc,
-                &stage,
-                &campaign_id,
-                &model,
-                &effort,
-                harness,
-                api_key,
-                timeout_min,
-                &cdir,
-                &workdir,
-                eval_only,
-            )
-            .await
-        }
-    })
+    write_status(&cdir, "running", Some(0), None);
+
+    let on_stage = |r: &CampaignRollup| write_status(&cdir, "running", None, Some(r));
+    let rollup = campaign::run_campaign(
+        &lc,
+        &opts,
+        |stage| {
+            let stage = stage.clone();
+            let lc = lc.clone();
+            let model = model.clone();
+            let effort = effort.clone();
+            let api_key = api_key.clone();
+            let cdir = cdir.clone();
+            let workdir = workdir.clone();
+            let campaign_id = campaign_id.clone();
+            async move {
+                run_one_stage(
+                    &lc,
+                    &stage,
+                    &campaign_id,
+                    &model,
+                    &effort,
+                    harness,
+                    api_key,
+                    timeout_min,
+                    &cdir,
+                    &workdir,
+                    eval_only,
+                )
+                .await
+            }
+        },
+        Some(&on_stage),
+    )
     .await?;
 
+    write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
     print_rollup(&rollup);
@@ -213,18 +280,17 @@ async fn run_one_stage(
     let run_id = format!("{campaign_id}_s{}", stage.id);
     let stage_dir = cdir.join(format!("s{}", stage.id));
     std::fs::create_dir_all(&stage_dir)?;
-
-    println!(
-        "\n{}",
-        format!(
-            "─── ticket {} [{}] {} (acceptance {:?}, budget ${:.2}) ───",
-            stage.id, stage.kind, stage.title, stage.acceptance.redis_stages, stage.budget_usd
-        )
-        .bold()
-    );
+    bump_current_stage(cdir, stage.id);
 
     let buf = Arc::new(Mutex::new(Vec::<String>::new()));
-    let logger: Arc<dyn PipelineLogger> = Arc::new(CampaignLogger { buf: buf.clone() });
+    let logger: Arc<dyn PipelineLogger> = Arc::new(CampaignLogger {
+        buf: buf.clone(),
+        live: cdir.join("live.log"),
+    });
+    logger.log(&format!(
+        "─── ticket {} [{}] {} (acceptance {:?}, budget ${:.2}) ───",
+        stage.id, stage.kind, stage.title, stage.acceptance.redis_stages, stage.budget_usd
+    ));
 
     let config = BenchmarkConfig {
         model: model.to_string(),

@@ -343,26 +343,45 @@ pub struct CampaignRunOptions {
 
 /// Run the ladder. `exec` performs one ticket (agent + verification) and
 /// returns its outcome; orchestration (stops, regressions, rollup) is pure
-/// and unit-tested with a mock executor.
+/// and unit-tested with a mock executor. `on_stage` receives the
+/// rollup-so-far after every ticket (and on budget stop) so callers can
+/// publish live progress.
 pub async fn run_campaign<F, Fut>(
     lc: &LoadedCampaign,
     opts: &CampaignRunOptions,
     mut exec: F,
+    on_stage: Option<&dyn Fn(&CampaignRollup)>,
 ) -> Result<CampaignRollup>
 where
     F: FnMut(&StageSpec) -> Fut,
     Fut: std::future::Future<Output = Result<StageOutcome>>,
 {
     let started_at = chrono::Utc::now().to_rfc3339();
-    let mut stages: Vec<StageRecord> = Vec::new();
     let mut best: HashMap<u32, bool> = HashMap::new();
     let mut reached: Option<u32> = None;
     let mut total_cost = 0.0f64;
-    let mut over_budget = false;
+    let mut rollup = CampaignRollup {
+        campaign_id: opts.campaign_id.clone(),
+        name: lc.spec.name.clone(),
+        model: opts.model.clone(),
+        harness: opts.harness.clone(),
+        effort: opts.effort.clone(),
+        task: lc.spec.task.clone(),
+        started_at: started_at.clone(),
+        finished_at: started_at,
+        stages: Vec::new(),
+        reached: None,
+        regression_free_tickets: 0,
+        total_cost_usd: 0.0,
+        over_budget: false,
+    };
 
     for stage in &lc.spec.stages {
         if opts.budget_usd > 0.0 && total_cost >= opts.budget_usd {
-            over_budget = true;
+            rollup.over_budget = true;
+            if let Some(cb) = on_stage {
+                cb(&rollup);
+            }
             break;
         }
         let out = exec(stage)
@@ -383,7 +402,7 @@ where
         } else {
             "failed"
         };
-        stages.push(StageRecord {
+        rollup.stages.push(StageRecord {
             id: stage.id,
             title: stage.title.clone(),
             kind: stage.kind.clone(),
@@ -403,30 +422,26 @@ where
         });
         if out.passed {
             reached = Some(stage.id);
-        } else {
+        }
+        // Progressive view for the GUI: the rollup-so-far is published
+        // after every ticket (status.json writer in main_campaign).
+        rollup.reached = reached;
+        rollup.total_cost_usd = total_cost;
+        rollup.regression_free_tickets = rollup
+            .stages
+            .iter()
+            .filter(|r| r.passed && r.regressed.is_empty())
+            .count() as u32;
+        if let Some(cb) = on_stage {
+            cb(&rollup);
+        }
+        if !out.passed {
             break;
         }
     }
 
-    let regression_free_tickets = stages
-        .iter()
-        .filter(|r| r.passed && r.regressed.is_empty())
-        .count() as u32;
-    Ok(CampaignRollup {
-        campaign_id: opts.campaign_id.clone(),
-        name: lc.spec.name.clone(),
-        model: opts.model.clone(),
-        harness: opts.harness.clone(),
-        effort: opts.effort.clone(),
-        task: lc.spec.task.clone(),
-        started_at,
-        finished_at: chrono::Utc::now().to_rfc3339(),
-        stages,
-        reached,
-        regression_free_tickets,
-        total_cost_usd: total_cost,
-        over_budget,
-    })
+    rollup.finished_at = chrono::Utc::now().to_rfc3339();
+    Ok(rollup)
 }
 
 /// Host-side git commit of the current workspace state as one stage.
@@ -459,7 +474,9 @@ pub fn git_commit_stage(
         git(&["init", "-q"])?;
         std::fs::write(
             workdir.join(".gitignore"),
-            "target/\nnode_modules/\n__pycache__/\n*.o\n*.tmp\n",
+            // Runtime state (AOF/dumps) is evidence on disk, never source:
+            // committing it bloated the first replay's stage diffs (123k lines).
+            "target/\nnode_modules/\n__pycache__/\n*.o\n*.tmp\nappendonly.log\n*.aof\n*.rdb\n",
         )?;
     }
     git(&["add", "-A"])?;
@@ -686,18 +703,30 @@ mod tests {
             budget_usd: 10.0,
         };
         let mut calls = 0;
-        let rollup = run_campaign(&lc, &opts, |stage| {
-            calls += 1;
-            let out = if stage.id < 2 {
-                outcome(true, &[(1, true), (2, true), (3, stage.id >= 1)])
-            } else {
-                outcome(false, &[(1, true), (2, true), (3, true), (5, false)])
-            };
-            async move { Ok(out) }
-        })
+        let snaps = std::cell::RefCell::new(Vec::new());
+        let cb = |r: &CampaignRollup| snaps.borrow_mut().push(r.stages.len());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |stage| {
+                calls += 1;
+                let out = if stage.id < 2 {
+                    outcome(true, &[(1, true), (2, true), (3, stage.id >= 1)])
+                } else {
+                    outcome(false, &[(1, true), (2, true), (3, true), (5, false)])
+                };
+                async move { Ok(out) }
+            },
+            Some(&cb),
+        )
         .await
         .unwrap();
         assert_eq!(calls, 3);
+        assert_eq!(
+            *snaps.borrow(),
+            vec![1, 2, 3],
+            "progressive rollup fires after every ticket"
+        );
         assert_eq!(
             rollup.reached,
             Some(1),
@@ -718,9 +747,12 @@ mod tests {
             effort: "high".into(),
             budget_usd: 0.005, // one stage costs 0.01; the second never starts
         };
-        let rollup = run_campaign(&lc, &opts, |_stage| async {
-            Ok(outcome(true, &[(1, true), (2, true)]))
-        })
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |_stage| async { Ok(outcome(true, &[(1, true), (2, true)])) },
+            None,
+        )
         .await
         .unwrap();
         assert!(rollup.over_budget);
@@ -739,16 +771,21 @@ mod tests {
             budget_usd: 10.0,
         };
         // Stage 0 green; stage 1 regresses stage 1 (was green, now red).
-        let rollup = run_campaign(&lc, &opts, |stage| {
-            let out = if stage.id == 0 {
-                outcome(true, &[(1, true), (2, true)])
-            } else {
-                let mut o = outcome(false, &[(1, false), (2, true)]);
-                o.agent_failed = true;
-                o
-            };
-            async move { Ok(out) }
-        })
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |stage| {
+                let out = if stage.id == 0 {
+                    outcome(true, &[(1, true), (2, true)])
+                } else {
+                    let mut o = outcome(false, &[(1, false), (2, true)]);
+                    o.agent_failed = true;
+                    o
+                };
+                async move { Ok(out) }
+            },
+            None,
+        )
         .await
         .unwrap();
         let s1 = &rollup.stages[1];
