@@ -218,6 +218,20 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-6, 2026-10-14 run 7, `..._160300`): reached
+  **2** — s0 3/3 ($0.0219, 20t), s1 4/4 ($0.0302, 13t at the reduced cap),
+  s2 5/5 ($0.0455, 13 initial + 12 repair — the repair converted the
+  pub/sub routing bug), s3 durability **FAIL 0/6** ($0.0441, 18 + 12,
+  regressions [1..5]). $0.1417, tickets/$ 21.2, 3 regression-free. s3:
+  the initial attempt left `NameError: deque` (client threads died before
+  reading — every stage timed out; one smoke test would have caught it,
+  none was run); the repair fixed that, discovered writes still failed
+  (`main()` never called `wal_recover()`, so `WAL_FD is None`), diagnosed
+  it correctly **on its final turn** and the fix edit emitted `def main():`
+  twice -> IndentationError -> refused. Third straight cell where the
+  repair lands a broken edit at the cap. Genuine; harness clean. Ling's
+  effective profile on s3: needs ~35+ turns for the WAL ticket and always
+  leaves 1-2 small bugs at the pool edge.
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 6, `..._154729`): reached
   **1** — s0 3/3 ($0.0281, 18t), s1 4/4 ($0.0260, 13t — first live use of
   the 12-turn reserve, passed at the reduced initial cap), s2 pub/sub
