@@ -2033,7 +2033,18 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                             match remote::post_json(&server, "/api/queue", &body).await {
                                 Ok(resp) => {
                                     let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                                    println!("enqueued {id}: {m} {t} {e} x{trials}");
+                                    // Say what will actually run: stop-on-pass
+                                    // clamps the dispatched batch to SCREEN_CAP_TRIALS,
+                                    // so "x9" alone reads as nine trials per cell.
+                                    let trial_label = if stop_on_pass {
+                                        format!(
+                                            "x{trials} (screening <= {})",
+                                            trials.min(subdollarbench::config::SCREEN_CAP_TRIALS)
+                                        )
+                                    } else {
+                                        format!("x{trials}")
+                                    };
+                                    println!("enqueued {id}: {m} {t} {e} {trial_label}");
                                     ok += 1;
                                 }
                                 Err(err) => eprintln!("enqueue failed {m} {t} {e}: {err:#}"),

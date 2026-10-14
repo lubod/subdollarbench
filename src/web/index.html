@@ -3358,7 +3358,8 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         const key = `${rk.model}\u0001${rk.effort || 'auto'}\u0001${(rk.task || '').toLowerCase()}\u0001${(rk.harness || 'omp').toLowerCase()}`;
         if (qi.status === 'Pending') pendPos++;
         queued[key] = { status: qi.status, id: qi.id, pos: qi.status === 'Pending' ? pendPos : 0,
-          trials: rk.trials ?? 9, note: qi.note || '', refusals: qi.refusals || 0,
+          trials: rk.trials ?? 9, screening: rk.stop_on_pass ? Math.min(rk.trials ?? 9, 4) : null,
+          note: qi.note || '', refusals: qi.refusals || 0,
           notBefore: qi.not_before || null };
       });
       // Live trial progress. Workers carry (model, task, effort) but no
@@ -3456,7 +3457,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
               const live = qi.status === 'Running' ? liveFor(key, m, eff, t, null) : null;
               const prog = live ? ` trial ${(live.subrun ?? '?')}/${(live.total_subruns ?? '?')}` + (live.turns != null ? ` · ${live.turns}t` : '') : '';
               const state = qi.status === 'Running' ? `▶ running${prog}` : (parked ? `⏸ ${qi.id}` : `⏳ ${qi.id} · #${qi.pos}`);
-              const tip = `${qi.id} · ${qi.status}` + (parked ? ` · parked until ${qi.notBefore}` : '') + (qi.refusals ? ` · refused ×${qi.refusals}` : '') + (qi.note ? ` · ${qi.note}` : '') + ` · ${qi.trials} trials planned` + (live ? ' · live snapshot' : '');
+              const tip = `${qi.id} · ${qi.status}` + (parked ? ` · parked until ${qi.notBefore}` : '') + (qi.refusals ? ` · refused ×${qi.refusals}` : '') + (qi.note ? ` · ${qi.note}` : '') + ` · ${qi.trials} planned` + (qi.screening ? ` · screening ≤${qi.screening}` : '') + (live ? ' · live snapshot' : '');
               const bg = qi.status === 'Running' ? 'rgba(88,166,255,.13)' : 'transparent';
               cells += `<td style="text-align:center;background:${bg};color:var(--text-muted);font-size:.78rem;" title="${escapeHtml(tip)}">${escapeHtml(state)}</td>`;
               return;
@@ -4923,7 +4924,7 @@ function copyRunId() {
         }
         const data = await res.json();
         const where = data.started ? 'started now' : ('position ' + (data.position ?? '?'));
-        appendLog(`[QUEUE] Queued ${data.id} (${payload.model} / ${payload.task} / ${payload.trials}x) — ${where}.`);
+        appendLog(`[QUEUE] Queued ${data.id} (${payload.model} / ${payload.task} / ${payload.trials}x${payload.stop_on_pass ? ` → screening ≤${Math.min(payload.trials ?? 4, 4)}` : ''}) — ${where}.`);
         refreshQueue();
       } catch (e) {
         alert(`Error queueing run: ${e.message}`);
@@ -5046,7 +5047,7 @@ function copyRunId() {
           const modelShort = (r.model || '').split('/').pop();
           const hh = r.harness || 'omp';
           const harnesstag = ` <span class="badge ${hh === 'omp' ? '' : 'badge-effort'}" title="Agent harness">harness: ${escapeHtml(hh)}</span>`;
-          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times;${harnesstag} <span class="${pill}" title="${escapeHtml(q.note || q.status)}">${q.status}</span>${rm}</div>`;
+          return `<div class="queue-row"><span class="badge">${q.id}</span> ${modelShort} · ${r.task || '?'} · ${r.effort || ''} · ${r.trials ?? '?'}&times;${r.stop_on_pass ? ` &rarr; screening &le;${Math.min(r.trials ?? 4, 4)}` : ''}${harnesstag} <span class="${pill}" title="${escapeHtml(q.note || q.status)}">${q.status}</span>${rm}</div>`;
         }).join('');
       } catch (e) { /* keep last state on transient errors */ }
     }

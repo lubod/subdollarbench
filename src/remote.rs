@@ -289,12 +289,29 @@ fn short_model(model: &str) -> &str {
 pub fn queue_summary(kind: &serde_json::Value) -> String {
     if let Some(r) = kind.get("Run") {
         let effort = r.get("effort").and_then(|e| e.as_str()).unwrap_or("-");
+        let trials = r.get("trials").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+        // Stop-on-pass clamps the dispatched batch to SCREEN_CAP_TRIALS.
+        // The raw request count is kept for intent, but the row must say
+        // what will actually run, or "x9" reads as nine trials per cell.
+        let stop = r
+            .get("stop_on_pass")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let trials_label = if stop {
+            format!(
+                "x{}->cap{} (screening)",
+                trials,
+                trials.clamp(1, crate::config::SCREEN_CAP_TRIALS)
+            )
+        } else {
+            format!("x{trials}")
+        };
         format!(
-            "run {} {} {} x{}",
+            "run {} {} {} {}",
             short_model(js(r, "model")),
             js(r, "task"),
             effort,
-            r.get("trials").and_then(|n| n.as_u64()).unwrap_or(0)
+            trials_label
         )
     } else if let Some(e) = kind.get("Extend") {
         format!(
@@ -827,6 +844,16 @@ mod tests {
             "effort": "xhigh", "trials": 9,
         }});
         assert_eq!(queue_summary(&run), "run muse-spark redis xhigh x9");
+        // Stop-on-pass must show the dispatched clamp, not the raw request:
+        // the canary wave queued x9 cells that actually ran at most 4.
+        let screening = serde_json::json!({"Run": {
+            "model": "openrouter/muse-spark", "task": "redis", "effort": "high",
+            "trials": 9, "stop_on_pass": true,
+        }});
+        assert_eq!(
+            queue_summary(&screening),
+            "run muse-spark redis high x9->cap4 (screening)"
+        );
         let ext = serde_json::json!({"Extend": {
             "parent_run_id": "wal_m_20260916_152544", "trials": 6,
         }});

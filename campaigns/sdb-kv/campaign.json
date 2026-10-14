@@ -1,0 +1,45 @@
+{
+  "name": "sdb-kv",
+  "version": 1,
+  "task": "redis",
+  "title": "SDB-KV: green field to enterprise",
+  "description": "One living RESP key-value store, evolved through ordered tickets. Cumulative acceptance: stage i passes only if every stage 0..i acceptance holds. Cost is the headline metric; regressions are the cardinal sin.",
+  "stages": [
+    {
+      "id": 0,
+      "type": "genesis",
+      "title": "MVP: RESP server",
+      "prompt": "stages/0_genesis/prompt.md",
+      "acceptance": { "redis_stages": [1, 2, 4] },
+      "budget_usd": 0.10,
+      "max_turns": 40
+    },
+    {
+      "id": 1,
+      "type": "feature",
+      "title": "Expiry",
+      "prompt": "stages/1_expiry/prompt.md",
+      "acceptance": { "redis_stages": [1, 2, 3, 4] },
+      "budget_usd": 0.10,
+      "max_turns": 25
+    },
+    {
+      "id": 2,
+      "type": "feature",
+      "title": "Pub/Sub",
+      "prompt": "stages/2_pubsub/prompt.md",
+      "acceptance": { "redis_stages": [1, 2, 3, 4, 5] },
+      "budget_usd": 0.10,
+      "max_turns": 25
+    },
+    {
+      "id": 3,
+      "type": "feature",
+      "title": "Durability",
+      "prompt": "stages/3_durability/prompt.md",
+      "acceptance": { "redis_stages": [1, 2, 3, 4, 5, 6] },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    }
+  ]
+}
