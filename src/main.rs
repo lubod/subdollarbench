@@ -3224,4 +3224,1046 @@ mod tests {
         };
         assert!(run_cli(cli).await.is_ok());
     }
+
+    // ---- Offline CLI coverage ------------------------------------------
+    //
+    // Every test below uses its own pid-tagged temp dir and only offline or
+    // explicitly closed-port (`http://127.0.0.1:9`) command variants: none
+    // of them may talk to the live engine on 127.0.0.1:3000, mutate the
+    // repo runs/results dirs, or write bench.db rows.
+
+    /// Shadow of the parent `run_cli`: the dispatch future is huge (the
+    /// whole command match lives inside it), and a test coroutine that
+    /// awaits many inline copies overflows the default test-thread stack.
+    /// Boxing keeps one future on the heap per call instead.
+    async fn run_cli(cli: Cli) -> Result<()> {
+        Box::pin(super::run_cli(cli)).await
+    }
+
+    /// Fresh uniquely named temp dir (removed first in case a prior run of
+    /// the same test crashed mid-way).
+    fn test_tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("test_main_{}_{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Write a full RunManifest fixture into runs/<id>/manifest.json.
+    fn write_manifest(runs_dir: &Path, id: &str, mutate: impl FnOnce(&mut RunManifest)) -> PathBuf {
+        let mut m = test_manifest_with_status("completed");
+        m.run_id = id.to_string();
+        mutate(&mut m);
+        let dir = runs_dir.join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string(&m).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Manifest with two stages (one failing when pass_rate < 100).
+    fn manifest_fixture(id: &str, pass_rate: f64) -> RunManifest {
+        let mut m = test_manifest_with_status(if pass_rate >= 100.0 {
+            "completed"
+        } else {
+            "failed_tests"
+        });
+        m.run_id = id.to_string();
+        m.model = "openrouter/meta/muse-spark".to_string();
+        m.task = "redis".to_string();
+        m.effort = Some("low".to_string());
+        m.pass_rate = pass_rate;
+        m.passed_stages = if pass_rate >= 100.0 { 2 } else { 1 };
+        m.total_stages = 2;
+        m.stages = vec![
+            subdollarbench::verifier::StageResult {
+                stage: 1,
+                name: "Stage 1: basic protocol".to_string(),
+                passed: true,
+                error: None,
+            },
+            subdollarbench::verifier::StageResult {
+                stage: 2,
+                name: "Stage 2: dbsize".to_string(),
+                passed: pass_rate >= 100.0,
+                error: Some("expected 1 key".to_string()),
+            },
+        ];
+        m
+    }
+
+    /// Consolidated parent result with one subrun per pass rate. Equal pass
+    /// rates and no throughput make it `Stability::Stable` by construction
+    /// (so `stability`/`extend` never hit their `process::exit` arms).
+    fn parent_result(id: &str, pass_rates: &[f64]) -> BenchmarkRunResult {
+        let mut parent = test_result_with_pass_rate(pass_rates[0]);
+        parent.id = id.to_string();
+        parent.model = "openrouter/meta/muse-spark".to_string();
+        parent.task = "redis".to_string();
+        parent.effort = Some("low".to_string());
+        parent.subruns = pass_rates
+            .iter()
+            .enumerate()
+            .map(|(i, pass)| {
+                let mut sub = test_result_with_pass_rate(*pass);
+                sub.id = format!("{id}_trial{}", i + 1);
+                sub.model = parent.model.clone();
+                sub.task = parent.task.clone();
+                sub
+            })
+            .collect();
+        parent
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_runs_views() {
+        let runs = test_tmp_dir("runs_views");
+        write_manifest(&runs, "redis_alpha_20261001", |m| {
+            m.model = "openrouter/meta/muse-spark".to_string();
+            m.task = "redis".to_string();
+            m.effort = Some("low".to_string());
+            m.status = "completed".to_string();
+            m.pass_rate = 100.0;
+            m.started_at = "2026-10-01T00:00:00Z".to_string();
+        });
+        write_manifest(&runs, "http_beta_20261002", |m| {
+            m.model = "openrouter/z-ai/glm".to_string();
+            m.task = "http".to_string();
+            m.effort = Some("high".to_string());
+            m.status = "failed_tests".to_string();
+            m.pass_rate = 50.0;
+            m.started_at = "2026-10-02T00:00:00Z".to_string();
+        });
+        let hidden = write_manifest(&runs, "redis_gamma_20261003", |m| {
+            m.started_at = "2026-10-03T00:00:00Z".to_string();
+        });
+        fs::write(hidden.join(".portal_hidden"), "").unwrap();
+        let dir = runs.to_string_lossy().to_string();
+
+        // Unfiltered view: portal-hidden runs are dropped without --all.
+        let cli = Cli {
+            command: Commands::Runs {
+                task: None,
+                model: None,
+                effort: None,
+                status: None,
+                limit: 20,
+                all: false,
+                runs_dir: dir.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_ok());
+
+        // Every filter arm at once, plus --limit/--all.
+        let cli = Cli {
+            command: Commands::Runs {
+                task: Some("redis".to_string()),
+                model: Some("muse".to_string()),
+                effort: Some("high".to_string()),
+                status: Some("failed_tests".to_string()),
+                limit: 1,
+                all: true,
+                runs_dir: dir,
+            },
+        };
+        assert!(run_cli(cli).await.is_ok());
+
+        // A missing runs dir is a clean error, never a panic.
+        let cli = Cli {
+            command: Commands::Runs {
+                task: None,
+                model: None,
+                effort: None,
+                status: None,
+                limit: 20,
+                all: false,
+                runs_dir: runs.join("missing").to_string_lossy().to_string(),
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_watch_fixture() {
+        let runs = test_tmp_dir("watch");
+        let dir = write_manifest(&runs, "redis_watch_20261004", |m| {
+            m.started_at = "2026-10-04T00:00:00Z".to_string();
+        });
+        fs::write(
+            dir.join("console.log"),
+            "Stage 1: PASS ok\nStage 2: FAIL bad\nplain line\n",
+        )
+        .unwrap();
+        let runs_s = runs.to_string_lossy().to_string();
+
+        // --no-follow prints the current log once and returns.
+        let cli = Cli {
+            command: Commands::Watch {
+                run: "redis_watch".to_string(),
+                no_follow: true,
+                stages_only: false,
+                runs_dir: runs_s.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_ok());
+
+        // An archived manifest ends the follow loop without waiting on sleep.
+        let cli = Cli {
+            command: Commands::Watch {
+                run: "redis_watch_20261004".to_string(),
+                no_follow: false,
+                stages_only: true,
+                runs_dir: runs_s.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_ok());
+
+        // Unknown run id is an error.
+        let cli = Cli {
+            command: Commands::Watch {
+                run: "nope".to_string(),
+                no_follow: true,
+                stages_only: false,
+                runs_dir: runs_s,
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_diff_stages_fixture_and_missing_ids() {
+        let runs = test_tmp_dir("diff_stages");
+        for m in [
+            manifest_fixture("redis_a_20261001", 100.0),
+            manifest_fixture("redis_b_20261002", 50.0),
+        ] {
+            let d = runs.join(&m.run_id);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("manifest.json"), serde_json::to_string(&m).unwrap()).unwrap();
+        }
+        let runs_s = runs.to_string_lossy().to_string();
+
+        // Diff: exact id on one side, unambiguous prefix on the other.
+        let cli = Cli {
+            command: Commands::Diff {
+                a: "redis_a".to_string(),
+                b: "redis_b_20261002".to_string(),
+                runs_dir: runs_s.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_ok());
+
+        // Stages: human-readable and JSON.
+        for json in [false, true] {
+            let cli = Cli {
+                command: Commands::Stages {
+                    run: "redis_a".to_string(),
+                    trial: None,
+                    json,
+                    runs_dir: runs_s.clone(),
+                },
+            };
+            assert!(run_cli(cli).await.is_ok());
+        }
+
+        // --trial appends _trialN when the id has no trial suffix; that dir
+        // does not exist, so this is a clean error.
+        let cli = Cli {
+            command: Commands::Stages {
+                run: "redis_a_20261001".to_string(),
+                trial: Some(2),
+                json: false,
+                runs_dir: runs_s.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+
+        // Unknown ids fail during resolution (before verdict's exit/format).
+        let cli = Cli {
+            command: Commands::Verdict {
+                run: "missing".to_string(),
+                json: false,
+                runs_dir: runs_s.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+        let cli = Cli {
+            command: Commands::Diff {
+                a: "redis_a".to_string(),
+                b: "missing".to_string(),
+                runs_dir: runs_s.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+        let cli = Cli {
+            command: Commands::Stages {
+                run: "redis_a".to_string(),
+                trial: None,
+                json: false,
+                runs_dir: runs.join("missing").to_string_lossy().to_string(),
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_stability_and_extend_error_paths() {
+        let results = test_tmp_dir("stability_extend");
+        for parent in [
+            parent_result("stable_parent", &[100.0, 100.0]),
+            parent_result("single_trial_parent", &[100.0]),
+        ] {
+            fs::write(
+                results.join(format!("{}.json", parent.id)),
+                serde_json::to_string(&parent).unwrap(),
+            )
+            .unwrap();
+        }
+        let dir = results.to_string_lossy().to_string();
+
+        // Exact id and prefix both stay on the stable (never-transient)
+        // branch of assess_stability.
+        for prefix in ["stable_parent", "stable_par"] {
+            let cli = Cli {
+                command: Commands::Stability {
+                    parent: prefix.to_string(),
+                    results_dir: dir.clone(),
+                },
+            };
+            assert!(run_cli(cli).await.is_ok());
+        }
+        let cli = Cli {
+            command: Commands::Stability {
+                parent: "nope".to_string(),
+                results_dir: dir.clone(),
+            },
+        };
+        assert!(run_cli(cli).await.is_err());
+
+        let extend_cli = |parent: &str| Cli {
+            command: Commands::Extend {
+                parent: parent.to_string(),
+                trials: 3,
+                model: None,
+                task: None,
+                effort: None,
+                max_turns: 100,
+                budget_usd: 1.0,
+                timeout_min: 120,
+                api_key: None,
+                workdir: "./workspace".to_string(),
+                eval_only: false,
+                review_model: None,
+                results_dir: dir.clone(),
+            },
+        };
+
+        // Stable parent: extend is a no-op success (no pipeline, no docker).
+        assert!(run_cli(extend_cli("stable_par")).await.is_ok());
+        // Single-trial parent: refused before any batch is attempted.
+        let err = run_cli(extend_cli("single_trial_parent"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a multi-trial parent"), "{err}");
+        // Unknown parent fails during resolution.
+        assert!(run_cli(extend_cli("missing")).await.is_err());
+        let _ = fs::remove_dir_all(&results);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_matrix_plan_and_offline_enqueue() {
+        let matrix_cli = |efforts: &str, tasks: &str, enqueue: bool, server: Option<String>| Cli {
+            command: Commands::Matrix {
+                models: "openrouter/meta/muse-spark".to_string(),
+                efforts: efforts.to_string(),
+                tasks: tasks.to_string(),
+                trials: 2,
+                extra: "--no-save".to_string(),
+                per_effort_columns: false,
+                enqueue,
+                extend_if_unstable: false,
+                harness: Harness::Omp,
+                max_trials: 9,
+                server,
+                stop_on_pass: false,
+                feedback: false,
+                feedback_rounds: 0,
+            },
+        };
+
+        // Print mode is pure formatting: no network, no enqueue.
+        assert!(run_cli(matrix_cli("low", "redis", false, None))
+            .await
+            .is_ok());
+        // Mixed efforts without --per-effort-columns are refused up front.
+        assert!(run_cli(matrix_cli("low,high", "redis", false, None))
+            .await
+            .is_err());
+        // Unknown task names fail before any dispatch.
+        assert!(run_cli(matrix_cli("low", "dns", false, None))
+            .await
+            .is_err());
+        // Enqueue mode against a closed port: status/balance probes degrade
+        // to None, every cell POST fails, and the loop still exits Ok having
+        // queued nothing.
+        assert!(run_cli(matrix_cli(
+            "low",
+            "redis",
+            true,
+            Some("http://127.0.0.1:9".to_string())
+        ))
+        .await
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_campaign_list_and_dry_run() {
+        // Bundled campaigns are listed read-only.
+        assert!(run_cli(Cli {
+            command: Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::List,
+            },
+        })
+        .await
+        .is_ok());
+
+        // Missing campaign fails to load.
+        let missing = format!("no-such-campaign-{}", std::process::id());
+        assert!(run_cli(Cli {
+            command: Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::DryRun {
+                    name: missing,
+                    model: "test-model".to_string(),
+                },
+            },
+        })
+        .await
+        .is_err());
+
+        // Existing campaign: dry-run only reads campaign.json + prints the
+        // stage plan (no spend, no engine, no workspace writes).
+        if let Some(name) = subdollarbench::campaign::list_campaigns()
+            .into_iter()
+            .next()
+        {
+            assert!(run_cli(Cli {
+                command: Commands::Campaign {
+                    action: subdollarbench::config::CampaignAction::DryRun {
+                        name,
+                        model: "test-model".to_string(),
+                    },
+                },
+            })
+            .await
+            .is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_maintenance_dry_runs_on_temp_dirs() {
+        let results = test_tmp_dir("maint_results");
+        let runs = test_tmp_dir("maint_runs");
+        // One single-trial row and one two-trial parent cover both backfill
+        // arms without --yes.
+        let single = test_result_with_pass_rate(100.0);
+        fs::write(
+            results.join("single_trial.json"),
+            serde_json::to_string_pretty(&single).unwrap(),
+        )
+        .unwrap();
+        let parent = parent_result("multi_trial", &[100.0, 0.0]);
+        fs::write(
+            results.join("multi_trial.json"),
+            serde_json::to_string_pretty(&parent).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read_to_string(results.join("multi_trial.json")).unwrap();
+        let results_s = results.to_string_lossy().to_string();
+        let runs_s = runs.to_string_lossy().to_string();
+
+        assert!(run_cli(Cli {
+            command: Commands::Backfill {
+                results_dir: results_s.clone(),
+                yes: false,
+            },
+        })
+        .await
+        .is_ok());
+        assert!(run_cli(Cli {
+            command: Commands::Migrate {
+                results_dir: results_s.clone(),
+                yes: false,
+            },
+        })
+        .await
+        .is_ok());
+        // Dry runs must not rewrite the rows they describe.
+        assert_eq!(
+            fs::read_to_string(results.join("multi_trial.json")).unwrap(),
+            before
+        );
+
+        // Canonical-dir guards refuse foreign dirs before touching live data.
+        let err = run_cli(Cli {
+            command: Commands::CostAnnotate {
+                results_dir: results_s.clone(),
+                runs_dir: runs_s.clone(),
+                yes: false,
+            },
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("canonical"), "{err}");
+        let err = run_cli(Cli {
+            command: Commands::Repair {
+                results_dir: results_s.clone(),
+                runs_dir: runs_s.clone(),
+                yes: false,
+            },
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("canonical"), "{err}");
+        let err = run_cli(Cli {
+            command: Commands::AnnotateCutoff {
+                runs_dir: runs_s,
+                yes: false,
+            },
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("canonical"), "{err}");
+
+        let _ = fs::remove_dir_all(&results);
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_migrate_check_audit() {
+        // Read-only integrity audit against the canonical bench.db. The repo
+        // may legitimately have findings, in which case the handler must fail
+        // with its own audit error rather than something unexpected.
+        match run_cli(Cli {
+            command: Commands::MigrateCheck,
+        })
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => assert!(
+                e.to_string().starts_with("integrity check found"),
+                "migrate-check failed for a non-audit reason: {e:#}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_regen_reviews_offline() {
+        let root = test_tmp_dir("regen_reviews");
+        let runs = root.join("runs");
+        let results = root.join("results");
+        let out = root.join("portal");
+        let out_rollup = root.join("portal-rollup");
+        fs::create_dir_all(&results).unwrap();
+        let id = format!("redis_regen_{}", std::process::id());
+        let rdir = runs.join(&id);
+        fs::create_dir_all(&rdir).unwrap();
+        // A cached review.json + force=false means the judge is never called.
+        fs::write(
+            rdir.join("review.json"),
+            r#"{"good":[],"bad":[],"conclusion":"cached"}"#,
+        )
+        .unwrap();
+
+        let regen_cli = |out: &Path, rollup_only: bool| Cli {
+            command: Commands::RegenReviews {
+                runs_dir: runs.to_string_lossy().to_string(),
+                run_id: Some(id.clone()),
+                model: "openrouter/meta/muse-spark".to_string(),
+                api_key: None,
+                force: false,
+                results_dir: results.to_string_lossy().to_string(),
+                out: out.to_string_lossy().to_string(),
+                base_url: String::new(),
+                keep: 10,
+                rollup_only,
+            },
+        };
+
+        // Full portal export path.
+        assert!(run_cli(regen_cli(&out, false)).await.is_ok());
+        assert!(out.join("index.html").exists());
+        // Rollup-only export path.
+        assert!(run_cli(regen_cli(&out_rollup, true)).await.is_ok());
+        assert!(out_rollup.join("index.html").exists());
+        // The cached review file was not rewritten.
+        assert!(rdir.join("review.json").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_review_run_error_and_early_paths() {
+        let runs = test_tmp_dir("review_run");
+
+        // Unknown id fails during resolution.
+        assert!(run_cli(Cli {
+            command: Commands::ReviewRun {
+                run_id: "missing".to_string(),
+                runs_dir: runs.to_string_lossy().to_string(),
+                model: "openrouter/meta/muse-spark".to_string(),
+                api_key: None,
+                force: false,
+            },
+        })
+        .await
+        .is_err());
+
+        // Existing run dir but no merged parent in the canonical results
+        // dir: fails before any judge call (the id is pid-unique).
+        let id = format!("zzz_offline_review_fixture_{}", std::process::id());
+        let rdir = runs.join(&id);
+        fs::create_dir_all(&rdir).unwrap();
+        let err = run_cli(Cli {
+            command: Commands::ReviewRun {
+                run_id: id.clone(),
+                runs_dir: runs.to_string_lossy().to_string(),
+                model: "openrouter/meta/muse-spark".to_string(),
+                api_key: None,
+                force: false,
+            },
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no results/"), "{err}");
+
+        // An existing run-review.md short-circuits without --force.
+        fs::write(rdir.join("run-review.md"), "already reviewed\n").unwrap();
+        assert!(run_cli(Cli {
+            command: Commands::ReviewRun {
+                run_id: id,
+                runs_dir: runs.to_string_lossy().to_string(),
+                model: "openrouter/meta/muse-spark".to_string(),
+                api_key: None,
+                force: false,
+            },
+        })
+        .await
+        .is_ok());
+        assert_eq!(
+            fs::read_to_string(rdir.join("run-review.md")).unwrap(),
+            "already reviewed\n"
+        );
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_engine_commands_closed_port() {
+        // Engine-backed variants are exercised only against a closed port:
+        // each one must observe a connection failure, queue/stop nothing,
+        // and leave local fixtures untouched.
+        let dead = || Some("http://127.0.0.1:9".to_string());
+
+        assert!(run_cli(Cli {
+            command: Commands::Status {
+                server: dead(),
+                json: false,
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Status {
+                server: dead(),
+                json: true,
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Queue {
+                server: dead(),
+                json: false,
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Ps {
+                server: dead(),
+                model: None,
+                task: None,
+                effort: None,
+                status: None,
+                limit: 20,
+                runs_dir: "./runs".to_string(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Enqueue {
+                model: "openrouter/meta/muse-spark".to_string(),
+                task: TaskType::Redis,
+                effort: "low".to_string(),
+                harness: Harness::Omp,
+                max_turns: 1,
+                budget_usd: 0.1,
+                timeout_min: 1,
+                api_key: None,
+                eval_only: true,
+                trials: 1,
+                extend_if_unstable: false,
+                max_trials: 9,
+                no_save: true,
+                review_model: None,
+                server: dead(),
+                stop_on_pass: false,
+                feedback: false,
+                feedback_rounds: 0,
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Dequeue {
+                id: "q1".to_string(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::QueueClear { server: dead() },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Stop {
+                run: String::new(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Log {
+                run: String::new(),
+                tail: 10,
+                stages_only: false,
+                follow: false,
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Prompt {
+                task: "redis".to_string(),
+                save: false,
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Env { server: dead() },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Models {
+                family: Some("glm".to_string()),
+                search: None,
+                sort: "cheapest".to_string(),
+                limit: 5,
+                json: false,
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Omp { server: dead() },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::OmpUpdate {
+                version: None,
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::PortalRebuild { server: dead() },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Lboard {
+                task: "redis".to_string(),
+                json: true,
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+
+        // QueueExtend resolves the parent locally, then fails on POST.
+        let results = test_tmp_dir("engine_queue_extend");
+        let parent = parent_result("queue_extend_parent", &[100.0]);
+        fs::write(
+            results.join("queue_extend_parent.json"),
+            serde_json::to_string(&parent).unwrap(),
+        )
+        .unwrap();
+        assert!(run_cli(Cli {
+            command: Commands::QueueExtend {
+                parent: "queue_extend".to_string(),
+                trials: 3,
+                max_turns: None,
+                budget_usd: None,
+                timeout_min: None,
+                eval_only: false,
+                results_dir: results.to_string_lossy().to_string(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+
+        // Run-inspection variants resolve the id against a temp runs dir,
+        // then fail on the closed-port request.
+        let runs = test_tmp_dir("engine_runs");
+        let m = manifest_fixture("redis_engine_offline", 100.0);
+        let rdir = runs.join(&m.run_id);
+        fs::create_dir_all(&rdir).unwrap();
+        fs::write(
+            rdir.join("manifest.json"),
+            serde_json::to_string(&m).unwrap(),
+        )
+        .unwrap();
+        let runs_s = runs.to_string_lossy().to_string();
+        let lookup = || "redis_engine".to_string();
+
+        assert!(run_cli(Cli {
+            command: Commands::Detail {
+                run: lookup(),
+                json: false,
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Ls {
+                run: lookup(),
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Cat {
+                run: lookup(),
+                file: "main.py".to_string(),
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Review {
+                run: lookup(),
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Sdiff {
+                a: lookup(),
+                b: lookup(),
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Poison {
+                run: lookup(),
+                cure: false,
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Hide {
+                run: lookup(),
+                show: false,
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        // Rm refuses without --yes before any network call; with --yes the
+        // DELETE hits the closed port, so the archived dir survives.
+        assert!(run_cli(Cli {
+            command: Commands::Rm {
+                run: lookup(),
+                yes: false,
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(run_cli(Cli {
+            command: Commands::Rm {
+                run: lookup(),
+                yes: true,
+                runs_dir: runs_s.clone(),
+                server: dead(),
+            },
+        })
+        .await
+        .is_err());
+        assert!(rdir.join("manifest.json").exists());
+
+        let _ = fs::remove_dir_all(&runs);
+        let _ = fs::remove_dir_all(&results);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_matrix_report_temp_dirs() {
+        let results = test_tmp_dir("matrix_report");
+        // Empty dir: the "no results" arm.
+        assert!(run_cli(Cli {
+            command: Commands::MatrixReport {
+                results_dir: results.to_string_lossy().to_string(),
+            },
+        })
+        .await
+        .is_ok());
+
+        // One well-formed row: validates the wave, then prints the matrix.
+        let mut row = test_result_with_pass_rate(100.0);
+        row.id = "matrix_fixture_1".to_string();
+        row.model = "openrouter/meta/muse-spark".to_string();
+        row.task = "redis".to_string();
+        row.effort = Some("low".to_string());
+        fs::write(
+            results.join("matrix_fixture_1.json"),
+            serde_json::to_string(&row).unwrap(),
+        )
+        .unwrap();
+        assert!(run_cli(Cli {
+            command: Commands::MatrixReport {
+                results_dir: results.to_string_lossy().to_string(),
+            },
+        })
+        .await
+        .is_ok());
+        let _ = fs::remove_dir_all(&results);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_doctor_readonly() {
+        // Read-only pre-flight (docker info/images, env, TCP bind probes).
+        // Either everything is green or the handler's own hard-check gate
+        // fires; any other error means the arm fell over unexpectedly.
+        match run_cli(Cli {
+            command: Commands::Doctor,
+        })
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => assert!(
+                e.to_string().starts_with("doctor:"),
+                "unexpected doctor error: {e:#}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_subcommand_paths() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["subdollarbench", "runs", "--limit", "5", "--all"]).unwrap();
+        match cli.command {
+            Commands::Runs { limit, all, .. } => {
+                assert_eq!(limit, 5);
+                assert!(all);
+            }
+            other => panic!("expected Runs, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["subdollarbench", "campaign", "dry-run", "--name", "demo"])
+            .unwrap();
+        match cli.command {
+            Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::DryRun { name, model },
+            } => {
+                assert_eq!(name, "demo");
+                assert_eq!(model, "(unset)");
+            }
+            other => panic!("expected Campaign::DryRun, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["subdollarbench", "matrix", "--tasks", "redis"]).unwrap();
+        match cli.command {
+            Commands::Matrix {
+                tasks,
+                efforts,
+                enqueue,
+                ..
+            } => {
+                assert_eq!(tasks, "redis");
+                // Defaults documented on the clap args.
+                assert_eq!(efforts, "minimal,max");
+                assert!(!enqueue);
+            }
+            other => panic!("expected Matrix, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["subdollarbench", "sandbox", "check"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Sandbox {
+                command: subdollarbench::config::SandboxCommands::Check
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["subdollarbench", "verdict", "abc", "--json"]).unwrap();
+        match cli.command {
+            Commands::Verdict { run, json, .. } => {
+                assert_eq!(run, "abc");
+                assert!(json);
+            }
+            other => panic!("expected Verdict, got {other:?}"),
+        }
+
+        // Invalid ValueEnum values and unknown subcommands are clap errors.
+        assert!(Cli::try_parse_from(["subdollarbench", "eval", "--task", "dns"]).is_err());
+        assert!(Cli::try_parse_from(["subdollarbench", "no-such-command"]).is_err());
+    }
 }

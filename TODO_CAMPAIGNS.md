@@ -247,6 +247,15 @@ Actions enforces the requirement.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-10, 2026-10-14 run 11, `..._180418`, RULES
+  `2026-10-14.12`): s0 PASS 3/3 ($0.0283, 19t, Python). s1 **invalidated
+  by an anti-cheat false positive**: the model's own test script piped a
+  RESP payload into `nc -q1 127.0.0.1 6379`, and the scanner flagged
+  `nc` in any mode -> instant DQ (0/4). Client-mode nc cannot implement
+  or tunnel a service; the cheat vector is LISTEN/EXEC mode. Fixed same
+  day (RULES `2026-10-14.13`): only listen/exec forms fail, client-mode
+  is allowed; tests cover both. Do not quote this cell; re-run replaces
+  it.
 - **ling-3.1-flash** (spec 0-10, 2026-10-14 run 10, `..._172751`, RULES
   `2026-10-14.12`): **reached 4 — new best; first run past s3.** s0 3/3
   ($0.0265, 28t), s1 4/4 ($0.0260, 13t), s2 5/5 ($0.0484, 13+12 repair),

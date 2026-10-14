@@ -8,6 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.13`: anti-cheat proxy rule refined. The scanner flagged
+///   `nc`/`socat` in ANY mode, so a candidate that piped a RESP payload
+///   into `nc -q1 127.0.0.1 6379` inside its own TEST script was
+///   disqualified (live run 11 false positive). Only LISTEN/EXEC-mode
+///   invocations are the cheat vector (serving via a tunnel to the
+///   official reference, or exec'ing a shell) and those still fail with a
+///   message naming listen/exec mode; client-mode use is allowed. Rows
+///   stamped `2026-10-14.12` or earlier are not comparable without
+///   `backfill --yes`.
 /// - `2026-10-14.12`: campaign ticket 10 (three-node HA finale, operator
 ///   decision Q1). New pipeline-level stage 13: the candidate is restarted
 ///   as a three-node cluster (`./start.sh --port/--data/--replicaof` on
@@ -326,7 +335,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.12";
+pub const RULES_VERSION: &str = "2026-10-14.13";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

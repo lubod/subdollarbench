@@ -535,4 +535,733 @@ mod tests {
         assert_eq!(files[0].0, "main.go");
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("sdb_judge_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn sample_manifest() -> RunManifest {
+        serde_json::from_value(serde_json::json!({
+            "run_id": "test_judge_run",
+            "model": "fixture/model",
+            "task": "redis",
+            "status": "completed",
+            "language": "Rust",
+            "started_at": "2026-10-01T00:00:00Z",
+            "completed_at": "2026-10-01T00:01:00Z",
+            "duration_seconds": 61.0,
+            "pass_rate": 100.0,
+            "passed_stages": 4,
+            "total_stages": 4,
+            "stages": [{"stage": 1, "name": "boot", "passed": true, "error": null}],
+            "throughput_req_sec": 1234.5,
+            "tokens": {
+                "prompt_tokens": 11,
+                "cached_tokens": 3,
+                "completion_tokens": 7,
+                "total_tokens": 21
+            },
+            "cost_usd": 0.0123,
+            "savings_percent": 0.0,
+            "efficiency_score": 55.0,
+            "files": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_judge_validate_trims_counts_and_caps_bullets() {
+        let mut r = sample();
+        r.good = vec!["  only strength  ".to_string()];
+        r.bad = vec![
+            "b1".to_string(),
+            "b2".to_string(),
+            "b3".to_string(),
+            "b4".to_string(),
+            "b5".to_string(),
+            "b6".to_string(),
+            "b7".to_string(),
+            "b8".to_string(),
+        ];
+        assert!(RunJudge::validate(&r).is_ok());
+        // Bullets are trimmed before the 500-char cap is applied.
+        let mut r = sample();
+        r.good[0] = "x".repeat(500);
+        assert!(RunJudge::validate(&r).is_ok());
+        r.good[0] = format!(" {} ", "x".repeat(501));
+        assert!(RunJudge::validate(&r).is_err());
+        // Whitespace-only conclusion is empty.
+        let mut r = sample();
+        r.conclusion = "  \n\t".to_string();
+        assert!(RunJudge::validate(&r).is_err());
+        // Nine bullets on one side is rejected (needs at least one of each).
+        let mut r = sample();
+        r.bad.clear();
+        r.good = (0..9).map(|i| format!("g{i}")).collect();
+        assert!(RunJudge::validate(&r).is_err());
+    }
+
+    #[test]
+    fn test_judge_extract_json_variants() {
+        assert_eq!(
+            RunJudge::extract_json("prose { \"a\": 1 } more").unwrap(),
+            "{ \"a\": 1 }"
+        );
+        assert_eq!(
+            RunJudge::extract_json("  ```json\n{\"a\":1}\n```  ").unwrap(),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            RunJudge::extract_json("```\n{\"a\":1}\n```").unwrap(),
+            "{\"a\":1}"
+        );
+        assert_eq!(RunJudge::extract_json("}{\"a\":1}").unwrap(), "{\"a\":1}");
+        assert_eq!(RunJudge::extract_json("{ }").unwrap(), "{ }");
+        assert!(RunJudge::extract_json("closing } only").is_none());
+        assert!(RunJudge::extract_json("}{").is_none());
+        assert!(RunJudge::extract_json("").is_none());
+    }
+
+    #[test]
+    fn test_judge_collect_workspace_nested_order_and_filters() {
+        let base = temp_root("ws_order");
+        std::fs::create_dir_all(base.join("sub/deep")).unwrap();
+        std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(base.join("__pycache__")).unwrap();
+        std::fs::write(base.join("b.txt"), "b").unwrap();
+        std::fs::write(base.join("a.txt"), "a").unwrap();
+        std::fs::write(base.join("server.log"), "noise").unwrap();
+        std::fs::write(base.join(".env"), "secret").unwrap();
+        std::fs::write(base.join("sub/z.txt"), "z").unwrap();
+        std::fs::write(base.join("sub/m.txt"), "m").unwrap();
+        std::fs::write(base.join("sub/.hidden"), "h").unwrap();
+        std::fs::write(base.join("sub/deep/leaf.txt"), "leaf").unwrap();
+        std::fs::write(base.join("node_modules/pkg/index.js"), "js").unwrap();
+        std::fs::write(base.join("__pycache__/x.pyc"), "pyc").unwrap();
+        // Entries that are neither dir nor file (dangling symlink) are skipped.
+        std::os::unix::fs::symlink(base.join("gone"), base.join("dangling")).unwrap();
+        let files = RunJudge::collect_workspace(&base);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "a.txt",
+                "b.txt",
+                "sub/deep/leaf.txt",
+                "sub/m.txt",
+                "sub/z.txt"
+            ]
+        );
+        assert_eq!(files[0].1, "a");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_judge_collect_workspace_budget_truncation() {
+        let base = temp_root("ws_budget");
+        let big = "b".repeat(MAX_WORKSPACE_CHARS + 500);
+        std::fs::write(base.join("big.txt"), &big).unwrap();
+        // Sorts after big.txt, so the exhausted budget must skip it.
+        std::fs::write(base.join("zz_after.txt"), "never read").unwrap();
+        let files = RunJudge::collect_workspace(&base);
+        assert_eq!(files.len(), 1);
+        let (name, content) = &files[0];
+        assert_eq!(name, "big.txt");
+        assert!(content.ends_with("\n...[truncated]"));
+        assert_eq!(
+            content.len(),
+            MAX_WORKSPACE_CHARS + "\n...[truncated]".len()
+        );
+        // A directory entered with an already-exhausted budget collects nothing.
+        let mut out = Vec::new();
+        let mut budget = 0usize;
+        RunJudge::collect_dir(&base, "", &mut out, &mut budget);
+        assert!(out.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_judge_collect_workspace_multibyte_boundary() {
+        let base = temp_root("ws_unicode");
+        // 23_999 ASCII bytes + 2-byte é = 24_001 bytes: the 24k cutoff
+        // lands in the middle of a multi-byte char and must floor.
+        let content = format!("{}é", "a".repeat(MAX_WORKSPACE_CHARS - 1));
+        std::fs::write(base.join("u.txt"), &content).unwrap();
+        let files = RunJudge::collect_workspace(&base);
+        assert_eq!(files.len(), 1);
+        let (_, clipped) = &files[0];
+        assert!(clipped.ends_with("\n...[truncated]"));
+        assert!(!clipped.contains('é'));
+        assert_eq!(
+            clipped.len(),
+            MAX_WORKSPACE_CHARS - 1 + "\n...[truncated]".len()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_judge_collect_workspace_skips_unreadable_and_missing_dir() {
+        let base = temp_root("ws_unreadable");
+        std::fs::write(base.join("bin.dat"), [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::write(base.join("ok.txt"), "ok").unwrap();
+        let files = RunJudge::collect_workspace(&base);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "ok.txt");
+        assert!(RunJudge::collect_workspace(&base.join("does-not-exist")).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_judge_build_prompt_truncates_and_lists_files() {
+        let task_prompt = format!("{}TAIL", "Q".repeat(MAX_PROMPT_CHARS));
+        let files = vec![("src/main.rs".to_string(), "fn main() {}".to_string())];
+        let p = RunJudge::build_prompt("redis", &task_prompt, &files, "{\"pass_rate\":100}");
+        assert!(p.contains("Review the candidate redis server"));
+        assert!(p.contains("--- src/main.rs ---\nfn main() {}"));
+        assert!(p.contains("## Measured results\n{\"pass_rate\":100}"));
+        assert!(p.contains(&"Q".repeat(MAX_PROMPT_CHARS)));
+        assert!(!p.contains("TAIL"));
+        assert!(p.contains("exactly 9 bullets"));
+    }
+
+    #[test]
+    fn test_judge_resolve_target_edges() {
+        let (url, model) = RunJudge::resolve_target("  openrouter/meta/llama-3  ").unwrap();
+        assert_eq!(url, "https://openrouter.ai/api/v1/chat/completions");
+        assert_eq!(model, "meta/llama-3");
+        // Bare (slash-free) model ids route to OpenRouter too.
+        let (_, model) = RunJudge::resolve_target("llama-3").unwrap();
+        assert_eq!(model, "llama-3");
+        // A slash-bearing non-openrouter id is not a cloud judge.
+        assert!(RunJudge::resolve_target("meta/llama-3").is_err());
+        let e = RunJudge::resolve_target("openrouter/x:batch")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("batch"));
+        assert!(RunJudge::resolve_target("   ").is_err());
+        let e = RunJudge::resolve_target("ollama/qwen")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unsupported judge model"));
+    }
+
+    #[test]
+    fn test_run_stats_block_exact_numbers() {
+        let trials = vec![
+            (
+                "t1".to_string(),
+                100.0_f64,
+                10_u32,
+                1000_u64,
+                0.1_f64,
+                60.0_f64,
+            ),
+            ("t2".to_string(), 50.0, 20, 3000, 0.2, 120.0),
+        ];
+        let failures = vec!["".to_string(), "boot: timeout".to_string()];
+        let s = RunJudge::run_stats_block_with_failures(
+            "run7",
+            "openai/gpt",
+            "redis",
+            &trials,
+            &failures,
+        );
+        let expected = concat!(
+            "RUN run7 model=openai/gpt task=redis trials=2 passed=1/2 mean_pass=75.0% (range 50-100) mean_turns=15 mean_tokens=2000 mean_cost=$0.1500 mean_dur=90s\n",
+            "  trial t1 pass=100% turns=10 tokens=1000 cost=$0.1000 dur=60s\n",
+            "  trial t2 pass=50% turns=20 tokens=3000 cost=$0.2000 dur=120s\n",
+            "    failures: boot: timeout\n",
+        );
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn test_run_stats_block_empty_uses_fold_defaults() {
+        let s = RunJudge::run_stats_block("run0", "m", "t", &[]);
+        // Empty sums are -0.0 in Rust, and the pass-rate fold defaults to
+        // (100, 0), so the range prints inverted for an empty run.
+        assert_eq!(
+            s,
+            "RUN run0 model=m task=t trials=0 passed=0/0 mean_pass=-0.0% (range 100-0) mean_turns=-0 mean_tokens=-0 mean_cost=$-0.0000 mean_dur=-0s\n"
+        );
+    }
+
+    #[test]
+    fn test_run_stats_block_without_failures_omits_lines() {
+        let trials = vec![("only".to_string(), 33.3_f64, 1_u32, 7_u64, 0.0_f64, 5.0_f64)];
+        let s = RunJudge::run_stats_block("r", "m", "t", &trials);
+        assert!(s.contains("passed=0/1"));
+        assert!(s.contains("range 33-33"));
+        assert!(!s.contains("failures:"));
+    }
+
+    #[test]
+    fn test_build_synthesis_prompt_sections() {
+        let stats = "RUN x model=m task=t trials=1 passed=1/1\n";
+        let task_prompt = format!("{}TAILMARKER", "A".repeat(MAX_PROMPT_CHARS));
+        let notes = vec![("t1".to_string(), "Trial one conclusion".to_string())];
+        let files = vec![("main.go".to_string(), "package main".to_string())];
+        let p = RunJudge::build_synthesis_prompt(stats, &task_prompt, &notes, &files);
+        assert!(p.contains(stats));
+        assert!(p.contains("## Run statistics (facts, do not recompute)"));
+        assert!(p.contains("### t1\nTrial one conclusion\n"));
+        assert!(p.contains("## Canonical best-trial workspace"));
+        assert!(p.contains("### main.go\npackage main\n"));
+        assert!(p.contains(&"A".repeat(MAX_PROMPT_CHARS)));
+        assert!(!p.contains("TAILMARKER"));
+        let p2 = RunJudge::build_synthesis_prompt(stats, "short", &[], &[]);
+        assert!(!p2.contains("Canonical best-trial workspace"));
+        assert!(!p2.contains("### t1"));
+    }
+
+    // ---- HTTP boundary: everything below talks to a local tokio TCP mock,
+    // never to a real provider. ----
+
+    struct MockRequest {
+        headers: String,
+        body: serde_json::Value,
+    }
+
+    struct JudgeMock {
+        url: String,
+        requests: Arc<Mutex<Vec<MockRequest>>>,
+    }
+
+    fn find_header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0)
+    }
+
+    /// Scripted one-request-per-connection HTTP/1.1 mock. Each reply is
+    /// `(status, body)`; requests are captured for assertions.
+    async fn spawn_judge_mock(replies: Vec<(u16, String)>) -> JudgeMock {
+        spawn_judge_mock_on("127.0.0.1", replies).await
+    }
+
+    /// Same, bound to an explicit loopback address. A non-`127.0.0.1`
+    /// address also switches the production max-token branch.
+    async fn spawn_judge_mock_on(addr: &str, replies: Vec<(u16, String)>) -> JudgeMock {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((addr, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests: Arc<Mutex<Vec<MockRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        tokio::spawn(async move {
+            for (status, body) in replies {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => return,
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let mut raw_headers = String::new();
+                let raw_body = loop {
+                    if let Some(pos) = find_header_end(&buf) {
+                        let headers = String::from_utf8_lossy(&buf[..pos]).to_string();
+                        let len = content_length(&headers);
+                        if buf.len() >= pos + 4 + len {
+                            raw_headers = headers;
+                            break buf[pos + 4..pos + 4 + len].to_vec();
+                        }
+                    }
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break Vec::new(),
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                };
+                captured.lock().unwrap().push(MockRequest {
+                    headers: raw_headers,
+                    body: serde_json::from_slice(&raw_body).unwrap_or(serde_json::Value::Null),
+                });
+                let reason = match status {
+                    200 => "OK",
+                    401 => "Unauthorized",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        JudgeMock {
+            url: format!("http://{addr}:{port}/v1/chat/completions"),
+            requests,
+        }
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    fn ok_message(payload: serde_json::Value) -> String {
+        serde_json::json!({ "choices": [{ "message": payload }] }).to_string()
+    }
+
+    fn valid_review() -> ReviewJson {
+        ReviewJson {
+            good: ["g1", "g2", "g3", "g4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            bad: ["b1", "b2", "b3", "b4", "b5"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            conclusion: "Solid but incomplete.".to_string(),
+        }
+    }
+
+    fn valid_review_text() -> String {
+        serde_json::to_string(&valid_review()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_judge_call_once_shapes_request() {
+        let mock = spawn_judge_mock(vec![(
+            200,
+            ok_message(serde_json::json!({ "content": valid_review_text() })),
+        )])
+        .await;
+        let client = test_client();
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "user prompt"}),
+        ];
+        let text = RunJudge::call_once(
+            &client,
+            &mock.url,
+            Some("sk-test"),
+            "meta/model",
+            &messages,
+            99,
+        )
+        .await
+        .unwrap();
+        assert!(text.contains("\"conclusion\""));
+        let reqs = mock.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = &reqs[0].body;
+        assert_eq!(body["model"], "meta/model");
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["max_tokens"], 99);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        let headers = reqs[0].headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer sk-test"));
+        assert!(headers.contains("x-title: subdollarbench-judge"));
+        assert!(headers.contains("http-referer: https://github.com/lubod/subdollarbench"));
+    }
+
+    #[tokio::test]
+    async fn test_judge_attempt_content_fallbacks() {
+        let client = test_client();
+        // Whitespace content falls through to reasoning_content.
+        let mock = spawn_judge_mock(vec![(
+            200,
+            ok_message(serde_json::json!({
+                "content": "   ",
+                "reasoning_content": valid_review_text()
+            })),
+        )])
+        .await;
+        let review = RunJudge::attempt(&client, &mock.url, None, "m", "p".into())
+            .await
+            .unwrap();
+        assert_eq!(review.conclusion, "Solid but incomplete.");
+        {
+            let reqs = mock.requests.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            assert!(!reqs[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("authorization:"));
+        }
+        // Empty reasoning_content falls through to reasoning.
+        let mock = spawn_judge_mock(vec![(
+            200,
+            ok_message(serde_json::json!({
+                "reasoning_content": "",
+                "reasoning": valid_review_text()
+            })),
+        )])
+        .await;
+        let review = RunJudge::attempt(&client, &mock.url, None, "m", "p".into())
+            .await
+            .unwrap();
+        assert_eq!(review.good.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_judge_attempt_surfaces_api_and_payload_errors() {
+        let client = test_client();
+        let mock = spawn_judge_mock(vec![(
+            401,
+            serde_json::json!({"error": {"message": "invalid api key"}}).to_string(),
+        )])
+        .await;
+        let err = RunJudge::attempt(&client, &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("judge API error 401"), "{err}");
+        assert!(err.contains("invalid api key"), "{err}");
+        // Structured error without a message reads "unknown".
+        let mock = spawn_judge_mock(vec![(500, "{}".to_string())]).await;
+        let err = RunJudge::attempt(&client, &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown"), "{err}");
+        // 200 with no usable content.
+        let mock = spawn_judge_mock(vec![(200, ok_message(serde_json::json!({})))]).await;
+        let err = RunJudge::attempt(&client, &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no content"), "{err}");
+        // 200 with a non-JSON body.
+        let mock = spawn_judge_mock(vec![(200, "this is not json".to_string())]).await;
+        let err = RunJudge::attempt(&client, &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("judge response unreadable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_judge_attempt_retries_invalid_and_missing_json() {
+        let client = test_client();
+        // Extractable but rule-violating JSON: one corrective retry.
+        let invalid = "{\"good\": [\"only\"], \"bad\": [], \"conclusion\": \"\"}";
+        let mock = spawn_judge_mock(vec![
+            (200, ok_message(serde_json::json!({ "content": invalid }))),
+            (
+                200,
+                ok_message(serde_json::json!({ "content": valid_review_text() })),
+            ),
+        ])
+        .await;
+        let review = RunJudge::attempt(&client, &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap();
+        assert_eq!(review.bad.len(), 5);
+        {
+            let reqs = mock.requests.lock().unwrap();
+            assert_eq!(reqs.len(), 2);
+            let msgs = reqs[1].body["messages"].as_array().unwrap();
+            assert_eq!(msgs.len(), 4);
+            assert!(msgs[2]["content"].as_str().unwrap().contains("conclusion"));
+            assert!(msgs[3]["content"]
+                .as_str()
+                .unwrap()
+                .contains("That output was invalid"));
+        }
+        // No JSON at all on the first reply: different corrective prompt.
+        let mock = spawn_judge_mock(vec![
+            (
+                200,
+                ok_message(serde_json::json!({ "content": "I cannot review this run." })),
+            ),
+            (
+                200,
+                ok_message(serde_json::json!({ "content": valid_review_text() })),
+            ),
+        ])
+        .await;
+        let review = RunJudge::attempt(&client, &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap();
+        assert_eq!(review.good.len(), 4);
+        let reqs = mock.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert!(reqs[1].body["messages"][3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("No JSON object found"));
+    }
+
+    #[tokio::test]
+    async fn test_judge_attempt_uses_non_local_max_tokens() {
+        let mock = spawn_judge_mock_on(
+            "127.0.0.2",
+            vec![(
+                200,
+                ok_message(serde_json::json!({ "content": valid_review_text() })),
+            )],
+        )
+        .await;
+        let review = RunJudge::attempt(&test_client(), &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap();
+        assert_eq!(review.bad.len(), 5);
+        let reqs = mock.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].body["max_tokens"], 2000);
+    }
+
+    #[tokio::test]
+    async fn test_judge_attempt_exhausts_retry() {
+        let invalid = "{\"good\": [], \"bad\": [], \"conclusion\": \"\"}";
+        let mock = spawn_judge_mock(vec![
+            (200, ok_message(serde_json::json!({ "content": invalid }))),
+            (200, ok_message(serde_json::json!({ "content": invalid }))),
+        ])
+        .await;
+        let err = RunJudge::attempt(&test_client(), &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("did not return a valid review after retry"),
+            "{err}"
+        );
+        assert_eq!(mock.requests.lock().unwrap().len(), 2);
+        // Two prose-only replies: the second call breaks out instead of
+        // appending another corrective message.
+        let mock = spawn_judge_mock(vec![
+            (
+                200,
+                ok_message(serde_json::json!({ "content": "no json here" })),
+            ),
+            (
+                200,
+                ok_message(serde_json::json!({ "content": "still no json" })),
+            ),
+        ])
+        .await;
+        let err = RunJudge::attempt(&test_client(), &mock.url, Some("k"), "m", "p".into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("did not return a valid review after retry"),
+            "{err}"
+        );
+        assert_eq!(mock.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_judge_run_rejects_batch_model_before_network() {
+        let workdir = temp_root("run_batch");
+        let err = RunJudge::judge_run(
+            Some("sk-test"),
+            "openrouter/some/judge:batch",
+            "redis",
+            "task prompt",
+            &workdir,
+            &sample_manifest(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("batch API judges stall"), "{err}");
+        let _ = std::fs::remove_dir_all(&workdir);
+    }
+
+    #[tokio::test]
+    async fn test_judge_run_rejects_empty_workspace() {
+        let workdir = temp_root("run_empty_ws");
+        let err = RunJudge::judge_run(
+            Some("sk-test"),
+            "openrouter/some/judge",
+            "redis",
+            "task prompt",
+            &workdir,
+            &sample_manifest(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no reviewable workspace files"), "{err}");
+        let _ = std::fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn test_judge_run_requires_key_when_env_missing() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let workdir = temp_root("run_nokey");
+        // Deliberately no IO driver: even a regression that skipped the key
+        // gate could not reach the network from here.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = rt.block_on(RunJudge::judge_run(
+            None,
+            "openrouter/some/judge",
+            "redis",
+            "task prompt",
+            &workdir,
+            &sample_manifest(),
+        ));
+        match prev {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("needs an OpenRouter API key"), "{err}");
+        let _ = std::fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn test_judge_synthesis_preconditions() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let missing_key = rt.block_on(RunJudge::judge_synthesis(
+            None,
+            "openrouter/some/judge",
+            "prompt".into(),
+        ));
+        match prev {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        let err = missing_key.unwrap_err().to_string();
+        assert!(err.contains("needs an OpenRouter API key"), "{err}");
+        // Both remaining guards fire before any client is built.
+        let batch = rt
+            .block_on(RunJudge::judge_synthesis(
+                Some("sk-test"),
+                "openrouter/some/judge:batch",
+                "p".into(),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(batch.contains("batch API judges stall"), "{batch}");
+        let empty = rt
+            .block_on(RunJudge::judge_synthesis(Some("sk-test"), "  ", "p".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("empty review model"), "{empty}");
+    }
 }

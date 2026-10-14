@@ -498,4 +498,339 @@ mod tests {
         let bytes = encode_frame(9, OP_PING, &[]);
         assert_eq!(&bytes[12..16], &[0, 0, 0, 0]);
     }
+
+    #[test]
+    fn test_corrupt_crc_empty_payload_flips_crc_word() {
+        let good = encode_frame(7, OP_PING, &[]);
+        let bad = corrupt_crc(&good);
+        assert_ne!(good, bad);
+        // With no payload byte to flip the CRC word itself is corrupted.
+        assert!(decode_frame(&bad).is_err());
+    }
+
+    #[test]
+    fn test_decode_accepts_payload_at_cap() {
+        let payload = vec![0xAB; MAX_PAYLOAD];
+        let frame = encode_frame(3, OP_ECHO, &payload);
+        let (f, used) = decode_frame(&frame).unwrap().unwrap();
+        assert_eq!(used, frame.len());
+        assert_eq!(f.seq, 3);
+        assert_eq!(f.payload, payload);
+        // A complete header whose payload is truncated waits for more bytes.
+        assert!(decode_frame(&frame[..16 + 3]).unwrap().is_none());
+    }
+
+    // ---- In-process mock-server tests: drive the verifier over real TCP ----
+
+    use std::collections::HashMap;
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum BinFail {
+        None,
+        BadMagicReplies,
+        SilentOnGarbage,
+        EchoFlipValue,
+        EchoWrongSeq,
+        EchoBadStatus,
+        CrcAccepts,
+        CrcCloses,
+        ReplyBadCrc,
+        UnknownOpOk,
+        KvMissing,
+        KvMissingOk,
+        PutWrongStatus,
+        PipelineShiftId,
+        PipelineWrongPayload,
+        SilenceAll,
+        CloseOnAccept,
+    }
+
+    /// A response frame: the real encoder with the status byte overwritten.
+    fn response(seq: u16, opcode: u8, status: u8, payload: &[u8]) -> Vec<u8> {
+        let mut f = encode_frame(seq, opcode, payload);
+        f[7] = status;
+        f
+    }
+
+    async fn spawn_binproto_mock(fail: BinFail) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    serve_binproto_conn(sock, fail).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Minimal SDB1 server: stateful PUT/GET, ECHO, CRC checking, and
+    /// deterministic close on bad magic. `fail` selects one defect.
+    async fn serve_binproto_conn(mut sock: TcpStream, fail: BinFail) {
+        if fail == BinFail::CloseOnAccept {
+            return;
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        let mut kv: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let mut tmp = [0u8; 65536];
+        loop {
+            // Answer every complete frame currently buffered (real pipelining).
+            loop {
+                if buf.len() < 16 {
+                    break;
+                }
+                if &buf[0..4] != MAGIC {
+                    if fail == BinFail::BadMagicReplies {
+                        let _ = sock.write_all(b"garbage").await;
+                    }
+                    if fail == BinFail::SilentOnGarbage {
+                        // Stay open and mute, modeling a buffered reader.
+                        break;
+                    }
+                    return; // deterministic rejection: close
+                }
+                let seq = u16::from_be_bytes([buf[4], buf[5]]);
+                let opcode = buf[6];
+                let len = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
+                if len > MAX_PAYLOAD || buf.len() < 16 + len {
+                    break;
+                }
+                let crc_want = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+                let payload = buf[16..16 + len].to_vec();
+                buf.drain(..16 + len);
+                if fail == BinFail::SilenceAll {
+                    continue;
+                }
+                if crc_of(&payload) != crc_want {
+                    match fail {
+                        BinFail::CrcAccepts => {
+                            let _ = sock.write_all(&response(seq, opcode, ST_OK, &[])).await;
+                        }
+                        BinFail::CrcCloses => return,
+                        _ => {
+                            let _ = sock
+                                .write_all(&response(seq, opcode, ST_BAD_CHECKSUM, &[]))
+                                .await;
+                        }
+                    }
+                    continue;
+                }
+                let mut reply = match opcode {
+                    OP_PING => response(seq, OP_PING, ST_OK, &[]),
+                    OP_ECHO if fail == BinFail::EchoFlipValue && !payload.is_empty() => {
+                        let mut flipped = payload.clone();
+                        flipped[0] ^= 0xFF;
+                        response(seq, OP_ECHO, ST_OK, &flipped)
+                    }
+                    OP_ECHO if fail == BinFail::EchoWrongSeq => {
+                        response(seq.wrapping_add(1), OP_ECHO, ST_OK, &payload)
+                    }
+                    OP_ECHO if fail == BinFail::EchoBadStatus => {
+                        response(seq, OP_ECHO, ST_UNKNOWN_OP, &payload)
+                    }
+                    OP_ECHO if fail == BinFail::PipelineShiftId && seq == 1005 => {
+                        // Same frame count but one ID wrong: the delivered
+                        // IDs (not a timeout) must fail the pipeline stage.
+                        response(1099, OP_ECHO, ST_OK, &payload)
+                    }
+                    OP_ECHO if fail == BinFail::PipelineWrongPayload && seq >= 1000 => {
+                        response(seq, OP_ECHO, ST_OK, b"CORRUPT")
+                    }
+                    OP_ECHO => response(seq, OP_ECHO, ST_OK, &payload),
+                    OP_PUT => {
+                        if let Some(i) = payload.iter().position(|b| *b == 0) {
+                            kv.insert(payload[..i].to_vec(), payload[i + 1..].to_vec());
+                        }
+                        if fail == BinFail::PutWrongStatus {
+                            response(seq, OP_PUT, ST_UNKNOWN_OP, &[])
+                        } else {
+                            response(seq, OP_PUT, ST_OK, &[])
+                        }
+                    }
+                    OP_GET => match kv.get(&payload) {
+                        Some(v) if fail != BinFail::KvMissing => response(seq, OP_GET, ST_OK, v),
+                        Some(_) | None if fail == BinFail::KvMissingOk => {
+                            response(seq, OP_GET, ST_OK, &[])
+                        }
+                        Some(_) | None => response(seq, OP_GET, ST_UNKNOWN_OP, &[]),
+                    },
+                    _ if fail == BinFail::UnknownOpOk => response(seq, opcode, ST_OK, &[]),
+                    _ => response(seq, opcode, ST_UNKNOWN_OP, &[]),
+                };
+                if fail == BinFail::ReplyBadCrc {
+                    // Corrupt the stored CRC word of a valid response.
+                    reply[15] ^= 0xFF;
+                }
+                if sock.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+            match sock.read(&mut tmp).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_run_all_passes_on_faithful_server() {
+        let port = spawn_binproto_mock(BinFail::None).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        let summary = v.run_all().await;
+        assert_eq!(summary.total_stages, 5);
+        assert_eq!(summary.passed_count, 5, "stages: {:?}", summary.stages);
+        assert_eq!(summary.pass_rate, 100.0);
+        assert_eq!(
+            summary.stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(summary.stages.iter().all(|s| s.error.is_none()));
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_bad_magic_handling() {
+        // Answering garbage fails the handshake.
+        let port = spawn_binproto_mock(BinFail::BadMagicReplies).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        let st = v.stage1_handshake().await;
+        assert!(!st.passed);
+        assert!(st.error.as_deref().unwrap_or("").contains("bad magic drew"));
+        assert_eq!(st.stage, 1);
+
+        // Mute-on-garbage is accepted: silence within the window passes.
+        let port = spawn_binproto_mock(BinFail::SilentOnGarbage).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        let st = tokio::time::timeout(Duration::from_secs(10), v.stage1_handshake())
+            .await
+            .expect("silence check must finish inside its own 3s read window");
+        assert!(st.passed, "silent rejection must pass: {:?}", st.error);
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_stage2_failure_modes() {
+        let cases: &[(BinFail, &str)] = &[
+            (BinFail::EchoFlipValue, "ECHO mismatch"),
+            (BinFail::EchoWrongSeq, "empty ECHO wrong"),
+            (BinFail::EchoBadStatus, "empty ECHO wrong"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_binproto_mock(*fail).await;
+            let v = BinprotoVerifier::new(port, Some("mockseed"));
+            let st = v.stage2_roundtrip().await;
+            assert!(!st.passed, "{fail:?} must fail stage 2");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_stage3_failure_modes() {
+        let cases: &[(BinFail, &str)] = &[
+            (BinFail::CrcAccepts, "CRC-corrupt reply wrong"),
+            (BinFail::CrcCloses, "server closed connection"),
+            (BinFail::UnknownOpOk, "unknown-op reply wrong"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_binproto_mock(*fail).await;
+            let v = BinprotoVerifier::new(port, Some("mockseed"));
+            let st = v.stage3_integrity().await;
+            assert!(!st.passed, "{fail:?} must fail stage 3");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_stage4_failure_modes() {
+        let cases: &[(BinFail, &str)] = &[
+            (BinFail::PutWrongStatus, "PUT reply wrong"),
+            (BinFail::KvMissing, "GET mismatch"),
+            (BinFail::KvMissingOk, "missing-key reply wrong"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_binproto_mock(*fail).await;
+            let v = BinprotoVerifier::new(port, Some("mockseed"));
+            let st = v.stage4_kv().await;
+            assert!(!st.passed, "{fail:?} must fail stage 4");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_stage5_failure_modes() {
+        let cases: &[(BinFail, &str)] = &[
+            (BinFail::PipelineShiftId, "IDs unmatched"),
+            (BinFail::PipelineWrongPayload, "pipeline frame 1000 corrupt"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_binproto_mock(*fail).await;
+            let v = BinprotoVerifier::new(port, Some("mockseed"));
+            let st = v.stage5_pipeline().await;
+            assert!(!st.passed, "{fail:?} must fail stage 5");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 5);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_measure_throughput_and_closed_peer() {
+        let port = spawn_binproto_mock(BinFail::None).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        let rate = v
+            .measure_throughput()
+            .await
+            .expect("200 pipelined ECHOs must be answered");
+        assert!(rate.is_finite() && rate > 0.0, "rate {rate}");
+
+        // A peer that closes immediately yields None, not a hang or panic.
+        let port = spawn_binproto_mock(BinFail::CloseOnAccept).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        assert!(v.measure_throughput().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_corrupt_response_crc_fails_framing() {
+        // Responses with a bad CRC word must be rejected by the frame
+        // decoder, not silently accepted.
+        let port = spawn_binproto_mock(BinFail::ReplyBadCrc).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        assert!(v.measure_throughput().await.is_none());
+        let st = v.stage5_pipeline().await;
+        assert!(!st.passed);
+        assert!(st.error.as_deref().unwrap_or("").contains("crc mismatch"));
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_silent_server_times_out_to_none() {
+        let port = spawn_binproto_mock(BinFail::SilenceAll).await;
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        let out = tokio::time::timeout(Duration::from_secs(10), v.measure_throughput()).await;
+        assert!(
+            out.expect("must obey its own 3s read window").is_none(),
+            "a mute server yields no throughput"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_binproto_unreachable_target_is_reported() {
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let v = BinprotoVerifier::new(port, Some("mockseed"));
+        let st = v.stage1_handshake().await;
+        assert!(!st.passed);
+        assert!(st
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Failed to connect"));
+        assert!(v.measure_throughput().await.is_none());
+    }
 }

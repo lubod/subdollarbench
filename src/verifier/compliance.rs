@@ -299,13 +299,42 @@ impl ComplianceChecker {
         let cmd_token = tokens[idx].to_lowercase();
         let cmd_base = cmd_token.split('/').next_back().unwrap_or(&cmd_token);
 
-        // Check forbidden generic socket tunneling / proxy utilities
+        // Check forbidden generic socket tunneling / proxy utilities.
+        //
+        // Only LISTEN/EXEC-mode invocations are the cheat vector (serving
+        // the port through a tunnel to the official reference, or exec'ing
+        // a shell). Client-mode use is legitimate test tooling: a model
+        // piped a RESP payload into `nc -q1 127.0.0.1 6379` inside its own
+        // test script and was wrongly disqualified (2026-10-14 run 11).
         let forbidden_proxies = ["socat", "nc", "ncat", "netcat"];
         if forbidden_proxies.contains(&cmd_base) {
-            return Some(format!(
-                "uses forbidden generic socket tunnel/proxy '{}'",
-                cmd_base
-            ));
+            let args: Vec<String> = tokens[idx + 1..].iter().map(|a| a.to_lowercase()).collect();
+            let listens = if cmd_base == "socat" {
+                args.iter().any(|a| {
+                    a.contains("tcp-listen")
+                        || a.contains("tcp4-listen")
+                        || a.contains("tcp6-listen")
+                        || a.contains("unix-listen")
+                        || a.contains("openssl-listen")
+                        || a.contains("exec:")
+                        || a.contains("system:")
+                })
+            } else {
+                args.iter().any(|a| {
+                    a == "--listen"
+                        || a == "-l"
+                        || a.contains("--exec")
+                        || (a.starts_with('-')
+                            && !a.starts_with("--")
+                            && (a[1..].contains('l') || a[1..].contains('e')))
+                })
+            };
+            if listens {
+                return Some(format!(
+                    "uses forbidden generic socket tunnel/proxy '{}' in listen/exec mode",
+                    cmd_base
+                ));
+            }
         }
 
         // Any forbidden daemon basename is a violation, whatever path
@@ -1594,7 +1623,7 @@ RUN apk add redis
             std::env::temp_dir().join(format!("test_compliance_hardened_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
 
-        // 1. socat / nc proxy usage
+        // 1. socat / nc proxy usage (listen/exec mode is the cheat vector)
         fs::write(
             temp_dir.join("start.sh"),
             "#!/bin/bash\nsocat TCP-LISTEN:8080,fork TCP:127.0.0.1:80\n",
@@ -1602,8 +1631,48 @@ RUN apk add redis
         .unwrap();
         let res_proxy = ComplianceChecker::check_no_frameworks(&temp_dir);
         assert!(res_proxy.is_err());
-        assert!(res_proxy.unwrap_err().contains("socat"));
+        assert!(res_proxy.unwrap_err().contains("listen/exec mode"));
         let _ = fs::remove_file(temp_dir.join("start.sh"));
+
+        // 1b. Client-mode tunnel tools are legitimate test tooling: a
+        // RESP pipeline piped into `nc -q1 127.0.0.1 6379` (the 2026-10-14
+        // run-11 false disqualification) must NOT fail the checker. The
+        // same file with a listener/exec invocation still must.
+        fs::write(
+            temp_dir.join("test_expiry.sh"),
+            "#!/bin/sh\npipe=$(printf '*1\\r\\n$4\\r\\nPING\\r\\n' | nc -q1 127.0.0.1 6379)\n\
+             echo \"$pipe\"\nsocat - TCP:127.0.0.1:6379 < /dev/null\n",
+        )
+        .unwrap();
+        let res_client_proxy = ComplianceChecker::check_no_frameworks(&temp_dir);
+        assert!(
+            res_client_proxy.is_ok(),
+            "client-mode nc/socat must not disqualify: {res_client_proxy:?}"
+        );
+        let _ = fs::remove_file(temp_dir.join("test_expiry.sh"));
+
+        for (name, body) in [
+            ("nc_listen.sh", "#!/bin/sh\nnc -lk 0.0.0.0 6379\n"),
+            ("ncat_listen.sh", "#!/bin/sh\nncat --listen 6379\n"),
+            ("netcat_exec.sh", "#!/bin/sh\nnetcat -e /bin/sh -l 6379\n"),
+            (
+                "socat_unix.sh",
+                "#!/bin/sh\nsocat UNIX-LISTEN:/tmp/x,fork - \n",
+            ),
+            (
+                "socat_exec.sh",
+                "#!/bin/sh\nsocat TCP:127.0.0.1:6379 EXEC:/bin/cat\n",
+            ),
+        ] {
+            fs::write(temp_dir.join(name), body).unwrap();
+            let res = ComplianceChecker::check_no_frameworks(&temp_dir);
+            assert!(res.is_err(), "{name} must be flagged: {res:?}");
+            assert!(
+                res.unwrap_err().contains("listen/exec mode"),
+                "{name} message should name listen/exec mode"
+            );
+            let _ = fs::remove_file(temp_dir.join(name));
+        }
 
         // 2. Python wsgiref
         fs::write(

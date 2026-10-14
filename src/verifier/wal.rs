@@ -562,4 +562,412 @@ mod tests {
         bad[1].1 = "tampered".to_string();
         assert!(WalVerifier::verify_recovery_payloads(&bad, 3).is_err());
     }
+
+    // ---- In-process mock-server tests: drive the verifier over real TCP ----
+
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum WalFail {
+        None,
+        Crlf,
+        PubAckGarbage,
+        PubAckExtraToken,
+        PubAckShifted,
+        CloseOnPub,
+        SubErr,
+        SubGarbage,
+        SubEmpty,
+        SubStaggered,
+        SubOmitLast,
+        SubWrongPayload,
+        SubClose,
+        LeakPayload,
+        NonUtf8,
+        Silent,
+    }
+
+    async fn spawn_wal_mock(fail: WalFail) -> u16 {
+        spawn_wal_mock_seeded(fail, &[]).await
+    }
+
+    /// Line-oriented WAL mock: `PUB` appends and acks the offset, `SUB`
+    /// replays the topic from the requested offset then `+END`. `fail`
+    /// selects one deterministic defect; `seed` preloads topic logs (used
+    /// for the recovery-topic stages).
+    async fn spawn_wal_mock_seeded(fail: WalFail, seed: &[(&str, &[&str])]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::new(Mutex::new(
+            seed.iter()
+                .map(|(t, msgs)| (t.to_string(), msgs.iter().map(|m| m.to_string()).collect()))
+                .collect(),
+        ));
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut rd = BufReader::new(rd);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match rd.read_line(&mut line).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        let line = line.trim_end();
+                        let nl = if fail == WalFail::Crlf { "\r\n" } else { "\n" };
+                        if let Some(rest) = line.strip_prefix("PUB ") {
+                            let (topic, payload) = rest.split_once(' ').unwrap_or((rest, ""));
+                            let off = {
+                                let mut st = state.lock().unwrap();
+                                let log = st.entry(topic.to_string()).or_default();
+                                let off = log.len() as u64;
+                                log.push(payload.to_string());
+                                off
+                            };
+                            let reply = match fail {
+                                WalFail::PubAckGarbage => "+OK notanumber".to_string(),
+                                WalFail::PubAckExtraToken => format!("+OK {off} junk"),
+                                WalFail::PubAckShifted => format!("+OK {}", off * 2),
+                                WalFail::CloseOnPub => break,
+                                WalFail::NonUtf8 => {
+                                    // read_line into a String rejects this.
+                                    let _ = wr.write_all(b"+OK \xff\xfe\n").await;
+                                    continue;
+                                }
+                                WalFail::Silent => continue, // stay open, never answer
+                                _ => format!("+OK {off}"),
+                            };
+                            if wr
+                                .write_all(format!("{reply}{nl}").as_bytes())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        } else if let Some(rest) = line.strip_prefix("SUB ") {
+                            let (topic, off) = match rest.split_once(' ') {
+                                Some((t, o)) => (t, o.parse::<u64>().unwrap_or(0)),
+                                None => (rest, 0),
+                            };
+                            match fail {
+                                WalFail::SubErr => {
+                                    let _ = wr
+                                        .write_all(format!("-ERR unknown topic{nl}").as_bytes())
+                                        .await;
+                                    continue;
+                                }
+                                WalFail::SubClose => break,
+                                WalFail::Silent => continue,
+                                _ => {}
+                            }
+                            let mut msgs: Vec<(u64, String)> = {
+                                let st = state.lock().unwrap();
+                                st.get(topic)
+                                    .map(|log| {
+                                        log.iter()
+                                            .enumerate()
+                                            .filter(|(i, _)| *i as u64 >= off)
+                                            .map(|(i, p)| (i as u64, p.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            if fail == WalFail::SubEmpty {
+                                let _ = wr.write_all(format!("+END{nl}").as_bytes()).await;
+                                continue;
+                            }
+                            if fail == WalFail::LeakPayload {
+                                let _ = wr
+                                    .write_all(
+                                        format!(":0 leaked_payload{nl}:1 also_leaked{nl}+END{nl}")
+                                            .as_bytes(),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                            if fail == WalFail::SubGarbage {
+                                let _ = wr
+                                    .write_all(
+                                        format!(":notanumber payload{nl}+END{nl}").as_bytes(),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                            if fail == WalFail::SubOmitLast {
+                                msgs.truncate(msgs.len().saturating_sub(1));
+                            }
+                            if fail == WalFail::SubStaggered {
+                                for m in msgs.iter_mut() {
+                                    m.0 *= 2;
+                                }
+                                // One real message alone is contiguous, so a
+                                // synthetic gap makes the defect observable.
+                                if let Some(last) = msgs.last() {
+                                    msgs.push((last.0 + 2, last.1.clone()));
+                                }
+                            }
+                            if fail == WalFail::SubWrongPayload {
+                                for m in msgs.iter_mut() {
+                                    m.1 = format!("tampered-{}", m.1);
+                                }
+                            }
+                            let mut out = String::new();
+                            for (o, p) in &msgs {
+                                out.push_str(&format!(":{o} {p}{nl}"));
+                            }
+                            out.push_str(&format!("+END{nl}"));
+                            if wr.write_all(out.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn mock_wal_run_basic_passes_on_faithful_server() {
+        let port = spawn_wal_mock(WalFail::None).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let summary = v.run_basic().await;
+        assert_eq!(summary.total_stages, 3);
+        assert_eq!(summary.passed_count, 3, "stages: {:?}", summary.stages);
+        assert_eq!(summary.pass_rate, 100.0);
+        assert_eq!(
+            summary.stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(summary.stages.iter().all(|s| s.passed && s.error.is_none()));
+    }
+
+    #[tokio::test]
+    async fn mock_wal_run_basic_passes_on_crlf_server() {
+        let port = spawn_wal_mock(WalFail::Crlf).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let summary = v.run_basic().await;
+        assert_eq!(summary.passed_count, 3, "stages: {:?}", summary.stages);
+    }
+
+    #[tokio::test]
+    async fn mock_wal_run_basic_reports_failures() {
+        let port = spawn_wal_mock(WalFail::SubEmpty).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let summary = v.run_basic().await;
+        assert_eq!(summary.passed_count, 0);
+        assert_eq!(summary.pass_rate, 0.0);
+        assert!(summary
+            .stages
+            .iter()
+            .all(|s| !s.passed && s.error.is_some()));
+        assert!(summary.stages[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("no messages"));
+    }
+
+    #[tokio::test]
+    async fn mock_wal_stage1_failure_modes() {
+        let cases: &[(WalFail, &str)] = &[
+            (WalFail::PubAckGarbage, "expected `+OK <offset>`"),
+            (WalFail::PubAckExtraToken, "expected `+OK <offset>`"),
+            (WalFail::CloseOnPub, "Server closed connection"),
+            (WalFail::SubErr, "failed: -ERR"),
+            (WalFail::SubGarbage, "Unparseable SUB line"),
+            (WalFail::SubEmpty, "returned no messages"),
+            (WalFail::SubStaggered, "not contiguous"),
+            (WalFail::LeakPayload, "missing from SUB output"),
+            (WalFail::SubClose, "Server closed connection"),
+            (WalFail::NonUtf8, "Read failed"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_wal_mock(*fail).await;
+            let v = WalVerifier::new(port, Some("mockseed"));
+            let st = v.stage1_roundtrip().await;
+            assert!(!st.passed, "{fail:?} must fail stage 1");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 1);
+            assert!(st.name.starts_with("Stage 1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_wal_stage2_failure_modes() {
+        let cases: &[(WalFail, &str)] = &[
+            (WalFail::PubAckShifted, "expected contiguous offset"),
+            (WalFail::SubOmitLast, "Expected 5 messages from offset 5"),
+            (WalFail::SubWrongPayload, "expected `:5 msg5_mockseed`"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_wal_mock(*fail).await;
+            let v = WalVerifier::new(port, Some("mockseed"));
+            let st = v.stage2_offsets().await;
+            assert!(!st.passed, "{fail:?} must fail stage 2");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_wal_stage3_failure_modes() {
+        let cases: &[(WalFail, &str)] = &[
+            (WalFail::LeakPayload, "leaked foreign payloads"),
+            (WalFail::SubEmpty, "no messages"),
+        ];
+        for (fail, needle) in cases {
+            let port = spawn_wal_mock(*fail).await;
+            let v = WalVerifier::new(port, Some("mockseed"));
+            let st = v.stage3_isolation().await;
+            assert!(!st.passed, "{fail:?} must fail stage 3");
+            let err = st.error.as_deref().unwrap_or("");
+            assert!(err.contains(needle), "{fail:?}: {err:?} missing {needle:?}");
+            assert_eq!(st.stage, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_wal_conn_direct_ops() {
+        let port = spawn_wal_mock(WalFail::None).await;
+        let mut c = WalConn::connect(port).await.unwrap();
+        assert_eq!(c.pub_one("wal_direct", "one").await.unwrap(), 0);
+        assert_eq!(c.pub_one("wal_direct", "two words").await.unwrap(), 1);
+        let ack = c
+            .request_one(&format_pub("wal_direct", "raw"))
+            .await
+            .unwrap();
+        assert_eq!(parse_pub_ack(&ack), Some(2));
+        assert_eq!(
+            c.sub_collect("wal_direct", 0).await.unwrap(),
+            vec![
+                (0, "one".to_string()),
+                (1, "two words".to_string()),
+                (2, "raw".to_string()),
+            ]
+        );
+        assert_eq!(
+            c.sub_collect("wal_direct", 1).await.unwrap(),
+            vec![(1, "two words".to_string()), (2, "raw".to_string())]
+        );
+        // Unknown topics and offsets past the end are empty, not errors.
+        assert!(c.sub_collect("wal_unknown", 0).await.unwrap().is_empty());
+        assert!(c.sub_collect("wal_direct", 9).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mock_wal_unreachable_target_is_reported() {
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let st = v.stage1_roundtrip().await;
+        assert!(!st.passed);
+        assert!(st
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Failed to connect"));
+        assert!(v.measure_throughput().await.is_none());
+        let rec = v.check_recovery(1).await;
+        assert!(!rec.passed);
+        assert!(rec
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Failed to connect"));
+    }
+
+    #[tokio::test]
+    async fn mock_wal_read_timeout_is_reported() {
+        let port = spawn_wal_mock(WalFail::Silent).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let st = tokio::time::timeout(Duration::from_secs(10), v.stage1_roundtrip())
+            .await
+            .expect("stage 1 must honour its own 3s read timeout");
+        assert!(!st.passed);
+        assert!(st.error.as_deref().unwrap_or("").contains("Read timed out"));
+    }
+
+    #[tokio::test]
+    async fn mock_wal_check_recovery_pass_and_failures() {
+        let exact = ["msg-0", "msg-1", "msg-2"];
+        let port = spawn_wal_mock_seeded(WalFail::None, &[(RECOVERY_TOPIC, &exact)]).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let st = v.check_recovery(3).await;
+        assert!(st.passed, "exact replay must pass: {:?}", st.error);
+        assert_eq!(st.stage, 4);
+        assert!(st.name.starts_with("Stage 4"));
+
+        // An extra un-acked message still satisfies the at-least contract.
+        let extra = ["msg-0", "msg-1", "msg-2", "msg-3"];
+        let port = spawn_wal_mock_seeded(WalFail::None, &[(RECOVERY_TOPIC, &extra)]).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        assert!(v.check_recovery(3).await.passed);
+
+        // Short replay: the verdict names the loss.
+        let short = ["msg-0", "msg-1"];
+        let port = spawn_wal_mock_seeded(WalFail::None, &[(RECOVERY_TOPIC, &short)]).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let st = v.check_recovery(3).await;
+        assert!(!st.passed);
+        assert!(st
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Only 2/3 acked messages survived"));
+
+        // Tampered payload at offset 1.
+        let tampered = ["msg-0", "tampered"];
+        let port = spawn_wal_mock_seeded(WalFail::None, &[(RECOVERY_TOPIC, &tampered)]).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let st = v.check_recovery(2).await;
+        assert!(!st.passed);
+        assert!(st
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("payload mismatch at offset 1"));
+    }
+
+    #[tokio::test]
+    async fn mock_wal_check_recovery_sub_error_is_reported() {
+        let seeded = ["msg-0"];
+        let port = spawn_wal_mock_seeded(WalFail::SubErr, &[(RECOVERY_TOPIC, &seeded)]).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let st = v.check_recovery(1).await;
+        assert!(!st.passed);
+        assert!(st
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("SUB recovery_probe failed"));
+    }
+
+    #[tokio::test]
+    async fn mock_wal_measure_throughput_reports_rate() {
+        let port = spawn_wal_mock(WalFail::None).await;
+        let v = WalVerifier::new(port, Some("mockseed"));
+        let rate = v
+            .measure_throughput()
+            .await
+            .expect("faithful server must ack all 2000 pipelined PUBs");
+        assert!(rate.is_finite() && rate > 0.0, "rate {rate}");
+    }
+
+    #[tokio::test]
+    async fn mock_wal_measure_throughput_returns_none_on_bad_acks() {
+        for fail in [WalFail::PubAckGarbage, WalFail::CloseOnPub] {
+            let port = spawn_wal_mock(fail).await;
+            let v = WalVerifier::new(port, Some("mockseed"));
+            assert!(v.measure_throughput().await.is_none(), "{fail:?}");
+        }
+    }
 }
