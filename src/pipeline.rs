@@ -3116,6 +3116,181 @@ mod tests {
         fn log(&self, _msg: &str) {}
     }
 
+    /// Logger capturing every line, for asserting on pipeline decisions.
+    #[derive(Default)]
+    struct RecordingLogger(std::sync::Mutex<Vec<String>>);
+
+    impl RecordingLogger {
+        fn contains(&self, needle: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|l| l.contains(needle))
+        }
+    }
+
+    impl PipelineLogger for RecordingLogger {
+        fn log(&self, msg: &str) {
+            self.0.lock().unwrap().push(msg.to_string());
+        }
+    }
+
+    /// Temp fixture root unique to this process and test tag.
+    fn covtest_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("covtest-{}-{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Minimal RESP candidate: raw sockets + a thread per connection, so
+    /// PING/ECHO/SET/GET/DEL/EXISTS pass stages 1-2 (and the advisory
+    /// robustness probes), while the deliberately missing TTL/INCR/PUBSUB
+    /// commands keep stages 3-5 red. That keeps pass_rate < 100%, so the
+    /// pipeline skips the bench while still building the full manifest.
+    const MOCK_RESP_SERVER_PY: &str = r#"import socket
+import sys
+import threading
+
+STORE = {}
+LOCK = threading.Lock()
+
+
+def line(f):
+    raw = f.readline()
+    if not raw:
+        raise EOFError("eof")
+    return raw.rstrip(b"\r\n")
+
+
+def read_args(f):
+    first = f.read(1)
+    if not first:
+        raise EOFError("eof")
+    if first != b"*":
+        raise ValueError("unsupported frame")
+    count = int(line(f))
+    args = []
+    for _ in range(count):
+        kind = f.read(1)
+        if kind != b"$":
+            raise ValueError("unsupported type")
+        n = int(line(f))
+        data = f.read(n)
+        f.read(2)
+        args.append(data)
+    return args
+
+
+def dispatch(args):
+    cmd = args[0].upper()
+    if cmd == b"PING":
+        return b"+PONG\r\n"
+    if cmd == b"ECHO" and len(args) == 2:
+        v = args[1]
+        return b"$%d\r\n%s\r\n" % (len(v), v)
+    if cmd == b"SET" and len(args) >= 3:
+        with LOCK:
+            STORE[args[1]] = args[2]
+        return b"+OK\r\n"
+    if cmd == b"GET" and len(args) == 2:
+        with LOCK:
+            v = STORE.get(args[1])
+        if v is None:
+            return b"$-1\r\n"
+        return b"$%d\r\n%s\r\n" % (len(v), v)
+    if cmd == b"DEL" and len(args) == 2:
+        with LOCK:
+            hit = STORE.pop(args[1], None) is not None
+        return b":%d\r\n" % (1 if hit else 0)
+    if cmd == b"EXISTS" and len(args) == 2:
+        with LOCK:
+            hit = args[1] in STORE
+        return b":%d\r\n" % (1 if hit else 0)
+    return b"-ERR unknown command\r\n"
+
+
+def handle(conn):
+    try:
+        f = conn.makefile("rb")
+        while True:
+            args = read_args(f)
+            if not args:
+                continue
+            conn.sendall(dispatch(args))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def main():
+    port = int(sys.argv[1])
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", port))
+    srv.listen(128)
+    print("covtest-mock listening on %d" % port, flush=True)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+
+main()
+"#;
+
+    /// Write the mock candidate into `dir`, listening on `port`.
+    /// `boot_sleep_secs` delays the listener (used to keep a run inside
+    /// verification while a test flips the cancel flag).
+    fn write_mock_candidate(dir: &Path, port: u16, boot_sleep_secs: u64) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("server.py"), MOCK_RESP_SERVER_PY).unwrap();
+        let start = format!(
+            "#!/bin/bash\nsleep {boot_sleep_secs}\nexec python3 -u /workspace/server.py {port}\n"
+        );
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Eval-only Redis config on a high worker offset: candidate/ref ports
+    /// live at base + worker*100, far away from the worker-0 ports
+    /// (6379/6380/8090) used by live campaign cells.
+    fn covtest_config(workdir: PathBuf, worker: u8, tag: &str) -> BenchmarkConfig {
+        BenchmarkConfig {
+            model: "test_model".to_string(),
+            task: TaskType::Redis,
+            effort: "low".to_string(),
+            harness: Harness::Omp,
+            max_turns: 1,
+            budget_usd: 0.10,
+            timeout_min: 1,
+            api_key: None,
+            workdir,
+            eval_only: true,
+            run_id: Some(format!("test_covtest_{tag}_{}", std::process::id())),
+            save_results: false,
+            review_model: None,
+            batch_reference: None,
+            worker,
+            feedback_rounds: 0,
+            campaign_stage: None,
+            baseline_rps: None,
+        }
+    }
+
+    /// The pipeline's own cleanup deliberately keeps networks younger than
+    /// its staleness window (a parallel worker may still be attaching). Tests
+    /// know their run is over, so reap their own named network explicitly.
+    fn cleanup_covtest_network(tag: &str) {
+        let net = format!("subdollar-net-test_covtest_{tag}_{}", std::process::id());
+        let _ = std::process::Command::new("docker")
+            .args(["network", "rm", &net])
+            .output();
+    }
+
     /// Stage 9 end-to-end against real fixtures (needs Docker + the
     /// `subdollar-sandbox` image, like the other container-backed sandbox
     /// tests). Builds a temp git repo with genuine stage-0/stage-1 commits,
@@ -3346,7 +3521,10 @@ mod tests {
             save_results: true,
             review_model: None,
             batch_reference: None,
-            worker: 0,
+            // Worker 99: this test only asserts the archive path; worker 0
+            // ports (6379/6380/8090) belong to live campaign cells on this
+            // host, so keep test traffic on the high offset.
+            worker: 99,
             harness: Harness::Omp,
             feedback_rounds: 0,
             campaign_stage: None,
@@ -3448,5 +3626,449 @@ mod tests {
         assert!(prompt.contains("server started on port 6379"));
         assert!(prompt.contains("Directives for Surgical Bug Fixing:"));
         assert!(prompt.contains("DO NOT wipe your workspace"));
+    }
+
+    fn stage_by(m: &RunManifest, n: u32) -> &crate::verifier::StageResult {
+        m.stages
+            .iter()
+            .find(|s| s.stage == n)
+            .unwrap_or_else(|| panic!("stage {n} missing from manifest"))
+    }
+
+    #[test]
+    fn test_output_tail_trims_and_respects_char_boundaries() {
+        assert_eq!(output_tail("  hello  ", 10), "hello");
+        assert_eq!(output_tail("hello world", 5), "…world");
+        // A cut landing inside a multi-byte char walks forward to the next
+        // boundary ("héllo" = 6 bytes: cutting at 3 keeps "llo").
+        assert_eq!(output_tail("héllo", 3), "…llo");
+        // Entire tail is one partial char: the marker stands alone, never a
+        // broken UTF-8 slice.
+        assert_eq!(output_tail("h€", 2), "…");
+        assert_eq!(output_tail("", 4), "");
+    }
+
+    #[test]
+    fn test_hash_seed_is_stable_and_hex_shaped() {
+        let a = hash_seed("redis_test_model_20261014");
+        assert_eq!(a, hash_seed("redis_test_model_20261014"));
+        assert_ne!(a, hash_seed("redis_test_model_20261015"));
+        assert_eq!(a.len(), 8);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_git_in_success_and_failure() {
+        let dir = covtest_dir("git");
+        fs::create_dir_all(&dir).unwrap();
+        // Not a repo: the failure must name the git args for diagnosis.
+        let err = git_in(&dir, &["rev-parse", "HEAD"]).unwrap_err();
+        assert!(err.contains("rev-parse"), "{err}");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let inside = git_in(&dir, &["rev-parse", "--is-inside-work-tree"]).unwrap();
+        assert_eq!(inside.trim(), "true");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_buffering_logger_honors_cancel_filter() {
+        let inner = Arc::new(RecordingLogger::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let buf = BufferingPipelineLogger::new(inner.clone(), Some(cancel.clone()));
+        buf.log("normal before cancel");
+        cancel.store(true, Ordering::SeqCst);
+        buf.log("suppressed while cancelled");
+        buf.log("[USER ACTION] still shown");
+        buf.log("[DONE] marker");
+        buf.log("[STOP] marker");
+        buf.log("[PIPELINE] Run cancelled before archiving.");
+        buf.log("[PIPELINE] Cancellation reason");
+        assert!(inner.contains("normal before cancel"));
+        assert!(!inner.contains("suppressed while cancelled"));
+        assert!(inner.contains("[USER ACTION] still shown"));
+        assert!(inner.contains("[DONE] marker"));
+        assert!(inner.contains("[STOP] marker"));
+        assert!(inner.contains("Run cancelled before archiving"));
+        assert!(inner.contains("Cancellation reason"));
+        // Buffer mirrors the forwarded lines, timestamp-prefixed.
+        let logs = buf.get_logs();
+        assert!(logs.contains("normal before cancel"));
+        assert!(!logs.contains("suppressed while cancelled"));
+        assert!(logs
+            .lines()
+            .any(|l| l.starts_with('[') && l.contains("] normal before cancel")));
+    }
+
+    #[test]
+    fn test_worker_upstream_ports_follow_worker_offset() {
+        assert_eq!(worker_upstream_ports(0), [8101, 8102, 8103]);
+        assert_eq!(worker_upstream_ports(3), [8401, 8402, 8403]);
+    }
+
+    #[test]
+    fn test_format_feedback_prompt_zero_stages_and_tail_limit() {
+        // Zero totals: the percentage guard must not divide by zero.
+        let p = BenchmarkPipeline::format_feedback_prompt(TaskType::Redis, 0, 0, &[], "");
+        assert!(p.contains("passed 0 of 0 stages (0.0%)"));
+        assert!(!p.contains("Service Container Runtime Output"));
+        // Container logs are tail-capped at 60 lines: older lines drop off.
+        let logs: Vec<String> = (0..80).map(|i| format!("line {i:02}")).collect();
+        let p =
+            BenchmarkPipeline::format_feedback_prompt(TaskType::Redis, 1, 2, &[], &logs.join("\n"));
+        assert!(p.contains("line 79"));
+        assert!(p.contains("line 20"));
+        assert!(!p.contains("line 19"));
+    }
+
+    /// Full REAL pipeline drive with no model: eval-only Redis on a mock
+    /// RESP candidate that clears stages 1-2 and deliberately fails 3-5.
+    /// Asserts the verdict/manifest shape of a partially-passing trial and
+    /// that the bench is skipped below 100%.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_mock_candidate_full_flow() {
+        let worker = 90u8;
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
+        let workdir = covtest_dir("flow");
+        write_mock_candidate(&workdir, port, 0);
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(
+            covtest_config(workdir.clone(), worker, "flow"),
+            logger.clone(),
+            None,
+        )
+        .await
+        .expect("eval-only mock pipeline must complete");
+        assert!(!out.disqualified && !out.infra_error && !out.agent_failed);
+
+        let m = &out.manifest;
+        assert_eq!(m.status, "failed_tests");
+        assert_eq!((m.passed_stages, m.total_stages), (2, 6));
+        assert!(
+            m.pass_rate > 33.0 && m.pass_rate < 34.0,
+            "pass_rate {}",
+            m.pass_rate
+        );
+        assert!(
+            stage_by(m, 1).passed,
+            "handshake: {:?}",
+            stage_by(m, 1).error
+        );
+        assert!(stage_by(m, 2).passed, "kv: {:?}", stage_by(m, 2).error);
+        for n in [3, 4, 5] {
+            assert!(!stage_by(m, n).passed, "stage {n} must fail");
+        }
+        assert!(!stage_by(m, 6).passed);
+        assert!(stage_by(m, 6)
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("skipped"));
+
+        // Below 100%: no load test, no tokens, no cost, unsolved.
+        assert!(m.throughput_req_sec.is_none());
+        assert!(m.reference_throughput_req_sec.is_none());
+        assert!(m.baseline_source.is_none());
+        assert_eq!(m.tokens.total_tokens, 0);
+        assert_eq!(m.cost_usd, 0.0);
+        assert_eq!(m.cost_source.as_deref(), Some("formula"));
+        assert_eq!(m.solved, Some(false));
+        assert!(m.solved_at.is_none());
+        assert_eq!(m.repaired, None);
+        assert_eq!(m.feedback_rounds, None);
+        assert_eq!(out.benchmark_result.status.as_deref(), Some("failed_tests"));
+        assert_eq!(out.benchmark_result.pass_at_1, Some(0.0));
+
+        // Advisory probes ran; the threaded mock survives both robustness
+        // checks (malformed garbage + half-open slow sender).
+        assert_eq!(m.robustness.len(), 3);
+        let adv = |n: u32| m.robustness.iter().find(|s| s.stage == n).unwrap();
+        assert!(adv(101).passed, "malformed: {:?}", adv(101).error);
+        assert!(adv(102).passed, "slow sender: {:?}", adv(102).error);
+
+        assert!(logger.contains("PING & ECHO Handshake"));
+        assert!(logger.contains("skipped due to failure in earlier stages"));
+        cleanup_covtest_network("flow");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// Empty workspace: no start.sh/Dockerfile -> verification is skipped,
+    /// no container is built, and the verdict stays a (0%, 6-stage) trial.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_no_runnable_workspace() {
+        let workdir = covtest_dir("norun");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(workdir.join("notes.txt"), "no server here").unwrap();
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(
+            covtest_config(workdir.clone(), 91, "norun"),
+            logger.clone(),
+            None,
+        )
+        .await
+        .expect("pipeline completes even without a candidate");
+        assert!(!out.infra_error && !out.disqualified && !out.agent_failed);
+        assert_eq!(out.manifest.status, "failed_tests");
+        assert_eq!(out.manifest.pass_rate, 0.0);
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (0, 6)
+        );
+        assert!(out.manifest.stages.is_empty());
+        assert!(logger.contains("No runnable start.sh or Dockerfile found"));
+        cleanup_covtest_network("norun");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// Forbidden base image -> disqualified before any container work, with
+    /// the compliance stage carrying the reason and the cheat status.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_disqualified_workspace() {
+        let workdir = covtest_dir("dq");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(workdir.join("Dockerfile"), "FROM redis:alpine\n").unwrap();
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(
+            covtest_config(workdir.clone(), 92, "dq"),
+            logger.clone(),
+            None,
+        )
+        .await
+        .expect("disqualified run still returns Ok");
+        assert!(out.disqualified);
+        assert!(!out.infra_error);
+        assert_eq!(out.manifest.status, "disqualified_cheat");
+        assert_eq!(out.manifest.pass_rate, 0.0);
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (0, 6)
+        );
+        assert_eq!(out.manifest.stages.len(), 1);
+        assert_eq!(out.manifest.stages[0].stage, 0);
+        assert!(out.manifest.stages[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("forbidden base image"));
+        assert!(logger.contains("[ANTI-CHEAT VIOLATION]"));
+        cleanup_covtest_network("dq");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// `docker run -p` cannot bind a port the host already holds -> the
+    /// candidate container failure is classified as an infra error, not a
+    /// 0% model verdict.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_infra_error_on_port_conflict() {
+        let worker = 93u8;
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
+        let workdir = covtest_dir("infra");
+        write_mock_candidate(&workdir, port, 0);
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_accept = stop.clone();
+        let acceptor = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_accept.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Immediately reset: verifier probes fail fast on EOF.
+                drop(stream);
+            }
+        });
+
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(
+            covtest_config(workdir.clone(), worker, "infra"),
+            logger.clone(),
+            None,
+        )
+        .await
+        .expect("infra-error run still returns Ok");
+        assert!(out.infra_error);
+        assert!(!out.disqualified && !out.agent_failed);
+        assert_eq!(out.manifest.status, "infra_error");
+        assert!(logger.contains("[INFRA] Candidate container failed to start"));
+        assert!(
+            !logger.contains("[MODEL-FAULT]"),
+            "a port clash is not a model packaging fault"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        acceptor.join().unwrap();
+        cleanup_covtest_network("infra");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// Runnable image, unusable entrypoint: `docker run` fails with
+    /// "no such file or directory", which is the model's packaging fault
+    /// (not infra). Driven through `run_verification` directly.
+    #[tokio::test]
+    async fn test_verification_classifies_model_packaging_fault() {
+        let worker = 94u8;
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
+        let workdir = covtest_dir("packaging");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(
+            workdir.join("Dockerfile"),
+            "FROM subdollar-sandbox\nENTRYPOINT [\"/nonexistent-binary\"]\n",
+        )
+        .unwrap();
+
+        let id = format!("covtest-{}-packaging", std::process::id());
+        let sandbox = SandboxManager::with_id(&id);
+        let rec: Arc<RecordingLogger> = Arc::new(RecordingLogger::default());
+        let logger: Arc<dyn PipelineLogger> = rec.clone();
+        let outcome = BenchmarkPipeline::run_verification(
+            TaskType::Redis,
+            &workdir,
+            &sandbox,
+            port,
+            "covtest-seed",
+            false,
+            worker,
+            &logger,
+            None,
+        )
+        .await;
+        assert!(
+            !outcome.infra_error,
+            "packaging faults are model-side, not infra"
+        );
+        assert_eq!(outcome.pass_rate, 0.0);
+        assert_eq!(outcome.total_stages, 6);
+        assert!(rec.contains("[MODEL-FAULT] Candidate container failed to start"));
+
+        sandbox.cleanup();
+        let _ = std::process::Command::new("docker")
+            .args(["rmi", "-f", &format!("subdollar-candidate-{id}")])
+            .output();
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// A cancel that lands while verification is running must surface as an
+    /// Err after the sandbox is cleaned up, never as a scored trial.
+    #[tokio::test]
+    async fn test_pipeline_cancel_after_verification_returns_err() {
+        let worker = 95u8;
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
+        let workdir = covtest_dir("cancel");
+        // Slow boot keeps the run inside verification past the timer.
+        write_mock_candidate(&workdir, port, 8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_timer = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            cancel_timer.store(true, Ordering::SeqCst);
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let res = BenchmarkPipeline::execute(
+            covtest_config(workdir.clone(), worker, "cancel"),
+            logger.clone(),
+            Some(cancel),
+        )
+        .await;
+        let err = res.expect_err("a cancelled run must not report success");
+        assert!(err.to_string().contains("cancelled"), "{err}");
+        assert!(logger.contains("cancel"), "cancellation must be logged");
+        cleanup_covtest_network("cancel");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// Campaign ticket with a partial acceptance subset: only stages 1-3
+    /// count toward the verdict, the destructive AOF stage is skipped, and
+    /// the manifest records the subset totals.
+    #[tokio::test]
+    async fn test_pipeline_campaign_acceptance_subset_scopes_verdict() {
+        let worker = 96u8;
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
+        let workdir = covtest_dir("campaign");
+        write_mock_candidate(&workdir, port, 0);
+        let prompt_path = workdir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "campaign ticket: continue the build").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "campaign");
+        config.feedback_rounds = 2;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-campaign".to_string(),
+            stage: 1,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![1, 2, 3],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("campaign eval-only run must complete");
+        let m = &out.manifest;
+        assert_eq!(m.status, "failed_tests");
+        assert_eq!((m.passed_stages, m.total_stages), (2, 3));
+        assert!(
+            m.pass_rate > 66.0 && m.pass_rate < 67.0,
+            "pass_rate {}",
+            m.pass_rate
+        );
+        // feedback_rounds > 0 but eval-only never runs a repair round.
+        assert_eq!(m.feedback_rounds, Some(0));
+        assert_eq!(m.repair_attempted, Some(false));
+        assert_eq!(m.repaired, None);
+        assert!(logger.contains("outside this ticket's acceptance"));
+        assert!(logger.contains("skipping the destructive kill"));
+        cleanup_covtest_network("campaign");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// No-runnable branches of `run_verification`, including the
+    /// agent-failed (empty workspace) wording. No container is started.
+    #[tokio::test]
+    async fn test_run_verification_no_runnable_candidate_paths() {
+        let workdir = covtest_dir("v-none");
+        fs::create_dir_all(&workdir).unwrap();
+        let sandbox = SandboxManager::with_id(&format!("covtest-{}-vn", std::process::id()));
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), 97);
+
+        let rec: Arc<RecordingLogger> = Arc::new(RecordingLogger::default());
+        let logger: Arc<dyn PipelineLogger> = rec.clone();
+        let outcome = BenchmarkPipeline::run_verification(
+            TaskType::Redis,
+            &workdir,
+            &sandbox,
+            port,
+            "covtest-seed",
+            false,
+            97,
+            &logger,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.pass_rate, 0.0);
+        assert!(outcome.stage_results.is_empty());
+        assert!(!outcome.infra_error);
+        assert!(rec.contains("No runnable start.sh or Dockerfile found"));
+
+        let rec2: Arc<RecordingLogger> = Arc::new(RecordingLogger::default());
+        let logger2: Arc<dyn PipelineLogger> = rec2.clone();
+        let outcome2 = BenchmarkPipeline::run_verification(
+            TaskType::Redis,
+            &workdir,
+            &sandbox,
+            port,
+            "covtest-seed",
+            true,
+            97,
+            &logger2,
+            None,
+        )
+        .await;
+        assert_eq!(outcome2.pass_rate, 0.0);
+        assert!(outcome2.stage_results.is_empty());
+        assert!(rec2.contains("did not produce runnable code"));
+        let _ = fs::remove_dir_all(&workdir);
     }
 }
