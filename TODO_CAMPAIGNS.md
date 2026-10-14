@@ -265,6 +265,10 @@ non-redis acceptance adapters.
   counter failed. Fixed: the test now connects/disconnects a second
   client; mock test asserts pass + frozen-counter fail. RULES
   `2026-10-14.7`. Stage 7 still needs a live execution.)*
+  *(2026-10-14 follow-up 2: stage 9's revert-sensitivity flow now has an
+  end-to-end test against a real fixture git repo — green suite passes,
+  toothless always-green suite is rejected. Stage 9 needs a live campaign
+  run only if the ladder ever reaches t6.)*
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
   **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
   25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
