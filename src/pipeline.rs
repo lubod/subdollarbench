@@ -81,8 +81,10 @@ fn initial_turn_cap(max_turns: u32, feedback_rounds: u32, reserve_repair: bool) 
             // attempt: the shared pool IS max_turns, and the live canary
             // showed a 25-turn ticket consuming 25/25 on the initial
             // attempt — the repair round never fired and a compile error
-            // went unfixed. Reserve a quarter of the pool (min 1 turn).
-            let reserve = (max_turns / 4).max(1);
+            // went unfixed. Reserve a quarter of the pool, but at least 8
+            // turns (inkling burned its 6-turn reserve surveying and never
+            // edited) and never more than half the pool.
+            let reserve = (max_turns / 4).max(8).min(max_turns / 2).max(1);
             cap = cap.min(max_turns.saturating_sub(reserve)).max(1);
         }
         Some(cap)
@@ -678,6 +680,68 @@ impl BenchmarkPipeline {
                                 st.error.as_deref().unwrap_or("")
                             ));
                             stages.push(st);
+                        }
+                        // Stage 8 (ENOSPC incident) runs in a fault
+                        // container: the candidate is restarted with
+                        // SDB_DATA_DIR on an 8MB tmpfs so "disk full" is
+                        // real and contained. Explicit acceptance only.
+                        // The normal container is restored afterwards so the
+                        // advisory robustness/differential probes run
+                        // against a clean candidate.
+                        if accepted.map(|a| a.contains(&8)).unwrap_or(false) {
+                            let name8 = "Stage 8: ENOSPC incident (log volume full)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 8,
+                                    name: name8.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                let started = match sandbox.stop_candidate() {
+                                    Ok(_) => sandbox.start_candidate_enospc(workdir, port),
+                                    Err(e) => Err(e),
+                                };
+                                match started {
+                                    Ok(()) => {
+                                        if sandbox.wait_for_port(port, 25).await {
+                                            verifier.test_stage_enospc().await
+                                        } else {
+                                            crate::verifier::StageResult {
+                                                stage: 8,
+                                                name: name8.to_string(),
+                                                passed: false,
+                                                error: Some(
+                                                    "fault container did not open its port"
+                                                        .to_string(),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    Err(e) => crate::verifier::StageResult {
+                                        stage: 8,
+                                        name: name8.to_string(),
+                                        passed: false,
+                                        error: Some(format!("fault container start failed: {e}")),
+                                    },
+                                }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker(workdir, port);
+                            let _ = sandbox.wait_for_port(port, 25).await;
                         }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();
@@ -2259,12 +2323,15 @@ mod tests {
         assert_eq!(initial_turn_cap(30, 1, false), Some(30));
         // Feedback off: full budget up front.
         assert_eq!(initial_turn_cap(100, 0, false), Some(100));
-        // Campaign reserve (D6 option b): a quarter of the pool is kept for
-        // the repair round; big pools are unchanged (50-cap binds first).
+        // Campaign reserve (D6 option b, floor 8): a quarter of the pool is
+        // kept for the repair round, at least 8 turns and at most half the
+        // pool; big pools are unchanged (the 50-cap binds first).
         assert_eq!(initial_turn_cap(100, 2, true), Some(50));
         assert_eq!(initial_turn_cap(40, 2, true), Some(30));
-        assert_eq!(initial_turn_cap(25, 1, true), Some(19));
-        assert_eq!(initial_turn_cap(4, 1, true), Some(3));
+        assert_eq!(initial_turn_cap(30, 1, true), Some(22));
+        assert_eq!(initial_turn_cap(25, 1, true), Some(17));
+        assert_eq!(initial_turn_cap(10, 1, true), Some(5));
+        assert_eq!(initial_turn_cap(4, 1, true), Some(2));
         assert_eq!(initial_turn_cap(1, 1, true), Some(1));
         // No repair rounds means no reserve.
         assert_eq!(initial_turn_cap(25, 0, true), Some(25));

@@ -187,9 +187,9 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
         }
         let mut seen = HashSet::new();
         for id in a {
-            if !(1..=7).contains(id) {
+            if !(1..=8).contains(id) {
                 bail!(
-                    "campaign '{}': stage {} acceptance id {} out of range 1..=7",
+                    "campaign '{}': stage {} acceptance id {} out of range 1..=8",
                     spec.name,
                     s.id,
                     id

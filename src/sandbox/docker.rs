@@ -104,6 +104,18 @@ pub struct SandboxManager {
     pub needs_cleanup: AtomicBool,
 }
 
+/// Extra runtime knobs for a candidate container. Used by campaign fault
+/// injectors: the ENOSPC incident runs the candidate against a small tmpfs
+/// data volume (`SDB_DATA_DIR=/data`) so "disk full" is real, deterministic
+/// and contained.
+#[derive(Default, Clone)]
+pub struct CandidateRunExtras {
+    /// tmpfs mounts in docker syntax (`/data:size=8m`).
+    pub tmpfs: Vec<String>,
+    /// Environment variables for the container.
+    pub env: Vec<(String, String)>,
+}
+
 impl Default for SandboxManager {
     fn default() -> Self {
         Self::new()
@@ -991,6 +1003,42 @@ impl SandboxManager {
     }
 
     pub fn start_candidate_in_docker(&self, workdir: &Path, port: u16) -> Result<()> {
+        self.start_candidate_in_docker_with(workdir, port, &CandidateRunExtras::default())
+    }
+
+    /// ENOSPC incident container: the candidate's log directory
+    /// (`SDB_DATA_DIR`) lives on an 8MB tmpfs, so filling it produces real
+    /// ENOSPC without touching the host or the workspace.
+    pub fn start_candidate_enospc(&self, workdir: &Path, port: u16) -> Result<()> {
+        self.start_candidate_in_docker_with(
+            workdir,
+            port,
+            &CandidateRunExtras {
+                tmpfs: vec!["/data:size=8m".to_string()],
+                env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
+            },
+        )
+    }
+
+    fn candidate_extras_args(extras: &CandidateRunExtras) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in &extras.tmpfs {
+            out.push("--tmpfs".to_string());
+            out.push(t.clone());
+        }
+        for (k, v) in &extras.env {
+            out.push("-e".to_string());
+            out.push(format!("{k}={v}"));
+        }
+        out
+    }
+
+    pub fn start_candidate_in_docker_with(
+        &self,
+        workdir: &Path,
+        port: u16,
+        extras: &CandidateRunExtras,
+    ) -> Result<()> {
         Self::relax_workspace_perms(workdir);
         let name = self.candidate_container_name();
         info!(
@@ -1030,26 +1078,28 @@ impl SandboxManager {
             match build_res {
                 Ok(out) if out.status.success() => {
                     info!("Custom Dockerfile build succeeded. Running container...");
-                    let run_res = Command::new("docker")
-                        .args([
-                            "run",
-                            "-d",
-                            "--label",
-                            &format!("sdb.run={}", self.instance_id),
-                            "--label",
-                            "sdb.role=candidate",
-                            "--name",
-                            &name,
-                            "--memory=2g",
-                            "--cpus=2.0",
-                            "--pids-limit=256",
-                            "-p",
-                            &port_tcp,
-                            "-p",
-                            &port_udp,
-                            &image_tag,
-                        ])
-                        .output();
+                    let mut args: Vec<String> = vec![
+                        "run".into(),
+                        "-d".into(),
+                        "--label".into(),
+                        format!("sdb.run={}", self.instance_id),
+                        "--label".into(),
+                        "sdb.role=candidate".into(),
+                        "--name".into(),
+                        name.clone(),
+                        "--memory=2g".into(),
+                        "--cpus=2.0".into(),
+                        "--pids-limit=256".into(),
+                    ];
+                    args.extend(Self::candidate_extras_args(extras));
+                    args.extend([
+                        "-p".into(),
+                        port_tcp.clone(),
+                        "-p".into(),
+                        port_udp.clone(),
+                        image_tag.clone(),
+                    ]);
+                    let run_res = Command::new("docker").args(&args).output();
                     match run_res {
                         Ok(run_out) if run_out.status.success() => {}
                         Ok(run_out) => {
@@ -1085,31 +1135,33 @@ impl SandboxManager {
         // CASE B: Standard Sandbox with start.sh
         let mount_arg = format!("{}:/workspace", canonical_workdir.display());
         let launch_cmd = "cd /workspace && if [ -f start.sh ]; then chmod +x start.sh && exec ./start.sh; elif [ -f main.py ]; then exec python3 main.py; elif [ -f app.py ]; then exec python3 app.py; elif [ -f server.py ]; then exec python3 server.py; elif [ -f main.go ]; then exec go run main.go; elif [ -f Cargo.toml ]; then exec cargo run --release; elif [ -f main.js ]; then exec node main.js; elif [ -f index.js ]; then exec node index.js; else chmod +x start.sh 2>/dev/null && exec ./start.sh; fi";
-        let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=candidate",
-                "--name",
-                &name,
-                "--memory=2g",
-                "--cpus=2.0",
-                "--pids-limit=256",
-                "-v",
-                &mount_arg,
-                "-p",
-                &port_tcp,
-                "-p",
-                &port_udp,
-                "subdollar-sandbox",
-                "/bin/bash",
-                "-c",
-                launch_cmd,
-            ])
-            .output()?;
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--label".into(),
+            format!("sdb.run={}", self.instance_id),
+            "--label".into(),
+            "sdb.role=candidate".into(),
+            "--name".into(),
+            name.clone(),
+            "--memory=2g".into(),
+            "--cpus=2.0".into(),
+            "--pids-limit=256".into(),
+        ];
+        args.extend(Self::candidate_extras_args(extras));
+        args.extend([
+            "-v".into(),
+            mount_arg.clone(),
+            "-p".into(),
+            port_tcp.clone(),
+            "-p".into(),
+            port_udp.clone(),
+            "subdollar-sandbox".into(),
+            "/bin/bash".into(),
+            "-c".into(),
+            launch_cmd.into(),
+        ]);
+        let out = Command::new("docker").args(&args).output()?;
         if !out.status.success() {
             return Err(anyhow!(
                 "candidate sandbox failed to start: {}",

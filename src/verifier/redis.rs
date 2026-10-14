@@ -1166,6 +1166,114 @@ impl RedisVerifier {
             error: None,
         }
     }
+
+    /// Stage 8 (campaign ENOSPC incident): the pipeline runs the candidate
+    /// with `SDB_DATA_DIR` on a small tmpfs. Protocol writes fill the volume
+    /// until persistence fails; then:
+    ///   - previously acked data still reads back and PING stays alive
+    ///     (no crash, no wedge),
+    ///   - a write that cannot be persisted returns an error and is NOT
+    ///     applied (GET of the failed key is nil) — never a silent ack,
+    ///   - further writes answer without hanging (error preferred; success
+    ///     is tolerated only if the server reclaimed space).
+    ///
+    /// Recovery-after-free and replay-after-incident are out of scope (they
+    /// need to free/reach the container's tmpfs); see TODO_CAMPAIGNS C2.
+    pub async fn test_stage_enospc(&self) -> StageResult {
+        let name = "Stage 8: ENOSPC incident (log volume full)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 8,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect: {e}")),
+        };
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("PING before fill: {r:?}")),
+            Err(e) => return fail(format!("PING before fill failed: {e}")),
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.get_seed_prefix("enospc").hash(&mut h);
+        "enospc-stage-v1".hash(&mut h);
+        let tag = format!("{:08x}", (h.finish() ^ (h.finish() >> 32)) as u32);
+        let seed_k = format!("enospc_seed_{tag}");
+        let seed_v = format!("seed-{tag}");
+        match Self::send_resp_cmd(&mut stream, &["SET", &seed_k, &seed_v]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return fail(format!("seed SET: {r:?}")),
+            Err(e) => return fail(format!("seed SET failed: {e}")),
+        }
+
+        // Fill with 240KB values: an 8MB volume covers ~30 successful
+        // writes; the 80-attempt bound (≈19MB of payload) guarantees
+        // termination even if the log is not on the small volume.
+        let value = "x".repeat(240 * 1024);
+        let mut failed_key: Option<usize> = None;
+        for i in 0..80usize {
+            let k = format!("enospc_fill_{tag}_{i}");
+            match Self::send_resp_cmd(&mut stream, &["SET", &k, &value]).await {
+                Ok(r) if r.trim() == "+OK" => continue,
+                Ok(r) if r.starts_with('-') => {
+                    failed_key = Some(i);
+                    break;
+                }
+                Ok(r) => return fail(format!("fill SET {i} unexpected reply {r:?}")),
+                Err(e) => {
+                    return fail(format!(
+                        "fill SET {i} connection failed (server died or wedged): {e}"
+                    ))
+                }
+            }
+        }
+        let Some(fk) = failed_key else {
+            return fail(
+                "writes never failed after ~19MB: the log volume never filled (is the log on SDB_DATA_DIR?)"
+                    .to_string(),
+            );
+        };
+
+        // Previously acked data still reads back.
+        match Self::send_resp_cmd(&mut stream, &["GET", &seed_k]).await {
+            Ok(r) if r.contains(&seed_v) => {}
+            Ok(r) => return fail(format!("seed read with full volume: {r:?}")),
+            Err(e) => return fail(format!("seed read failed with full volume: {e}")),
+        }
+        // Alive.
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("PING with full volume: {r:?}")),
+            Err(e) => return fail(format!("PING failed with full volume (server died?): {e}")),
+        }
+        // Never apply unpersisted state.
+        let fk_name = format!("enospc_fill_{tag}_{fk}");
+        match Self::send_resp_cmd(&mut stream, &["GET", &fk_name]).await {
+            Ok(r) if r.starts_with("$-1") => {}
+            Ok(r) => return fail(format!("unpersisted write became visible: {r:?}")),
+            Err(e) => return fail(format!("read of failed key failed: {e}")),
+        }
+        // Further writes must answer (hang/crash is the failure).
+        match Self::send_resp_cmd(
+            &mut stream,
+            &["SET", &format!("enospc_after_{tag}"), &value],
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => return fail(format!("write after failure did not answer: {e}")),
+        }
+        StageResult {
+            stage: 8,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1486,6 +1594,98 @@ mod tests {
         assert_eq!(m2.get("keyspace_misses").map(String::as_str), Some("2"));
         let m3 = RedisVerifier::parse_info("UPTIME_IN_SECONDS:9\n");
         assert_eq!(m3.get("uptime_in_seconds").map(String::as_str), Some("9"));
+    }
+
+    /// Stateful RESP mock for stage 8: replies +OK to SETs until `fail_after`
+    /// successful ones, then -ERR; GET echoes stored values; PING works.
+    fn spawn_enospc_mock(listener: TcpListener, fail_after: Option<usize>) {
+        tokio::spawn(async move {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let (r, mut w) = sock.into_split();
+            let mut r = tokio::io::BufReader::new(r);
+            let mut store = std::collections::HashMap::<String, String>::new();
+            let mut sets = 0usize;
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+            loop {
+                let mut header = String::new();
+                match r.read_line(&mut header).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let header = header.trim_end();
+                if !header.starts_with('*') {
+                    continue;
+                }
+                let n: usize = header[1..].parse().unwrap_or(0);
+                let mut argv = Vec::new();
+                for _ in 0..n {
+                    let mut lh = String::new();
+                    if r.read_line(&mut lh).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let lh = lh.trim_end();
+                    let Some(rest) = lh.strip_prefix('$') else {
+                        return;
+                    };
+                    let len: usize = rest.parse().unwrap_or(0);
+                    let mut payload = vec![0u8; len + 2];
+                    if r.read_exact(&mut payload).await.is_err() {
+                        return;
+                    }
+                    argv.push(String::from_utf8_lossy(&payload[..len]).to_string());
+                }
+                let cmd = argv.first().cloned().unwrap_or_default().to_uppercase();
+                let reply = match cmd.as_str() {
+                    "PING" => "+PONG\r\n".to_string(),
+                    "SET" => {
+                        sets += 1;
+                        if fail_after.map(|nf| sets > nf).unwrap_or(false) {
+                            "-ERR persistence failure: no space left on device\r\n".to_string()
+                        } else {
+                            if argv.len() >= 3 {
+                                store.insert(argv[1].clone(), argv[2].clone());
+                            }
+                            "+OK\r\n".to_string()
+                        }
+                    }
+                    "GET" => {
+                        let k = argv.get(1).cloned().unwrap_or_default();
+                        match store.get(&k) {
+                            Some(v) => format!("${}\r\n{}\r\n", v.len(), v),
+                            None => "$-1\r\n".to_string(),
+                        }
+                    }
+                    _ => "-ERR unknown command\r\n".to_string(),
+                };
+                if w.write_all(reply.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_mock_stage8_enospc_pass_and_never_full() {
+        // PASS: the volume reports full after 12 successful writes.
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        spawn_enospc_mock(l, Some(12));
+        let r = RedisVerifier::new(port, Some("enospc-pass"))
+            .test_stage_enospc()
+            .await;
+        assert!(r.passed, "expected pass: {:?}", r.error);
+
+        // FAIL: writes never fail -> the log is not on the small volume.
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        spawn_enospc_mock(l, None);
+        let r = RedisVerifier::new(port, Some("enospc-never"))
+            .test_stage_enospc()
+            .await;
+        assert!(!r.passed);
+        assert!(r.error.unwrap_or_default().contains("never filled"));
     }
 
     #[tokio::test]

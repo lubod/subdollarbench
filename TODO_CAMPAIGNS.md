@@ -117,15 +117,17 @@ non-redis acceptance adapters.
 - [ ] C1. AOF acceptance: stage 6 covers fsync-before-ack + SIGKILL +
   replay on live tickets; torn-tail and replay-idempotence checks still
   to add (reuse WAL verifier patterns).
-- [ ] C2. ENOSPC injector (design settled, implementation pending):
-  ticket contract adds `SDB_DATA_DIR`; the incident container starts with
-  `--tmpfs /data:size=8m` + `SDB_DATA_DIR=/data`; fill via protocol writes
-  (large values) until writes fail; verify reads keep serving,
-  unpersistable writes return errors and are never acked, PING alive, no
-  corruption. Deferred sub-checks: free-space recovery and
-  replay-after-incident need to free/reach the container tmpfs -> docker
-  exec (shell must exist in image) or a privileged loop-mount injector
-  (sudo); v1 records them as SKIP, revisit before the perf-gate wave.
+- [x] C2. ENOSPC injector (2026-10-14.3, v1): ticket 4 (acceptance
+  [1,2,3,4,5,6,8]) adds the `SDB_DATA_DIR` contract; the pipeline restarts
+  the candidate with `--tmpfs /data:size=8m` + `SDB_DATA_DIR=/data`
+  (`start_candidate_enospc`), fills it with 240KB protocol writes, and
+  stage 8 requires: acked data still reads, PING alive, the first
+  unpersistable write returns an error and is NOT applied, later writes
+  keep answering. Mock tests cover pass + never-full. Deferred sub-checks
+  (documented SKIPs): free-space recovery and replay-after-incident need
+  to free/reach the container tmpfs -> docker exec (shell must exist) or
+  a privileged loop-mount injector; revisit before the perf-gate wave.
+  Ticket 5's acceptance now also includes 8 (cumulative incident check).
 - [x] C3. INFO suite (2026-10-14.2): verifier stage 7 — required fields,
   integer parse, monotonicity, randomized delta checks (hits/misses/
   commands/connections/expired). Runs ONLY when a campaign ticket

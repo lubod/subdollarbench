@@ -42,11 +42,20 @@
       "max_turns": 30
     },
     {
+      "id": 4,
+      "type": "incident",
+      "title": "Disk full",
+      "prompt": "stages/4_enospc/prompt.md",
+      "acceptance": { "redis_stages": [1, 2, 3, 4, 5, 6, 8] },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
       "id": 5,
       "type": "observability",
       "title": "INFO metrics",
       "prompt": "stages/5_observability/prompt.md",
-      "acceptance": { "redis_stages": [1, 2, 3, 4, 5, 6, 7] },
+      "acceptance": { "redis_stages": [1, 2, 3, 4, 5, 6, 7, 8] },
       "budget_usd": 0.10,
       "max_turns": 25
     }

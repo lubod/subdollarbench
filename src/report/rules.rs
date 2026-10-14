@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.3`: campaign ENOSPC incident (ticket 4). New redis
+///   verifier stage 8 "ENOSPC incident (log volume full)": the pipeline
+///   restarts the candidate with `SDB_DATA_DIR` on an 8MB tmpfs, fills it
+///   with 240KB protocol writes, then requires (a) previously acked data
+///   still reads back and PING stays alive, (b) the first unpersistable
+///   write returns an error and is NOT applied (no silent ack), (c) later
+///   writes answer without hanging. Runs only when a ticket's acceptance
+///   explicitly includes id 8; single-shot totals unchanged; acceptance
+///   ids up to 8. Rows stamped `2026-10-14.2` or earlier are not
+///   comparable without `backfill --yes`.
 /// - `2026-10-14.2`: campaign ticket 5 (observability) suite. New redis
 ///   verifier stage 7 "INFO metrics & counters": required-field presence,
 ///   integer parsing, monotonicity, and DELTAS against randomized scripted
@@ -222,7 +232,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.2";
+pub const RULES_VERSION: &str = "2026-10-14.3";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
