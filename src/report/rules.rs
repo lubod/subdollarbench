@@ -8,6 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.6`: campaign repair reserve floor 8 -> 12 (D6 amendment,
+///   DECISIONS #12). Reserve is now `max(max_turns/4, 12)` capped at
+///   `max_turns/2`, so initial caps for campaign tickets drop from 22->18
+///   (30-turn pools), 17->13 (25), 30->28 (40). Evidence: three cells
+///   where an 8-turn repair could not recover an interrupted refactor
+///   (ling runs 4-5, inkling probe). Single-shot unchanged. Rows stamped
+///   `2026-10-14.5` or earlier are not comparable without
+///   `backfill --yes`.
 /// - `2026-10-14.5`: stage-4 INCR state-independence fix. A repair
 ///   re-verification runs against a durable candidate whose WAL already
 ///   holds the seeded counter from the previous attempt (the seed is
@@ -251,7 +259,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.5";
+pub const RULES_VERSION: &str = "2026-10-14.6";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

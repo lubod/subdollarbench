@@ -97,6 +97,16 @@ non-redis acceptance adapters.
   the edit tool (compile error, 0/6 verification), and the 7-turn repair
   fixed exactly those lines -> 6/6. Candidate measured 108k GET req/s;
   write probe 816 SET/s.
+- **D6(b) amendment (2026-10-14, later): repair floor 8 -> 12.** After
+  three more cells whose repair rounds could not recover an interrupted
+  refactor (ling run 4: fixed two compile errors then hit the limit
+  mid-fix; ling run 5: surveyed 7 turns, one edit at the cap; inkling
+  probe: never edited), the reserve is now `max(max_turns/4, 12)` capped
+  at `max_turns/2`. Initial caps: 40->28, 30->18, 25->13; the half-pool
+  cap keeps tiny pools sane (10->5, 4->2, 1->1). RULES `2026-10-14.6`;
+  DECISIONS #12
+  amended; `initial_turn_cap` tests updated. Watch for small tickets that
+  used to pass initially now needing their repair round.
 - Finding (Slice F dependency): campaign stages run WITHOUT a batch
   reference, so each passing stage tries the live per-trial ref — at s3
   the ref measurement failed ("Could not connect to ref-redis") and the
@@ -236,10 +246,20 @@ non-redis acceptance adapters.
   truncates every record after the first DEL (the probe). Classic Go
   slice-length bug; exactly what ticket 3 is for. Advisory 102 failed on
   the pre-`5cf5a86` binary (self-seed fix landed after launch).
-  **Calibration signal #2**: an 8-turn repair floor is too small to
-  recover a 500-line implementation that never compiled (ling needed
-  ~2-4 more turns to test durability; inkling's probe never edited at
-  all). Collect more before tuning D6b.
+  **Calibration signal #2**: the 8-turn repair floor could not recover a
+  500-line implementation that never compiled (ling needed ~2-4 more
+  turns to test durability; inkling's probe never edited at all).
+- **ling-3.1-flash** (spec 0-6, 2026-10-14 run 5, `..._152002`): reached
+  **2** — s0 3/3 ($0.0263, 30t), s1 4/4 ($0.0356, 17t), s2 5/5 ($0.0338,
+  17t), s3 durability **FAIL 0/6** ($0.0556, 22 initial + 8 repair,
+  regressions [1,2,3,4,5] sev 3). $0.1514 total, tickets/$ 19.8, 3
+  regression-free. Go again. The initial attempt ended mid-refactor
+  (`walLog` undefined, unused imports, never built); the 8-turn repair
+  spent 7 turns surveying a 900-line file and its single edit landed at
+  the limit — and duplicated a `"sort"` import, so the re-verification
+  did not compile either. Harness clean (refused-connection verdicts are
+  the candidate's failure). **Calibration signal #3** — see the D6
+  amendment below: floor 8 -> 12.
 - **ling-3.1-flash** (spec 0-5, 2026-10-14 run 3, `..._140445`): s0-s3 PASS
   3/3/4/5/6 (30t/17t/25t/22t, $0.0286/$0.0333/$0.0369/$0.0752), then s4
   **invalidated by a harness murder**: while the AOF probe had the candidate
@@ -263,6 +283,7 @@ non-redis acceptance adapters.
   tickets/$ 47.5. **Calibration signal**: the max/4 repair reserve (min 1)
   can be too small for slower models — consider a floor (e.g. 8 turns) or
   larger stage budgets once more cells confirm; do not tune on n=1.
+  *(Resolved later same day: floor raised to 12 — see the D6 amendment.)*
 - **inkling:free (probe, floor=8)**: reached **0** — s0 PASS 3/3 (30t,
   $0.0156), s1 expiry FAIL 3/4 (17 initial + 8 repair, $0.0071). The
   repair round again read/surveyed for its entire budget and NEVER edited
@@ -270,9 +291,10 @@ non-redis acceptance adapters.
   binding constraint for this model is repair-round *behavior* (it does
   not switch to editing under budget), not the reserve size: 6 turns
   (run A) and 8 turns (run B) both failed the same way, and run-to-run
-  variance is large (s0 took 14 turns in A, 30 in B). Keep floor=8 for
-  now (it only touches pools <32: 25->17+8), do NOT tune further on n=1;
-  collect more cells. $0.0227, tickets/$ 44.1.
+  variance is large (s0 took 14 turns in A, 30 in B). Floor was kept at 8
+  for this cell *(superseded 2026-10-14: raised to 12 after three cells
+  showed repair-starved refactors; see the D6 amendment)*; do NOT tune
+  further on n=1; collect more cells. $0.0227, tickets/$ 44.1.
 - **nemotron:free**: quota-blocked (`free-models-per-day-high-balance`,
   retry ~10.4h). Recorded as a ticket-0 **FAULT** (1 turn, $0.0002) — the
   throttle classification worked; acceptance counted 3 stages, campaign

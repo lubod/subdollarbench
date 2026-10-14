@@ -81,10 +81,22 @@ fn initial_turn_cap(max_turns: u32, feedback_rounds: u32, reserve_repair: bool) 
             // attempt: the shared pool IS max_turns, and the live canary
             // showed a 25-turn ticket consuming 25/25 on the initial
             // attempt — the repair round never fired and a compile error
-            // went unfixed. Reserve a quarter of the pool, but at least 8
-            // turns (inkling burned its 6-turn reserve surveying and never
-            // edited) and never more than half the pool.
-            let reserve = (max_turns / 4).max(8).min(max_turns / 2).max(1);
+            // went unfixed. Reserve a quarter of the pool, but at least 12
+            // turns and never more than half the pool.
+            //
+            // D6(b) amendment 2026-10-14 (floor 8 -> 12): three cells
+            // showed an 8-turn repair cannot recover an interrupted
+            // refactor. ling run 4 fixed two compile errors and hit the
+            // limit right after (2-4 more turns would have reached a
+            // build); ling run 5 spent 7 turns surveying and its single
+            // edit landed at the limit; the inkling probe never reached an
+            // edit at all. The marginal value of initial turns for models
+            // that leave uncompilable code is low — they do not finish at
+            // 17-30 either — while repair turns start from a precise
+            // failure report on a near-complete file. Shifting up to 4
+            // turns from initial to repair is therefore net-positive for
+            // the observed failure class (see TODO_CAMPAIGNS grid log).
+            let reserve = (max_turns / 4).max(12).min(max_turns / 2).max(1);
             cap = cap.min(max_turns.saturating_sub(reserve)).max(1);
         }
         Some(cap)
@@ -2566,13 +2578,13 @@ mod tests {
         assert_eq!(initial_turn_cap(30, 1, false), Some(30));
         // Feedback off: full budget up front.
         assert_eq!(initial_turn_cap(100, 0, false), Some(100));
-        // Campaign reserve (D6 option b, floor 8): a quarter of the pool is
-        // kept for the repair round, at least 8 turns and at most half the
-        // pool; big pools are unchanged (the 50-cap binds first).
+        // Campaign reserve (D6 option b, amended floor 12): a quarter of the
+        // pool is kept for the repair round, at least 12 turns and at most
+        // half the pool; big pools are unchanged (the 50-cap binds first).
         assert_eq!(initial_turn_cap(100, 2, true), Some(50));
-        assert_eq!(initial_turn_cap(40, 2, true), Some(30));
-        assert_eq!(initial_turn_cap(30, 1, true), Some(22));
-        assert_eq!(initial_turn_cap(25, 1, true), Some(17));
+        assert_eq!(initial_turn_cap(40, 2, true), Some(28));
+        assert_eq!(initial_turn_cap(30, 1, true), Some(18));
+        assert_eq!(initial_turn_cap(25, 1, true), Some(13));
         assert_eq!(initial_turn_cap(10, 1, true), Some(5));
         assert_eq!(initial_turn_cap(4, 1, true), Some(2));
         assert_eq!(initial_turn_cap(1, 1, true), Some(1));

@@ -132,3 +132,24 @@ Validated live (2026-10-14, run 2): all four canary tickets passed;
 ticket 3's initial attempt hit its cap mid-WAL with a three-line compile
 error, and the 7-turn repair round fixed exactly those lines to 6/6 —
 the failure mode that motivated the reserve.
+
+**Amendment (2026-10-14, same day): floor 8 -> 12.** Three further cells
+showed the 8-turn floor cannot cover the dominant failure class — an
+interrupted refactor left uncompilable code at the initial cap:
+
+- ling run 4 (Go): repair fixed `package main` + duplicate `store.del`,
+  then hit the limit immediately; 2-4 more turns would have reached a
+  build. (The residual AOF replay bug then failed the ticket honestly.)
+- ling run 5 (Go): repair spent 7 turns surveying a 900-line file and its
+  single edit landed at turn 8.
+- inkling probe: never reached a single edit inside 8.
+
+Meanwhile repairs that ARE small (a deterministic pub/sub bug, ling run 4
+s2) succeed inside 8 and will keep succeeding. So reserve =
+`max(max_turns/4, 12)`, capped at `max_turns/2`; small pools pay up to 4
+turns of initial budget (25->13, 30->18, 40->28), which is net-positive
+for the observed class: models that leave uncompilable code do not finish
+at 17-30 initial turns either, while repair starts from a precise failure
+report on a near-complete file. Graceful degradation for tiny pools is
+unchanged (10->5, 4->2, 1->1). Revisit if small tickets start failing
+initially where they used to pass.
