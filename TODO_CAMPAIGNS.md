@@ -218,6 +218,13 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **LADDER COMPLETE (2026-10-14 evening):** all 11 tickets built —
+  stages 1-13. Ticket 10 (3-node HA, RULES `2026-10-14.12`) per operator
+  decision Q1: automatic failover (T=10s, deterministic leader), rejoin
+  pointed at the new leader, accumulated RESP suite + ./test.sh against
+  the current master; partition safety deferred. Validation: `ha_node_args`
+  unit test + ROLE/probe helper mock tests; live execution needs a model
+  that passes t9 (none has yet). Spec total: 11 tickets, \$1.55 sum.
 - **ling-3.1-flash** (spec 0-9, 2026-10-14 run 9, `..._170557`, RULES
   `2026-10-14.10`): reached **0** — first cell to fall at s1. s0 3/3
   ($0.0395, 28t), s1 expiry **FAIL 3/4** ($0.0430, 13 initial + 12
