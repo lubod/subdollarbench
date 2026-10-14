@@ -3249,6 +3249,79 @@ mod tests {
         dir
     }
 
+    /// Serializes every test that mutates `SDB_HOME`/`SDB_BENCH_DB`: the env
+    /// is process-wide, so a racing test would resolve repo dirs under the
+    /// wrong root mid-command. Async mutex so the guard can be held across
+    /// the command await without tripping `await_holding_lock`.
+    pub(crate) static SDB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Points `SDB_HOME` and `SDB_BENCH_DB` at a fresh temp tree for the
+    /// test's lifetime and restores the previous values on drop. Everything
+    /// that resolves repo dirs (canonical results/runs, bench.db, campaigns)
+    /// then reads/writes only the temp tree.
+    pub(crate) struct SdbEnv {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        pub(crate) root: PathBuf,
+        prev_home: Option<std::ffi::OsString>,
+        prev_db: Option<std::ffi::OsString>,
+    }
+
+    impl SdbEnv {
+        pub(crate) async fn new(tag: &str) -> Self {
+            let lock = SDB_ENV_LOCK.lock().await;
+            // Resolve the real repo root before the env flip so the read-only
+            // graded inputs stay reachable: a concurrently running test may
+            // call rules::fingerprint() while our temp root is active.
+            let real_root = subdollarbench::config::get_repo_root();
+            let root = test_tmp_dir(tag);
+            #[cfg(unix)]
+            for name in ["tasks", "src"] {
+                let target = real_root.join(name);
+                if target.exists() {
+                    let _ = std::os::unix::fs::symlink(&target, root.join(name));
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = &real_root;
+            let prev_home = std::env::var_os("SDB_HOME");
+            let prev_db = std::env::var_os("SDB_BENCH_DB");
+            std::env::set_var("SDB_HOME", &root);
+            // Blank, not absent: Store falls back to `$SDB_HOME/bench.db`,
+            // while LeaderboardManager::use_db stays false for foreign temp
+            // dirs. A non-blank override would flip concurrent tests onto our
+            // temp DB and change what their results dirs load.
+            std::env::set_var("SDB_BENCH_DB", "");
+            Self {
+                _lock: lock,
+                root,
+                prev_home,
+                prev_db,
+            }
+        }
+    }
+
+    impl Drop for SdbEnv {
+        fn drop(&mut self) {
+            match self.prev_home.take() {
+                Some(v) => std::env::set_var("SDB_HOME", v),
+                None => std::env::remove_var("SDB_HOME"),
+            }
+            match self.prev_db.take() {
+                Some(v) => std::env::set_var("SDB_BENCH_DB", v),
+                None => std::env::remove_var("SDB_BENCH_DB"),
+            }
+        }
+    }
+
+    /// Write a result row as the export copy the CLI scanners read.
+    fn write_result_row(dir: &Path, result: &BenchmarkRunResult) {
+        fs::write(
+            dir.join(format!("{}.json", result.id)),
+            serde_json::to_string_pretty(result).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// Write a full RunManifest fixture into runs/<id>/manifest.json.
     fn write_manifest(runs_dir: &Path, id: &str, mutate: impl FnOnce(&mut RunManifest)) -> PathBuf {
         let mut m = test_manifest_with_status("completed");
@@ -3625,6 +3698,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_main_cli_campaign_list_and_dry_run() {
+        // Serialize with the SDB_HOME fixture tests: this resolves the repo
+        // campaigns dir and must not observe a temp campaigns tree.
+        let _env_lock = SDB_ENV_LOCK.lock().await;
         // Bundled campaigns are listed read-only.
         assert!(run_cli(Cli {
             command: Commands::Campaign {
@@ -3750,6 +3826,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_main_cli_migrate_check_audit() {
+        // Serialize with the SDB_HOME/SDB_BENCH_DB tests: this one opens the
+        // resolved bench.db, and an env test's temp store may be mid-write.
+        let _env_lock = SDB_ENV_LOCK.lock().await;
         // Read-only integrity audit against the canonical bench.db. The repo
         // may legitimately have findings, in which case the handler must fail
         // with its own audit error rather than something unexpected.
@@ -4265,5 +4344,1015 @@ mod tests {
         // Invalid ValueEnum values and unknown subcommands are clap errors.
         assert!(Cli::try_parse_from(["subdollarbench", "eval", "--task", "dns"]).is_err());
         assert!(Cli::try_parse_from(["subdollarbench", "no-such-command"]).is_err());
+    }
+
+    // ---- Synthetic-fixture coverage (offline) ---------------------------
+
+    #[tokio::test]
+    async fn test_main_cli_leaderboard_populated_and_matrix_protocols() {
+        let results = test_tmp_dir("lb_matrix_pop");
+        let row = |id: &str, model: &str, pass: f64| {
+            let mut r = test_result_with_pass_rate(pass);
+            r.id = id.to_string();
+            r.model = model.to_string();
+            r.task = "redis".to_string();
+            r.effort = Some("low".to_string());
+            r.timestamp = "2026-10-01T00:00:00Z".to_string();
+            // Single-trial legs need an evidence count or the board filters
+            // them as 0-trial junk.
+            r.total_trials = Some(1);
+            r
+        };
+        let a = row("redis_pop_a_20261001", "openrouter/meta/muse-spark", 100.0);
+        let b = row("redis_pop_b_20261001", "openrouter/z-ai/glm", 50.0);
+        write_result_row(&results, &a);
+        write_result_row(&results, &b);
+        let dir = results.to_string_lossy().to_string();
+
+        // Non-empty boards: the task-filtered and consolidated views both print.
+        for task in ["redis", "all"] {
+            assert!(run_cli(Cli {
+                command: Commands::Leaderboard {
+                    results_dir: dir.clone(),
+                    task: task.to_string(),
+                },
+            })
+            .await
+            .is_ok());
+        }
+
+        // One uniform-protocol wave: the matrix prints.
+        assert!(run_cli(Cli {
+            command: Commands::MatrixReport {
+                results_dir: dir.clone(),
+            },
+        })
+        .await
+        .is_ok());
+
+        // Mixed evaluation protocols must be refused, never pooled.
+        let mut a2 = a.clone();
+        a2.protocol = Some("fixed_n".to_string());
+        let mut b2 = b.clone();
+        b2.protocol = Some("sequential_cap".to_string());
+        write_result_row(&results, &a2);
+        write_result_row(&results, &b2);
+        let err = run_cli(Cli {
+            command: Commands::MatrixReport {
+                results_dir: dir.clone(),
+            },
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("protocol"), "{err}");
+
+        // Same-stamped wave compares again (two rows, three cells incl. this one).
+        b2.protocol = Some("fixed_n".to_string());
+        write_result_row(&results, &b2);
+        let mut c = row("redis_pop_c_20261001", "openrouter/meta/muse-spark", 0.0);
+        c.protocol = Some("fixed_n".to_string());
+        write_result_row(&results, &c);
+        assert!(run_cli(Cli {
+            command: Commands::MatrixReport {
+                results_dir: dir.clone(),
+            },
+        })
+        .await
+        .is_ok());
+
+        let _ = fs::remove_dir_all(&results);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_stages_failed_stage_and_trial_suffix() {
+        let runs = test_tmp_dir("stages_more");
+        for m in [
+            manifest_fixture("redis_fail_fixture", 50.0),
+            manifest_fixture("redis_trial_target_trial2", 100.0),
+        ] {
+            let d = runs.join(&m.run_id);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("manifest.json"), serde_json::to_string(&m).unwrap()).unwrap();
+        }
+        let runs_s = runs.to_string_lossy().to_string();
+
+        // Failed stage with a verifier error message.
+        assert!(run_cli(Cli {
+            command: Commands::Stages {
+                run: "redis_fail".to_string(),
+                trial: None,
+                json: false,
+                runs_dir: runs_s.clone(),
+            },
+        })
+        .await
+        .is_ok());
+
+        // --trial appends _trialN only when the resolved id has no suffix.
+        assert!(run_cli(Cli {
+            command: Commands::Stages {
+                run: "redis_trial_target".to_string(),
+                trial: Some(2),
+                json: false,
+                runs_dir: runs_s.clone(),
+            },
+        })
+        .await
+        .is_ok());
+
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_stability_throughput_subruns() {
+        let results = test_tmp_dir("stability_tp");
+        let mut parent = parent_result("stability_tp_parent", &[100.0, 100.0]);
+        for sub in &mut parent.subruns {
+            sub.throughput_req_sec = Some(1234.0);
+            sub.reference_throughput_req_sec = Some(71000.0);
+        }
+        write_result_row(&results, &parent);
+        assert!(run_cli(Cli {
+            command: Commands::Stability {
+                parent: "stability_tp".to_string(),
+                results_dir: results.to_string_lossy().to_string(),
+            },
+        })
+        .await
+        .is_ok());
+        let _ = fs::remove_dir_all(&results);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_watch_follow_loop_without_manifest() {
+        let runs = test_tmp_dir("watch_follow");
+        let rdir = runs.join("redis_watch_live");
+        fs::create_dir_all(&rdir).unwrap();
+        fs::write(rdir.join("console.log"), "booting\n").unwrap();
+        let cli = Cli {
+            command: Commands::Watch {
+                run: "redis_watch_live".to_string(),
+                no_follow: false,
+                stages_only: false,
+                runs_dir: runs.to_string_lossy().to_string(),
+            },
+        };
+        // No manifest: the loop tails, sleeps, and tails again; the timeout
+        // proves it stayed in follow mode without waiting on a real run.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), run_cli(cli))
+                .await
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_eval_offline_verifier_arms() {
+        // Closed ports only: every verifier reports 0% without touching a
+        // live server (the engine's own task ports are never probed).
+        for (task, port) in [
+            (TaskType::Pdf, 59990),
+            (TaskType::Wal, 59991),
+            (TaskType::Pubsub, 59992),
+            (TaskType::Binproto, 59993),
+            (TaskType::Proxy, 59994),
+        ] {
+            assert!(run_cli(Cli {
+                command: Commands::Eval {
+                    task,
+                    port: Some(port),
+                },
+            })
+            .await
+            .is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_replay_manifest_read_failure_offline() {
+        // Exact one-dir resolution then a manifest read failure: both happen
+        // before the engine status probe, so this stays fully offline even
+        // though a live engine may hold 127.0.0.1:3000.
+        let runs = test_tmp_dir("replay_bad_manifest");
+        let rdir = runs.join("redis_replay_fixture_bad");
+        fs::create_dir_all(&rdir).unwrap();
+        fs::write(rdir.join("manifest.json"), "{not json").unwrap();
+        let err = run_cli(Cli {
+            command: Commands::Replay {
+                run: "redis_replay_fixture".to_string(),
+                port: Some(59980),
+                runs_dir: runs.to_string_lossy().to_string(),
+            },
+        })
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("manifest"), "{msg}");
+
+        // Valid manifest, unsupported task: parse_task refuses before the
+        // engine probe and before any docker work.
+        let mut m = test_manifest_with_status("completed");
+        m.run_id = "redis_replay_badtask".to_string();
+        m.task = "dns".to_string();
+        let d2 = runs.join(&m.run_id);
+        fs::create_dir_all(&d2).unwrap();
+        fs::write(d2.join("manifest.json"), serde_json::to_string(&m).unwrap()).unwrap();
+        let err = run_cli(Cli {
+            command: Commands::Replay {
+                run: "redis_replay_badtask".to_string(),
+                port: None,
+                runs_dir: runs.to_string_lossy().to_string(),
+            },
+        })
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("task"), "{msg}");
+        let _ = fs::remove_dir_all(&runs);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_queue_feedback_defaults_and_empty_extra() {
+        let dead = || Some("http://127.0.0.1:9".to_string());
+
+        // Run --queue --feedback: the default rounds (2) resolve before the
+        // POST fails on the closed port; no pipeline, no docker.
+        assert!(run_cli(Cli {
+            command: Commands::Run {
+                model: "openrouter/meta/muse-spark".to_string(),
+                task: TaskType::Redis,
+                effort: "low".to_string(),
+                harness: Harness::Omp,
+                max_turns: 1,
+                budget_usd: 0.1,
+                timeout_min: 1,
+                api_key: None,
+                workdir: "./workspace".to_string(),
+                eval_only: true,
+                trials: 1,
+                no_save: true,
+                queue: true,
+                server: dead(),
+                review_model: None,
+                extend_if_unstable: false,
+                max_trials: 9,
+                stop_on_pass: false,
+                feedback: true,
+                feedback_rounds: 0,
+            },
+        })
+        .await
+        .is_err());
+
+        // Enqueue --feedback: same default resolution.
+        assert!(run_cli(Cli {
+            command: Commands::Enqueue {
+                model: "openrouter/meta/muse-spark".to_string(),
+                task: TaskType::Redis,
+                effort: "low".to_string(),
+                harness: Harness::Omp,
+                max_turns: 1,
+                budget_usd: 0.1,
+                timeout_min: 1,
+                api_key: None,
+                eval_only: true,
+                trials: 1,
+                extend_if_unstable: false,
+                max_trials: 9,
+                no_save: true,
+                review_model: None,
+                server: dead(),
+                stop_on_pass: false,
+                feedback: true,
+                feedback_rounds: 0,
+            },
+        })
+        .await
+        .is_err());
+
+        // Matrix print mode with no extra flags: command lines carry no
+        // trailing suffix and nothing is dispatched.
+        assert!(run_cli(Cli {
+            command: Commands::Matrix {
+                models: "openrouter/meta/muse-spark".to_string(),
+                efforts: "low".to_string(),
+                tasks: "redis".to_string(),
+                trials: 1,
+                extra: String::new(),
+                per_effort_columns: true,
+                enqueue: false,
+                extend_if_unstable: false,
+                harness: Harness::Omp,
+                max_trials: 9,
+                server: None,
+                stop_on_pass: false,
+                feedback: true,
+                feedback_rounds: 0,
+            },
+        })
+        .await
+        .is_ok());
+    }
+
+    /// Minimal valid campaign spec; `mutate` tweaks it for validation cases.
+    fn campaign_spec_json(
+        name: &str,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "name": name,
+            "version": 1,
+            "task": "redis",
+            "title": "Fixture campaign",
+            "description": "offline fixture",
+            "stages": [{
+                "id": 0,
+                "type": "build",
+                "title": "Stage zero",
+                "prompt": "p0.md",
+                "acceptance": {"redis_stages": [1, 2]},
+                "budget_usd": 0.05,
+                "max_turns": 3
+            }]
+        });
+        mutate(&mut v);
+        v
+    }
+
+    fn write_campaign_fixture(
+        root: &Path,
+        name: &str,
+        spec: &serde_json::Value,
+        with_prompt: bool,
+    ) {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("campaign.json"),
+            serde_json::to_string(spec).unwrap(),
+        )
+        .unwrap();
+        if with_prompt {
+            fs::write(dir.join("p0.md"), "build something\n").unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_campaign_fixture_validation() {
+        let env = SdbEnv::new("campaign_fixture").await;
+
+        // No campaigns dir at all: the empty-list arm.
+        assert!(run_cli(Cli {
+            command: Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::List,
+            },
+        })
+        .await
+        .is_ok());
+
+        let croot = env.root.join("campaigns");
+        write_campaign_fixture(&croot, "good", &campaign_spec_json("good", |_| {}), true);
+        // Invalid: acceptance id outside 1..=13.
+        write_campaign_fixture(
+            &croot,
+            "bad_stage_id",
+            &campaign_spec_json("bad_stage_id", |v| {
+                v["stages"][0]["acceptance"]["redis_stages"] = serde_json::json!([99]);
+            }),
+            true,
+        );
+        // Invalid: empty stage title.
+        write_campaign_fixture(
+            &croot,
+            "empty_title",
+            &campaign_spec_json("empty_title", |v| {
+                v["stages"][0]["title"] = serde_json::json!("  ");
+            }),
+            true,
+        );
+        // Invalid: prompt file missing on disk.
+        write_campaign_fixture(
+            &croot,
+            "missing_prompt",
+            &campaign_spec_json("missing_prompt", |_| {}),
+            false,
+        );
+
+        // list() reports the good one and marks the broken ones INVALID.
+        assert!(run_cli(Cli {
+            command: Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::List,
+            },
+        })
+        .await
+        .is_ok());
+
+        // dry-run of the valid campaign prints the full stage plan.
+        assert!(run_cli(Cli {
+            command: Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::DryRun {
+                    name: "good".to_string(),
+                    model: "test-model".to_string(),
+                },
+            },
+        })
+        .await
+        .is_ok());
+
+        // Each invalid variant fails to load before any engine call.
+        for name in ["bad_stage_id", "empty_title", "missing_prompt"] {
+            assert!(run_cli(Cli {
+                command: Commands::Campaign {
+                    action: subdollarbench::config::CampaignAction::DryRun {
+                        name: name.to_string(),
+                        model: "test-model".to_string(),
+                    },
+                },
+            })
+            .await
+            .is_err());
+        }
+
+        // `campaign run` on a missing name fails in load_campaign, before the
+        // engine status probe (no network, no runs/ writes).
+        assert!(run_cli(Cli {
+            command: Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::Run {
+                    name: "no-such-campaign".to_string(),
+                    model: "test-model".to_string(),
+                    effort: "low".to_string(),
+                    harness: Harness::Omp,
+                    budget_usd: 1.0,
+                    timeout_min: 5,
+                    api_key: None,
+                    eval_only: true,
+                    workspace: None,
+                },
+            },
+        })
+        .await
+        .is_err());
+
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_backfill_yes_rewrites_temp_tree() {
+        let env = SdbEnv::new("backfill_yes_apply").await;
+        let results = env.root.join("results");
+        let runs = env.root.join("runs");
+        fs::create_dir_all(&results).unwrap();
+        fs::create_dir_all(&runs).unwrap();
+        // Pre-create the store so the DB mirror branches execute.
+        let _store = subdollarbench::report::Store::open(&env.root.join("bench.db")).unwrap();
+        let fresh_stamp = subdollarbench::report::rules::fingerprint();
+
+        // 1. Single-trial row, unstamped: rewrite + upsert.
+        let mut old_single = test_result_with_pass_rate(100.0);
+        old_single.id = "sbf_single_old".to_string();
+        write_result_row(&results, &old_single);
+        // 2. Single-trial row already on the current fingerprint: skip.
+        let mut fresh_single = test_result_with_pass_rate(100.0);
+        fresh_single.id = "sbf_single_fresh".to_string();
+        fresh_single.rules_version = Some(fresh_stamp.clone());
+        write_result_row(&results, &fresh_single);
+        // 3. Unparseable row: skipped.
+        fs::write(results.join("sbf_bad.json"), "{not json").unwrap();
+        // 4. Unreadable entry (dangling symlink): skipped.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nowhere.json", results.join("sbf_broken.json")).unwrap();
+        // 5. Multi-trial with current numbers but no stamp: re-stamp only.
+        let mut current = parent_result("sbf_multi_current", &[100.0, 0.0]);
+        current.subruns = current
+            .subruns
+            .iter()
+            .map(|s| {
+                let mut sub = s.clone();
+                let eff = sub.effective_cost_usd.unwrap_or(sub.total_cost_usd);
+                sub.efficiency_score =
+                    subdollarbench::cost::calculator::ModelPricing::calculate_efficiency_score(
+                        sub.pass_rate,
+                        eff,
+                    );
+                sub.rules_version = None;
+                sub
+            })
+            .collect();
+        let mut merged = BenchmarkRunResult::merge_subruns(
+            "sbf_multi_current",
+            current.subruns.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        merged.rules_version = None;
+        write_result_row(&results, &merged);
+        write_manifest(&runs, "sbf_multi_current", |m| {
+            m.status = "completed".to_string();
+        });
+        // 6. Same shape, already stamped fresh: skip.
+        let mut merged_fresh = merged.clone();
+        merged_fresh.rules_version = Some(fresh_stamp.clone());
+        for s in &mut merged_fresh.subruns {
+            s.rules_version = Some(fresh_stamp.clone());
+        }
+        write_result_row(&results, &merged_fresh);
+        // 7. Multi-trial whose stored numbers are stale: printed diff +
+        //    rewrite + manifest mirror (status becomes failed_tests at 50%).
+        let mut stale = parent_result("sbf_multi_stale", &[100.0, 0.0]);
+        stale.throughput_score = Some(55.5);
+        for sub in &mut stale.subruns {
+            sub.throughput_req_sec = Some(50_000.0);
+            sub.reference_throughput_req_sec = Some(71_000.0);
+        }
+        write_result_row(&results, &stale);
+        write_manifest(&runs, "sbf_multi_stale", |m| {
+            m.status = "completed".to_string();
+            m.pass_rate = 100.0;
+        });
+        // 8. Multi-trial, all passing, with a stored throughput score: the
+        //    printed diff shows both throughput columns and the manifest
+        //    mirror restores status completed.
+        let mut full = parent_result("sbf_multi_full", &[100.0, 100.0]);
+        full.throughput_score = Some(12.5);
+        for sub in &mut full.subruns {
+            sub.throughput_req_sec = Some(50_000.0);
+            sub.reference_throughput_req_sec = Some(71_000.0);
+        }
+        write_result_row(&results, &full);
+        write_manifest(&runs, "sbf_multi_full", |m| {
+            m.status = "failed_tests".to_string();
+            m.pass_rate = 0.0;
+        });
+
+        let results_s = results.to_string_lossy().to_string();
+        assert!(run_cli(Cli {
+            command: Commands::Backfill {
+                results_dir: results_s.clone(),
+                yes: true,
+            },
+        })
+        .await
+        .is_ok());
+
+        // The rewrites landed and carry the current fingerprint.
+        let rewritten = fs::read_to_string(results.join("sbf_single_old.json")).unwrap();
+        assert!(rewritten.contains(&fresh_stamp));
+        let stale_row = fs::read_to_string(results.join("sbf_multi_stale.json")).unwrap();
+        assert!(stale_row.contains(&fresh_stamp));
+        // Manifest mirror: 100% stored / 50% merged -> failed_tests.
+        let mval: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(runs.join("sbf_multi_stale/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mval["status"], "failed_tests");
+        // All-passing row: mirror restores completed.
+        let fval: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(runs.join("sbf_multi_full/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fval["status"], "completed");
+        // Unchanged rows were not rewritten (dry-run assertion equivalent).
+        assert_eq!(
+            fs::read_to_string(results.join("sbf_single_fresh.json")).unwrap(),
+            serde_json::to_string_pretty(&fresh_single).unwrap()
+        );
+
+        // Strip the stamps from the merged stale row: identical numbers with
+        // a changed label take the re-stamp-only branch (not a rescore).
+        let mut stripped: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(results.join("sbf_multi_stale.json")).unwrap(),
+        )
+        .unwrap();
+        stripped["rules_version"] = serde_json::Value::Null;
+        for sub in stripped["subruns"].as_array_mut().unwrap() {
+            sub["rules_version"] = serde_json::Value::Null;
+        }
+        fs::write(
+            results.join("sbf_multi_stale.json"),
+            serde_json::to_string_pretty(&stripped).unwrap(),
+        )
+        .unwrap();
+        assert!(run_cli(Cli {
+            command: Commands::Backfill {
+                results_dir: results_s.clone(),
+                yes: true,
+            },
+        })
+        .await
+        .is_ok());
+        let restamped = fs::read_to_string(results.join("sbf_multi_stale.json")).unwrap();
+        assert!(restamped.contains(&fresh_stamp));
+        let restamped_val: serde_json::Value = serde_json::from_str(&restamped).unwrap();
+        assert_eq!(
+            restamped_val["rules_version"].as_str(),
+            Some(fresh_stamp.as_str())
+        );
+        // The stamp-only path mirrors the rule label into the manifest too.
+        let mval: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(runs.join("sbf_multi_stale/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mval["rules_version"].as_str(), Some(fresh_stamp.as_str()));
+
+        // Second pass: everything is current now, every row skips cleanly.
+        assert!(run_cli(Cli {
+            command: Commands::Backfill {
+                results_dir: results_s.clone(),
+                yes: true,
+            },
+        })
+        .await
+        .is_ok());
+
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_migrate_yes_imports_temp_db() {
+        let env = SdbEnv::new("migrate_yes_apply").await;
+        let results = env.root.join("results");
+        let runs = env.root.join("runs");
+        fs::create_dir_all(&results).unwrap();
+        fs::create_dir_all(&runs).unwrap();
+        let _store = subdollarbench::report::Store::open(&env.root.join("bench.db")).unwrap();
+
+        let mut row = test_result_with_pass_rate(100.0);
+        row.id = "smg_result_row".to_string();
+        write_result_row(&results, &row);
+        fs::write(results.join("smg_bad.json"), "{not json").unwrap();
+        // Unreadable entry: the read-failure skip arm.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nowhere.json", results.join("smg_broken.json")).unwrap();
+
+        write_manifest(&runs, "smg_run_ok", |_| {});
+        fs::create_dir_all(runs.join("smg_run_no_manifest")).unwrap();
+        fs::create_dir_all(runs.join("smg_staging.tmp")).unwrap();
+        let bad_dir = runs.join("smg_run_bad_manifest");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join("manifest.json"), "{not json").unwrap();
+
+        let cli = || Cli {
+            command: Commands::Migrate {
+                results_dir: results.to_string_lossy().to_string(),
+                yes: true,
+            },
+        };
+        assert!(run_cli(cli()).await.is_ok());
+        // Second run exercises the already-present parent arm and is idempotent.
+        assert!(run_cli(cli()).await.is_ok());
+        // The staging .tmp dir is skipped, not imported.
+        let store = subdollarbench::report::Store::open(&env.root.join("bench.db")).unwrap();
+        assert_eq!(store.parent_count(), 1);
+        assert_eq!(store.run_manifest_count(), 1);
+
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_migrate_check_findings_and_clean() {
+        let env = SdbEnv::new("migrate_check_fixture").await;
+        let results = env.root.join("results");
+        fs::create_dir_all(&results).unwrap();
+        let db = env.root.join("bench.db");
+
+        // A junk parent (test_ prefix, zero trials) and an orphan trial row.
+        let store = subdollarbench::report::Store::open(&db).unwrap();
+        let mut junk = test_result_with_pass_rate(100.0);
+        junk.id = "test_junk_probe".to_string();
+        store.upsert_parent(&junk).unwrap();
+        drop(store);
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO trials (id, parent_id, trial_no, pass_rate, status, cost_usd, duration_s, turns, doc)
+                 VALUES ('orphan_trial1', 'ghost_parent', 1, 0.0, 'Failed', 0.0, NULL, NULL, '{}')",
+                [],
+            )
+            .unwrap();
+        }
+        let err = run_cli(Cli {
+            command: Commands::MigrateCheck,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.starts_with("integrity check found"), "{err}");
+
+        // Clearing the debris leaves the same store clean.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM trials", []).unwrap();
+            conn.execute("DELETE FROM parents", []).unwrap();
+        }
+        assert!(run_cli(Cli {
+            command: Commands::MigrateCheck,
+        })
+        .await
+        .is_ok());
+
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_repair_and_cutoff_dry_run_canonical() {
+        let env = SdbEnv::new("repair_cutoff_dry").await;
+        let results = env.root.join("results");
+        let runs = env.root.join("runs");
+        fs::create_dir_all(&results).unwrap();
+        fs::create_dir_all(&runs).unwrap();
+
+        // Repair cures a false cheat DQ (empty workspace) and a 100% agent_kill.
+        for (id, status) in [
+            ("redis_dq_fixture_20261001_w0", "disqualified_cheat"),
+            ("redis_killed_fixture_20261001_w0", "agent_killed"),
+        ] {
+            let d = write_manifest(&runs, id, |m| {
+                m.status = status.to_string();
+                m.pass_rate = 100.0;
+            });
+            fs::create_dir_all(d.join("workspace")).unwrap();
+        }
+
+        // Cutoff fixture: opencode trial that thought but never acted, plus a
+        // billing-shaped near-miss that must be excluded.
+        let cutoff_dir = runs.join("redis_cutoff_fixture_20261008_000000_trial1");
+        fs::create_dir_all(cutoff_dir.join("workspace")).unwrap();
+        fs::write(
+            cutoff_dir.join("manifest.json"),
+            serde_json::json!({
+                "run_id": "redis_cutoff_fixture_20261008_000000_trial1",
+                "model": "openrouter/meta/muse-spark",
+                "task": "redis",
+                "harness": "opencode",
+                "status": "failed_tests",
+                "pass_rate": 0.0,
+                "cutoff_turn1": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            cutoff_dir.join("console.log"),
+            "[12:00:01] Turn 1 started\n[12:00:02] Finished!\n",
+        )
+        .unwrap();
+        let billing_dir = runs.join("redis_billing_fixture_20261008_000000_trial1");
+        fs::create_dir_all(billing_dir.join("workspace")).unwrap();
+        fs::write(
+            billing_dir.join("manifest.json"),
+            serde_json::json!({
+                "run_id": "redis_billing_fixture_20261008_000000_trial1",
+                "model": "openrouter/meta/muse-spark",
+                "task": "redis",
+                "harness": "opencode",
+                "status": "failed_tests",
+                "pass_rate": 0.0,
+                "cutoff_turn1": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            billing_dir.join("console.log"),
+            "[12:00:01] Turn 1 started\nHTTP/1.1 402 Payment Required\n",
+        )
+        .unwrap();
+
+        let results_s = results.to_string_lossy().to_string();
+        let runs_s = runs.to_string_lossy().to_string();
+
+        assert!(run_cli(Cli {
+            command: Commands::Repair {
+                results_dir: results_s.clone(),
+                runs_dir: runs_s.clone(),
+                yes: false,
+            },
+        })
+        .await
+        .is_ok());
+
+        assert!(run_cli(Cli {
+            command: Commands::AnnotateCutoff {
+                runs_dir: runs_s.clone(),
+                yes: false,
+            },
+        })
+        .await
+        .is_ok());
+
+        // Dry runs left every fixture byte-identical.
+        let untouched = fs::read_to_string(cutoff_dir.join("manifest.json")).unwrap();
+        assert!(untouched.contains("\"cutoff_turn1\":null"), "{untouched}");
+
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn test_main_cli_cost_annotate_empty_canonical() {
+        let env = SdbEnv::new("cost_annotate_empty").await;
+        let results = env.root.join("results");
+        let runs = env.root.join("runs");
+        fs::create_dir_all(&results).unwrap();
+        fs::create_dir_all(&runs).unwrap();
+        // No manifests and no result rows means no models to price, so the
+        // command stays fully offline while printing the zero report.
+        assert!(run_cli(Cli {
+            command: Commands::CostAnnotate {
+                results_dir: results.to_string_lossy().to_string(),
+                runs_dir: runs.to_string_lossy().to_string(),
+                yes: false,
+            },
+        })
+        .await
+        .is_ok());
+        drop(env);
+    }
+
+    #[test]
+    fn test_cli_parse_remaining_subcommand_flags() {
+        use clap::Parser;
+
+        // --server can steer engine commands at a closed port; parse each
+        // shape so the clap definitions are locked down.
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "run",
+            "--model",
+            "m",
+            "--queue",
+            "--server",
+            "http://127.0.0.1:9",
+            "--stop-on-pass",
+            "--feedback",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run {
+                queue,
+                stop_on_pass,
+                feedback,
+                server,
+                harness,
+                trials,
+                ..
+            } => {
+                assert!(queue);
+                assert!(stop_on_pass);
+                assert!(feedback);
+                assert_eq!(server.as_deref(), Some("http://127.0.0.1:9"));
+                assert_eq!(harness, Harness::Omp);
+                assert_eq!(trials, 9);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "enqueue",
+            "--model",
+            "m",
+            "--harness",
+            "opencode",
+            "--feedback-rounds",
+            "3",
+            "--max-trials",
+            "12",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Enqueue {
+                harness,
+                feedback_rounds,
+                max_trials,
+                trials,
+                ..
+            } => {
+                assert_eq!(harness, Harness::Opencode);
+                assert_eq!(feedback_rounds, 3);
+                assert_eq!(max_trials, 12);
+                assert_eq!(trials, 9);
+            }
+            other => panic!("expected Enqueue, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "campaign",
+            "run",
+            "--name",
+            "demo",
+            "--model",
+            "m",
+            "--harness",
+            "opencode",
+            "-b",
+            "2.5",
+            "--eval-only",
+            "--workspace",
+            "/tmp/ws",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Campaign {
+                action:
+                    subdollarbench::config::CampaignAction::Run {
+                        name,
+                        harness,
+                        budget_usd,
+                        eval_only,
+                        workspace,
+                        timeout_min,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "demo");
+                assert_eq!(harness, Harness::Opencode);
+                assert_eq!(budget_usd, 2.5);
+                assert!(eval_only);
+                assert_eq!(workspace.as_deref(), Some("/tmp/ws"));
+                assert_eq!(timeout_min, 60);
+            }
+            other => panic!("expected Campaign::Run, got {other:?}"),
+        }
+
+        for args in [
+            vec!["subdollarbench", "extend", "parent", "--trials", "3"],
+            vec!["subdollarbench", "backfill", "--yes"],
+            vec!["subdollarbench", "repair", "--results-dir", "r", "--yes"],
+            vec![
+                "subdollarbench",
+                "cost-annotate",
+                "--results-dir",
+                "r",
+                "--runs-dir",
+                "x",
+            ],
+            vec![
+                "subdollarbench",
+                "annotate-cutoff",
+                "--runs-dir",
+                "x",
+                "--yes",
+            ],
+            vec!["subdollarbench", "migrate", "--results-dir", "r"],
+            vec!["subdollarbench", "migrate-check"],
+            vec!["subdollarbench", "replay", "rid", "--port", "12345"],
+            vec!["subdollarbench", "ps", "--model", "glm", "--limit", "3"],
+            vec!["subdollarbench", "queue-extend", "parent", "--trials", "2"],
+            vec!["subdollarbench", "dequeue", "q3"],
+            vec!["subdollarbench", "queue-clear"],
+            vec!["subdollarbench", "stop"],
+            vec!["subdollarbench", "log", "--follow", "--tail", "5"],
+            vec!["subdollarbench", "detail", "rid", "--json"],
+            vec!["subdollarbench", "sdiff", "a", "b"],
+            vec!["subdollarbench", "ls", "rid"],
+            vec!["subdollarbench", "cat", "rid", "main.py"],
+            vec!["subdollarbench", "review", "rid"],
+            vec!["subdollarbench", "lboard", "--json", "--task", "redis"],
+            vec!["subdollarbench", "prompt", "redis", "--save"],
+            vec!["subdollarbench", "env"],
+            vec![
+                "subdollarbench",
+                "models",
+                "--sort",
+                "newest",
+                "--limit",
+                "4",
+            ],
+            vec!["subdollarbench", "omp"],
+            vec!["subdollarbench", "omp-update", "-v", "9.9.9"],
+            vec!["subdollarbench", "portal-rebuild"],
+            vec!["subdollarbench", "poison", "rid", "--cure"],
+            vec!["subdollarbench", "hide", "rid", "--show"],
+            vec!["subdollarbench", "rm", "rid", "--yes"],
+            vec![
+                "subdollarbench",
+                "matrix",
+                "--per-effort-columns",
+                "--enqueue",
+                "--stop-on-pass",
+            ],
+            vec!["subdollarbench", "sandbox", "update", "--version", "1.2.3"],
+            vec!["subdollarbench", "ui", "--engine-url", "http://127.0.0.1:9"],
+            vec!["subdollarbench", "portal", "--keep", "7"],
+            vec!["subdollarbench", "prune"],
+            vec!["subdollarbench", "doctor"],
+            vec!["subdollarbench", "status", "--json"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_ok(),
+                "failed to parse {args:?}"
+            );
+        }
+
+        // Subtle flag validation: a bad harness and a bad effort never parse
+        // into a valid command.
+        assert!(
+            Cli::try_parse_from(["subdollarbench", "run", "-m", "m", "--harness", "nope"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["subdollarbench", "campaign", "dry-run", "--name"]).is_err());
     }
 }
