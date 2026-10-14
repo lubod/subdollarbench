@@ -215,6 +215,16 @@ non-redis acceptance adapters.
   tickets/$ 47.5. **Calibration signal**: the max/4 repair reserve (min 1)
   can be too small for slower models — consider a floor (e.g. 8 turns) or
   larger stage budgets once more cells confirm; do not tune on n=1.
+- **inkling:free (probe, floor=8)**: reached **0** — s0 PASS 3/3 (30t,
+  $0.0156), s1 expiry FAIL 3/4 (17 initial + 8 repair, $0.0071). The
+  repair round again read/surveyed for its entire budget and NEVER edited
+  (last actions: `head -c 100 server | xxd` -> missing tool -> cap). The
+  binding constraint for this model is repair-round *behavior* (it does
+  not switch to editing under budget), not the reserve size: 6 turns
+  (run A) and 8 turns (run B) both failed the same way, and run-to-run
+  variance is large (s0 took 14 turns in A, 30 in B). Keep floor=8 for
+  now (it only touches pools <32: 25->17+8), do NOT tune further on n=1;
+  collect more cells. $0.0227, tickets/$ 44.1.
 - **nemotron:free**: quota-blocked (`free-models-per-day-high-balance`,
   retry ~10.4h). Recorded as a ticket-0 **FAULT** (1 turn, $0.0002) — the
   throttle classification worked; acceptance counted 3 stages, campaign
