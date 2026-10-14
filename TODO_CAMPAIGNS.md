@@ -201,6 +201,21 @@ non-redis acceptance adapters.
 - [ ] H4. Paper inputs: survival curves, $/ticket, harness deltas,
   regression-free rates.
 
+## Grid log (sdb-kv, omp, high effort)
+
+- **ling-3.1-flash** (spec 0-3, D6b): reached **3** tickets — s0 3/3 (30t),
+  s1 4/4 (19t), s2 5/5 (19t), s3 6/6 (23t + 7 repair). 4/4 regression-free,
+  $0.1743, tickets/$ 22.9. Repair converted a 3-line compile error.
+- **inkling:free** (spec 0-3): reached **1** — s0 3/3 (14t, $0.0112),
+  s1 4/4 (19t, $0.0192), s2 FAIL 4/5 ($0.0117, 25t: 19 initial + 6 repair).
+  Initial attempt hit its cap mid-pubsub; the 6-turn repair spent all six
+  turns reading/surveying and never made an edit. $0.0421 total,
+  tickets/$ 47.5. **Calibration signal**: the max/4 repair reserve (min 1)
+  can be too small for slower models — consider a floor (e.g. 8 turns) or
+  larger stage budgets once more cells confirm; do not tune on n=1.
+- **nemotron:free**: first launch crashed on a spec/binary mismatch mid-grid
+  (old binary, new gap-tolerant spec); rebuilt + relaunched.
+
 ## Open decisions (operator)
 
 - [ ] D1. HA failover: automatic election (spec as written) vs manual
