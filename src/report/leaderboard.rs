@@ -3947,4 +3947,653 @@ mod tests {
         assert!(temp.join("real_run_1.json").exists());
         let _ = fs::remove_dir_all(&temp);
     }
+
+    // --- targeted coverage (wave 3) ---------------------------------------
+
+    /// Minimal fully-defaulted result for branch tests: a legacy redis row.
+    /// Mutate per test; ids stay outside the real runs/results namespaces.
+    fn cov_run(id: &str) -> BenchmarkRunResult {
+        let mut r = stab_run(100.0, None);
+        r.id = id.to_string();
+        r
+    }
+
+    #[test]
+    fn test_format_duration_branches() {
+        assert_eq!(format_duration(0.0), "-");
+        assert_eq!(format_duration(-3.5), "-");
+        assert_eq!(format_duration(59.4), "59s");
+        assert_eq!(format_duration(60.0), "1m 0s");
+        assert_eq!(format_duration(125.6), "2m 6s");
+    }
+
+    #[test]
+    fn test_legacy_rules_version_cutover() {
+        // Strictly before the cutover instant is pre-cheat; the instant
+        // itself and later is legacy-cheat.
+        assert_eq!(
+            legacy_rules_version("2026-09-17T23:59:59"),
+            RULES_LEGACY_PRE_CHEAT
+        );
+        assert_eq!(
+            legacy_rules_version("2026-09-18T00:00:00Z"),
+            RULES_LEGACY_CHEAT
+        );
+        assert_eq!(
+            legacy_rules_version("2026-09-19T12:00:00"),
+            RULES_LEGACY_CHEAT
+        );
+        assert_eq!(RULES_LEGACY_PRE_CHEAT, "legacy-pre-cheat");
+        assert_eq!(RULES_LEGACY_CHEAT, "legacy-cheat");
+    }
+
+    #[test]
+    fn test_harness_regime_rules_helpers() {
+        let mut r = cov_run("helper_run");
+        // Legacy rows are graded as OMP; explicit harness passes through.
+        assert_eq!(BenchmarkRunResult::harness_of(&r), "omp");
+        r.harness = Some("opencode".to_string());
+        assert_eq!(BenchmarkRunResult::harness_of(&r), "opencode");
+
+        // Rules stamp: unscored legacy, scored only, and grader->scorer.
+        assert_eq!(BenchmarkRunResult::rules_of(&r), "legacy");
+        r.rules_version = Some("2026-09-30.1".to_string());
+        assert_eq!(BenchmarkRunResult::rules_of(&r), "2026-09-30.1");
+        r.graded_under = Some("2026-09-27.2".to_string());
+        assert_eq!(
+            BenchmarkRunResult::rules_of(&r),
+            "2026-09-27.2\u{2192}2026-09-30.1"
+        );
+        // Equal grader and scorer collapse to the plain stamp.
+        r.graded_under = Some("2026-09-30.1".to_string());
+        assert_eq!(BenchmarkRunResult::rules_of(&r), "2026-09-30.1");
+
+        // Regime digest: unpinned tag, digest with sha256: prefix, +drift.
+        r.ref_image = Some("registry.example/img:v1.2".to_string());
+        assert_eq!(BenchmarkRunResult::regime_of(&r), "registry.exa");
+        r.ref_image = Some("sha256:abcdef0123456789".to_string());
+        assert_eq!(BenchmarkRunResult::regime_of(&r), "abcdef012345");
+        r.ref_drift = Some(false);
+        assert_eq!(BenchmarkRunResult::regime_of(&r), "abcdef012345");
+        r.ref_drift = Some(true);
+        assert_eq!(BenchmarkRunResult::regime_of(&r), "abcdef012345+drift");
+        r.ref_image = None;
+        assert_eq!(BenchmarkRunResult::regime_of(&r), "legacy");
+    }
+
+    #[test]
+    fn test_cost_per_solved_variants() {
+        let mut r = cov_run("cps");
+        r.pass_rate = 25.0;
+        r.total_cost_usd = 0.5;
+        r.effective_cost_usd = Some(0.25);
+        // P@1 present: effective cost / (P@1/100).
+        r.pass_at_1 = Some(50.0);
+        assert_eq!(r.cost_per_solved(), Some(0.5));
+        // P@1 absent: falls back to the headline pass rate.
+        r.pass_at_1 = None;
+        assert_eq!(r.cost_per_solved(), Some(1.0));
+        // Unsolved: undefined, not zero.
+        r.pass_at_1 = Some(0.0);
+        assert_eq!(r.cost_per_solved(), None);
+        r.pass_at_1 = None;
+        r.pass_rate = 0.0;
+        assert_eq!(r.cost_per_solved(), None);
+        // Effective cost absent: falls back to API cost.
+        r.effective_cost_usd = None;
+        r.pass_rate = 100.0;
+        assert_eq!(r.cost_per_solved(), Some(0.5));
+    }
+
+    #[test]
+    fn test_wilson_interval_exact_values() {
+        // Pinned constants (z=1.96): a change in the maths must be visible.
+        let (lo1, hi1) = wilson_interval_95(1, 1);
+        assert!((lo1 - 20.6543).abs() < 1e-3, "1/1 lo {lo1}");
+        assert!((hi1 - 100.0).abs() < 1e-9);
+        let (lo2, hi2) = wilson_interval_95(2, 1);
+        assert!((lo2 - 9.4529).abs() < 1e-3, "1/2 lo {lo2}");
+        assert!((hi2 - 90.5471).abs() < 1e-3, "1/2 hi {hi2}");
+        let (lo3, hi3) = wilson_interval_95(3, 1);
+        assert!((lo3 - 6.1490).abs() < 1e-3, "1/3 lo {lo3}");
+        assert!((hi3 - 79.2345).abs() < 1e-3, "1/3 hi {hi3}");
+        // 0/3 clamps the lower bound at exactly zero.
+        let (zlo, zhi) = wilson_interval_95(3, 0);
+        assert_eq!(zlo, 0.0);
+        assert!((zhi - 56.1506).abs() < 1e-3, "0/3 hi {zhi}");
+    }
+
+    #[test]
+    fn test_compute_pass_at_k_edge_branches() {
+        // c > n and k > n are out of contract -> 0 (unless c == n).
+        assert_eq!(compute_pass_at_k(3, 4, 1), 0.0);
+        assert_eq!(compute_pass_at_k(3, 1, 4), 0.0);
+        // k == 0 with a full pass still reports 1.0.
+        assert_eq!(compute_pass_at_k(5, 5, 0), 1.0);
+        assert_eq!(compute_pass_at_k(0, 0, 0), 0.0);
+        // n - c < k: every draw of k must contain a pass.
+        assert_eq!(compute_pass_at_k(9, 8, 9), 1.0);
+        assert_eq!(compute_pass_at_k(9, 8, 2), 1.0);
+        // Straight combinatorial product: 2 passes in 4, k=1 -> 50%.
+        let p = compute_pass_at_k(4, 2, 1);
+        assert!((p - 0.5).abs() < 1e-9, "{p}");
+    }
+
+    #[test]
+    fn test_assess_stability_zero_throughput_reads() {
+        // Two explicit zero readings: mean is zero, so the CV gate is
+        // skipped (no fabricated division) and the cell reads stable.
+        let r = [stab_run(100.0, Some(0.0)), stab_run(100.0, Some(0.0))];
+        assert_eq!(assess_stability(&r).0, Stability::Stable);
+        assert_eq!(assess_stability(&r).1, "2 trials agree");
+        // A single throughput reading is not enough for a CV: pass spread
+        // alone decides.
+        let r = [
+            stab_run(100.0, Some(1000.0)),
+            stab_run(100.0, None),
+            stab_run(100.0, None),
+        ];
+        assert_eq!(assess_stability(&r).0, Stability::Stable);
+    }
+
+    #[test]
+    fn test_merge_provenance_unanimity_and_mixed_stamps() {
+        let mk =
+            |id: &str, cs: Option<&str>, ee: Option<&str>, cf: Option<f64>, proto: Option<&str>| {
+                let mut r = cov_run(id);
+                r.cost_source = cs.map(|s| s.to_string());
+                r.effort_effective = ee.map(|s| s.to_string());
+                r.cost_formula_usd = cf;
+                r.protocol = proto.map(|s| s.to_string());
+                r
+            };
+        // Unanimous: one provenance story, summed formula cost.
+        let m = BenchmarkRunResult::merge_subruns(
+            "prov_unanimous",
+            vec![
+                mk("a", Some("live"), Some("high"), Some(0.01), Some("fixed_n")),
+                mk("b", Some("live"), Some("high"), Some(0.02), Some("fixed_n")),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.cost_source.as_deref(), Some("live"));
+        assert_eq!(m.effort_effective.as_deref(), Some("high"));
+        assert!((m.cost_formula_usd.unwrap() - 0.03).abs() < 1e-12);
+        assert_eq!(m.protocol.as_deref(), Some("fixed_n"));
+
+        // Disagreement: "mixed" on both provenance columns and protocol.
+        let m = BenchmarkRunResult::merge_subruns(
+            "prov_mixed",
+            vec![
+                mk("a", Some("live"), Some("high"), Some(0.01), Some("fixed_n")),
+                mk(
+                    "b",
+                    Some("formula"),
+                    Some("#low"),
+                    Some(0.03),
+                    Some("sequential_cap"),
+                ),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.cost_source.as_deref(), Some("mixed"));
+        assert_eq!(m.effort_effective.as_deref(), Some("mixed"));
+        assert_eq!(m.protocol.as_deref(), Some("mixed"));
+
+        // First trial without provenance: no single story -> None even
+        // though the second trial has one (unanimity over the recorded set).
+        let m = BenchmarkRunResult::merge_subruns(
+            "prov_first_none",
+            vec![
+                mk("a", None, None, None, None),
+                mk("b", Some("live"), Some("high"), Some(0.01), Some("fixed_n")),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.cost_source, None);
+        assert_eq!(m.effort_effective, None);
+        assert_eq!(m.cost_formula_usd, None);
+        // Protocol is read from the full subrun list, so the one recorded
+        // value survives even when the first trial has none.
+        assert_eq!(m.protocol.as_deref(), Some("fixed_n"));
+        assert_eq!(m.total_trials, Some(2));
+    }
+
+    #[test]
+    fn test_merge_protocol_none_when_unrecorded() {
+        let r1 = cov_run("np_trial1");
+        let r2 = cov_run("np_trial2");
+        let m = BenchmarkRunResult::merge_subruns("np", vec![r1, r2], None, None).unwrap();
+        assert_eq!(m.protocol, None, "not recorded is never invented");
+    }
+
+    #[test]
+    fn test_single_trial_merge_recompute_and_drift() {
+        // Partial-credit single trial: headline keeps its pass rate but the
+        // unified score is base_eff(100%) x P@1(0) = 0.
+        let mut r = cov_run("one_trial1");
+        r.pass_rate = 50.0;
+        r.passed_stages = 2;
+        r.total_cost_usd = 0.02;
+        r.effective_cost_usd = Some(0.01);
+        r.throughput_score = Some(9.0);
+        r.throughput_req_sec = None;
+        r.reference_throughput_req_sec = None;
+        let m = BenchmarkRunResult::merge_subruns("one", vec![r], None, None).unwrap();
+        assert_eq!(m.pass_at_1, Some(0.0));
+        assert_eq!(m.pass_rate, 50.0);
+        assert_eq!(m.efficiency_score, 0.0);
+        assert_eq!(
+            m.throughput_score, None,
+            "no measured rate -> no throughput score"
+        );
+        assert_eq!(m.solved, Some(false));
+        assert_eq!(m.solved_at, None);
+        assert_eq!(m.best_stage_score, Some(50.0));
+        assert_eq!(m.total_trials, Some(1));
+
+        // Anchored 1/1: score recomputes positive, solve lands at trial 1.
+        let mut r = cov_run("two_trial1");
+        r.effective_cost_usd = Some(0.01);
+        r.throughput_req_sec = Some(30_000.0);
+        r.reference_throughput_req_sec = Some(70_000.0);
+        r.throughput_score = Some(1.0);
+        let m = BenchmarkRunResult::merge_subruns("two", vec![r], None, None).unwrap();
+        assert_eq!(m.pass_at_1, Some(100.0));
+        assert!(m.throughput_score.unwrap() > 0.0);
+        assert_eq!(m.solved, Some(true));
+        assert_eq!(m.solved_at, Some(1));
+
+        // The trial itself was already drift-flagged and the batch says
+        // nothing: the trial's own verdict survives and suppresses scoring.
+        let mut r = cov_run("three_trial1");
+        r.effective_cost_usd = Some(0.01);
+        r.throughput_req_sec = Some(30_000.0);
+        r.reference_throughput_req_sec = Some(70_000.0);
+        r.throughput_score = Some(1.0);
+        r.ref_drift = Some(true);
+        let m = BenchmarkRunResult::merge_subruns("three", vec![r], None, None).unwrap();
+        assert_eq!(m.ref_drift, Some(true));
+        assert_eq!(m.throughput_score, None);
+    }
+
+    #[test]
+    fn test_merge_no_valid_trial_picks_fault_over_cheat() {
+        let mut cheat = cov_run("mix_trial1");
+        cheat.status = Some("disqualified_cheat".to_string());
+        let mut fault = cov_run("mix_trial2");
+        fault.status = Some("agent_killed".to_string());
+        let m = BenchmarkRunResult::merge_subruns("mix", vec![cheat, fault], None, None).unwrap();
+        assert_eq!(
+            m.status.as_deref(),
+            Some("agent_killed"),
+            "the neutral fault pill wins; cheat stays visible in subruns"
+        );
+        assert_eq!(m.subruns.len(), 2);
+    }
+
+    #[test]
+    fn test_finalize_regroups_loose_trials_and_prefers_parents() {
+        let mk = |id: &str, pass: f64| {
+            let mut r = cov_run(id);
+            r.pass_rate = pass;
+            r.passed_stages = if pass >= 100.0 { 4 } else { 0 };
+            r.total_trials = Some(1);
+            r.timestamp = "2026-09-28T00:00:00Z".to_string();
+            r
+        };
+        // Two loose trials of one cell merge into a synthetic parent
+        // ("cell_trialN" -> "cell"); a lone loose trial stays as-is.
+        let out = LeaderboardManager::finalize_results(vec![
+            mk("cell_trial1", 100.0),
+            mk("cell_trial2", 0.0),
+            mk("lonely_trial1", 50.0),
+        ]);
+        assert_eq!(out.len(), 2);
+        let cell = out.iter().find(|r| r.id == "cell").expect("merged parent");
+        assert_eq!(cell.total_trials, Some(2));
+        assert!((cell.pass_at_1.unwrap() - 50.0).abs() < 1e-9);
+        assert_eq!(cell.subruns.len(), 2);
+        assert!(out.iter().any(|r| r.id == "lonely_trial1"));
+        // 1/2 Wilson lo (9.45) loses to the lone 50% headline: rank_lo
+        // falls back to pass_rate for legacy rows without Wilson fields.
+        assert_eq!(out[0].id, "lonely_trial1");
+        assert_eq!(out[1].id, "cell");
+
+        // A child embedded in a stored parent is dropped as a loose row
+        // before any regrouping.
+        let mut parent = cov_run("parent_x");
+        parent.subruns = vec![cov_run("kid_trial1")];
+        parent.total_trials = Some(2);
+        let out = LeaderboardManager::finalize_results(vec![parent, mk("kid_trial1", 100.0)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "parent_x");
+    }
+
+    #[test]
+    fn test_finalize_rank_tiebreaks() {
+        let mk = |id: &str, p1: f64, lo: f64, cost: f64, tp: f64| {
+            let mut r = cov_run(id);
+            r.total_trials = Some(1);
+            r.pass_at_1 = Some(p1);
+            r.pass_at_1_lo = Some(lo);
+            r.pass_at_1_hi = Some(100.0);
+            r.avg_pass_rate = Some(p1);
+            r.effective_cost_usd = Some(cost);
+            r.throughput_req_sec = Some(tp);
+            r.throughput_score = None;
+            r.efficiency_score = 0.0;
+            r
+        };
+        // Equal lo + p1 + score: cheaper wins; at equal cost, faster wins.
+        let out = LeaderboardManager::finalize_results(vec![
+            mk("tie_expensive", 50.0, 10.0, 0.5, 999_999.0),
+            mk("tie_cheap_slow", 50.0, 10.0, 0.1, 1_000.0),
+            mk("tie_cheap_fast", 50.0, 10.0, 0.1, 2_000.0),
+        ]);
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["tie_cheap_fast", "tie_cheap_slow", "tie_expensive"]);
+        // Equal lo but different P@1: the point estimate breaks the tie.
+        let out = LeaderboardManager::finalize_results(vec![
+            mk("p1_low", 20.0, 10.0, 0.1, 1_000.0),
+            mk("p1_high", 80.0, 10.0, 0.1, 1_000.0),
+        ]);
+        assert_eq!(out[0].id, "p1_high");
+    }
+
+    #[test]
+    fn test_frontier_fractions_group_by_harness() {
+        let mut a = cov_run("fr_a");
+        a.subruns = vec![cov_run("fr_a_trial1")];
+        a.throughput_req_sec = Some(10.0);
+        a.reference_throughput_req_sec = Some(100.0);
+        let mut b = cov_run("fr_b");
+        b.subruns = vec![cov_run("fr_b_trial1")];
+        b.harness = Some("opencode".to_string());
+        b.throughput_req_sec = Some(20.0);
+        b.reference_throughput_req_sec = Some(100.0);
+        let mut c = cov_run("fr_c");
+        c.subruns = vec![cov_run("fr_c_trial1")];
+        c.throughput_req_sec = Some(40.0);
+        c.reference_throughput_req_sec = Some(100.0);
+        // Zero reference is not anchored. A loose row (no subruns) never
+        // enters the denominator set, but still gets a numerator reading
+        // against its own key when one exists, and None when it does not.
+        let mut d = cov_run("fr_d");
+        d.subruns = vec![cov_run("fr_d_trial1")];
+        d.throughput_req_sec = Some(50.0);
+        d.reference_throughput_req_sec = Some(0.0);
+        let mut e = cov_run("fr_e");
+        e.task = "http".to_string();
+        e.throughput_req_sec = Some(60.0);
+        e.reference_throughput_req_sec = Some(100.0);
+        let mut f = cov_run("fr_f");
+        f.throughput_req_sec = Some(20.0);
+        f.reference_throughput_req_sec = Some(100.0);
+        let mut rows = vec![a, b, c, d, e, f];
+        BenchmarkRunResult::recompute_frontier_fractions(&mut rows);
+        // omp group best is fr_c (40): fr_a = 0.25; opencode group best is
+        // itself (its own harness key); the loose redis reading halves.
+        assert_eq!(rows[0].frontier_fraction, Some(0.25));
+        assert_eq!(rows[1].frontier_fraction, Some(1.0));
+        assert_eq!(rows[2].frontier_fraction, Some(1.0));
+        assert_eq!(rows[3].frontier_fraction, None);
+        assert_eq!(rows[4].frontier_fraction, None);
+        assert_eq!(rows[5].frontier_fraction, Some(0.5));
+    }
+
+    #[test]
+    fn test_throughput_units_and_badges() {
+        assert_eq!(LeaderboardManager::throughput_unit("PDF"), "pages/s");
+        assert_eq!(LeaderboardManager::throughput_unit("wal"), "msgs/s");
+        assert_eq!(
+            LeaderboardManager::throughput_unit("pubsub"),
+            "deliveries/s"
+        );
+        assert_eq!(LeaderboardManager::throughput_unit("binproto"), "ops/s");
+        assert_eq!(LeaderboardManager::throughput_unit("redis"), "req/s");
+        assert_eq!(LeaderboardManager::throughput_unit("http"), "req/s");
+
+        assert_eq!(
+            LeaderboardManager::pricing_badge("muse-contributor"),
+            " [contrib]"
+        );
+        assert_eq!(
+            LeaderboardManager::pricing_badge("z-ai/ling-3.1-flash"),
+            " [free]"
+        );
+        assert_eq!(
+            LeaderboardManager::pricing_badge("space-bunny-1"),
+            " [free]"
+        );
+        assert_eq!(
+            LeaderboardManager::pricing_badge("vendor/model:free"),
+            " [free]"
+        );
+        assert_eq!(LeaderboardManager::pricing_badge("openai/gpt-5"), "");
+    }
+
+    #[test]
+    fn test_model_cli_meta_vendors() {
+        let cases: [(&str, &str, Color); 11] = [
+            ("anthropic/claude-x", "✦", Color::Red),
+            ("openai/gpt-5", "✳️", Color::Green),
+            ("google/gemini-3", "✨", Color::Blue),
+            ("deepseek/v4", "🐋", Color::Cyan),
+            ("meta/llama-4", "🦙", Color::Magenta),
+            ("qwen/qwen-3", "🔮", Color::DarkMagenta),
+            ("mistral/codestral", "🌪️", Color::DarkYellow),
+            ("minimax/m2", "⚡", Color::DarkRed),
+            ("amazon/nova-pro", "☀️", Color::Yellow),
+            ("cohere/command-r", "🌿", Color::DarkCyan),
+            ("vllm/orca-local", "💻", Color::White),
+        ];
+        for (model, icon, color) in cases {
+            assert_eq!(
+                LeaderboardManager::get_model_cli_meta(model),
+                (icon, color),
+                "{model}"
+            );
+        }
+        // Unknown vendor falls back to the robot badge.
+        assert_eq!(
+            LeaderboardManager::get_model_cli_meta("nobody/mystery"),
+            ("🤖", Color::Cyan)
+        );
+    }
+
+    #[test]
+    fn test_print_matrix_and_views_smoke() {
+        let mut r1 = cov_run("disp_a_trial1");
+        r1.model = "anthropic/claude-x".to_string();
+        r1.harness = Some("opencode".to_string());
+        r1.effort = Some("high".to_string());
+        r1.rules_version = Some("2026-09-30.1".to_string());
+        r1.ref_image = Some("img@sha256:abcdef012345".to_string());
+        r1.ref_drift = Some(true);
+        r1.throughput_req_sec = Some(5_000.0);
+        r1.reference_throughput_req_sec = Some(10_000.0);
+        r1.throughput_score = Some(2.5);
+        r1.frontier_fraction = Some(0.8);
+        r1.duration_seconds = Some(125.0);
+        r1.turns = Some(7);
+        r1.effective_cost_usd = Some(0.02);
+        r1.subruns = vec![cov_run("disp_a_trial1_sub")];
+        r1.total_trials = Some(1);
+        r1.pass_at_1 = Some(100.0);
+        r1.pass_at_1_lo = Some(70.0);
+        r1.pass_at_1_hi = Some(100.0);
+        r1.pass_at_k = Some(100.0);
+        r1.avg_pass_rate = Some(100.0);
+
+        let mut r2 = cov_run("disp_b");
+        r2.model = "qwen/qwen-x".to_string();
+        r2.task = "http".to_string();
+        r2.rules_version = Some("2026-09-27.2".to_string());
+        r2.pass_rate = 50.0;
+        r2.effective_cost_usd = Some(0.01);
+        r2.total_trials = Some(1);
+
+        let mut r3 = cov_run("disp_c");
+        r3.model = "local/llama.cpp".to_string();
+        r3.task = "wal".to_string();
+        r3.pass_rate = 20.0;
+        r3.pass_at_1 = Some(20.0);
+        r3.pass_at_1_lo = Some(5.0);
+        r3.frontier_fraction = Some(0.5);
+        r3.total_trials = Some(1);
+
+        let rows = vec![r1, r2, r3];
+        // Matrix path: per-task tables, effort fallback to "auto", frontier
+        // annotated and un-annotated cells.
+        LeaderboardManager::print_effort_matrix(&rows);
+        // All-tasks view: per-task titles + consolidated board; the redis
+        // title branch and the two-regime warning.
+        LeaderboardManager::print_leaderboard_views(&rows, "");
+        LeaderboardManager::print_leaderboard_views(&rows, "ALL");
+        LeaderboardManager::print_leaderboard_views(&rows, "redis");
+        LeaderboardManager::print_leaderboard_views(&rows, "HTTP");
+        // Unknown task prints the not-found branch.
+        LeaderboardManager::print_leaderboard_views(&rows, "does-not-exist");
+        // Archived mode strips ordinals and suppresses the regime warning.
+        LeaderboardManager::print_table_with_title("Archived record", &rows, true);
+        LeaderboardManager::print_table_with_title("Live mixed", &rows, false);
+    }
+
+    #[test]
+    fn test_language_detection_skips_build_and_hidden_dirs() {
+        let temp = std::env::temp_dir().join(format!("test_lang_skip_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("target")).unwrap();
+        fs::write(temp.join("target/main.rs"), "fn main() {}").unwrap();
+        fs::create_dir_all(temp.join(".hidden")).unwrap();
+        fs::write(temp.join(".hidden/main.go"), "package main").unwrap();
+        fs::create_dir_all(temp.join("node_modules")).unwrap();
+        fs::write(temp.join("node_modules/index.py"), "print(1)").unwrap();
+        // Every source lives in a skipped directory: no language found.
+        assert_eq!(LeaderboardManager::detect_language(&temp), "Unknown");
+        // A visible source next to them is still detected.
+        fs::write(temp.join("main.js"), "console.log(1)").unwrap();
+        assert_eq!(LeaderboardManager::detect_language(&temp), "Node.js");
+        let _ = fs::remove_dir_all(&temp);
+
+        // Polyglot priority: Rust > Go > C/C++ > Node.js > Python.
+        let temp = std::env::temp_dir().join(format!("test_lang_prio_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        for (name, body) in [
+            ("main.py", "print(1)"),
+            ("main.js", "1;"),
+            ("main.c", "int main(){}"),
+            ("main.go", "package main"),
+            ("main.rs", "fn main() {}"),
+        ] {
+            fs::write(temp.join(name), body).unwrap();
+        }
+        assert_eq!(LeaderboardManager::detect_language(&temp), "Rust");
+        fs::remove_file(temp.join("main.rs")).unwrap();
+        assert_eq!(LeaderboardManager::detect_language(&temp), "Go");
+        fs::remove_file(temp.join("main.go")).unwrap();
+        assert_eq!(LeaderboardManager::detect_language(&temp), "C/C++");
+        fs::remove_file(temp.join("main.c")).unwrap();
+        assert_eq!(LeaderboardManager::detect_language(&temp), "Node.js");
+        fs::remove_file(temp.join("main.js")).unwrap();
+        assert_eq!(LeaderboardManager::detect_language(&temp), "Python");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_load_all_skips_invalid_and_non_json_files() {
+        let temp = std::env::temp_dir().join(format!("test_lb_badjson_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let mut good = cov_run("good_row");
+        good.total_trials = Some(1);
+        fs::write(
+            temp.join("good_row.json"),
+            serde_json::to_string(&good).unwrap(),
+        )
+        .unwrap();
+        fs::write(temp.join("bad.json"), "{ not valid json").unwrap();
+        fs::write(temp.join("notes.txt"), "ignored extension").unwrap();
+        fs::create_dir_all(temp.join("subdir.json")).unwrap();
+        let out = LeaderboardManager::load_all(temp.to_str().unwrap());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "good_row");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_merge_repaired_flag_on_converted_repair() {
+        let mut a = cov_run("rep_trial1");
+        a.status = Some("completed".to_string());
+        a.repaired = Some(true);
+        let mut b = cov_run("rep_trial2");
+        b.status = Some("failed_tests".to_string());
+        b.pass_rate = 0.0;
+        let m = BenchmarkRunResult::merge_subruns("rep", vec![a, b], None, None).unwrap();
+        assert_eq!(m.repaired, Some(true));
+        assert_eq!(m.repair_attempted, Some(true));
+    }
+
+    #[test]
+    fn test_merge_empty_and_missing_path_degradation() {
+        assert!(BenchmarkRunResult::merge_subruns("p", Vec::new(), None, None).is_none());
+        // A path with no readable files is "Unknown", never a panic.
+        assert_eq!(
+            LeaderboardManager::detect_language(Path::new("/nonexistent/cov_lang_dir")),
+            "Unknown"
+        );
+        // A results dir that does not exist loads as empty.
+        assert!(LeaderboardManager::load_all_from_dir("/nonexistent/cov_results_dir").is_empty());
+    }
+
+    #[test]
+    fn test_consolidate_without_save_merges_and_stamps_protocol() {
+        assert!(
+            LeaderboardManager::consolidate_multi_trial_run("p", &[], false, None, None).is_none()
+        );
+        let mut s1 = cov_run("cov_cons_trial1");
+        s1.protocol = Some("sequential_cap".to_string());
+        s1.timestamp = "2026-10-01T00:00:00Z".to_string();
+        let mut s2 = cov_run("cov_cons_trial2");
+        s2.protocol = Some("sequential_cap".to_string());
+        s2.pass_rate = 0.0;
+        s2.timestamp = "2026-10-01T00:01:00Z".to_string();
+        let subs = vec![s1.clone(), s2.clone()];
+        // save_results=false keeps the merge in memory: no repo writes.
+        let merged = LeaderboardManager::consolidate_multi_trial_run(
+            "cov_cons_parent",
+            &subs,
+            false,
+            Some(false),
+            None,
+        )
+        .unwrap();
+        assert_eq!(merged.id, "cov_cons_parent");
+        assert_eq!(merged.protocol.as_deref(), Some("sequential_cap"));
+        assert_eq!(merged.total_trials, Some(2));
+        assert_eq!(
+            merged.graded_under,
+            Some(crate::report::rules::fingerprint()),
+            "consolidation stamps the current grader"
+        );
+        // An explicit protocol wins; batch drift passes through.
+        let merged = LeaderboardManager::consolidate_multi_trial_run(
+            "cov_cons_parent",
+            &subs,
+            false,
+            Some(true),
+            Some("fixed_n".to_string()),
+        )
+        .unwrap();
+        assert_eq!(merged.protocol.as_deref(), Some("fixed_n"));
+        assert_eq!(merged.ref_drift, Some(true));
+    }
 }

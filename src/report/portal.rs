@@ -2862,4 +2862,797 @@ mod tests {
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].id, "new_1");
     }
+
+    // --- targeted coverage (wave 3) ---------------------------------------
+
+    fn cov_temp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("cov_portal_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    /// Minimal runs/<id>/ tree with a parseable manifest and workspace file.
+    fn cov_write_run(runs_dir: &Path, id: &str, status: &str, pass: f64) {
+        let dir = runs_dir.join(id);
+        fs::create_dir_all(dir.join("workspace")).unwrap();
+        fs::write(dir.join("workspace/server.go"), "package main").unwrap();
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({
+                "run_id": id, "model": "m", "task": "redis", "status": status,
+                "language": "Go", "started_at": "2026-09-26T15:00:00",
+                "completed_at": "2026-09-26T15:02:00", "duration_seconds": 10.0,
+                "pass_rate": pass, "passed_stages": 2, "total_stages": 4,
+                "stages": [], "tokens": {"prompt_tokens": 1, "cached_tokens": 0,
+                "completion_tokens": 1, "total_tokens": 2},
+                "cost_usd": 0.01, "savings_percent": 0.0, "efficiency_score": 5.0,
+                "files": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Minimal results/<id>.json row (post-freeze timestamp by default).
+    fn cov_result(id: &str, pass: f64, ts: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "model": "m", "task": "redis", "language": "Go",
+            "total_trials": 1,
+            "pass_rate": pass, "passed_stages": 2, "total_stages": 4,
+            "prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1,
+            "total_tokens": 2, "total_cost_usd": 0.01, "savings_percent": 0.0,
+            "efficiency_score": 5.0, "timestamp": ts
+        })
+    }
+
+    fn cov_manifest(status: &str, pass: f64, tp: Option<f64>, ref_tp: Option<f64>) -> RunManifest {
+        serde_json::from_value(serde_json::json!({
+            "run_id": "cov_run_1", "model": "anthropic/claude-x", "task": "redis",
+            "status": status, "language": "Go", "started_at": "2026-09-26T15:00:00",
+            "completed_at": "2026-09-26T15:02:00", "duration_seconds": 125.0,
+            "turns": 7,
+            "pass_rate": pass,
+            "passed_stages": if pass >= 100.0 { 4 } else { 2 }, "total_stages": 4,
+            "stages": [
+                {"stage": 1, "name": "Stage 1: handshake", "passed": true, "error": null},
+                {"stage": 2, "name": "Stage 2: kv", "passed": false, "error": "connection refused"}
+            ],
+            "throughput_req_sec": tp, "reference_throughput_req_sec": ref_tp,
+            "tokens": {"prompt_tokens": 100, "cached_tokens": 10,
+                       "completion_tokens": 90, "total_tokens": 200},
+            "cost_usd": 0.02, "effective_cost_usd": 0.05, "savings_percent": 10.0,
+            "efficiency_score": 7.0, "files": [],
+            "total_trials": 3, "pass_at_1": 66.7, "stability": "watch"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_esc_escapes_html_specials() {
+        assert_eq!(
+            PortalExporter::esc("a<b>&\"c\""),
+            "a&lt;b&gt;&amp;&quot;c&quot;"
+        );
+        assert_eq!(PortalExporter::esc("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_hidden_and_poisoned_flag_lifecycle() {
+        let base = cov_temp("flags");
+        let runs = base.join("runs");
+        fs::create_dir_all(&runs).unwrap();
+        cov_write_run(&runs, "flag_run", "completed", 100.0);
+        // Hidden on/off.
+        assert!(!is_hidden(&runs, "flag_run"));
+        assert!(set_hidden(&runs, "flag_run", true).unwrap());
+        assert!(is_hidden(&runs, "flag_run"));
+        assert!(!set_hidden(&runs, "flag_run", false).unwrap());
+        assert!(!is_hidden(&runs, "flag_run"));
+        // Poisoned on/off, independent of hidden.
+        assert!(!is_poisoned(&runs, "flag_run"));
+        assert!(set_poisoned(&runs, "flag_run", true).unwrap());
+        assert!(is_poisoned(&runs, "flag_run"));
+        assert!(!set_poisoned(&runs, "flag_run", false).unwrap());
+        assert!(!is_poisoned(&runs, "flag_run"));
+        // Invalid and missing ids.
+        assert!(is_hidden(&runs, ""));
+        assert!(!is_poisoned(&runs, ""));
+        assert!(is_hidden(&runs, "."));
+        assert!(set_hidden(&runs, "", true).is_err());
+        assert!(set_hidden(&runs, "ghost", true).is_err());
+        assert!(set_poisoned(&runs, "", true).is_err());
+        assert!(set_poisoned(&runs, "ghost", true).is_err());
+        // Path-ish ids resolve to their final component.
+        fs::create_dir_all(runs.join("flag_run")).unwrap();
+        assert!(!is_hidden(&runs, "nested/flag_run"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_get_model_meta_vendors_and_hash_fallback() {
+        let cases = [
+            ("anthropic/claude-sonnet", "Anthropic"),
+            ("openai/o1-mini", "OpenAI"),
+            ("google/gemini-3", "Google"),
+            ("deepseek/v4", "DeepSeek"),
+            ("meta/llama-4", "Meta"),
+            ("qwen/qwen-3", "Qwen"),
+            ("mistral/pixtral-large", "Mistral"),
+            ("minimax/m2", "MiniMax"),
+            ("amazon/nova-pro", "Amazon"),
+            ("cohere/command-r", "Cohere"),
+            ("vllm/local-7b", "Local"),
+            ("nobody/mystery-a", "Other"),
+            ("nobody/mystery-b", "Other"),
+        ];
+        for (model, family) in cases {
+            assert_eq!(PortalExporter::get_model_meta(model).0, family, "{model}");
+        }
+        // Unknown-vendor colouring is a deterministic hash, never random.
+        assert_eq!(
+            PortalExporter::get_model_meta("zzz/unknown"),
+            PortalExporter::get_model_meta("zzz/unknown")
+        );
+    }
+
+    #[test]
+    fn test_render_review_tolerates_missing_and_invalid_fields() {
+        let v = serde_json::json!({
+            "good": ["clear structure"],
+            "bad": ["no timeouts"],
+            "conclusion": "acceptable",
+        });
+        let html = PortalExporter::render_review(&v);
+        assert!(html.contains("Strengths"));
+        assert!(html.contains("clear structure"));
+        assert!(html.contains("Weaknesses"));
+        assert!(html.contains("no timeouts"));
+        assert!(html.contains("Conclusion:</b> acceptable"));
+        // Missing keys and non-array values render empty lists, not panics.
+        let html = PortalExporter::render_review(&serde_json::json!({
+            "good": "not-an-array",
+            "bad": [1, 2],
+        }));
+        assert!(html.contains("Strengths"));
+        assert!(html.contains("Conclusion:</b> "));
+        assert!(!html.contains("<li>not-an-array</li>"));
+    }
+
+    #[test]
+    fn test_render_run_full_page_and_non_result_pills() {
+        let base = cov_temp("render_run");
+        fs::create_dir_all(base.join("workspace")).unwrap();
+        fs::write(base.join("workspace/main.go"), "package main").unwrap();
+        fs::write(base.join("console.log"), "boot ok token sk-ant-LEAKME done").unwrap();
+        fs::write(base.join("README.md"), "# readme").unwrap();
+        fs::write(
+            base.join("review.json"),
+            r#"{"good":["g"],"bad":["b"],"conclusion":"fine"}"#,
+        )
+        .unwrap();
+        let patterns = PortalExporter::secret_patterns();
+        let m = cov_manifest("completed", 100.0, Some(5_000.0), Some(10_000.0));
+        let html = PortalExporter::render_run(&m, &base, &patterns).unwrap();
+        // Multi-trial pill + P@1, stability pill, throughput with reference bar.
+        assert!(html.contains("3 trials"));
+        assert!(html.contains("P@1 67%"));
+        assert!(html.contains("🟡 watch"));
+        assert!(html.contains("50% of reference"));
+        assert!(html.contains("50%\"") || html.contains("width:50%"));
+        assert!(html.contains("2m 5s"));
+        assert!(html.contains("7 turns"));
+        assert!(html.contains("PASS"));
+        assert!(html.contains("FAIL"));
+        assert!(html.contains("connection refused"));
+        assert!(html.contains("Code review"));
+        assert!(html.contains("Conclusion:</b> fine"));
+        assert!(html.contains("main.go"));
+        assert!(html.contains("&#47;") || html.contains("workspace/main.go"));
+        assert!(html.contains("# readme"));
+        // Console log is redacted before embedding.
+        assert!(!html.contains("sk-ant-LEAKME"));
+        assert!(html.contains("***REDACTED***"));
+        // API + compute split: effective 0.05, API 0.02 -> compute 0.03.
+        assert!(html.contains("compute $0.0300"));
+
+        // Degraded run: both status and pass-rate pills stay neutral, all
+        // optional sections vanish, env falls back to the N/A row.
+        let empty = cov_temp("render_run_empty");
+        fs::create_dir_all(&empty).unwrap();
+        let m2 = cov_manifest("infra_error", 0.0, None, None);
+        let html2 = PortalExporter::render_run(&m2, &empty, &patterns).unwrap();
+        assert!(html2.contains("class=\"pill info\">infra_error"));
+        assert!(html2.contains("class=\"pill info\">0.0%"));
+        assert!(html2.contains("colspan=\"2\">N/A"));
+        assert!(!html2.contains("Code review"));
+        assert!(!html2.contains("console.log (full trace)"));
+        // Explicitly-missing turn count renders the N/A fallback.
+        let mut m2b = cov_manifest("infra_error", 0.0, None, None);
+        m2b.turns = None;
+        let html2b = PortalExporter::render_run(&m2b, &empty, &patterns).unwrap();
+        assert!(html2b.contains("N/A turns"));
+
+        // Real failure keeps the red pass pill; unanchored throughput is
+        // reported raw, and zero reference is not a bar.
+        let m3 = cov_manifest("failed_tests", 50.0, Some(5_000.0), None);
+        let html3 = PortalExporter::render_run(&m3, &empty, &patterns).unwrap();
+        assert!(html3.contains("class=\"pill fail\">50.0%"));
+        assert!(html3.contains("5000 req/s"));
+        assert!(!html3.contains("of reference"));
+        let m4 = cov_manifest("failed_tests", 50.0, Some(5_000.0), Some(0.0));
+        let html4 = PortalExporter::render_run(&m4, &empty, &patterns).unwrap();
+        assert!(html4.contains("5000 req/s"));
+        assert!(!html4.contains("of reference"));
+
+        // Stability pill variants.
+        let mut m_stable = cov_manifest("completed", 100.0, None, None);
+        m_stable.stability = Some("stable".to_string());
+        let html_stable = PortalExporter::render_run(&m_stable, &empty, &patterns).unwrap();
+        assert!(html_stable.contains("🟢 stable"));
+        let mut m_unstable = cov_manifest("completed", 100.0, None, None);
+        m_unstable.stability = Some("unstable".to_string());
+        let html_unstable = PortalExporter::render_run(&m_unstable, &empty, &patterns).unwrap();
+        assert!(html_unstable.contains("🔴 unstable"));
+
+        // Environment table renders sorted key/value rows.
+        let mut m_env = cov_manifest("completed", 100.0, None, None);
+        m_env.env = Some(crate::report::environment::EnvironmentInfo {
+            os: "linux".to_string(),
+            kernel: "6.8.0".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_model: "EPYC-9004".to_string(),
+            cpu_cores: 8,
+            total_memory: "32GB".to_string(),
+            docker_version: "27.0".to_string(),
+            rust_version: "1.80".to_string(),
+            python_version: "3.12".to_string(),
+            node_version: "20".to_string(),
+            git_commit: "abc123".to_string(),
+            git_branch: "main".to_string(),
+            timestamp: "2026-09-26T15:00:00".to_string(),
+        });
+        let html_env = PortalExporter::render_run(&m_env, &empty, &patterns).unwrap();
+        assert!(html_env.contains("EPYC-9004"));
+        assert!(html_env.contains("x86_64"));
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn test_render_workspace_lists_and_inlines_with_skip_rules() {
+        let base = cov_temp("workspace");
+        let dir = base.join("workspace");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        fs::create_dir_all(dir.join("__pycache__")).unwrap();
+        fs::write(dir.join("app.py"), "print(1)").unwrap();
+        fs::write(dir.join("sub/nested.py"), "nested = True").unwrap();
+        fs::write(dir.join(".hidden.py"), "hidden").unwrap();
+        fs::write(dir.join("target/t.py"), "target").unwrap();
+        fs::write(dir.join("node_modules/n.js"), "nm").unwrap();
+        fs::write(dir.join("__pycache__/c.py"), "pyc").unwrap();
+        fs::write(dir.join("big.txt"), "x".repeat(101 * 1024)).unwrap();
+        fs::write(dir.join("blob.bin"), [0xFFu8, 0xFE, 0x00]).unwrap();
+        let mut list = String::new();
+        let mut inline = String::new();
+        PortalExporter::render_workspace(&dir, "", &mut list, &mut inline).unwrap();
+        assert!(list.contains("app.py"));
+        assert!(list.contains("big.txt"));
+        assert!(list.contains("sub/"));
+        assert!(list.contains("nested.py"));
+        assert!(list.contains("blob.bin"));
+        assert!(list.contains("(103424 bytes)"));
+        for skipped in [".hidden.py", "target", "node_modules", "__pycache__"] {
+            assert!(!list.contains(skipped), "{skipped} leaked into listing");
+        }
+        assert!(inline.contains("print(1)"));
+        assert!(inline.contains("nested = True"));
+        // Oversized and non-UTF-8 files are listed, never inlined.
+        assert!(!inline.contains("xxxxx"));
+        assert!(!inline.contains("blob.bin"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_copy_workspace_redacts_copies_and_skips() {
+        let base = cov_temp("copy_ws");
+        let src = base.join("src");
+        let dst = base.join("dst");
+        // Missing source: no-op success, no destination created.
+        PortalExporter::copy_workspace(&base.join("missing"), &dst, &[]).unwrap();
+        assert!(!dst.exists());
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::create_dir_all(src.join("target")).unwrap();
+        fs::write(src.join("keep.txt"), "key sk-or-v1-COVSECRET end").unwrap();
+        fs::write(src.join("binary.bin"), [0xFFu8, 0x00, 0x01]).unwrap();
+        fs::write(src.join("big.bin"), vec![0u8; 600 * 1024]).unwrap();
+        fs::write(src.join(".hidden"), "hidden").unwrap();
+        fs::write(src.join("target/t.rs"), "t").unwrap();
+        fs::write(src.join("sub/deep.txt"), "deep").unwrap();
+        PortalExporter::copy_workspace(&src, &dst, &PortalExporter::secret_patterns()).unwrap();
+        assert!(fs::read_to_string(dst.join("keep.txt"))
+            .unwrap()
+            .contains("***REDACTED***"));
+        assert_eq!(
+            fs::read(dst.join("binary.bin")).unwrap(),
+            [0xFFu8, 0x00, 0x01]
+        );
+        assert!(dst.join("sub/deep.txt").exists());
+        assert!(!dst.join("big.bin").exists(), ">512KB skipped");
+        assert!(!dst.join(".hidden").exists());
+        assert!(!dst.join("target").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_export_run_without_manifest_writes_placeholder() {
+        let base = cov_temp("ghost_run");
+        let runs = base.join("runs");
+        let out = base.join("out");
+        fs::create_dir_all(&runs).unwrap();
+        PortalExporter::export_run(&runs, &out, "ghost_run", &PortalExporter::secret_patterns())
+            .unwrap();
+        let page = fs::read_to_string(out.join("ghost_run/index.html")).unwrap();
+        assert!(page.contains("Manifest missing."));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_portal_export_prunes_stale_and_exports_subruns() {
+        let base = cov_temp("export_prune");
+        let runs = base.join("runs");
+        let results = base.join("results");
+        let out = base.join("portal");
+        fs::create_dir_all(&results).unwrap();
+        cov_write_run(&runs, "prune_parent", "completed", 100.0);
+        cov_write_run(&runs, "prune_sub_1", "completed", 100.0);
+        let mut sub = cov_result("prune_sub_1", 100.0, "2026-09-26T19:45:16");
+        sub["total_trials"] = serde_json::json!(1);
+        let mut parent = cov_result("prune_parent", 100.0, "2026-09-26T19:45:17");
+        parent["subruns"] = serde_json::json!([sub]);
+        parent["total_trials"] = serde_json::json!(1);
+        fs::write(
+            results.join("prune_parent.json"),
+            serde_json::to_string(&parent).unwrap(),
+        )
+        .unwrap();
+        // Pre-existing stale run page must be pruned.
+        fs::create_dir_all(out.join("runs/stale_residue")).unwrap();
+        fs::write(out.join("runs/stale_residue/index.html"), "stale").unwrap();
+
+        let summary = PortalExporter::export(
+            runs.to_str().unwrap(),
+            results.to_str().unwrap(),
+            out.to_str().unwrap(),
+            "",
+            200,
+        )
+        .unwrap();
+        assert_eq!(summary.run_count, 1);
+        assert!(out.join("runs/prune_parent/index.html").exists());
+        assert!(
+            out.join("runs/prune_sub_1/index.html").exists(),
+            "subrun pages are exported alongside the parent"
+        );
+        assert!(!out.join("runs/stale_residue").exists());
+        // results.json ships the visible row set.
+        let rows: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("results.json")).unwrap()).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_portal_export_freeze_keep_poison_and_fault_filters() {
+        let base = cov_temp("export_filters");
+        let runs = base.join("runs");
+        let results = base.join("results");
+        let out = base.join("portal");
+        fs::create_dir_all(&results).unwrap();
+        for id in [
+            "filt_old",
+            "filt_new",
+            "filt_poison",
+            "filt_fault",
+            "filt_top",
+        ] {
+            cov_write_run(&runs, id, "completed", 100.0);
+        }
+        // Old timestamp is frozen out.
+        fs::write(
+            results.join("filt_old.json"),
+            serde_json::to_string(&cov_result("filt_old", 10.0, "2026-09-16T14:54:59")).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            results.join("filt_new.json"),
+            serde_json::to_string(&cov_result("filt_new", 50.0, "2026-09-26T19:45:16")).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            results.join("filt_poison.json"),
+            serde_json::to_string(&cov_result("filt_poison", 90.0, "2026-09-26T19:45:16")).unwrap(),
+        )
+        .unwrap();
+        let mut fault = cov_result("filt_fault", 0.0, "2026-09-26T19:45:16");
+        fault["status"] = serde_json::json!("infra_error");
+        fs::write(
+            results.join("filt_fault.json"),
+            serde_json::to_string(&fault).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            results.join("filt_top.json"),
+            serde_json::to_string(&cov_result("filt_top", 100.0, "2026-09-26T19:45:16")).unwrap(),
+        )
+        .unwrap();
+        set_poisoned(&runs, "filt_poison", true).unwrap();
+
+        let summary = PortalExporter::export(
+            runs.to_str().unwrap(),
+            results.to_str().unwrap(),
+            out.to_str().unwrap(),
+            "",
+            200,
+        )
+        .unwrap();
+        assert_eq!(summary.run_count, 2);
+        let index = fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(index.contains("filt_new"));
+        assert!(index.contains("filt_top"));
+        for excluded in ["filt_old", "filt_poison", "filt_fault"] {
+            assert!(!index.contains(excluded), "{excluded} leaked into index");
+            assert!(
+                !out.join(format!("runs/{excluded}")).exists(),
+                "{excluded} page published"
+            );
+        }
+
+        // keep=1 truncates the ranked list before export: the top row
+        // (filt_top at 100%) is the only page written.
+        let out2 = base.join("portal_keep");
+        let summary = PortalExporter::export(
+            runs.to_str().unwrap(),
+            results.to_str().unwrap(),
+            out2.to_str().unwrap(),
+            "",
+            1,
+        )
+        .unwrap();
+        assert_eq!(summary.run_count, 1);
+        assert!(out2.join("runs/filt_top").exists());
+        assert!(!out2.join("runs/filt_new").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_render_index_initial_rows_and_subrun_details() {
+        let mut parent = rollup_parent(
+            "idx_parent_1",
+            "anthropic/claude-x",
+            "redis",
+            66.7,
+            0.02,
+            Some(0.05),
+            2,
+            Some("watch"),
+        );
+        parent.pass_rate = 66.7;
+        parent.passed_stages = 2;
+        parent.pass_at_1 = Some(50.0);
+        parent.pass_at_k = Some(100.0);
+        parent.throughput_req_sec = Some(5_000.0);
+        let mut sub = rollup_parent(
+            "idx_sub_1",
+            "anthropic/claude-x",
+            "redis",
+            50.0,
+            0.01,
+            None,
+            1,
+            None,
+        );
+        sub.throughput_req_sec = None;
+        sub.turns = None;
+        sub.duration_seconds = None;
+        parent.subruns = vec![sub];
+        let simple = rollup_parent(
+            "idx_simple",
+            "openai/gpt-5",
+            "http",
+            100.0,
+            0.01,
+            None,
+            1,
+            None,
+        );
+
+        let html = PortalExporter::render_index(&[parent, simple], "https://pub.example");
+        assert!(html.contains("idx_parent_1"));
+        assert!(html.contains("idx_simple"));
+        assert!(html.contains("1 trials (Fair)"));
+        assert!(html.contains("Pass@1: 50%"));
+        assert!(html.contains("View 1 subruns breakdown"));
+        assert!(html.contains("Trial 1:"));
+        assert!(html.contains("N/A"));
+        assert!(html.contains("Base: https://pub.example"));
+        // Zero-subrun row has no breakdown block.
+        assert!(!html.contains("View 0 subruns"));
+        // Empty input still renders a page.
+        let empty = PortalExporter::render_index(&[], "");
+        assert!(empty.contains("Total Runs"));
+        assert!(!empty.contains("Base:"));
+    }
+
+    fn cov_rollup_row(model: &str, stab: Option<&str>, lo: f64, hi: f64) -> ModelRollupRow {
+        ModelRollupRow {
+            model: model.to_string(),
+            harness: "omp".to_string(),
+            regime: "legacy".to_string(),
+            protocol: "unknown".to_string(),
+            n_tasks: 6,
+            tasks: vec!["http".to_string(), "redis".to_string()],
+            n_parents: 1,
+            n_trials: 3,
+            n_pass: 2,
+            avg_pass_rate: 66.7,
+            p1: (lo + hi) / 2.0,
+            p1_lo: lo,
+            p1_hi: hi,
+            total_cost_usd: 0.1,
+            avg_cost_usd: 0.1,
+            total_api_cost_usd: 0.05,
+            avg_api_cost_usd: 0.05,
+            stability: stab.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_render_rollup_index_ranks_stability_and_ci_clamp() {
+        let rows = vec![
+            cov_rollup_row("m1", Some("stable"), 40.0, 60.0),
+            cov_rollup_row("m2", Some("watch"), 30.0, 50.0),
+            cov_rollup_row("m3", Some("unstable"), 10.0, 30.0),
+            // Narrow interval: the CI fill clamps to a 2-point minimum.
+            cov_rollup_row("m4", None, 50.0, 51.0),
+        ];
+        let html = PortalExporter::render_rollup_index(&rows, "https://pub.example");
+        for cls in ["rank-1", "rank-2", "rank-3"] {
+            assert!(html.contains(cls), "{cls} missing");
+        }
+        assert!(html.contains("class=\"rank\">4"), "rank-4 missing");
+        for cls in ["stab-ok", "stab-watch", "stab-bad", "stab-na"] {
+            assert!(html.contains(cls), "{cls} missing");
+        }
+        assert!(html.contains("width:2%"));
+        assert!(html.contains("Base: https://pub.example"));
+        assert!(html.contains("4 models"));
+        assert!(html.contains("3t/1r"));
+        // No per-run detail in the rollup.
+        assert!(!html.contains("runs/"));
+    }
+
+    #[test]
+    fn test_rollup_canonical_dedup_prefers_trials_then_timestamp() {
+        let mk = |id: &str, pass: f64, cost: f64, trials: u32, ts: &str| {
+            let mut r = rollup_parent(
+                id,
+                "dedup-model",
+                "http",
+                pass,
+                cost,
+                Some(cost),
+                trials,
+                None,
+            );
+            r.timestamp = ts.to_string();
+            r
+        };
+        // Same key: the 3-trial row beats the 1-trial row; between equal
+        // trial counts the newer timestamp wins.
+        let rows = PortalExporter::rollup_models(&[
+            mk("d_old", 100.0, 0.10, 3, "2026-09-26T16:00:00"),
+            mk("d_new", 50.0, 0.20, 3, "2026-09-26T17:00:00"),
+            mk("d_small", 100.0, 0.30, 1, "2026-09-27T00:00:00"),
+        ]);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.n_parents, 1);
+        assert_eq!(r.n_trials, 3);
+        assert_eq!(r.n_pass, 0, "50% parent with no subruns passed 0/3");
+        assert!((r.avg_pass_rate - 50.0).abs() < 1e-9);
+        assert!((r.total_cost_usd - 0.20).abs() < 1e-9, "newer row kept");
+
+        // Equal trial counts AND equal timestamps: first inserted wins.
+        let rows = PortalExporter::rollup_models(&[
+            mk("d_first", 100.0, 0.11, 3, "2026-09-26T16:00:00"),
+            mk("d_second", 100.0, 0.22, 3, "2026-09-26T16:00:00"),
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].total_cost_usd - 0.11).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_rollup_groups_by_protocol_harness_and_regime() {
+        let mk = |id: &str,
+                  model: &str,
+                  pass: f64,
+                  harness: Option<&str>,
+                  rules: Option<&str>,
+                  proto: Option<&str>| {
+            let mut r = rollup_parent(id, model, "http", pass, 0.1, Some(0.1), 3, None);
+            r.timestamp = "2026-09-26T16:00:00".to_string();
+            r.harness = harness.map(|s| s.to_string());
+            r.rules_version = rules.map(|s| s.to_string());
+            r.protocol = proto.map(|s| s.to_string());
+            r
+        };
+        // Protocols are separate comparability classes; unrecorded reads
+        // "unknown". Sorted class-first: fixed_n < sequential_cap < unknown.
+        let rows = PortalExporter::rollup_models(&[
+            mk(
+                "p_cap",
+                "proto-model",
+                100.0,
+                None,
+                None,
+                Some("sequential_cap"),
+            ),
+            mk("p_fixed", "proto-model", 100.0, None, None, Some("fixed_n")),
+            mk("p_none", "proto-model", 100.0, None, None, None),
+        ]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].protocol, "fixed_n");
+        assert_eq!(rows[1].protocol, "sequential_cap");
+        assert_eq!(rows[2].protocol, "unknown");
+
+        // Harness and rules regime also split the group.
+        let rows = PortalExporter::rollup_models(&[
+            mk("h_omp", "class-model", 80.0, None, None, None),
+            mk("h_oc", "class-model", 80.0, Some("opencode"), None, None),
+            mk(
+                "h_v2",
+                "class-model",
+                80.0,
+                None,
+                Some("2026-09-30.1"),
+                None,
+            ),
+        ]);
+        assert_eq!(rows.len(), 3);
+        assert!(rows
+            .iter()
+            .any(|r| r.harness == "opencode" && r.regime == "legacy"));
+        assert!(rows.iter().any(|r| r.regime == "2026-09-30.1"));
+        assert!(rows
+            .iter()
+            .any(|r| r.harness == "omp" && r.regime == "legacy"));
+    }
+
+    #[test]
+    fn test_rollup_counts_subruns_best_stability_and_cost_tiebreak() {
+        // Subrun counting: parent without an explicit trial count derives n
+        // from its subruns and c from the 100% ones; avg falls back to the
+        // parent's pass_rate when avg_pass_rate is absent.
+        let mut parent = rollup_parent(
+            "sb_par",
+            "sub-model",
+            "redis",
+            50.0,
+            0.20,
+            Some(0.20),
+            9,
+            Some("stable"),
+        );
+        // Derived from subruns, not the (absent) explicit trial count.
+        parent.total_trials = None;
+        parent.avg_pass_rate = None;
+        let mut sub_a = rollup_parent("sb_sub1", "sub-model", "redis", 100.0, 0.0, None, 1, None);
+        sub_a.total_trials = None;
+        let mut sub_b = rollup_parent("sb_sub2", "sub-model", "redis", 0.0, 0.0, None, 1, None);
+        sub_b.total_trials = None;
+        parent.subruns = vec![sub_a, sub_b];
+        let rows = PortalExporter::rollup_models(&[parent]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].n_trials, 2);
+        assert_eq!(rows[0].n_pass, 1);
+        assert!((rows[0].avg_pass_rate - 50.0).abs() < 1e-9);
+        assert!((rows[0].p1 - 50.0).abs() < 1e-9);
+        assert_eq!(rows[0].stability.as_deref(), Some("stable"));
+
+        // No trial count and no subruns: one trial, zero passes, no
+        // stability verdict.
+        let mut bare = rollup_parent("bare_1", "bare-model", "wal", 10.0, 0.1, None, 1, None);
+        bare.total_trials = None;
+        let rows = PortalExporter::rollup_models(&[bare]);
+        assert_eq!(rows[0].n_trials, 1);
+        assert_eq!(rows[0].n_pass, 0);
+        assert_eq!(rows[0].stability, None);
+
+        // Worst stability across a model's parents wins; equal averages and
+        // Wilson bounds sort cheaper-first.
+        let rows = PortalExporter::rollup_models(&[
+            rollup_parent(
+                "w_stable",
+                "worst-model",
+                "http",
+                100.0,
+                0.9,
+                None,
+                3,
+                Some("stable"),
+            ),
+            rollup_parent(
+                "w_unstable",
+                "worst-model",
+                "redis",
+                100.0,
+                0.1,
+                None,
+                3,
+                Some("unstable"),
+            ),
+            rollup_parent(
+                "w_watch",
+                "worst-model",
+                "pdf",
+                100.0,
+                0.5,
+                None,
+                3,
+                Some("watch"),
+            ),
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stability.as_deref(), Some("unstable"));
+        assert!((rows[0].total_cost_usd - 1.5).abs() < 1e-9);
+        // 3 parents, 9 trials, all passing.
+        assert_eq!(rows[0].n_parents, 3);
+        assert_eq!(rows[0].n_trials, 9);
+
+        // Cost tie-break on identical pass stats (different models, so the
+        // regime/protocol/avg/p1_lo keys tie): the cheaper row leads.
+        let rows = PortalExporter::rollup_models(&[
+            rollup_parent("t_exp", "sort-model-b", "http", 100.0, 0.5, None, 3, None),
+            rollup_parent(
+                "t_cheap",
+                "sort-model-a",
+                "redis",
+                100.0,
+                0.1,
+                None,
+                3,
+                None,
+            ),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert!((rows[0].total_cost_usd - 0.1).abs() < 1e-9);
+        assert!((rows[1].total_cost_usd - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_export_rollup_excludes_frozen_rows_and_writes_floor_note() {
+        let base = cov_temp("rollup_frozen");
+        let results = base.join("results");
+        let out = base.join("portal");
+        fs::create_dir_all(&results).unwrap();
+        // One below-floor model only: everything is filtered, but the page
+        // and floor note still render.
+        let mut old = rollup_parent("frz_old", "m", "http", 100.0, 0.01, None, 9, None);
+        old.timestamp = "2026-09-16T14:54:59".to_string();
+        fs::write(
+            results.join("frz_old.json"),
+            serde_json::to_string(&old).unwrap(),
+        )
+        .unwrap();
+        let summary =
+            PortalExporter::export_rollup(results.to_str().unwrap(), out.to_str().unwrap(), "")
+                .unwrap();
+        assert_eq!(summary.run_count, 0);
+        let index = fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(index.contains("Rollup coverage floor"));
+        assert!(!index.contains("frz_old"));
+        let _ = fs::remove_dir_all(&base);
+    }
 }

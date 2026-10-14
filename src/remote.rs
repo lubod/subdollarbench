@@ -953,4 +953,511 @@ mod tests {
         let s = format_compare(&v);
         assert!(s.contains("a: a (50.0%)") && s.contains("[modified] main.py"));
     }
+
+    // --- targeted coverage (wave 3) ---------------------------------------
+
+    /// One complete HTTP/1.1 response for the loopback mock.
+    fn http_reply(status: u16, headers: &[(&str, &str)], body: &str) -> String {
+        let reason = match status {
+            200 => "OK",
+            404 => "Not Found",
+            422 => "Unprocessable Entity",
+            500 => "Internal Server Error",
+            _ => "Error",
+        };
+        let mut out = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (k, v) in headers {
+            out.push_str(&format!("{k}: {v}\r\n"));
+        }
+        out.push_str("\r\n");
+        out.push_str(body);
+        out
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Minimal one-request-per-connection HTTP mock. Replies are handed out
+    /// in connection order; each captured request arrives on the returned
+    /// channel as `{method, target, headers, body}`. Loopback only.
+    async fn spawn_http_mock(
+        replies: Vec<String>,
+    ) -> (u16, tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let replies = Arc::new(replies);
+        let next_reply = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let tx = tx.clone();
+                let replies = Arc::clone(&replies);
+                let next_reply = Arc::clone(&next_reply);
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let head_end = loop {
+                        if let Some(i) = find_subslice(&buf, b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]);
+                    let mut lines = head.split("\r\n");
+                    let request_line = lines.next().unwrap_or_default();
+                    let mut parts = request_line.split_whitespace();
+                    let method = parts.next().unwrap_or_default().to_string();
+                    let target = parts.next().unwrap_or_default().to_string();
+                    let mut headers = serde_json::Map::new();
+                    let mut content_length = 0usize;
+                    for line in lines {
+                        if let Some((k, v)) = line.split_once(':') {
+                            let k = k.trim().to_ascii_lowercase();
+                            let v = v.trim().to_string();
+                            if k == "content-length" {
+                                content_length = v.parse().unwrap_or(0);
+                            }
+                            headers.insert(k, serde_json::Value::String(v));
+                        }
+                    }
+                    while buf.len() < head_end + content_length {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
+                    let _ = tx.send(serde_json::json!({
+                        "method": method,
+                        "target": target,
+                        "headers": headers,
+                        "body": body,
+                    }));
+                    let idx = next_reply.fetch_add(1, Ordering::SeqCst);
+                    let reply = replies
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| http_reply(500, &[], "mock exhausted"));
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (port, rx)
+    }
+
+    #[tokio::test]
+    async fn test_get_json_and_text_roundtrip_via_mock() {
+        let (port, mut rx) = spawn_http_mock(vec![
+            http_reply(
+                200,
+                &[("content-type", "application/json")],
+                r#"{"is_running":true,"n":3}"#,
+            ),
+            http_reply(200, &[], "hello world"),
+            http_reply(200, &[], "not json at all"),
+        ])
+        .await;
+        // Trailing slash exercises resolve_server's trim.
+        let server = format!("http://127.0.0.1:{port}/");
+
+        let v = get_json(&server, "/api/status").await.unwrap();
+        assert_eq!(v["is_running"], true);
+        assert_eq!(v["n"], 3);
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["method"], "GET");
+        assert_eq!(req["target"], "/api/status");
+
+        let t = get_text(&server, "/api/runs/x/log").await.unwrap();
+        assert_eq!(t, "hello world");
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["target"], "/api/runs/x/log");
+
+        // Unparseable JSON degrades to a string value, never an error.
+        let s = get_json(&server, "/api/prompt/redis").await.unwrap();
+        assert_eq!(s, serde_json::Value::String("not json at all".into()));
+    }
+
+    #[tokio::test]
+    async fn test_post_delete_request_shapes_via_mock() {
+        let (port, mut rx) = spawn_http_mock(vec![
+            http_reply(
+                200,
+                &[("content-type", "application/json")],
+                r#"{"queued":1}"#,
+            ),
+            http_reply(200, &[], "stopped"),
+            http_reply(200, &[], "prompt saved"),
+            http_reply(200, &[], "Removed q4 from queue"),
+        ])
+        .await;
+        let server = format!("http://127.0.0.1:{port}");
+
+        let v = post_json(&server, "/api/queue", &serde_json::json!({"model": "m"}))
+            .await
+            .unwrap();
+        assert_eq!(v["queued"], 1);
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["method"], "POST");
+        assert_eq!(req["target"], "/api/queue");
+        assert_eq!(req["headers"]["content-type"], "application/json");
+        assert_eq!(req["body"], r#"{"model":"m"}"#);
+
+        assert_eq!(post_empty(&server, "/api/stop").await.unwrap(), "stopped");
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["method"], "POST");
+        assert_eq!(req["target"], "/api/stop");
+        assert_eq!(req["body"], "");
+
+        assert_eq!(
+            post_text(&server, "/api/prompt/redis", "hello prompt".to_string())
+                .await
+                .unwrap(),
+            "prompt saved"
+        );
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["headers"]["content-type"], "text/plain");
+        assert_eq!(req["body"], "hello prompt");
+
+        assert_eq!(
+            delete_text(&server, "/api/queue/q4").await.unwrap(),
+            "Removed q4 from queue"
+        );
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["method"], "DELETE");
+        assert_eq!(req["target"], "/api/queue/q4");
+    }
+
+    #[tokio::test]
+    async fn test_console_and_file_helpers_via_mock() {
+        let (port, mut rx) = spawn_http_mock(vec![
+            http_reply(200, &[("X-Console-Total", "77")], "line1\nline2"),
+            http_reply(200, &[("X-Console-Total", "not-a-number")], "rest"),
+            http_reply(200, &[], "file body"),
+        ])
+        .await;
+        let server = format!("http://127.0.0.1:{port}");
+
+        let (total, body) = get_console(&server, 200, Some(41)).await.unwrap();
+        assert_eq!(total, 77);
+        assert_eq!(body, "line1\nline2");
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["target"], "/api/console?tail=200&since=41");
+
+        // No since parameter; a garbage total header reads as 0.
+        let (total, body) = get_console(&server, 50, None).await.unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(body, "rest");
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req["target"], "/api/console?tail=50");
+
+        // File query encoding: spaces and reserved bytes are percent-escaped,
+        // path separators are not.
+        let body = get_file_text(&server, "run1", "sub dir/a b.py&x=1")
+            .await
+            .unwrap();
+        assert_eq!(body, "file body");
+        let req = rx.recv().await.unwrap();
+        assert_eq!(
+            req["target"],
+            "/api/runs/run1/file?file=sub%20dir/a%20b.py%26x%3D1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_error_statuses_are_reported() {
+        let (port, _rx) = spawn_http_mock(vec![
+            http_reply(500, &[], "boom"),
+            http_reply(404, &[], "nope"),
+            http_reply(422, &[], "bad payload"),
+        ])
+        .await;
+        let server = format!("http://127.0.0.1:{port}");
+        let err = get_json(&server, "/api/status").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&format!("{server}/api/status")), "{msg}");
+        assert!(msg.contains("500"), "{msg}");
+        assert!(msg.contains("boom"), "{msg}");
+
+        let err = post_empty(&server, "/api/stop").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("404") && msg.contains("nope"), "{msg}");
+
+        let err = delete_text(&server, "/api/queue/q9").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("422") && msg.contains("bad payload"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_http_transport_error_is_contextualized() {
+        // Bind-then-drop hands us a loopback port with nothing listening.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let server = format!("http://127.0.0.1:{port}");
+        let err = get_text(&server, "/api/status").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!("GET {server}/api/status")),
+            "missing request context: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mutating_transport_errors_are_contextualized() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let server = format!("http://127.0.0.1:{port}");
+        let cases: Vec<String> = vec![
+            format!(
+                "{:#}",
+                post_json(&server, "/api/queue", &serde_json::json!({}))
+                    .await
+                    .unwrap_err()
+            ),
+            format!("{:#}", post_empty(&server, "/api/stop").await.unwrap_err()),
+            format!(
+                "{:#}",
+                post_text(&server, "/api/prompt/x", "body".to_string())
+                    .await
+                    .unwrap_err()
+            ),
+            format!(
+                "{:#}",
+                delete_text(&server, "/api/queue/q").await.unwrap_err()
+            ),
+            format!("{:#}", get_json(&server, "/api/status").await.unwrap_err()),
+            format!("{:#}", get_console(&server, 5, Some(1)).await.unwrap_err()),
+            format!(
+                "{:#}",
+                get_file_text(&server, "r1", "f.py").await.unwrap_err()
+            ),
+        ];
+        for msg in cases {
+            assert!(
+                msg.contains(&format!("127.0.0.1:{port}")),
+                "missing request context: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ui_token_env_and_auth_builder() {
+        // Hold the shared env lock: SDB_UI_TOKEN is process-global.
+        let _guard = keep_env();
+        let key = "SDB_UI_TOKEN";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "cov-token-123");
+        assert_eq!(ui_token().as_deref(), Some("cov-token-123"));
+        let req = auth(client().post("http://127.0.0.1:1/api/stop"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("authorization").unwrap(),
+            "Bearer cov-token-123"
+        );
+        // Blank env is never a token: the env branch falls through to the
+        // repo .env (or None); it must not return the whitespace string.
+        std::env::set_var(key, "   ");
+        assert_ne!(ui_token().as_deref(), Some("   "));
+        // Restore only if no other thread overwrote us meanwhile.
+        if std::env::var(key).ok().as_deref() == Some("   ") {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_url_encode_reserved_bytes() {
+        assert_eq!(url_encode("a/b.py"), "a/b.py");
+        assert_eq!(url_encode("a b.py"), "a%20b.py");
+        assert_eq!(url_encode("a?b&c=d#e"), "a%3Fb%26c%3Dd%23e");
+        assert_eq!(url_encode("~-_.ok"), "~-_.ok");
+    }
+
+    #[test]
+    fn test_queue_summary_and_status_edges() {
+        // Missing fields fall back to "-"; a "-" model stays "-".
+        assert_eq!(
+            queue_summary(&serde_json::json!({"Run": {}})),
+            "run - - - x0"
+        );
+        // Unknown kinds render their raw JSON.
+        assert_eq!(queue_summary(&serde_json::json!("Legacy")), "\"Legacy\"");
+        // Status without a run pair anywhere.
+        let s = format_status(&serde_json::json!({}));
+        assert!(s.contains("idle"));
+        assert!(s.contains("current: -"));
+        assert!(s.contains("last: -"));
+        // Partial subrun metadata renders no trial segment.
+        let s = format_status(&serde_json::json!({
+            "is_running": false,
+            "current_run": {"run_id": "r", "model": "m", "turns": 1, "max_turns": 2,
+                            "cost_usd": 0.5, "tokens": 10, "subrun": 2},
+        }));
+        assert!(s.contains("current: r"));
+        assert!(!s.contains("trial"));
+        // Queue rows with a short enqueued_at and no kind.
+        let s = format_queue(&serde_json::json!([
+            {"id": "q0", "status": "Pending", "enqueued_at": "short"},
+        ]));
+        assert!(s.contains("q0"));
+        // Non-array queue reads as empty.
+        assert!(format_queue(&serde_json::json!({})).contains("empty"));
+    }
+
+    #[test]
+    fn test_format_ps_merges_queue_and_manifests() {
+        let queue = serde_json::json!([
+            {"id": "q1", "status": "Running",
+             "kind": {"Run": {"model": "openrouter/m", "task": "redis", "effort": "high", "trials": 3}}},
+            {"id": "q2", "status": "Done",
+             "kind": {"Extend": {"parent_run_id": "p", "trials": 2}}},
+            {"id": "q3", "status": "Pending", "kind": {"Run": {}}},
+        ]);
+        let runs = serde_json::json!([
+            {"run_id": "r_old", "model": "openrouter/m", "task": "redis",
+             "effort": "high", "status": "completed",
+             "started_at": "2026-09-01T00:00:00", "pass_rate": 100.0},
+            {"run_id": "r_new", "model": "openrouter/very-long-model-name-abcdef",
+             "task": "http", "effort": "low", "status": "failed_tests",
+             "started_at": "2026-09-02T00:00:00", "pass_rate": 50.0},
+        ]);
+        let s = format_ps(&queue, &runs, None, None, None, None, 10);
+        assert!(s.contains("queue: 2 live (1 finished history)"));
+        assert!(s.contains("q1") && s.contains("q3"));
+        // Newest manifest first; long names truncate to the column width.
+        assert!(s.find("r_new") < s.find("r_old"));
+        assert!(s.contains("very-long-model-name-a"));
+        // Model + status filters (status is exact, case-insensitive).
+        let s2 = format_ps(
+            &queue,
+            &runs,
+            Some("OPENROUTER/M"),
+            None,
+            None,
+            Some("completed"),
+            10,
+        );
+        assert!(s2.contains("r_old") && !s2.contains("r_new"));
+        let s3 = format_ps(
+            &queue,
+            &runs,
+            None,
+            Some("http"),
+            None,
+            Some("FAILED_TESTS"),
+            10,
+        );
+        assert!(s3.contains("r_new") && !s3.contains("r_old"));
+        // No match: only the header line.
+        let s4 = format_ps(&queue, &runs, Some("glm"), None, None, None, 10);
+        assert!(!s4.contains("r_new") && !s4.contains("r_old"));
+        // limit clamps to at least one; non-array inputs degrade safely.
+        let s5 = format_ps(&queue, &runs, None, None, None, None, 1);
+        assert!(s5.contains("r_new") && !s5.contains("r_old"));
+        let s6 = format_ps(
+            &serde_json::json!({}),
+            &serde_json::json!(null),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(s6.contains("queue: 0 live (0 finished history)"));
+    }
+
+    #[test]
+    fn test_format_detail_fields() {
+        let v = serde_json::json!({
+            "run_id": "r1", "model": "m", "task": "redis", "effort": "max",
+            "status": "completed", "passed_stages": 4, "total_stages": 4,
+            "pass_rate": 100.0, "total_trials": 3, "portal_hidden": true,
+            "turns": 9, "duration_seconds": 61.5, "cost_usd": 0.0123,
+        });
+        let s = format_detail(&v);
+        assert!(s.contains("stages:  4/4 (100.0%)"));
+        assert!(s.contains("trials:  3 merged"));
+        assert!(s.contains("portal:  hidden"));
+        assert!(s.contains("turns:   9  spent: 61.5s  cost: $0.0123"));
+        // Defaults for absent optional fields; single-trial rows print no
+        // merged-trials line; a visible row prints no portal line.
+        let s2 = format_detail(&serde_json::json!({"run_id": "r2", "total_trials": 1}));
+        assert!(s2.contains("turns:   -  spent: 0.0s  cost: $0.0000"));
+        assert!(!s2.contains("trials:"));
+        assert!(!s2.contains("portal:"));
+    }
+
+    #[test]
+    fn test_format_models_expensive_sort_and_edges() {
+        let v = serde_json::json!([
+            {"id": "cheap/model", "name": "Cheap", "prompt_price_per_m": 0.1,
+             "completion_price_per_m": 0.2, "context_length": 100,
+             "created": 100, "supported_efforts": [], "default_effort": "low",
+             "is_reasoning": false},
+            {"id": "pricey/model", "name": "Pricey", "prompt_price_per_m": 0.9,
+             "completion_price_per_m": 1.8, "created": 200,
+             "supported_efforts": [], "is_reasoning": true,
+             "supports_max_tokens": true},
+        ]);
+        // Descending prompt price.
+        let s = format_models_filtered(&v, None, None, "expensive", 10);
+        assert!(s.find("pricey/model") < s.find("cheap/model"));
+        // Search matches names too; unknown sort falls back to cheapest.
+        let s = format_models_filtered(&v, Some("all"), Some("PRICEY"), "bogus", 10);
+        assert!(s.contains("pricey/model") && !s.contains("cheap/model"));
+        // No efforts + reasoning + max tokens -> [tokens] badge; missing
+        // context/released render as placeholders.
+        assert!(s.contains("[tokens]"));
+        assert!(s.contains(" - "));
+        // Back-compat unfiltered wrapper.
+        let s = format_models(&v);
+        assert!(s.contains("cheap/model") && s.contains("pricey/model"));
+        // Empty input still renders the header.
+        assert!(format_models(&serde_json::json!([])).contains("0 model(s)"));
+    }
+
+    #[test]
+    fn test_format_compare_defaults() {
+        // Missing run pair and metric diff: only the files line renders.
+        let v = serde_json::json!({"file_diffs": [{"path": "a.py", "status": "added"}]});
+        let s = format_compare(&v);
+        assert!(s.contains("files: 1 diffed"));
+        assert!(s.contains("[added] a.py"));
+        assert!(!s.contains("delta:"));
+        // More than 30 files: only the first 30 are listed.
+        let files: Vec<serde_json::Value> = (0..35)
+            .map(|i| serde_json::json!({"path": format!("f{i}.py"), "status": "modified"}))
+            .collect();
+        let s = format_compare(&serde_json::json!({"file_diffs": files}));
+        assert!(s.contains("files: 35 diffed"));
+        assert!(s.contains("f29.py") && !s.contains("f30.py"));
+        // Non-array file_diffs reads as none.
+        assert!(format_compare(&serde_json::json!({"file_diffs": 7})).contains("files: 0 diffed"));
+    }
+
+    #[test]
+    fn test_render_log_tail_zero_and_empty_body() {
+        assert_eq!(render_log("a\nb", 0, false), "b");
+        assert_eq!(render_log("", 5, false), "");
+        assert_eq!(render_log("no stage lines here", 5, true), "");
+    }
 }

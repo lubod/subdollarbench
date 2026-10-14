@@ -2170,6 +2170,21 @@ mod gc_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Free loopback port for tests: fixed 5998x/5999x literals let
+    /// concurrent test processes (and this process's own parallel tests)
+    /// steal each other's binds. Stays above the live port map (<10000) and
+    /// below the legacy fixed-test range (59980).
+    fn free_port() -> u16 {
+        loop {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            if p > 20000 && p < 59980 {
+                return p;
+            }
+        }
+    }
+
     /// Dashboard plumbing: extra ports must publish 1:1 on loopback, and
     /// the ENOSPC extras must stay single-purpose.
     #[test]
@@ -2308,7 +2323,7 @@ mod tests {
         let sm = SandboxManager::new();
 
         // 1. Unbound port should return false
-        let ok = sm.wait_for_port(59995, 1).await;
+        let ok = sm.wait_for_port(free_port(), 1).await;
         assert!(!ok);
 
         // 2. Active port should return true
@@ -2345,9 +2360,9 @@ mod tests {
     fn test_start_and_cleanup_reference_containers() {
         let sm = SandboxManager::with_id("test-ref");
         let _guard = RunGuard::new(SandboxManager::with_id("test-ref"));
-        let res_redis = sm.start_reference_redis(59994);
+        let res_redis = sm.start_reference_redis(free_port());
         assert!(res_redis.is_ok());
-        let res_http = sm.start_reference_http(59993);
+        let res_http = sm.start_reference_http(free_port());
         assert!(res_http.is_ok());
         sm.cleanup();
     }
@@ -2360,7 +2375,7 @@ mod tests {
         assert!(sm.ensure_network().is_ok());
         // Idempotent: second create must not fail
         assert!(sm.ensure_network().is_ok());
-        assert!(sm.start_reference_redis(59991).is_ok());
+        assert!(sm.start_reference_redis(free_port()).is_ok());
         // Give the reference a moment to accept connections
         std::thread::sleep(std::time::Duration::from_millis(2500));
 
@@ -2453,7 +2468,7 @@ mod tests {
             "#!/bin/bash\necho candidate running\n",
         )
         .unwrap();
-        let res_sh = sm.start_candidate_in_docker(&temp_dir, 59990);
+        let res_sh = sm.start_candidate_in_docker(&temp_dir, free_port());
         assert!(res_sh.is_ok());
         sm.cleanup();
 
@@ -2464,7 +2479,7 @@ mod tests {
             "FROM alpine\nCMD [\"echo\", \"done\"]\n",
         )
         .unwrap();
-        let res_df = sm.start_candidate_in_docker(&temp_dir, 59989);
+        let res_df = sm.start_candidate_in_docker(&temp_dir, free_port());
         assert!(res_df.is_ok());
         sm.cleanup();
 
@@ -2733,5 +2748,682 @@ mod tests {
         assert!(re.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
         assert!(!re.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref"));
         assert!(!re.is_match("subdollar-candidate-parent_20261002_120000_trial22"));
+    }
+}
+
+/// Live-Docker coverage suite. Every test uses a `covtest-<pid>-<tag>`
+/// instance id, so its containers, networks, and marker files can never
+/// collide with a live campaign, and host ports are ephemeral (>20000; live
+/// runs stay below 10000). `InstanceCleanup` is a panic-safe belt on top of
+/// the exact cleanup/Drop paths the tests themselves exercise.
+#[cfg(test)]
+mod live_docker_cov_tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::process::Command;
+    use std::sync::atomic::Ordering;
+
+    /// Unique-per-test instance id: never shared with a live run.
+    fn id_for(tag: &str) -> String {
+        format!("covtest-{}-{}", std::process::id(), tag)
+    }
+
+    /// Free loopback port outside the live port map (live runs stay <10000)
+    /// and outside the privileged range. Also excludes the legacy fixed test
+    /// ports (59980..=59999) so parallel tests in this process never steal
+    /// `test_start_candidate_in_docker_start_sh_and_dockerfile`'s bind.
+    /// Small race window until docker binds it; worst case the launch fails
+    /// loudly instead of measuring the wrong thing.
+    fn free_port() -> u16 {
+        loop {
+            let l = TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+            let p = l.local_addr().expect("local addr").port();
+            drop(l);
+            if p > 20000 && p < 59980 {
+                return p;
+            }
+        }
+    }
+
+    fn free_ports(n: usize) -> Vec<u16> {
+        let mut out: Vec<u16> = Vec::new();
+        while out.len() < n {
+            let p = free_port();
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    fn docker(args: &[&str]) -> std::process::Output {
+        Command::new("docker")
+            .args(args)
+            .output()
+            .expect("docker CLI must be available")
+    }
+
+    fn running(name: &str) -> bool {
+        let o = docker(&["inspect", "--format", "{{.State.Running}}", name]);
+        o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true"
+    }
+
+    fn exists(name: &str) -> bool {
+        docker(&["inspect", name]).status.success()
+    }
+
+    fn attached_to(name: &str, net: &str) -> bool {
+        let o = docker(&[
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Networks}}",
+            name,
+        ]);
+        o.status.success() && String::from_utf8_lossy(&o.stdout).contains(net)
+    }
+
+    /// Host-published HTTP GET with retry (nginx startup is async).
+    fn http_get(port: u16) -> String {
+        use std::io::{Read, Write};
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let _ = s.write_all(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+                let mut buf = String::new();
+                let _ = s.read_to_string(&mut buf);
+                if !buf.is_empty() {
+                    return buf;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return String::new();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// Panic-safe teardown for exactly one instance id: label-filtered
+    /// reaping (own label value only) plus the exact names this instance can
+    /// have created, its own network, and its marker files. Deliberately not
+    /// a global sweep, so sibling test processes and live runs are untouched.
+    struct InstanceCleanup {
+        id: String,
+    }
+
+    impl Drop for InstanceCleanup {
+        fn drop(&mut self) {
+            let filter = format!("label=sdb.run={}", self.id);
+            let list = Command::new("docker")
+                .args(["ps", "-a", "-q", "--filter", &filter])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let ids: Vec<&str> = list.split_whitespace().collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm", "-f"];
+                args.extend(ids);
+                let _ = Command::new("docker").args(&args).output();
+            }
+            let sm = SandboxManager::with_id(&self.id);
+            let mut names = sm.owned_container_names();
+            names.push(format!("subdollar-tests-{}", self.id));
+            let mut args: Vec<String> = vec!["rm".into(), "-f".into()];
+            args.extend(names);
+            let _ = Command::new("docker").args(&args).output();
+            SandboxManager::remove_network_retrying(&sm.network_name());
+            for idx in 1..=8u8 {
+                let _ = fs::remove_file(sm.upstream_marker_path(idx));
+            }
+        }
+    }
+
+    /// ensure_network creates the run network plus the anchor that keeps the
+    /// network from looking stale; cleanup reaps the anchor but the age gate
+    /// deliberately keeps the young empty network; the explicit own-network
+    /// reaper still removes it.
+    #[test]
+    fn live_test_anchor_network_lifecycle_and_age_gated_cleanup() {
+        let id = id_for("anchor");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup(); // pre-clean leftovers from a killed prior run
+
+        assert!(sm.ensure_network().is_ok());
+        let net = sm.network_name();
+        assert!(exists(&net), "network must exist after ensure_network");
+        let anchor = sm.anchor_container_name();
+        assert!(
+            running(&anchor),
+            "anchor must be running for the run's life"
+        );
+        assert!(attached_to(&anchor, &net), "anchor must be attached");
+        assert!(
+            SandboxManager::network_in_use_or_young(&net),
+            "attached anchor keeps the network non-sweepable"
+        );
+
+        // Idempotent: "already exists" + anchor already running.
+        assert!(sm.ensure_network().is_ok());
+        assert!(running(&anchor));
+
+        sm.cleanup();
+        assert!(!exists(&anchor), "cleanup must reap its anchor");
+        assert!(
+            exists(&net),
+            "young empty network survives cleanup by design (sibling create-then-attach race)"
+        );
+        // The explicit pool-pressure path removes this instance's own net.
+        sm.cleanup_finished_networks();
+        assert!(!exists(&net), "explicit own-network reaper must remove it");
+
+        // Unknown network fails closed: never reported as safe to reap.
+        assert!(SandboxManager::network_in_use_or_young(&format!(
+            "subdollar-net-does-not-exist-{}",
+            std::process::id()
+        )));
+    }
+
+    /// `remove_network_retrying` must force-detach this instance's own
+    /// endpoint (rm refuses attached nets) and then succeed.
+    #[test]
+    fn live_test_remove_network_retrying_disconnects_own_endpoint() {
+        let id = id_for("rmnet");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        assert!(sm.ensure_network().is_ok());
+        let net = sm.network_name();
+        assert!(running(&sm.anchor_container_name()));
+        // First rm sees "active endpoints"; the helper disconnects the
+        // inspected names (ours only) and retries.
+        SandboxManager::remove_network_retrying(&net);
+        assert!(
+            !exists(&net),
+            "retrying removal must succeed on own live net"
+        );
+        sm.cleanup();
+    }
+
+    /// Deterministic subnet collision: the first-attempt subnet is leased to
+    /// the test, so `ensure_network` must bump the wheel and still succeed
+    /// instead of failing or launching without a network.
+    #[test]
+    fn live_test_ensure_network_retries_on_subnet_collision() {
+        let id = id_for("subnet");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        let net = sm.network_name();
+        let blocked = SandboxManager::run_subnet_attempt(&net, 0);
+        let holder = format!("covtest-subnet-holder-{}", std::process::id());
+        let _ = docker(&["network", "rm", holder.as_str()]);
+        let created = docker(&["network", "create", "--subnet", &blocked, holder.as_str()]);
+        if !created.status.success() {
+            // The deterministic attempt-0 subnet is already leased (usually
+            // a live run's network): ensure_network hits the same collision
+            // branch, so the assertion below still proves the retry.
+            eprintln!(
+                "holder create skipped, subnet already leased: {}",
+                String::from_utf8_lossy(&created.stderr).trim()
+            );
+        }
+        assert!(
+            sm.ensure_network().is_ok(),
+            "subnet collision must retry, not abort"
+        );
+        let sn = docker(&[
+            "network",
+            "inspect",
+            &net,
+            "--format",
+            "{{(index .IPAM.Config 0).Subnet}}",
+        ]);
+        assert!(sn.status.success());
+        assert_ne!(
+            String::from_utf8_lossy(&sn.stdout).trim(),
+            blocked,
+            "network must have moved off the leased subnet"
+        );
+        let _ = docker(&["network", "rm", holder.as_str()]);
+        sm.cleanup();
+        SandboxManager::remove_network_retrying(&net);
+    }
+
+    /// Candidate launch knobs (tmpfs/env/ports/memory) land on the
+    /// container; kill leaves it stopped-but-present, restart revives it,
+    /// stop removes it; logs and the network alias path work.
+    #[test]
+    fn live_test_candidate_extras_kill_restart_stop_and_alias() {
+        let id = id_for("cand");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+
+        let ws = std::env::temp_dir().join(format!("covtest-cand-ws-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).expect("create workspace");
+        let port = free_port();
+        let extra_port = free_port();
+        fs::write(
+            ws.join("start.sh"),
+            format!(
+                "#!/bin/bash\necho COVTEST_CANDIDATE_UP\nexec python3 -m http.server {port} --bind 0.0.0.0\n"
+            ),
+        )
+        .expect("write start.sh");
+
+        let extras = CandidateRunExtras {
+            tmpfs: vec!["/data:size=16m".to_string()],
+            env: vec![
+                ("SDB_DATA_DIR".to_string(), "/data".to_string()),
+                ("COVTEST_ENV".to_string(), "cov-value".to_string()),
+            ],
+            ports: vec![extra_port],
+            memory: Some("128m".to_string()),
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&ws, port, &extras)
+            .is_ok());
+        let name = sm.candidate_container_name();
+        assert!(running(&name));
+
+        let mem = docker(&["inspect", "--format", "{{.HostConfig.Memory}}", &name]);
+        assert_eq!(String::from_utf8_lossy(&mem.stdout).trim(), "134217728");
+        let envs = docker(&["inspect", "--format", "{{json .Config.Env}}", &name]);
+        let envs = String::from_utf8_lossy(&envs.stdout);
+        assert!(envs.contains("COVTEST_ENV=cov-value"), "{envs}");
+        assert!(envs.contains("SDB_DATA_DIR=/data"), "{envs}");
+        let tmpfs = docker(&["inspect", "--format", "{{json .HostConfig.Tmpfs}}", &name]);
+        assert!(String::from_utf8_lossy(&tmpfs.stdout).contains("/data"));
+        let ports = docker(&[
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
+            &name,
+        ]);
+        let ports = String::from_utf8_lossy(&ports.stdout);
+        assert!(
+            ports.contains(&format!("{extra_port}/tcp")),
+            "dashboard port must be published 1:1: {ports}"
+        );
+
+        let logs = sm.get_candidate_logs_tail(50);
+        assert!(logs.contains("COVTEST_CANDIDATE_UP"), "{logs}");
+
+        // Candidate accepts on its published loopback port (docker-proxy
+        // handshake + backend liveness heuristic).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        assert!(
+            rt.block_on(sm.wait_for_port(port, 10)),
+            "candidate must accept on the published port"
+        );
+
+        // kill -9 semantics: stopped but present, restartable.
+        assert!(sm.kill_candidate().is_ok());
+        assert!(!running(&name), "SIGKILL leaves the container stopped");
+        assert!(exists(&name), "kill -9 must not remove the container");
+        assert!(sm.restart_candidate().is_ok());
+        assert!(running(&name));
+
+        // Attach to the run network under the `candidate` alias; the second
+        // call exercises the already-connected arm.
+        assert!(sm.ensure_network().is_ok());
+        assert!(sm.connect_candidate_to_network().is_ok());
+        assert!(sm.connect_candidate_to_network().is_ok());
+        assert!(
+            attached_to(&name, &sm.network_name()),
+            "candidate must be attached under its alias"
+        );
+
+        assert!(sm.stop_candidate().is_ok());
+        assert!(!exists(&name));
+
+        // ENOSPC wrapper: 8MB tmpfs data volume + SDB_DATA_DIR env.
+        assert!(sm.start_candidate_enospc(&ws, free_port()).is_ok());
+        let tmpfs = docker(&["inspect", "--format", "{{json .HostConfig.Tmpfs}}", &name]);
+        let tmpfs = String::from_utf8_lossy(&tmpfs.stdout);
+        assert!(tmpfs.contains("\"/data\""), "{tmpfs}");
+        assert!(tmpfs.contains("size=8m"), "{tmpfs}");
+        let _ = sm.stop_candidate();
+        sm.cleanup();
+        SandboxManager::remove_network_retrying(&sm.network_name());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// A leaked binder on the host port must make the reference launch fail
+    /// loudly (Err), never look like a healthy run whose ref is missing.
+    #[test]
+    fn live_test_reference_containers_fail_loud_on_occupied_port() {
+        let id = id_for("ref-occupied");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        // Hold the port for the whole test: docker's `-p` bind must lose.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("hold port");
+        let port = listener.local_addr().expect("local addr").port();
+        assert!(port > 20000, "live port ranges stay below 10000");
+        assert!(sm.start_reference_redis(port).is_err());
+        assert!(sm.start_reference_http(port).is_err());
+        assert!(sm.start_reference_pdf(port).is_err());
+        assert!(!exists(&sm.ref_redis_name()));
+        assert!(!exists(&sm.ref_http_name()));
+        assert!(!exists(&sm.ref_pdf_name()));
+        drop(listener);
+        sm.cleanup();
+    }
+
+    /// PDF reference success path: starts on the default bridge (so `-p`
+    /// works) and then joins the run network under `ref-pdf`.
+    #[test]
+    fn live_test_reference_pdf_starts_dual_attached() {
+        let id = id_for("ref-pdf");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        let port = free_port();
+        assert!(sm.start_reference_pdf(port).is_ok());
+        let name = sm.ref_pdf_name();
+        assert!(running(&name));
+        let nets = docker(&[
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Networks}}",
+            &name,
+        ]);
+        let nets = String::from_utf8_lossy(&nets.stdout);
+        assert!(
+            nets.contains("bridge"),
+            "primary net must be bridge: {nets}"
+        );
+        assert!(
+            nets.contains(&sm.network_name()),
+            "pdf ref must join its run net: {nets}"
+        );
+        let ports = docker(&[
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
+            &name,
+        ]);
+        assert!(
+            String::from_utf8_lossy(&ports.stdout).contains("8090/tcp")
+                && String::from_utf8_lossy(&ports.stdout).contains(&port.to_string()),
+            "host port mapping must survive the dual attach: {}",
+            String::from_utf8_lossy(&ports.stdout)
+        );
+        sm.cleanup();
+        assert!(!exists(&name));
+        SandboxManager::remove_network_retrying(&sm.network_name());
+    }
+
+    /// Three-node HA: leader/replica launch args, dashboard port on node 1
+    /// only, kill (crash) keeps the container, respawn re-points replicaof,
+    /// stop removes the cluster.
+    #[test]
+    fn live_test_ha_nodes_start_kill_respawn_stop() {
+        let id = id_for("ha");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+
+        let ws = std::env::temp_dir().join(format!("covtest-ha-ws-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).expect("create ha workspace");
+        fs::write(
+            ws.join("start.sh"),
+            "#!/bin/bash\necho HA_NODE $@\nexec sleep 120\n",
+        )
+        .expect("write ha start.sh");
+
+        let ports = free_ports(3);
+        let dash = free_port();
+        assert!(
+            sm.start_ha_nodes(&ws, &ports[..1], None).is_err(),
+            "HA needs exactly 3 node ports"
+        );
+        assert!(sm.start_ha_nodes(&ws, &ports, Some(dash)).is_ok());
+        let net = sm.network_name();
+        for idx in 1..=3u8 {
+            let n = sm.ha_node_container_name(idx);
+            assert!(running(&n), "ha{idx} must run");
+            assert!(attached_to(&n, &net), "ha{idx} must join the run net");
+        }
+        // Fixture echoes its args: node 2 must point at ha1, node 1 must not.
+        let logs2 = docker(&["logs", sm.ha_node_container_name(2).as_str()]);
+        let text2 = format!(
+            "{}{}",
+            String::from_utf8_lossy(&logs2.stdout),
+            String::from_utf8_lossy(&logs2.stderr)
+        );
+        assert!(
+            text2.contains(&format!(
+                "--port {} --data /data2 --replicaof ha1:{}",
+                ports[1], ports[0]
+            )),
+            "{text2}"
+        );
+        let logs1 = docker(&["logs", sm.ha_node_container_name(1).as_str()]);
+        let text1 = format!(
+            "{}{}",
+            String::from_utf8_lossy(&logs1.stdout),
+            String::from_utf8_lossy(&logs1.stderr)
+        );
+        assert!(text1.contains(&format!("--port {} --data /data1", ports[0])));
+        assert!(!text1.contains("--replicaof"), "{text1}");
+        let ports1 = docker(&[
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
+            sm.ha_node_container_name(1).as_str(),
+        ]);
+        assert!(String::from_utf8_lossy(&ports1.stdout).contains(&format!("{dash}/tcp")));
+        let ports3 = docker(&[
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
+            sm.ha_node_container_name(3).as_str(),
+        ]);
+        assert!(!String::from_utf8_lossy(&ports3.stdout).contains(&format!("{dash}/tcp")));
+
+        // Crash node 2: container persists, is restartable via respawn.
+        assert!(sm.kill_ha_node(2).is_ok());
+        assert!(!running(&sm.ha_node_container_name(2)));
+        assert!(exists(&sm.ha_node_container_name(2)));
+        assert!(sm.kill_ha_node(9).is_err(), "missing node must report Err");
+        // Rejoin: node 2 recreated pointed at the new leader alias ha3.
+        assert!(sm
+            .respawn_ha_node(&ws, 2, ports[1], Some(("ha3", ports[2])))
+            .is_ok());
+        assert!(running(&sm.ha_node_container_name(2)));
+        let logs2b = docker(&["logs", sm.ha_node_container_name(2).as_str()]);
+        let text2b = format!(
+            "{}{}",
+            String::from_utf8_lossy(&logs2b.stdout),
+            String::from_utf8_lossy(&logs2b.stderr)
+        );
+        assert!(
+            text2b.contains(&format!("--replicaof ha3:{}", ports[2])),
+            "{text2b}"
+        );
+
+        sm.stop_ha_nodes(3);
+        for idx in 1..=3u8 {
+            assert!(!exists(&sm.ha_node_container_name(idx)));
+        }
+        sm.cleanup();
+        SandboxManager::remove_network_retrying(&net);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// Upstream pool: distinct marker bodies served on published ports, and
+    /// stop removes each container.
+    #[test]
+    fn live_test_upstream_pool_serves_markers_and_stops() {
+        let id = id_for("upstreams");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        let ports = free_ports(3);
+        assert!(sm.start_upstream_pool(&ports[..2]).is_ok());
+        assert!(sm.start_upstream(3, ports[2]).is_ok());
+        for (i, port) in ports.iter().enumerate() {
+            let idx = (i + 1) as u8;
+            let body = http_get(*port);
+            assert!(
+                body.contains(&SandboxManager::upstream_marker_body(idx)),
+                "upstream{idx} marker mismatch: {body}"
+            );
+        }
+        for idx in 1..=3u8 {
+            assert!(sm.stop_upstream(idx).is_ok());
+            assert!(!exists(&sm.upstream_name(idx)));
+        }
+        sm.cleanup();
+        SandboxManager::remove_network_retrying(&sm.network_name());
+    }
+
+    /// Egress sidecar: starts, disarms the ephemeral handle's Drop (the run
+    /// owner keeps it), joins the run network under its alias, stops cleanly.
+    #[test]
+    fn live_test_egress_proxy_start_disarm_alias_and_stop() {
+        let id = id_for("egress");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        let url = sm.start_egress_proxy();
+        assert_eq!(url.as_deref(), Some("http://egress-proxy:3128"));
+        let name = sm.egress_proxy_name();
+        assert!(running(&name));
+        assert!(attached_to(&name, &sm.network_name()));
+        assert!(
+            !sm.needs_cleanup.load(Ordering::SeqCst),
+            "ephemeral handle must not claim cleanup ownership of the sidecar"
+        );
+        sm.stop_egress_proxy();
+        assert!(!exists(&name));
+        SandboxManager::remove_network_retrying(&sm.network_name());
+    }
+
+    /// tests/CI stage seam: candidate command runs offline in the sandbox
+    /// image, exit status is reported, and the container never leaks.
+    #[test]
+    fn live_test_run_workspace_command_reports_status_and_reaps() {
+        let id = id_for("ws-cmd");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        let ws = std::env::temp_dir().join(format!("covtest-wscmd-ws-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).expect("create workspace");
+        fs::write(ws.join("marker.txt"), "covtest-marker\n").expect("write marker");
+
+        let (ok, out) = sm
+            .run_workspace_command(&ws, "cat marker.txt", 60)
+            .expect("run must execute");
+        assert!(ok, "{out}");
+        assert!(out.contains("covtest-marker"), "{out}");
+
+        let (bad, _) = sm
+            .run_workspace_command(&ws, "exit 3", 60)
+            .expect("run must execute");
+        assert!(!bad, "nonzero exit must be reported");
+        assert!(
+            !exists(&format!("subdollar-tests-{}", id)),
+            "container leaks"
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// Pure path/synthesis coverage for ensure_runnable_candidate: Go main
+    /// discovery, entrypoint patterns (root and nested), and the
+    /// target/node_modules/hidden skip rules.
+    #[test]
+    fn test_ensure_runnable_candidate_go_and_entrypoint_patterns() {
+        let base = std::env::temp_dir().join(format!("covtest_runnable_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let sm = SandboxManager::with_id("covtest-unit");
+
+        // Nested Go main: root bridge start.sh with `go run .`.
+        let go_dir = base.join("cmd/server");
+        fs::create_dir_all(&go_dir).expect("create go dir");
+        fs::write(go_dir.join("main.go"), "package main\n\nfunc main() {}\n")
+            .expect("write go main");
+        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
+        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
+        assert!(start.contains("cd /workspace/cmd/server"), "{start}");
+        assert!(start.contains("go run ."), "{start}");
+        let _ = fs::remove_dir_all(&base);
+
+        // Nested python entrypoint: cd into its dir, run python3 main.py.
+        let py_dir = base.join("svc");
+        fs::create_dir_all(&py_dir).expect("create py dir");
+        fs::write(py_dir.join("main.py"), "print('x')\n").expect("write py");
+        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
+        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
+        assert!(start.contains("cd /workspace/svc"), "{start}");
+        assert!(start.contains("python3 main.py"), "{start}");
+        let _ = fs::remove_dir_all(&base);
+
+        // Root Cargo.toml: release run line.
+        fs::create_dir_all(&base).expect("create base");
+        fs::write(base.join("Cargo.toml"), "[package]\nname='x'\n").expect("write cargo");
+        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
+        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
+        assert!(start.contains("cargo run --release"), "{start}");
+        let _ = fs::remove_dir_all(&base);
+
+        // Nested index.js: node bridge.
+        let js_dir = base.join("web");
+        fs::create_dir_all(&js_dir).expect("create js dir");
+        fs::write(js_dir.join("index.js"), "console.log(1)\n").expect("write js");
+        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
+        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
+        assert!(start.contains("node main.js"), "{start}");
+        let _ = fs::remove_dir_all(&base);
+
+        // Skipped dirs (.hidden/target/node_modules) are not entrypoints.
+        let skipped = base.join("target/secret");
+        fs::create_dir_all(&skipped).expect("create skipped");
+        fs::write(skipped.join("main.py"), "print('no')\n").expect("write hidden py");
+        let hidden = base.join(".hidden");
+        fs::create_dir_all(&hidden).expect("create hidden");
+        fs::write(hidden.join("server.py"), "print('no')\n").expect("write hidden server");
+        assert!(!sm.ensure_runnable_candidate(&base).expect("scan"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Workdir canonicalization: absolute stays verbatim; an unusable
+    /// relative path falls back to tempdir join (never panics).
+    #[test]
+    fn test_canonical_workdir_for_absolute_and_fallback() {
+        let abs = Path::new("/tmp/covtest-abs");
+        assert_eq!(
+            SandboxManager::canonical_workdir_for(abs),
+            PathBuf::from("/tmp/covtest-abs")
+        );
+        let missing = Path::new("covtest-definitely-missing-dir");
+        assert_eq!(
+            SandboxManager::canonical_workdir_for(missing),
+            std::env::temp_dir().join("covtest-definitely-missing-dir")
+        );
+    }
+
+    /// Reference image mapping for each task, incl. tasks without one.
+    #[test]
+    fn test_ref_image_for_task_mapping() {
+        assert_eq!(ref_image_for_task("redis"), Some(REF_REDIS_IMAGE));
+        assert_eq!(ref_image_for_task("http"), Some(REF_NGINX_IMAGE));
+        assert_eq!(ref_image_for_task("pdf"), Some(REF_PDF_IMAGE));
+        assert_eq!(ref_image_for_task("wal"), None);
+        assert_eq!(ref_image_for_task(""), None);
+    }
+
+    impl InstanceCleanup {
+        fn new_guard(id: &str) -> Self {
+            Self { id: id.to_string() }
+        }
     }
 }

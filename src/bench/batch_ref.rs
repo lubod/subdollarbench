@@ -1150,4 +1150,362 @@ mod tests {
             scratch.display()
         );
     }
+
+    // ---- Live-Docker coverage (wave 3). Scratch ids are
+    // `covtest-br-<pid>-<tag>`, so containers, networks, and history files
+    // can never collide with a live campaign; ports are ephemeral or in a
+    // worker slot far above the live cell range (live runs clamp to 0..8).
+
+    /// Unique-per-test scratch instance id.
+    fn cov_id(tag: &str) -> String {
+        format!("covtest-br-{}-{}", std::process::id(), tag)
+    }
+
+    /// Free loopback port outside the live port map (live runs stay <10000).
+    /// Excludes the legacy fixed test ports (59980..=59999) so parallel tests
+    /// in the same process never steal another test's bind.
+    fn cov_free_port() -> u16 {
+        loop {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+            let p = l.local_addr().expect("local addr").port();
+            drop(l);
+            if p > 20000 && p < 59980 {
+                return p;
+            }
+        }
+    }
+
+    /// Panic-safe teardown of exactly one scratch instance id (never a global
+    /// sweep): label-filtered reaping plus exact network removal.
+    struct DockerScratch(String);
+
+    impl Drop for DockerScratch {
+        fn drop(&mut self) {
+            let filter = format!("label=sdb.run={}", self.0);
+            let list = Command::new("docker")
+                .args(["ps", "-a", "-q", "--filter", &filter])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let ids: Vec<&str> = list.split_whitespace().collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm", "-f"];
+                args.extend(ids);
+                let _ = Command::new("docker").args(&args).output();
+            }
+            SandboxManager::remove_network_retrying(&format!("subdollar-net-{}", self.0));
+        }
+    }
+
+    fn container_exists(name: &str) -> bool {
+        Command::new("docker")
+            .args(["inspect", name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Worker slot whose batch port is above the live cell range: live cells
+    /// clamp to workers 0..8, so 137..=255 maps to ports >= 20089. Probed
+    /// free, rotated past collisions (a concurrent test process picks a
+    /// different slot from its pid/time seed).
+    fn private_worker() -> u8 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        let seed = std::process::id() as u64 ^ (nanos << 1);
+        let mut w = (137 + (seed % 119)) as u8;
+        for _ in 0..119 {
+            let port = crate::web::server::worker_port(6389, w);
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return w;
+            }
+            w = if w == 255 { 137 } else { w + 1 };
+        }
+        255
+    }
+
+    /// Canned-response HTTP server for the PDF probe paths.
+    fn spawn_static_http(response: String) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake http bind");
+        let port = listener.local_addr().expect("fake http addr").port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..6 {
+                if let Ok((mut s, _)) = listener.accept() {
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(response.as_bytes());
+                    let _ = s.flush();
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn test_ref_image_and_drift_threshold_cover_all_task_arms() {
+        assert_eq!(ref_image(&TaskType::Redis), REF_REDIS_IMAGE);
+        assert_eq!(ref_image(&TaskType::Http), REF_NGINX_IMAGE);
+        assert_eq!(ref_image(&TaskType::Proxy), REF_NGINX_IMAGE);
+        assert_eq!(ref_image(&TaskType::Pdf), REF_PDF_IMAGE);
+        assert_eq!(ref_image(&TaskType::Wal), "none");
+        assert_eq!(drift_threshold(&TaskType::Redis), 0.10);
+    }
+
+    /// A blank SDB_REF_HISTORY override must fall back to the repo history
+    /// file (an empty env value is not a path).
+    #[test]
+    fn test_ref_history_path_blank_env_falls_back() {
+        let _g = HIST_SERIAL.lock();
+        std::env::set_var("SDB_REF_HISTORY", "   ");
+        assert_eq!(
+            ref_history_path(),
+            get_repo_root().join("results").join("ref_history.jsonl")
+        );
+        std::env::remove_var("SDB_REF_HISTORY");
+    }
+
+    /// Tasks without an external reference fail the measurement immediately,
+    /// before anything touches docker.
+    #[tokio::test]
+    async fn test_measure_unsupported_tasks_error_immediately() {
+        assert!(measure(&TaskType::Wal, "covtest-nope", 1).await.is_err());
+        assert!(measure(&TaskType::Binproto, "covtest-nope", 1)
+            .await
+            .is_err());
+        assert!(measure_candidate(&TaskType::Pdf, "covtest-nope")
+            .await
+            .is_err());
+        assert!(measure_candidate(&TaskType::Wal, "covtest-nope")
+            .await
+            .is_err());
+    }
+
+    /// No-reference tasks return `Ok(None)` from the worker entry point
+    /// before the load gate, network, or any container.
+    #[tokio::test]
+    async fn test_start_on_worker_no_ref_tasks_return_none() {
+        let log = |_m: &str| {};
+        for task in [TaskType::Wal, TaskType::Pubsub, TaskType::Binproto] {
+            let got = BatchRef::start_on_worker(&task, "covtest-none", &log, 0, None)
+                .await
+                .expect("no-ref task must not error");
+            assert!(got.is_none(), "{task:?} has no batch port");
+        }
+    }
+
+    /// Sync bridge outside any runtime must build a throwaway one.
+    #[test]
+    fn test_start_sync_without_runtime_builds_throwaway() {
+        let log = |_m: &str| {};
+        let got = BatchRef::start(&TaskType::Wal, "covtest-none", &log)
+            .expect("sync bridge must not error");
+        assert!(got.is_none());
+    }
+
+    /// Sync bridge inside an async runtime must reuse it via block_in_place
+    /// (building a runtime there panics with exit 101).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_start_sync_inside_runtime_uses_block_in_place() {
+        let log = |_m: &str| {};
+        let got = BatchRef::start(&TaskType::Wal, "covtest-none", &log)
+            .expect("sync bridge must not error");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn test_wait_pdf_ready_sees_http_200() {
+        let port = spawn_static_http("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string());
+        assert!(wait_pdf_ready(port));
+    }
+
+    /// The PDF wrapper must surface a failed verifier soak as Err (no
+    /// fabricated denominator), on the throwaway-runtime path.
+    #[test]
+    fn test_measure_pdf_pages_per_sec_reports_verifier_failure() {
+        let port = spawn_static_http("HTTP/1.1 500 nope\r\nContent-Length: 0\r\n\r\n".to_string());
+        assert!(measure_pdf_pages_per_sec(port).is_err());
+    }
+
+    /// Same failure on the inside-a-runtime path (block_in_place wrapper).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_measure_pdf_wrapper_reuses_runtime() {
+        let port = spawn_static_http("HTTP/1.1 500 nope\r\nContent-Length: 0\r\n\r\n".to_string());
+        assert!(measure_pdf_pages_per_sec(port).is_err());
+    }
+
+    /// Readiness probes must resolve the reference by its network alias, not
+    /// through a published loopback port (which `--internal` drops).
+    #[test]
+    fn test_wait_redis_and_http_ready_against_live_refs() {
+        let id = cov_id("ready");
+        let _scratch = DockerScratch(id.clone());
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        let redis_port = cov_free_port();
+        let mut http_port = cov_free_port();
+        while http_port == redis_port {
+            http_port = cov_free_port();
+        }
+        assert!(sm.ensure_network().is_ok());
+        assert!(sm.start_reference_redis(redis_port).is_ok());
+        assert!(sm.start_reference_http(http_port).is_ok());
+        let net = sm.network_name();
+        assert!(
+            wait_redis_ready(&net, "ref-redis", 6379),
+            "redis-cli on the run net must see PONG"
+        );
+        assert!(
+            wait_http_ready(&net, "ref-http", 80),
+            "wrk on the run net must reach nginx"
+        );
+        sm.cleanup();
+    }
+
+    /// Real bracket lifecycle: start (warmup + pre median) -> post
+    /// re-measure -> exactly one history row -> container reaped by
+    /// `finish`. Uses a private worker slot, so the live cells' batch ports
+    /// are never touched. Skips (does not fail) when the host-load gate
+    /// refuses or the reference cannot start: that is the designed
+    /// fallback, not a test failure.
+    #[test]
+    fn test_redis_batch_ref_bracket_lifecycle_and_history_row() {
+        // SDB_REF_HISTORY is process-global; hold the lock every
+        // history-mutating test uses for the whole lifecycle so no sibling
+        // can interleave a different file with ours.
+        let _serial = HIST_SERIAL.lock();
+        let dir = std::env::temp_dir().join(cov_id("hist"));
+        let f = dir.join("h.jsonl");
+        let _ = std::fs::create_dir_all(&dir);
+        // Seed a sane distribution: a concurrent *reader* that races us
+        // must never see a single-row (degenerate) file.
+        let mut seed = String::new();
+        for v in [10_000.0, 50_000.0, 100_000.0] {
+            seed.push_str(
+                &serde_json::json!({
+                    "task": "redis",
+                    "ref_pre": v,
+                    "method": current_method_for(&TaskType::Redis),
+                })
+                .to_string(),
+            );
+            seed.push('\n');
+        }
+        std::fs::write(&f, seed).expect("seed history");
+        std::env::set_var("SDB_REF_HISTORY", &f);
+        // Restore env and delete the scratch even on panic.
+        struct HistScratch(std::path::PathBuf);
+        impl Drop for HistScratch {
+            fn drop(&mut self) {
+                std::env::remove_var("SDB_REF_HISTORY");
+                let _ = std::fs::remove_dir_all(self.0.parent().unwrap_or(&self.0));
+            }
+        }
+        let _hist = HistScratch(f.clone());
+
+        let parent = cov_id("bracket");
+        let ext = format!("{parent}_ext3");
+        let _scratch = DockerScratch(format!("{parent}_batchref"));
+        let worker = private_worker();
+        let log = |_m: &str| {};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let started = rt
+            .block_on(BatchRef::start_on_worker(
+                &TaskType::Redis,
+                &parent,
+                &log,
+                worker,
+                Some(&ext),
+            ))
+            .expect("redis batch ref must not hard-error");
+        let Some(batch) = started else {
+            eprintln!(
+                "skipping live assertions: redis batch ref unavailable (host-load gate or ref start failure)"
+            );
+            return;
+        };
+        assert!(batch.reference() > 0.0, "pre measurement must be positive");
+        let report = rt.block_on(batch.finish(&log));
+        assert!(report.pre > 0.0);
+        let post = report.post.expect("post re-measure must succeed");
+        assert!(post > 0.0, "post measurement must be positive");
+        // Exactly one new row, bound to this bracket id (the extension id,
+        // not the parent: each bracket pairs its own pre with its own post).
+        let text = std::fs::read_to_string(&f).expect("history file");
+        let row: serde_json::Value =
+            serde_json::from_str(text.lines().last().expect("history row")).expect("json row");
+        assert_eq!(row["batch"], ext.as_str());
+        assert!(row["ref_pre"].as_f64().unwrap() > 0.0);
+        assert!(row["ref_post"].as_f64().unwrap() > 0.0);
+        assert_eq!(row["verified"], !report.drift);
+        // finish() reaped the batch reference container itself.
+        assert!(
+            !container_exists(&format!("subdollar-ref-redis-{parent}_batchref")),
+            "batch ref container must be reaped by finish"
+        );
+    }
+
+    /// `finish` with an unmeasurable reference (no external path): the
+    /// bracket is unverified -> drift, exactly one null-post row lands, and
+    /// the sandbox (anchor included) is reaped.
+    #[test]
+    fn test_finish_unverified_bracket_flags_drift_and_reaps() {
+        let _serial = HIST_SERIAL.lock();
+        let dir = std::env::temp_dir().join(cov_id("hist-none"));
+        let f = dir.join("h.jsonl");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("SDB_REF_HISTORY", &f);
+        struct HistScratch(std::path::PathBuf);
+        impl Drop for HistScratch {
+            fn drop(&mut self) {
+                std::env::remove_var("SDB_REF_HISTORY");
+                let _ = std::fs::remove_dir_all(self.0.parent().unwrap_or(&self.0));
+            }
+        }
+        let _hist = HistScratch(f.clone());
+
+        let parent = cov_id("none");
+        let batch_id = format!("{parent}_batchref");
+        let _scratch = DockerScratch(batch_id.clone());
+        let sandbox = SandboxManager::with_id(&batch_id);
+        assert!(sandbox.ensure_network().is_ok());
+        let anchor = format!("subdollar-anchor-{batch_id}");
+        assert!(container_exists(&anchor), "anchor must exist pre-finish");
+        let guard = crate::sandbox::docker::RunGuard::new(SandboxManager::with_id(&batch_id));
+        let batch = BatchRef {
+            _guard: guard,
+            sandbox,
+            task: TaskType::Binproto,
+            port: 1,
+            pre: 42.5,
+            pre_load: Some((0.5, 4)),
+            bracket_id: "covtest-bracket-none".to_string(),
+        };
+        let log = |_m: &str| {};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let report = rt.block_on(batch.finish(&log));
+        assert_eq!(report.pre, 42.5);
+        assert!(report.post.is_none(), "no external ref: post must be None");
+        assert!(report.drift, "unverified bracket must be flagged as drift");
+        let text = std::fs::read_to_string(&f).expect("history file");
+        let row: serde_json::Value =
+            serde_json::from_str(text.lines().last().expect("history row")).expect("json row");
+        assert_eq!(row["batch"], "covtest-bracket-none");
+        assert_eq!(row["verified"], false);
+        assert_eq!(row["drift"], true);
+        assert_eq!(row["ref_post"], serde_json::Value::Null);
+        assert!(
+            !container_exists(&anchor),
+            "finish must reap the batchref anchor"
+        );
+    }
 }
