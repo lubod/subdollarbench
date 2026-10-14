@@ -222,6 +222,33 @@ pub async fn run(
     write_status(&cdir, "running", Some(0), None);
 
     let on_stage = |r: &CampaignRollup| write_status(&cdir, "running", None, Some(r));
+    // Termination safety: a foreground campaign killed with Ctrl-C/SIGTERM
+    // must cancel the running stage so the pipeline's cleanup guards reap
+    // its containers (a SIGTERM default-kill skips Drop entirely and leaked
+    // a reference container for 2h on 2026-10-14).
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = signal(SignalKind::terminate()).ok();
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = async {
+                    match term.as_mut() {
+                        Some(t) => {
+                            t.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {},
+            }
+            eprintln!(
+                "\n[CAMPAIGN] termination signal received: cancelling the running stage; containers will be reaped."
+            );
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
     let rollup = campaign::run_campaign(
         &lc,
         &opts,
@@ -234,6 +261,7 @@ pub async fn run(
             let cdir = cdir.clone();
             let workdir = workdir.clone();
             let campaign_id = campaign_id.clone();
+            let cancel = cancel.clone();
             async move {
                 run_one_stage(
                     &lc,
@@ -247,6 +275,7 @@ pub async fn run(
                     &cdir,
                     &workdir,
                     eval_only,
+                    Some(cancel),
                 )
                 .await
             }
@@ -276,6 +305,7 @@ async fn run_one_stage(
     cdir: &Path,
     workdir: &Path,
     eval_only: bool,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<StageOutcome> {
     let run_id = format!("{campaign_id}_s{}", stage.id);
     let stage_dir = cdir.join(format!("s{}", stage.id));
@@ -319,7 +349,7 @@ async fn run_one_stage(
         }),
     };
 
-    let output = BenchmarkPipeline::execute(config, logger, None).await?;
+    let output = BenchmarkPipeline::execute(config, logger, cancel).await?;
 
     // Evidence: console + manifest + git commit + diff.
     let console = buf.lock().unwrap().join("\n");

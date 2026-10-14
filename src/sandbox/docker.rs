@@ -429,7 +429,7 @@ impl SandboxManager {
         );
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
 
-        let _ = Command::new("docker")
+        let out = Command::new("docker")
             .args([
                 "run",
                 "-d",
@@ -451,7 +451,18 @@ impl SandboxManager {
                 &format!("127.0.0.1:{}:6379", port),
                 REF_REDIS_IMAGE,
             ])
-            .output();
+            .output()
+            .map_err(|e| anyhow!("reference redis spawn failed: {e}"))?;
+        // Never swallow: a failed bind (e.g. a leaked container holds the
+        // port) used to look like a healthy run whose ref was silently
+        // missing — the measurement then failed later with a misleading
+        // "Could not connect to ref-redis" (live incident 2026-10-14).
+        if !out.status.success() {
+            return Err(anyhow!(
+                "reference redis failed to start on host port {port}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
 
         Ok(())
     }
@@ -466,7 +477,7 @@ impl SandboxManager {
         );
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
 
-        let _ = Command::new("docker")
+        let out = Command::new("docker")
             .args([
                 "run",
                 "-d",
@@ -488,7 +499,16 @@ impl SandboxManager {
                 &format!("127.0.0.1:{}:80", port),
                 REF_NGINX_IMAGE,
             ])
-            .output();
+            .output()
+            .map_err(|e| anyhow!("reference nginx spawn failed: {e}"))?;
+        // Same rule as the redis reference: a silent non-start must fail
+        // loud (see the 2026-10-14 leaked-container incident).
+        if !out.status.success() {
+            return Err(anyhow!(
+                "reference nginx failed to start on host port {port}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
 
         Ok(())
     }

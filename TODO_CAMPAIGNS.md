@@ -262,6 +262,14 @@ non-redis acceptance adapters.
 
 ## Hygiene backlog
 
+- [x] Incident fix (2026-10-14): a SIGTERM-killed campaign leaked its
+  reference container holding host port 6380 for 2h; `start_reference_redis`
+  swallowed docker-run failures (`let _ = …; Ok(())`), so every later
+  campaign silently measured against a missing ref ("Could not connect to
+  ref-redis") with no warning. Fixed: both reference starters return Err
+  with stderr on failure, and the campaign CLI wires SIGINT/SIGTERM to the
+  pipeline cancel flag so cleanup guards reap running containers. After a
+  hard kill, `prune --yes` remains the belt.
 - [x] Cleanup (2026-10-14): pre-purge recovery branch + `refs/original`
   dropped, stale stash dropped, reflog expired, gc pruned the leaked-key
   blobs (verified absent). Stale root logs removed; data archived + reset
