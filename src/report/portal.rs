@@ -486,7 +486,7 @@ const PORTAL_JS: &str = concat!(
       desc: 'RESP2 protocol TCP server handling pipelined streams, simple strings, bulk strings, integers, errors, PING, ECHO, SET (with PX expiry), GET, DEL, EXISTS, and INCR non-integer guards.',
       stagesCount: 4,
       refInfo: 'redis:alpine reference container on port 6380 (live-measured per batch; no fixed baseline)',
-      benchTool: 'redis-benchmark -p 6379 -n 5000 -c 10 -t get,set -q'
+      benchTool: 'redis-benchmark -p 6379 -n 100000 -c 10 -t get -q (scored, read path; write path reported separately, fsync-bound)'
     },
     wal: {
       name: 'TCP Write-Ahead Log',

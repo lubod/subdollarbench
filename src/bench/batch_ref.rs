@@ -619,7 +619,7 @@ fn append_history(
         "task": task.to_string(),
         "batch": batch,
         "image": ref_image(task),
-        "method": format!("comeas-net-alias/reps{}", crate::bench::BENCH_REPS),
+        "method": current_method_for(task),
         "load_pre": pre_load.map(|(l, _)| l),
         "load_post": post_load.map(|(l, _)| l),
         "ncores": pre_load.map(|(_, n)| n).or(post_load.map(|(_, n)| n)),
@@ -666,19 +666,29 @@ impl RefHistory {
 /// Read the recorded reference history for `task`.
 ///
 /// Compared WITHIN one measurement method only: rows stamped with a
-/// different `method` (pre-regime host-published-port path) come from a
-/// broken apparatus and are excluded, so the warn cannot fire on regime
-/// mismatch. Unstamped legacy rows are treated as a different regime and
-/// likewise excluded. Gate on the pre/post bracket for drift; this warn is
-/// the cross-batch comparability signal, not the drift detector.
-pub fn current_method() -> String {
-    format!("comeas-net-alias/reps{}", crate::bench::BENCH_REPS)
+/// different `method` (pre-regime host-published-port path, or a different
+/// redis window shape) come from a different instrument and are excluded,
+/// so the warn cannot fire on regime mismatch. Unstamped legacy rows are
+/// treated as a different regime and likewise excluded. Gate on the
+/// pre/post bracket for drift; this warn is the cross-batch comparability
+/// signal, not the drift detector.
+///
+/// Redis carries its load shape in the stamp (["`redis_bench_descriptor`"]):
+/// the n=5000 `get,set` era and the n=100k GET-only era are different
+/// instruments, and averaging their denominators together would silently
+/// make ratios incomparable.
+pub fn current_method_for(task: &TaskType) -> String {
+    let base = format!("comeas-net-alias/reps{}", crate::bench::BENCH_REPS);
+    match task {
+        TaskType::Redis => format!("{base}/{}", crate::bench::redis_bench_descriptor()),
+        _ => base,
+    }
 }
 pub fn read_ref_history(task: &TaskType) -> Option<RefHistory> {
     let path = ref_history_path();
     let text = fs::read_to_string(path).ok()?;
     let want = task.to_string();
-    let method = current_method();
+    let method = current_method_for(task);
     let mut vals: Vec<f64> = text
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -784,7 +794,10 @@ mod tests {
         let stamped = text
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some(current_method().as_str()))
+            .filter(|v| {
+                v.get("method").and_then(|m| m.as_str())
+                    == Some(current_method_for(&TaskType::Redis).as_str())
+            })
             .count();
         if stamped == 0 {
             eprintln!("skipping: no current-method rows in ref_history.jsonl (pre-regime file)");
@@ -840,7 +853,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let old_row =
             serde_json::json!({"task":"redis","ref_pre":10.0,"method":"host-published-port/reps3"});
-        let new_row = serde_json::json!({"task":"redis","ref_pre":100.0,"method":current_method()});
+        let new_row = serde_json::json!({"task":"redis","ref_pre":100.0,"method":current_method_for(&TaskType::Redis)});
         std::fs::write(&f, format!("{}\n{}\n", old_row, new_row)).unwrap();
         let _g = HIST_SERIAL.lock();
         std::env::set_var("SDB_REF_HISTORY", &f);
@@ -949,11 +962,11 @@ mod tests {
         assert_eq!(rows[1]["ref_post"], serde_json::Value::Null);
         assert_eq!(
             rows[0]["method"],
-            serde_json::Value::String(current_method())
+            serde_json::Value::String(current_method_for(&TaskType::Redis))
         );
         assert_eq!(
             rows[1]["method"],
-            serde_json::Value::String(current_method())
+            serde_json::Value::String(current_method_for(&TaskType::Redis))
         );
         assert_eq!(rows[0]["load_pre"], 2.0);
         assert_eq!(rows[0]["ncores"], 24);

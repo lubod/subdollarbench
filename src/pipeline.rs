@@ -1436,19 +1436,45 @@ impl BenchmarkPipeline {
             );
             match config.task {
                 TaskType::Redis => {
-                    if let Ok(tp) = BenchmarkRunner::run_redis_benchmark_async(
+                    // Scored window is GET-only; the write path is a separate
+                    // unscored durability probe (see REDIS_BENCH_N). Candidate
+                    // measurement failure is LOUD: silent Ok-arm-only logging
+                    // let five reps x timeout kills produce tp=None while the
+                    // row looked merely unanchored (2026-10-14 finding).
+                    match BenchmarkRunner::run_redis_benchmark_async(
                         &sandbox.network_name(),
                         "candidate",
                         port,
                     )
                     .await
                     {
-                        logger.log(&format!(
-                            "  Candidate Throughput (median of {}): {:.0} req/sec",
-                            crate::bench::BENCH_REPS,
-                            tp
-                        ));
-                        throughput = Some(tp);
+                        Ok(tp) => {
+                            logger.log(&format!(
+                                "  Candidate Throughput (median of {}, GET): {:.0} req/sec",
+                                crate::bench::BENCH_REPS,
+                                tp
+                            ));
+                            throughput = Some(tp);
+                        }
+                        Err(e) => logger.log(&format!(
+                            "  [BENCH] candidate Redis load test FAILED: {e:#}. \
+                             No speed ratio this trial."
+                        )),
+                    }
+                    match BenchmarkRunner::probe_redis_write_async(
+                        &sandbox.network_name(),
+                        "candidate",
+                        port,
+                    )
+                    .await
+                    {
+                        Ok(w) => logger.log(&format!(
+                            "  Durability probe (unscored, fsync-bound): SET {:.0} req/sec",
+                            w
+                        )),
+                        Err(e) => logger.log(&format!(
+                            "  [BENCH] write probe unavailable: {e:#} (durability is verified by the AOF stage, not this number)"
+                        )),
                     }
                     if config.batch_reference.is_none() {
                         logger.log("[BENCH] Calibrating live official Redis baseline (redis:alpine on port 6380)...");

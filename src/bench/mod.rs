@@ -15,15 +15,29 @@ use std::time::{Duration, Instant};
 ///
 /// n=100000, not 5000: a 5k window is ~60ms of load, and the observed
 /// spread at n=5000 is 2.31x (CV 27.5%, 10 windows, pinned ref, same
-/// client/path; long-run medians at n=100k: 1.26x, CV 5.8% — measured
-/// 2026-10-14 on this box). The batch bracket's 10% tolerance cannot
-/// stabilize a 27%-CV instrument, and the throughput score multiplies the
-/// ratio by r(1+2r), so denominator noise was amplified quadratically.
-/// A 100k window is ~0.8s of load per rep; 5 reps + warmup adds seconds
-/// per measurement, not minutes. Absolute medians rise with n (startup
-/// amortization, 155k -> 261k median here); numerator and denominator use
-/// the same n, so the ratio stays the measured quantity.
+/// client/path; n=100k: 1.26x, CV 5.8% — measured 2026-10-14 on this
+/// box). The r(1+2r) multiplier amplifies denominator noise quadratically,
+/// so the reference window had to grow.
+///
+/// Scored window is GET-only. The task MANDATES fsync-before-ack, and a
+/// correct implementation is bounded by fsync latency (~870 SET/s on this
+/// host, ~11ms/op): at n=100k the SET phase alone takes ~2 minutes per
+/// rep and trips the client timeout, so the old `get,set` mix silently
+/// produced no candidate measurement at all (2026-10-14 finding: every
+/// canary cell had tp=None, 5 reps x 20s of timeout kills in each log).
+/// Read throughput is the code-quality signal and measures stably at high
+/// n; the write path is reported as an unscored durability probe.
 pub const REDIS_BENCH_N: &str = "100000";
+/// Command for the scored window (see REDIS_BENCH_N for the why).
+pub const REDIS_BENCH_CMD: &str = "get";
+/// Write-path probe: small count so a sync-fsync candidate finishes inside
+/// the client timeout. Reported, never scored (durability cost, not skill).
+pub const REDIS_WRITE_PROBE_N: &str = "2000";
+/// Load shape as one token for the history/regime stamp: denominators from
+/// different window shapes must never be averaged together.
+pub fn redis_bench_descriptor() -> String {
+    format!("{}-n{}", REDIS_BENCH_CMD, REDIS_BENCH_N)
+}
 pub const REDIS_BENCH_C: &str = "10";
 pub const WRK_THREADS: &str = "2";
 pub const WRK_CONNS: &str = "20";
@@ -316,61 +330,95 @@ impl BenchmarkRunner {
         Self::run_redis_benchmark_reps_async(net, host, port, BENCH_REPS).await
     }
 
+    /// Unscored durability probe: SET throughput at a small count.
+    ///
+    /// A correct fsync-before-ack candidate is bounded by the filesystem
+    /// (~870 SET/s on this host, ~11ms/fsync), so this number measures
+    /// durability cost, not code quality — reported, never scored. The
+    /// count is small for the same reason: at n=100k the write phase takes
+    /// ~2 minutes per rep and trips the client timeout (the 2026-10-14
+    /// finding: every candidate measurement in the canary timed out
+    /// silently because the scored window still carried `get,set`).
+    pub async fn probe_redis_write_async(net: &str, host: &str, port: u16) -> Result<f64> {
+        let net = net.to_string();
+        let host = host.to_string();
+        tokio::task::spawn_blocking(move || {
+            let _lock = acquire_bench_lock();
+            if !_lock.is_owned() {
+                eprintln!("[BENCH] write probe proceeding UNSERIALIZED (lock fail-open)");
+            }
+            Self::redis_run_once(&net, &host, port, REDIS_WRITE_PROBE_N, "set")
+        })
+        .await
+        .map_err(|e| anyhow!("bench blocking pool join failed: {}", e))?
+    }
+
+    /// One redis-benchmark window: fixed command + count, labeled client,
+    /// timeout-bounded, parsed. Shared by the scored read window and the
+    /// unscored write probe so both go through one apparatus.
+    ///
+    /// timeout -k 5 45: SIGTERM demonstrably did not end the docker CLI;
+    /// KILL after 5s grace bounds every window at ~50s. Sized for the GET
+    /// window against a slow-but-working candidate (n=100k at 2k req/s =
+    /// 50s); a candidate slower than that is pathological and its timeout
+    /// surfaces as a loud measurement error now, never a silent tp=None.
+    fn redis_run_once(net: &str, host: &str, port: u16, n: &str, cmd: &str) -> Result<f64> {
+        // Named + labeled client: an unnamed --rm client that never exits
+        // (5h wizardly_herschel) is invisible to reap_run/prune/orphan-sweep
+        // (no label) and --rm never fires. The name below is the exact
+        // manual recovery (docker kill + rm -f), mechanized.
+        let client = format!("subdollar-benchclient-{:x}", bench_client_tag(net, "redis"));
+        let _ = Command::new("docker").args(["rm", "-f", &client]).output();
+        let output = Command::new("timeout")
+            .args([
+                "-k",
+                "5",
+                "45",
+                "docker",
+                "run",
+                "--rm",
+                "--name",
+                &client,
+                "--label",
+                "sdb.run=bench-client",
+                "--label",
+                "sdb.role=bench-client",
+                "--network",
+                net,
+                BENCH_REDIS_CLIENT_IMAGE,
+                "redis-benchmark",
+                "-h",
+                host,
+                "-p",
+                &port.to_string(),
+                "-n",
+                n,
+                "-c",
+                REDIS_BENCH_C,
+                "-t",
+                cmd,
+                "-q",
+            ])
+            .output()
+            .map_err(|e| anyhow!("Failed to execute docker redis-benchmark: {}", e))?;
+        // Reap regardless of outcome: a killed-but-lingering container
+        // holds its trial net alive and defeats the orphan rule.
+        let _ = Command::new("docker").args(["rm", "-f", &client]).output();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Self::parse_redis_benchmark_output(&stdout).map_err(|e| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow!("{}, stderr: '{}'", e, stderr)
+        })
+    }
+
     fn redis_reps_blocking(net: &str, host: &str, port: u16, reps: usize) -> Result<f64> {
         let mut ok = Vec::new();
         let mut last_err = anyhow!("no benchmark repetitions attempted");
         for _ in 0..reps.max(1) {
-            // Named + labeled client: an unnamed --rm client that never
-            // exits (5h wizardly_herschel) is invisible to reap_run/prune/
-            // orphan-sweep (no label) and --rm never fires. The name below
-            // is the exact manual recovery (docker kill + rm -f), mechanized.
-            // timeout -k 5 15: SIGTERM demonstrably did not end the docker
-            // CLI; KILL after 5s grace bounds every window at ~20s.
-            let client = format!("subdollar-benchclient-{:x}", bench_client_tag(net, "redis"));
-            let _ = Command::new("docker").args(["rm", "-f", &client]).output();
-            let output = Command::new("timeout")
-                .args([
-                    "-k",
-                    "5",
-                    "15",
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--name",
-                    &client,
-                    "--label",
-                    "sdb.run=bench-client",
-                    "--label",
-                    "sdb.role=bench-client",
-                    "--network",
-                    net,
-                    BENCH_REDIS_CLIENT_IMAGE,
-                    "redis-benchmark",
-                    "-h",
-                    host,
-                    "-p",
-                    &port.to_string(),
-                    "-n",
-                    REDIS_BENCH_N,
-                    "-c",
-                    REDIS_BENCH_C,
-                    "-t",
-                    "get,set",
-                    "-q",
-                ])
-                .output()
-                .map_err(|e| anyhow!("Failed to execute docker redis-benchmark: {}", e))?;
-            // Reap regardless of outcome: a killed-but-lingering container
-            // holds its trial net alive and defeats the orphan rule.
-            let _ = Command::new("docker").args(["rm", "-f", &client]).output();
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            match Self::parse_redis_benchmark_output(&stdout) {
+            match Self::redis_run_once(net, host, port, REDIS_BENCH_N, REDIS_BENCH_CMD) {
                 Ok(v) => ok.push(v),
-                Err(e) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    last_err = anyhow!("{}, stderr: '{}'", e, stderr);
-                }
+                Err(e) => last_err = e,
             }
         }
         if ok.is_empty() {

@@ -382,6 +382,21 @@ First wave where the fix is live from trial 1: `repair_attempted`
 recorded natively on every trial row, non-result exclusion active from
 the first merge. Expect 4 running + 2 pending to drain in ~1h.
 
+## R2. Measurement incident (2026-10-14.1) — fsync-bound SET vs the 100k window
+
+The 2026-10-14 canary review found the n=100k window was still `get,set`.
+The task mandates fsync-before-ack, so a correct candidate does ~870 SET/s
+(~11ms/fsync): the SET phase alone takes ~2 minutes per rep, tripped the
+15s client timeout, and EVERY candidate measurement failed silently
+(all cells tp=None; five timeout-kill reps visible as a ~100s gap in each
+console). The batch reference (no AOF) measured fine, so only the
+numerator was missing. Fix (RULES 2026-10-14.1): scored window is
+GET-only at n=100k (read path = code-quality signal); write path becomes
+an unscored SET probe (n=2000) reported per passing trial; client window
+timeout 15s -> 45s; candidate measurement failure logs loudly; redis
+history rows carry a load-shape stamp (`get-n100000`) so n=5000-era
+denominators are never averaged in. Canary re-run q7-q12.
+
 ## R. Review round (2026-10-14) — scoring + measurement fixes, RULES 2026-10-14
 
 Independent code review of the q1-q6 canary found two live scoring defects

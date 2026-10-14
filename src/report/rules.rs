@@ -8,6 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.1`: measurement fix found by the 2026-10-14 canary review.
+///   The n=100000 window kept the `get,set` mix, and the task MANDATES
+///   fsync-before-ack: a correct candidate does ~870 SET/s, so the SET
+///   phase took ~2 minutes per rep, tripped the 15s client timeout, and
+///   every candidate measurement failed silently (all canary cells:
+///   tp=None, five timeout-kill reps per log). Scored window is now
+///   GET-only at n=100000 (read path = code-quality signal; stable);
+///   the write path is a small-count SET probe reported but never scored
+///   (fsync latency, not model skill). Client window timeout 15s -> 45s;
+///   candidate measurement failure now logs loudly. Redis history rows
+///   gain the load-shape stamp (`get-n100000`) so n=5000-era denominators
+///   are never averaged with the new instrument. Rows stamped
+///   `2026-10-14` or earlier are not comparable without `backfill --yes`.
 /// - `2026-10-14`: review-round fixes (scoring + measurement). (1) The n=1
 ///   merge path in `merge_subruns` now honors the batch drift bracket
 ///   instead of dropping it — stop-on-pass cells (a 100% cell is usually a
@@ -199,7 +212,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14";
+pub const RULES_VERSION: &str = "2026-10-14.1";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
