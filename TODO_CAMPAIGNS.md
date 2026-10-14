@@ -208,6 +208,25 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
+  **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
+  25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
+  $0.1930 total, tickets/$ 15.5, 3 regression-free. **Genuine model
+  failure, harness fixes held** (no network murder; the AOF restart
+  mechanics worked). This run the model rewrote in Go; the initial session
+  never compiled (`main.go` missing `package main`), the 8-turn repair
+  fixed both compile errors (package + duplicate `store.del`) and hit the
+  limit before testing. Root cause of the AOF loss (reproduced manually on
+  a workspace copy): `delFields` uses `make([]byte, 4, ...)` — slice
+  LENGTH 4, not cap — so every DEL record carries 4 junk zero bytes before
+  the count; replay reads `count=0`, trips the leftover-bytes check, and
+  truncates every record after the first DEL (the probe). Classic Go
+  slice-length bug; exactly what ticket 3 is for. Advisory 102 failed on
+  the pre-`5cf5a86` binary (self-seed fix landed after launch).
+  **Calibration signal #2**: an 8-turn repair floor is too small to
+  recover a 500-line implementation that never compiled (ling needed
+  ~2-4 more turns to test durability; inkling's probe never edited at
+  all). Collect more before tuning D6b.
 - **ling-3.1-flash** (spec 0-5, 2026-10-14 run 3, `..._140445`): s0-s3 PASS
   3/3/4/5/6 (30t/17t/25t/22t, $0.0286/$0.0333/$0.0369/$0.0752), then s4
   **invalidated by a harness murder**: while the AOF probe had the candidate
