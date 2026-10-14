@@ -1592,6 +1592,208 @@ impl RedisVerifier {
         }
     }
 
+    /// Stage 11 (campaign security ticket; explicit acceptance only): the
+    /// candidate runs with `SDB_PASSWORD` set and a 64MB memory cap.
+    ///   - RESP: every command except AUTH is refused before a correct
+    ///     `AUTH <password>`; a wrong password errors;
+    ///   - dashboard: HTTP Basic auth is required on every route;
+    ///   - oversized frames (a bulk header claiming 64MB, a multibulk
+    ///     claiming 2M args) must be answered or closed WITHOUT allocating
+    ///     them — under the 64MB cap, buffering would kill the process — and
+    ///     a valid PING must still work afterwards;
+    ///   - a malformed-frame corpus never kills or wedges the server (a
+    ///     fresh AUTH+PING passes after every payload);
+    ///   - a dozen half-open slow-loris connections do not starve a normal
+    ///     client.
+    pub async fn test_stage_security(&self, dashboard_port: u16, password: &str) -> StageResult {
+        let name = "Stage 11: security (auth, caps, fuzz, slow-loris)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 11,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+
+        // ---- RESP auth gate ----
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("resp connect: {e}")),
+        };
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.starts_with('-') && r.to_uppercase().contains("AUTH") => {}
+            Ok(r) => {
+                return fail(format!(
+                    "PING before AUTH returned {r:?}, want a -NOAUTH error"
+                ))
+            }
+            Err(e) => return fail(format!("PING before AUTH failed: {e}")),
+        }
+        match Self::send_resp_cmd(&mut stream, &["AUTH", "definitely-wrong"]).await {
+            Ok(r) if r.starts_with('-') => {}
+            Ok(r) => return fail(format!("AUTH with a wrong password returned {r:?}")),
+            Err(e) => return fail(format!("wrong-password AUTH failed: {e}")),
+        }
+        match Self::send_resp_cmd(&mut stream, &["AUTH", password]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return fail(format!("AUTH with the right password returned {r:?}")),
+            Err(e) => return fail(format!("right-password AUTH failed: {e}")),
+        }
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("PING after AUTH returned {r:?}")),
+            Err(e) => return fail(format!("PING after AUTH failed: {e}")),
+        }
+        let k = format!("sec_seed_{}", self.get_seed_prefix("sec"));
+        match Self::send_resp_cmd(&mut stream, &["SET", &k, "v"]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return fail(format!("SET after AUTH returned {r:?}")),
+            Err(e) => return fail(format!("SET after AUTH failed: {e}")),
+        }
+
+        // ---- dashboard behind the same password ----
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return fail(format!("http client: {e}")),
+        };
+        let base = format!("http://127.0.0.1:{dashboard_port}");
+        match client.get(format!("{base}/")).send().await {
+            Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {}
+            Ok(r) => {
+                return fail(format!(
+                    "GET / without credentials -> {}, want 401",
+                    r.status()
+                ))
+            }
+            Err(e) => return fail(format!("GET / without credentials failed: {e}")),
+        }
+        match client
+            .get(format!("{base}/api/stats"))
+            .basic_auth("ops", Some(password))
+            .send()
+            .await
+        {
+            Ok(r) if r.status() == reqwest::StatusCode::OK => {}
+            Ok(r) => {
+                return fail(format!(
+                    "GET /api/stats with Basic auth -> {}, want 200",
+                    r.status()
+                ))
+            }
+            Err(e) => return fail(format!("GET /api/stats with Basic auth failed: {e}")),
+        }
+
+        // ---- oversized frames: answer or close; never buffer ----
+        let oversize: &[(&str, &[u8])] = &[
+            (
+                "bulk header claiming 64MB",
+                b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$67108864\r\n",
+            ),
+            ("multibulk claiming 2M args", b"*2000000\r\n"),
+        ];
+        for (label, probe) in oversize {
+            if let Err(e) = self.security_probe_reacts(probe, label).await {
+                return fail(e);
+            }
+            if let Err(e) = self.security_auth_ping(password).await {
+                return fail(format!("after the {label} probe: {e}"));
+            }
+        }
+
+        // ---- malformed-frame corpus ----
+        let corpus: Vec<Vec<u8>> = vec![
+            b"\x00\x01\x02\xff\xfe".to_vec(),
+            b"*3\r\n$3\r\nSET\r\n".to_vec(),
+            b"$-2\r\n".to_vec(),
+            b"*999999999\r\n".to_vec(),
+            b"+OK\r\n".to_vec(),
+            b"\r\n\r\n\r\n".to_vec(),
+            b"NO SUCH COMMAND AT ALL\r\n".to_vec(),
+            b"*2\r\n$3\r\nGET\r\n$100000000\r\n".to_vec(),
+        ];
+        for (i, payload) in corpus.iter().enumerate() {
+            match self.connect().await {
+                Ok(mut c) => {
+                    let _ = c.write_all(payload).await;
+                    let mut tmp = [0u8; 256];
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(200), c.read(&mut tmp)).await;
+                }
+                Err(e) => return fail(format!("fuzz connect #{i}: {e}")),
+            }
+            if let Err(e) = self.security_auth_ping(password).await {
+                return fail(format!("after fuzz payload #{i}: {e}"));
+            }
+        }
+
+        // ---- slow-loris: half-open senders must not starve a client ----
+        let mut loris = Vec::new();
+        for _ in 0..12 {
+            match self.connect().await {
+                Ok(mut c) => {
+                    let _ = c.write_all(b"*3\r\n$3\r\nSET\r\n").await;
+                    loris.push(c);
+                }
+                Err(e) => return fail(format!("slow-loris connect: {e}")),
+            }
+        }
+        let starve =
+            tokio::time::timeout(Duration::from_secs(2), self.security_auth_ping(password)).await;
+        drop(loris);
+        match starve {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return fail(format!("client starved by slow-loris: {e}")),
+            Err(_) => {
+                return fail(
+                    "AUTH+PING timed out while 12 half-open connections idled (slow-loris not isolated)"
+                        .to_string(),
+                )
+            }
+        }
+        StageResult {
+            stage: 11,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
+    /// Connect, AUTH, PING — the post-incident liveness probe.
+    async fn security_auth_ping(&self, password: &str) -> std::result::Result<(), String> {
+        let mut c = self.connect().await.map_err(|e| e.to_string())?;
+        match Self::send_resp_cmd(&mut c, &["AUTH", password]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return Err(format!("AUTH returned {r:?}")),
+            Err(e) => return Err(format!("AUTH failed: {e}")),
+        }
+        match Self::send_resp_cmd(&mut c, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => Ok(()),
+            Ok(r) => Err(format!("PING returned {r:?}")),
+            Err(e) => Err(format!("PING failed: {e}")),
+        }
+    }
+
+    /// An oversized frame must get a reaction (an error reply or a close)
+    /// within 3s. Silence means the server is trying to buffer it — under
+    /// the stage's 64MB memory cap that is a process kill, not a policy.
+    async fn security_probe_reacts(
+        &self,
+        probe: &[u8],
+        label: &str,
+    ) -> std::result::Result<(), String> {
+        let mut c = self.connect().await.map_err(|e| e.to_string())?;
+        c.write_all(probe).await.map_err(|e| e.to_string())?;
+        let mut tmp = [0u8; 512];
+        match tokio::time::timeout(Duration::from_secs(3), c.read(&mut tmp)).await {
+            Ok(Ok(_)) | Ok(Err(_)) => Ok(()), // bytes back or connection closed: rejected
+            Err(_) => Err(format!(
+                "no reaction to the {label} within 3s (buffering it? cap must reject up front)"
+            )),
+        }
+    }
+
     /// GET `{base}/api/stats` and flatten the JSON into lowercased
     /// key -> integer (numbers directly, numeric strings parsed). Nested
     /// objects are walked so a `{"stats": {...}}` shape still mirrors INFO.
@@ -2368,6 +2570,244 @@ mod tests {
         assert!(
             st.error.as_deref().unwrap_or("").contains("delta"),
             "error should name the delta: {:?}",
+            st.error
+        );
+    }
+
+    /// Threaded RESP + HTTP mock for stage 11. RESP enforces AUTH when
+    /// `require_auth` (PING before AUTH -> -NOAUTH), rejects the oversize
+    /// probes up front (unless `hang_on_oversize`, which models a server
+    /// trying to buffer them), ignores garbage without dying, and never
+    /// replies to partial frames (slow-loris stays half-open). HTTP
+    /// requires Basic auth on every route.
+    async fn spawn_security_mock(
+        password: &str,
+        require_auth: bool,
+        hang_on_oversize: bool,
+    ) -> (u16, u16) {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let password = Arc::new(password.to_string());
+        let resp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resp_port = resp_listener.local_addr().unwrap().port();
+        {
+            let password = password.clone();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = resp_listener.accept().await {
+                    let password = password.clone();
+                    tokio::spawn(async move {
+                        let mut buf: Vec<u8> = Vec::new();
+                        let mut authed = !require_auth;
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            let n = match socket.read(&mut tmp).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            buf.extend_from_slice(&tmp[..n]);
+                            let text = String::from_utf8_lossy(&buf).to_string();
+                            // Oversize probes: reject on the header.
+                            if text.contains("$67108864") || text.contains("*2000000") {
+                                if hang_on_oversize {
+                                    continue; // model a server that tries to buffer
+                                }
+                                let _ = socket
+                                    .write_all(b"-ERR Protocol error: frame too large\r\n")
+                                    .await;
+                                break;
+                            }
+                            let frame = (|| -> Option<(Vec<String>, usize)> {
+                                let s = std::str::from_utf8(&buf).ok()?;
+                                let mut lines = s.split("\r\n");
+                                let head = lines.next()?;
+                                let count: usize = head.strip_prefix('*')?.parse().ok()?;
+                                let mut args = Vec::new();
+                                let mut consumed = head.len() + 2;
+                                for _ in 0..count {
+                                    let h = lines.next()?;
+                                    let len: usize = h.strip_prefix('$')?.parse().ok()?;
+                                    if len > 8 * 1024 * 1024 || count > 1024 {
+                                        return None;
+                                    }
+                                    consumed += h.len() + 2;
+                                    let data = lines.next()?;
+                                    if data.len() != len {
+                                        return None;
+                                    }
+                                    args.push(data.to_string());
+                                    consumed += len + 2;
+                                }
+                                Some((args, consumed))
+                            })();
+                            let Some((args, used)) = frame else {
+                                // Invalid or partial: partial frames must
+                                // stay unanswered; clear complete garbage.
+                                let is_partial_set =
+                                    buf.windows(11).any(|w| w == b"*3\r\n$3\r\nSET");
+                                if buf.ends_with(b"\r\n") && !is_partial_set {
+                                    buf.clear();
+                                }
+                                continue;
+                            };
+                            buf.drain(..used);
+                            let cmd = args[0].to_uppercase();
+                            let reply = if cmd == "AUTH" {
+                                if args.len() == 2 && args[1] == *password {
+                                    authed = true;
+                                    "+OK\r\n".to_string()
+                                } else {
+                                    "-WRONGPASS invalid password\r\n".to_string()
+                                }
+                            } else if !authed {
+                                "-NOAUTH Authentication required.\r\n".to_string()
+                            } else {
+                                match cmd.as_str() {
+                                    "PING" => "+PONG\r\n".to_string(),
+                                    "SET" => "+OK\r\n".to_string(),
+                                    "GET" => "$-1\r\n".to_string(),
+                                    _ => "-ERR unknown\r\n".to_string(),
+                                }
+                            };
+                            if socket.write_all(reply.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        {
+            let password = password.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = http_listener.accept().await {
+                    let password = password.clone();
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        let head_end = loop {
+                            let n = match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => n,
+                            };
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break pos + 4;
+                            }
+                            if buf.len() > 16 * 1024 {
+                                return;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                        let lower = head.to_lowercase();
+                        let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                        let b64 = base64_basic("ops", &password);
+                        // Header names are case-insensitive; the base64 value
+                        // is NOT, so match the prefix on the lowered head and
+                        // compare the credential case-sensitively.
+                        let authorized = lower
+                            .find("authorization: basic ")
+                            .map(|i| {
+                                let start = i + "authorization: basic ".len();
+                                head[start..].starts_with(&b64)
+                            })
+                            .unwrap_or(false);
+                        let (status, ctype, body) = if !authorized {
+                            (
+                                "401 Unauthorized",
+                                "text/plain",
+                                "auth required".to_string(),
+                            )
+                        } else if path == "/" {
+                            (
+                                "200 OK",
+                                "text/html; charset=utf-8",
+                                "<html><body>ok</body></html>".to_string(),
+                            )
+                        } else if path.starts_with("/api/stats") {
+                            (
+                                "200 OK",
+                                "application/json",
+                                "{\"keyspace_hits\":1}".to_string(),
+                            )
+                        } else {
+                            ("404 Not Found", "text/plain", "nope".to_string())
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+        }
+
+        (resp_port, http_port)
+    }
+
+    /// Minimal base64 for the mock's Basic credentials (test-only).
+    fn base64_basic(user: &str, password: &str) -> String {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let input = format!("{user}:{password}");
+        let bytes = input.as_bytes();
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(T[(n >> 18) as usize & 63] as char);
+            out.push(T[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                T[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                T[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    /// Stage 11 must pass against a faithful secured mock and must reject a
+    /// server that skips AUTH and one that buffers oversized frames.
+    #[tokio::test]
+    async fn test_stage_security_mock_pass_and_failures() {
+        let (resp_port, http_port) = spawn_security_mock("s3cret-probe", true, false).await;
+        let v = RedisVerifier::new(resp_port, Some("secmock"));
+        let st = v.test_stage_security(http_port, "s3cret-probe").await;
+        assert!(
+            st.passed,
+            "faithful secured server must pass: {:?}",
+            st.error
+        );
+
+        let (resp_port, http_port) = spawn_security_mock("s3cret-probe", false, false).await;
+        let v = RedisVerifier::new(resp_port, Some("secmock"));
+        let st = v.test_stage_security(http_port, "s3cret-probe").await;
+        assert!(!st.passed, "a server that skips AUTH must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("before AUTH"),
+            "error should name the missing auth gate: {:?}",
+            st.error
+        );
+
+        let (resp_port, http_port) = spawn_security_mock("s3cret-probe", true, true).await;
+        let v = RedisVerifier::new(resp_port, Some("secmock"));
+        let st = v.test_stage_security(http_port, "s3cret-probe").await;
+        assert!(!st.passed, "buffering an oversized frame must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("buffering"),
+            "error should name the buffering: {:?}",
             st.error
         );
     }

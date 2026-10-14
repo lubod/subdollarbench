@@ -8,6 +8,17 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.9`: campaign ticket 8 (security). New pipeline-level
+///   stage 11, run with the candidate restarted under `SDB_PASSWORD` and a
+///   64MB memory cap (restored afterwards so advisory probes see the
+///   normal container): RESP auth gate, dashboard HTTP Basic auth,
+///   oversized-frame probes (bulk header claiming 64MB / 2M-arg
+///   multibulk must react without buffering), a malformed-frame corpus
+///   with liveness after each payload, a 12-connection slow-loris probe,
+///   and a container-log scan for the secret. Runs only when a ticket's
+///   acceptance explicitly includes id 11; single-shot totals unchanged;
+///   acceptance ids up to 11. Rows stamped `2026-10-14.8` or earlier are
+///   not comparable without `backfill --yes`.
 /// - `2026-10-14.8`: campaign ticket 7 (dashboard). New pipeline-level
 ///   stage 10: `GET /` (offline HTML, no absolute http(s) src/href), `GET
 ///   /api/stats` (JSON mirror of the INFO counters; deltas must track
@@ -278,7 +289,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.8";
+pub const RULES_VERSION: &str = "2026-10-14.9";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

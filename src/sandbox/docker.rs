@@ -117,6 +117,10 @@ pub struct CandidateRunExtras {
     /// Extra container ports published 1:1 on 127.0.0.1 (dashboard stage:
     /// the worker's HTTP port must be reachable from the harness).
     pub ports: Vec<u16>,
+    /// Memory limit (docker syntax, e.g. `64m`). None means the default 2g.
+    /// The security stage runs the candidate under 64MB so an oversized
+    /// protocol frame must be rejected *before* allocating it.
+    pub memory: Option<String>,
 }
 
 impl Default for SandboxManager {
@@ -1110,6 +1114,7 @@ impl SandboxManager {
                 tmpfs: vec!["/data:size=8m".to_string()],
                 env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
                 ports: Vec::new(),
+                memory: None,
             },
         )
     }
@@ -1242,7 +1247,7 @@ impl SandboxManager {
             "sdb.role=candidate".into(),
             "--name".into(),
             name.clone(),
-            "--memory=2g".into(),
+            format!("--memory={}", extras.memory.as_deref().unwrap_or("2g")),
             "--cpus=2.0".into(),
             "--pids-limit=256".into(),
         ];
@@ -1362,9 +1367,16 @@ impl SandboxManager {
     }
 
     pub fn get_candidate_logs(&self) -> String {
+        self.get_candidate_logs_tail(100)
+    }
+
+    /// Container logs with an explicit tail bound. The security stage scans
+    /// a large tail for the secret, so a startup banner cannot scroll out
+    /// of a diagnostics-sized window first.
+    pub fn get_candidate_logs_tail(&self, tail: usize) -> String {
         let name = self.candidate_container_name();
         let output = Command::new("docker")
-            .args(["logs", "--tail", "100", &name])
+            .args(["logs", "--tail", &tail.to_string(), &name])
             .output();
         match output {
             Ok(out) => {
@@ -1989,6 +2001,7 @@ mod tests {
             tmpfs: vec!["/data:size=8m".to_string()],
             env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
             ports: vec![8090],
+            memory: Some("64m".to_string()),
         };
         let args = SandboxManager::candidate_extras_args(&extras);
         assert!(args.windows(2).any(|w| w == ["--tmpfs", "/data:size=8m"]));

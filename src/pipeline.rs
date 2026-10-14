@@ -1045,6 +1045,110 @@ impl BenchmarkPipeline {
                             ));
                             stages.push(st);
                         }
+                        // Stage 11 (security) runs the candidate under
+                        // SDB_PASSWORD and a 64MB memory cap: restart with
+                        // the secret in its env, probe, then restore the
+                        // normal container for the advisory passes. The
+                        // secret is never logged by the harness; the stage
+                        // also checks the candidate's own logs for it.
+                        if accepted.map(|a| a.contains(&11)).unwrap_or(false) {
+                            let name11 = "Stage 11: security (auth, caps, fuzz, slow-loris)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 11,
+                                    name: name11.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                use std::hash::{Hash, Hasher};
+                                verifier_seed.hash(&mut h);
+                                "security-stage-v1".hash(&mut h);
+                                let mut rng = h.finish() | 1;
+                                let mut next = || {
+                                    rng ^= rng << 13;
+                                    rng ^= rng >> 7;
+                                    rng ^= rng << 17;
+                                    rng
+                                };
+                                let secret = format!("{:016x}{:016x}", next(), next());
+                                let sec_extras = crate::sandbox::docker::CandidateRunExtras {
+                                    env: vec![("SDB_PASSWORD".to_string(), secret.clone())],
+                                    ports: extras.ports.clone(),
+                                    memory: Some("64m".to_string()),
+                                    ..Default::default()
+                                };
+                                let started = sandbox.stop_candidate().and_then(|_| {
+                                    sandbox.start_candidate_in_docker_with(
+                                        workdir,
+                                        port,
+                                        &sec_extras,
+                                    )
+                                });
+                                match started {
+                                    Ok(()) => {
+                                        if sandbox.wait_for_port(port, 25).await {
+                                            let mut st = verifier
+                                                .test_stage_security(
+                                                    crate::web::server::worker_port(8090, worker),
+                                                    &secret,
+                                                )
+                                                .await;
+                                            if st.passed {
+                                                let logs = sandbox.get_candidate_logs_tail(2000);
+                                                if logs.contains(&secret) {
+                                                    st = crate::verifier::StageResult {
+                                                        stage: 11,
+                                                        name: name11.to_string(),
+                                                        passed: false,
+                                                        error: Some(
+                                                            "the password appeared in the container logs"
+                                                                .to_string(),
+                                                        ),
+                                                    };
+                                                }
+                                            }
+                                            st
+                                        } else {
+                                            crate::verifier::StageResult {
+                                                stage: 11,
+                                                name: name11.to_string(),
+                                                passed: false,
+                                                error: Some(
+                                                    "secured candidate did not open its port"
+                                                        .to_string(),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    Err(e) => crate::verifier::StageResult {
+                                        stage: 11,
+                                        name: name11.to_string(),
+                                        passed: false,
+                                        error: Some(format!("secured candidate start failed: {e}")),
+                                    },
+                                }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                            // Restore the unsecured candidate for the
+                            // advisory robustness/differential passes.
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
+                        }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();
                         let ps = verdict.iter().filter(|s| s.passed).count() as u32;
