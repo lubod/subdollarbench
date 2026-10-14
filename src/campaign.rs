@@ -136,14 +136,26 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
             spec.task
         );
     }
+    if spec.stages[0].id != 0 {
+        bail!(
+            "campaign '{}': first stage id must be 0 (got {})",
+            spec.name,
+            spec.stages[0].id
+        );
+    }
+    let mut prev_id: Option<u32> = None;
     for (pos, s) in spec.stages.iter().enumerate() {
-        if s.id as usize != pos {
-            bail!(
-                "campaign '{}': stage ids must be dense from 0 (found {} at position {pos})",
-                spec.name,
-                s.id
-            );
+        if let Some(p) = prev_id {
+            if s.id <= p {
+                bail!(
+                    "campaign '{}': stage ids must strictly increase (found {} after {} at position {pos})",
+                    spec.name,
+                    s.id,
+                    p
+                );
+            }
         }
+        prev_id = Some(s.id);
         if s.title.trim().is_empty() {
             bail!(
                 "campaign '{}': stage {} has an empty title",
@@ -175,9 +187,9 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
         }
         let mut seen = HashSet::new();
         for id in a {
-            if !(1..=6).contains(id) {
+            if !(1..=7).contains(id) {
                 bail!(
-                    "campaign '{}': stage {} acceptance id {} out of range 1..=6",
+                    "campaign '{}': stage {} acceptance id {} out of range 1..=7",
                     spec.name,
                     s.id,
                     id
@@ -651,9 +663,25 @@ mod tests {
         assert!(validate_spec(&lc.spec, &lc.root).is_err());
         std::fs::write(lc.root.join("stages/1.md"), "x").unwrap();
 
-        // Dense ids violated.
+        // Out-of-order ids fail (gaps are allowed: ENOSPC slot 4 can be
+        // designed before it ships).
         let mut v = good.clone();
         v["stages"][1]["id"] = serde_json::json!(7);
+        let bad: CampaignSpec = serde_json::from_value(v).unwrap();
+        assert!(validate_spec(&bad, &lc.root).is_err());
+
+        // A gap (0, 4, 5) is a valid ladder position.
+        let mut v = good.clone();
+        v["stages"][1]["id"] = serde_json::json!(4);
+        v["stages"][2]["id"] = serde_json::json!(5);
+        let gap: CampaignSpec = serde_json::from_value(v).unwrap();
+        assert!(validate_spec(&gap, &lc.root).is_ok());
+
+        // First id must be 0.
+        let mut v = good.clone();
+        v["stages"][0]["id"] = serde_json::json!(1);
+        v["stages"][1]["id"] = serde_json::json!(2);
+        v["stages"][2]["id"] = serde_json::json!(3);
         let bad: CampaignSpec = serde_json::from_value(v).unwrap();
         assert!(validate_spec(&bad, &lc.root).is_err());
 

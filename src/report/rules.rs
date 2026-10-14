@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.2`: campaign ticket 5 (observability) suite. New redis
+///   verifier stage 7 "INFO metrics & counters": required-field presence,
+///   integer parsing, monotonicity, and DELTAS against randomized scripted
+///   traffic (hits/misses/commands/connections/expired) — static or
+///   hardcoded counters fail. Stage 7 runs ONLY when a campaign ticket's
+///   acceptance explicitly includes id 7, so single-shot redis totals stay
+///   six stages and archived rows keep their verdicts. Campaign spec
+///   validation now allows gaps in stage ids (slot 4 reserved for the
+///   ENOSPC incident) and accepts acceptance ids up to 7. Rows stamped
+///   `2026-10-14.1` or earlier are not comparable without `backfill --yes`.
 /// - `2026-10-14.1`: measurement fix found by the 2026-10-14 canary review.
 ///   The n=100000 window kept the `get,set` mix, and the task MANDATES
 ///   fsync-before-ack: a correct candidate does ~870 SET/s, so the SET
@@ -212,7 +222,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.1";
+pub const RULES_VERSION: &str = "2026-10-14.2";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

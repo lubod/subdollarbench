@@ -114,14 +114,25 @@ non-redis acceptance adapters.
 
 ## Slice C — durability, incidents, observability
 
-- [ ] C1. AOF acceptance: fsync-before-ack, SIGKILL + replay, torn
-  tail, replay idempotence (reuse WAL verifier patterns).
-- [ ] C2. ENOSPC injector: AOF dir on a small tmpfs; reads keep
-  serving, writes return an error safely, auto-recovery when space
-  frees, AOF never corrupted.
-- [ ] C3. INFO suite: exact counters under randomized scripted traffic;
-  structured error log check; secret-never-logged grep.
-- [ ] C4. Parsers for INFO fields and log lines; counter-delta helper.
+- [ ] C1. AOF acceptance: stage 6 covers fsync-before-ack + SIGKILL +
+  replay on live tickets; torn-tail and replay-idempotence checks still
+  to add (reuse WAL verifier patterns).
+- [ ] C2. ENOSPC injector (design settled, implementation pending):
+  ticket contract adds `SDB_DATA_DIR`; the incident container starts with
+  `--tmpfs /data:size=8m` + `SDB_DATA_DIR=/data`; fill via protocol writes
+  (large values) until writes fail; verify reads keep serving,
+  unpersistable writes return errors and are never acked, PING alive, no
+  corruption. Deferred sub-checks: free-space recovery and
+  replay-after-incident need to free/reach the container tmpfs -> docker
+  exec (shell must exist in image) or a privileged loop-mount injector
+  (sudo); v1 records them as SKIP, revisit before the perf-gate wave.
+- [x] C3. INFO suite (2026-10-14.2): verifier stage 7 — required fields,
+  integer parse, monotonicity, randomized delta checks (hits/misses/
+  commands/connections/expired). Runs ONLY when a campaign ticket
+  explicitly accepts id 7; single-shot totals unchanged. Secret-in-logs
+  grep lives in E3.
+- [x] C4. `parse_info` + delta checks are built into stage 7; candidate
+  log-line parsing deferred to E3 (pipeline already captures logs).
 
 ## Slice D — tests stage (coverage with teeth)
 

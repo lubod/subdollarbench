@@ -651,6 +651,34 @@ impl BenchmarkPipeline {
                             logger.log("  Stage 6: AOF crash recovery -> FAIL skipped due to failure in earlier stages");
                             stages.push(st);
                         }
+                        // Stage 7 (INFO metrics) is explicit-acceptance
+                        // only: single-shot redis runs keep their six-stage
+                        // totals, campaign tickets including id 7 opt in.
+                        if accepted.map(|a| a.contains(&7)).unwrap_or(false) {
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if prior_ok {
+                                verifier.test_stage_info().await
+                            } else {
+                                crate::verifier::StageResult {
+                                    stage: 7,
+                                    name: "Stage 7: INFO metrics & counters".to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                        }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();
                         let ps = verdict.iter().filter(|s| s.passed).count() as u32;

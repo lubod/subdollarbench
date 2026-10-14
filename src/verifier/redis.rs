@@ -970,6 +970,202 @@ impl RedisVerifier {
             error: None,
         }
     }
+
+    /// Parse an INFO bulk reply into a field map. Accepts the raw RESP frame
+    /// (`$N\r\n...`) or a bare field block; keys are lowercased; section
+    /// headers (`# ...`) and blank lines are ignored.
+    pub fn parse_info(reply: &str) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let mut body = reply.trim_start();
+        if let Some(rest) = body.strip_prefix('$') {
+            if let Some(nl) = rest.find("\r\n") {
+                body = &rest[nl + 2..];
+            }
+        }
+        for line in body.split(['\n', '\r']) {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                if !k.trim().is_empty() && !v.trim().is_empty() {
+                    out.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                }
+            }
+        }
+        out
+    }
+
+    async fn fetch_info(
+        stream: &mut TcpStream,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        match Self::send_resp_cmd(stream, &["INFO"]).await {
+            Ok(r) => {
+                if r.starts_with('-') {
+                    return Err(format!("INFO error reply: {}", r.trim()));
+                }
+                Ok(Self::parse_info(&r))
+            }
+            Err(e) => Err(format!("INFO failed: {e}")),
+        }
+    }
+
+    /// Stage 7 (campaign observability ticket; explicit acceptance only):
+    /// INFO must expose cumulative counters whose DELTAS track randomized
+    /// scripted traffic. Static or hardcoded values fail the delta checks,
+    /// and the counts differ every run, so a routing table cannot pass.
+    pub async fn test_stage_info(&self) -> StageResult {
+        let name = "Stage 7: INFO metrics & counters".to_string();
+        let fail = |e: String| StageResult {
+            stage: 7,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        const REQUIRED: &[&str] = &[
+            "total_connections_received",
+            "total_commands_processed",
+            "keyspace_hits",
+            "keyspace_misses",
+            "expired_keys",
+            "rejected_connections",
+            "connected_clients",
+            "uptime_in_seconds",
+        ];
+        let num = |m: &std::collections::HashMap<String, String>, f: &str| {
+            m.get(f).and_then(|v| v.trim().parse::<i64>().ok())
+        };
+
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect: {e}")),
+        };
+        let info0 = match Self::fetch_info(&mut stream).await {
+            Ok(m) => m,
+            Err(e) => return fail(e),
+        };
+        for f in REQUIRED {
+            if !info0.contains_key(*f) {
+                return fail(format!(
+                    "INFO is missing required field '{f}' ({} fields returned)",
+                    info0.len()
+                ));
+            }
+            if num(&info0, f).is_none() {
+                return fail(format!("INFO field '{f}' is not an integer"));
+            }
+        }
+
+        // Randomized traffic counts per run (anti-hardcode).
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.get_seed_prefix("info").hash(&mut h);
+        "info-stage-v1".hash(&mut h);
+        let mut rng = h.finish() | 1;
+        fn xnext(r: &mut u64) -> u64 {
+            *r ^= *r << 13;
+            *r ^= *r >> 7;
+            *r ^= *r << 17;
+            *r
+        }
+        let hits = 5 + (xnext(&mut rng) % 16) as usize;
+        let misses = 5 + (xnext(&mut rng) % 16) as usize;
+        let tag = format!("{:08x}", xnext(&mut rng));
+
+        let mut expect_commands: i64 = 0;
+        for i in 0..hits {
+            let k = format!("info_{tag}_{i}");
+            let v = format!("v{i}");
+            match Self::send_resp_cmd(&mut stream, &["SET", &k, &v]).await {
+                Ok(r) if r.trim() == "+OK" => {}
+                Ok(r) => return fail(format!("SET {k}: {r:?}")),
+                Err(e) => return fail(format!("SET {k} failed: {e}")),
+            }
+            expect_commands += 1;
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.contains(&v) => {}
+                Ok(r) => return fail(format!("GET {k}: {r:?}")),
+                Err(e) => return fail(format!("GET {k} failed: {e}")),
+            }
+            expect_commands += 1;
+        }
+        for i in 0..misses {
+            let k = format!("info_miss_{tag}_{i}");
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.starts_with("$-1") => {}
+                Ok(r) => return fail(format!("GET missing {k}: {r:?}")),
+                Err(e) => return fail(format!("GET missing {k} failed: {e}")),
+            }
+            expect_commands += 1;
+        }
+        // One expiring key: touching it after the deadline must count it.
+        let ek = format!("info_exp_{tag}");
+        match Self::send_resp_cmd(&mut stream, &["SET", &ek, "1", "PX", "150"]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return fail(format!("SET PX: {r:?}")),
+            Err(e) => return fail(format!("SET PX failed: {e}")),
+        }
+        expect_commands += 1;
+        sleep(Duration::from_millis(450)).await;
+        match Self::send_resp_cmd(&mut stream, &["GET", &ek]).await {
+            Ok(r) if r.starts_with("$-1") => {}
+            Ok(r) => return fail(format!("expired key still present: {r:?}")),
+            Err(e) => return fail(format!("GET expired failed: {e}")),
+        }
+        expect_commands += 1;
+
+        let info1 = match Self::fetch_info(&mut stream).await {
+            Ok(m) => m,
+            Err(e) => return fail(e),
+        };
+        let delta = |f: &str| -> Option<i64> { Some(num(&info1, f)? - num(&info0, f)?) };
+        for f in REQUIRED {
+            match delta(f) {
+                Some(v) if v >= 0 => {}
+                Some(v) => return fail(format!("counter '{f}' went backwards ({v})")),
+                None => return fail(format!("counter '{f}' missing or unparsable after traffic")),
+            }
+        }
+        let hits_d = delta("keyspace_hits").unwrap_or(0);
+        let miss_d = delta("keyspace_misses").unwrap_or(0);
+        let cmds_d = delta("total_commands_processed").unwrap_or(0);
+        let conns_d = delta("total_connections_received").unwrap_or(0);
+        let exp_d = delta("expired_keys").unwrap_or(0);
+        if hits_d < hits as i64 {
+            return fail(format!(
+                "keyspace_hits delta {hits_d} < executed hits {hits}"
+            ));
+        }
+        if miss_d < misses as i64 {
+            return fail(format!(
+                "keyspace_misses delta {miss_d} < executed misses {misses}"
+            ));
+        }
+        if cmds_d < expect_commands {
+            return fail(format!(
+                "total_commands_processed delta {cmds_d} < executed {expect_commands}"
+            ));
+        }
+        if conns_d < 1 {
+            return fail(format!(
+                "total_connections_received did not grow (delta {conns_d})"
+            ));
+        }
+        if exp_d < 1 {
+            return fail(format!(
+                "expired_keys did not grow after a key expired (delta {exp_d})"
+            ));
+        }
+        if num(&info1, "connected_clients").unwrap_or(0) < 1 {
+            return fail("connected_clients < 1 while a client is connected".to_string());
+        }
+        StageResult {
+            stage: 7,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1275,6 +1471,23 @@ mod tests {
             out[0].error
         );
     }
+    #[test]
+    fn test_parse_info_frame_and_bare() {
+        let frame = "$57\r\n# Server\r\ntotal_connections_received:3\r\nuptime_in_seconds:12\r\nconnected_clients:1\r\n";
+        let m = RedisVerifier::parse_info(frame);
+        assert_eq!(
+            m.get("total_connections_received").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(m.get("uptime_in_seconds").map(String::as_str), Some("12"));
+        assert_eq!(m.len(), 3, "blank and section-header lines are ignored");
+        // Bare body (no RESP header) and lowercase normalization.
+        let m2 = RedisVerifier::parse_info("keyspace_hits:5\nkeyspace_misses:2\n");
+        assert_eq!(m2.get("keyspace_misses").map(String::as_str), Some("2"));
+        let m3 = RedisVerifier::parse_info("UPTIME_IN_SECONDS:9\n");
+        assert_eq!(m3.get("uptime_in_seconds").map(String::as_str), Some("9"));
+    }
+
     #[tokio::test]
     async fn test_mock_redis_handshake_success() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
