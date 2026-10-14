@@ -89,6 +89,19 @@ non-redis acceptance adapters.
   cap = min(max_turns, 50) with feedback on), so a 25-turn ticket leaves
   zero repair headroom — the repair round never ran ("Global turn budget
   reached across attempts"). Re-run after D6 is settled.
+- Gate, part 3 — D6(b) validated live (2026-10-14, ling, run 2): all four
+  tickets PASS — s0 3/3 (30 turns), s1 4/4 (19), s2 5/5 (19), s3 6/6
+  (23 initial + 7 repair = 30). Reached 3, regression-free 4, $0.1743,
+  tickets/$ 22.9. The repair round converted a real failure: ticket 3's
+  initial attempt hit the cap mid-WAL with three comment lines mangled by
+  the edit tool (compile error, 0/6 verification), and the 7-turn repair
+  fixed exactly those lines -> 6/6. Candidate measured 108k GET req/s;
+  write probe 816 SET/s.
+- Finding (Slice F dependency): campaign stages run WITHOUT a batch
+  reference, so each passing stage tries the live per-trial ref — at s3
+  the ref measurement failed ("Could not connect to ref-redis") and the
+  speed reading went unscored. The perf gate needs a shared/batch
+  denominator for campaign tickets (or a readiness wait + retry).
 
 ## Slice B — stage suites (expiry, pubsub)
 
@@ -139,6 +152,9 @@ non-redis acceptance adapters.
 
 - [ ] F1. Perf gate: RESP pipelining in order; >=1.3x own stage-0
   baseline under pipelined load; p99 budget; BenchLock discipline.
+  PREREQ (canary finding): campaign stages must share a batch reference
+  or retry the live ref — s3's ref measurement failed ("Could not connect
+  to ref-redis") and the speed reading went unscored.
 - [ ] F2. Multi-instance launch: N nodes, per-node port/data dir,
   readiness per node, worker port offsets.
 - [ ] F3. HA acceptance: `ROLE` contract, replication bound (<=3s),

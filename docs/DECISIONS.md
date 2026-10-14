@@ -128,3 +128,7 @@ pool (min 1 turn) for repair; single-shot behavior unchanged; pools >=50
 are unaffected (the 50-cap binds first). Revisit if models thrash against
 the reduced initial budget (watch cutoffs / regressions on the re-run).
 Ref: `src/pipeline.rs` initial_turn_cap, `TODO_CAMPAIGNS.md` D6.
+Validated live (2026-10-14, run 2): all four canary tickets passed;
+ticket 3's initial attempt hit its cap mid-WAL with a three-line compile
+error, and the 7-turn repair round fixed exactly those lines to 6/6 —
+the failure mode that motivated the reserve.
