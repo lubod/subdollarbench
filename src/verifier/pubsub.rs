@@ -709,6 +709,12 @@ impl PubsubVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
     fn hex(d: &[u8]) -> String {
         d.iter().map(|b| format!("{:02x}", b)).collect()
     }
@@ -779,5 +785,843 @@ mod tests {
             Some("abc==".to_string())
         );
         assert_eq!(header_lookup(h, "missing"), None);
+    }
+
+    /// Server->client WS frame (unmasked; RFC 6455 forbids server masking).
+    fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mut f = Vec::with_capacity(10 + payload.len());
+        f.push(0x80 | (opcode & 0x0F));
+        if payload.len() < 126 {
+            f.push(payload.len() as u8);
+        } else {
+            f.push(126);
+            f.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        }
+        f.extend_from_slice(payload);
+        f
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum AcceptMode {
+        /// RFC-correct accept for whatever key the client sent.
+        Correct,
+        /// Always answer with the RFC 6455 test vector (hard-coded stub).
+        Static,
+        /// 101 with a bogus accept value.
+        Wrong,
+        /// 200 OK instead of 101 Switching Protocols.
+        No101,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum BroadcastMode {
+        /// Fan out to subscribers of the published channel only.
+        Matching,
+        /// Fan out to every subscribed connection (isolation violation).
+        AllChannels,
+        /// Fan out a corrupted payload.
+        Tamper,
+        /// Send subscribers a close frame instead of the message.
+        CloseSubscribers,
+        /// Never fan out anything.
+        Silent,
+    }
+
+    /// Knobs for the mock pub/sub server; the defaults model a faithful one.
+    #[derive(Clone, Debug)]
+    struct MockCfg {
+        accept: AcceptMode,
+        broadcast: BroadcastMode,
+        pong: bool,
+        /// Send an unrelated text frame before the pong reply.
+        ping_noise: bool,
+        close_on_ping: bool,
+        ack_sub: bool,
+        close_after_upgrade: bool,
+        drop_sub_at: Option<usize>,
+        delay_first_pub: Duration,
+        greet: Option<Vec<u8>>,
+    }
+
+    impl Default for MockCfg {
+        fn default() -> Self {
+            Self {
+                accept: AcceptMode::Correct,
+                broadcast: BroadcastMode::Matching,
+                pong: true,
+                ping_noise: false,
+                close_on_ping: false,
+                ack_sub: false,
+                close_after_upgrade: false,
+                drop_sub_at: None,
+                delay_first_pub: Duration::ZERO,
+                greet: None,
+            }
+        }
+    }
+
+    type Subscribers = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Vec<u8>>>>>>;
+
+    /// Spawns a mock chat server on its own loopback port: any GET upgrades
+    /// (per `accept`), then masked `SUB <chan>` / `PUB <chan> <msg>` text
+    /// frames are pumped with the configured fan-out and ping->pong.
+    async fn spawn_ws_mock(cfg: MockCfg) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let subs: Subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let sub_seq = Arc::new(AtomicUsize::new(0));
+        let delay_left = Arc::new(AtomicUsize::new(if cfg.delay_first_pub.is_zero() {
+            0
+        } else {
+            1
+        }));
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let cfg = cfg.clone();
+                let subs = subs.clone();
+                let sub_seq = sub_seq.clone();
+                let delay_left = delay_left.clone();
+                tokio::spawn(async move {
+                    let _ = serve_ws(stream, cfg, subs, sub_seq, delay_left).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// HTTP upgrade plus frame pump for one mock connection.
+    async fn serve_ws(
+        mut stream: TcpStream,
+        cfg: MockCfg,
+        subs: Subscribers,
+        sub_seq: Arc<AtomicUsize>,
+        delay_left: Arc<AtomicUsize>,
+    ) -> std::io::Result<()> {
+        let mut req: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            req.extend_from_slice(&tmp[..n]);
+            if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let req = String::from_utf8_lossy(&req).to_string();
+        let key = header_lookup(&req, "Sec-WebSocket-Key").unwrap_or_default();
+        let resp = match cfg.accept {
+            AcceptMode::Correct => format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                ws_accept_key(&key)
+            ),
+            AcceptMode::Static => format!(
+                "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {TEST_ACCEPT}\r\n\r\n"
+            ),
+            AcceptMode::Wrong => {
+                "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: nope\r\n\r\n".to_string()
+            }
+            AcceptMode::No101 => "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string(),
+        };
+        let mut first_write = resp.into_bytes();
+        if let Some(g) = &cfg.greet {
+            first_write.extend_from_slice(g);
+        }
+        stream.write_all(&first_write).await?;
+        if cfg.close_after_upgrade || cfg.accept == AcceptMode::No101 {
+            return Ok(());
+        }
+
+        let (mut rd, mut wr) = stream.into_split();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                if wr.write_all(&frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            while let Some((op, payload, used)) = decode_frame(&buf) {
+                buf.drain(..used);
+                match op {
+                    0x1 => {
+                        let text = String::from_utf8_lossy(&payload).to_string();
+                        if let Some(chan) = text.strip_prefix("SUB ") {
+                            let chan = chan.trim().to_string();
+                            if cfg.drop_sub_at == Some(sub_seq.fetch_add(1, Ordering::SeqCst)) {
+                                return Ok(());
+                            }
+                            subs.lock()
+                                .unwrap()
+                                .entry(chan.clone())
+                                .or_default()
+                                .push(tx.clone());
+                            if cfg.ack_sub {
+                                let _ =
+                                    tx.send(server_frame(0x1, format!("OK SUB {chan}").as_bytes()));
+                            }
+                        } else if let Some(rest) = text.strip_prefix("PUB ") {
+                            if let Some((chan, msg)) = rest.split_once(' ') {
+                                if delay_left.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                    sleep(cfg.delay_first_pub).await;
+                                }
+                                match cfg.broadcast {
+                                    BroadcastMode::Silent => {}
+                                    BroadcastMode::AllChannels => {
+                                        let frame = format!("PUB {chan} {msg}");
+                                        let targets: Vec<_> = subs
+                                            .lock()
+                                            .unwrap()
+                                            .values()
+                                            .flatten()
+                                            .cloned()
+                                            .collect();
+                                        for t in targets {
+                                            let _ = t.send(server_frame(0x1, frame.as_bytes()));
+                                        }
+                                    }
+                                    mode => {
+                                        let frame = match mode {
+                                            BroadcastMode::Tamper => server_frame(
+                                                0x1,
+                                                format!("PUB {chan} {msg}-tampered").as_bytes(),
+                                            ),
+                                            BroadcastMode::CloseSubscribers => {
+                                                server_frame(0x8, b"")
+                                            }
+                                            _ => server_frame(
+                                                0x1,
+                                                format!("PUB {chan} {msg}").as_bytes(),
+                                            ),
+                                        };
+                                        let targets: Vec<_> = subs
+                                            .lock()
+                                            .unwrap()
+                                            .get(chan)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        for t in targets {
+                                            let _ = t.send(frame.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    0x9 if cfg.close_on_ping => {
+                        let _ = tx.send(server_frame(0x8, b""));
+                    }
+                    0x9 if cfg.pong => {
+                        if cfg.ping_noise {
+                            let _ = tx.send(server_frame(0x1, b"NOTICE pong pending"));
+                        }
+                        let _ = tx.send(server_frame(0xA, &payload));
+                    }
+                    0x8 => return Ok(()),
+                    _ => {}
+                }
+            }
+            let n = rd.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+    }
+
+    #[test]
+    fn test_frame_decode_edge_cases() {
+        // A 126-length header whose extended length has not arrived yet.
+        assert!(decode_frame(&[0x81, 126]).is_none());
+        assert!(decode_frame(&[0x81, 126, 0]).is_none());
+        // The 64-bit length form is accepted while the value fits 16 bits.
+        let mut extended = vec![0x81, 127];
+        extended.extend_from_slice(&5u64.to_be_bytes());
+        extended.extend_from_slice(b"hello");
+        assert_eq!(
+            decode_frame(&extended),
+            Some((0x1, b"hello".to_vec(), extended.len()))
+        );
+        // A truncated payload of a 126-length masked frame yields no frame.
+        let frame = encode_masked_frame(0x1, &[b'y'; 130], [1, 2, 3, 4]);
+        assert!(decode_frame(&frame[..frame.len() - 1]).is_none());
+        // Trailing bytes belong to the next frame and are not consumed.
+        let mut two = frame.clone();
+        two.extend_from_slice(&server_frame(0x1, b"next"));
+        let (op, payload, used) = decode_frame(&two).unwrap();
+        assert_eq!((op, used), (0x1, frame.len()));
+        assert_eq!(payload, vec![b'y'; 130]);
+        // A 126-length unmasked server frame decodes through the same path.
+        let big = server_frame(0x1, &[b'z'; 130]);
+        assert_eq!(big[1], 126);
+        assert_eq!(decode_frame(&big), Some((0x1, vec![b'z'; 130], big.len())));
+    }
+
+    #[tokio::test]
+    async fn test_stage1_handshake_passes_against_faithful_mock() {
+        let port = spawn_ws_mock(MockCfg::default()).await;
+        let v = PubsubVerifier::new(port, Some("hsmock"));
+        let st = v.test_stage1_handshake().await;
+        assert!(st.passed, "faithful handshake must pass: {:?}", st.error);
+        assert_eq!(st.stage, 1);
+        assert!(st.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stage1_rejects_static_and_wrong_accept() {
+        let port = spawn_ws_mock(MockCfg {
+            accept: AcceptMode::Static,
+            ..Default::default()
+        })
+        .await;
+        let st = PubsubVerifier::new(port, None)
+            .test_stage1_handshake()
+            .await;
+        assert!(!st.passed, "a hard-coded vector accept must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("Static Accept"),
+            "error must call out the static accept: {:?}",
+            st.error
+        );
+
+        let port = spawn_ws_mock(MockCfg {
+            accept: AcceptMode::Wrong,
+            ..Default::default()
+        })
+        .await;
+        let st = PubsubVerifier::new(port, None)
+            .test_stage1_handshake()
+            .await;
+        assert!(!st.passed, "a bogus accept must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("Bad Accept"),
+            "error must name the accept check: {:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage1_rejects_non_101() {
+        let port = spawn_ws_mock(MockCfg {
+            accept: AcceptMode::No101,
+            ..Default::default()
+        })
+        .await;
+        let st = PubsubVerifier::new(port, None)
+            .test_stage1_handshake()
+            .await;
+        assert!(!st.passed, "a 200 OK response must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("Expected 101"),
+            "error must name the status check: {:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage1_reports_connect_refused() {
+        // Reserve then drop a port so nothing listens there.
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let st = PubsubVerifier::new(port, None)
+            .test_stage1_handshake()
+            .await;
+        assert!(!st.passed);
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Failed to connect"),
+            "error must name the failed connect: {:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage1_reports_handshake_abort_and_oversize() {
+        // The server accepts, reads the request, then closes: the handshake
+        // read must surface the EOF instead of hanging.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = listener.accept().await {
+                let mut tmp = [0u8; 1024];
+                let _ = s.read(&mut tmp).await;
+            }
+        });
+        let st = PubsubVerifier::new(port, None)
+            .test_stage1_handshake()
+            .await;
+        assert!(!st.passed, "an aborted handshake must fail");
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("closed connection during handshake"),
+            "error must name the EOF: {:?}",
+            st.error
+        );
+
+        // A header block that never terminates and overflows the 8KiB cap.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = listener.accept().await {
+                let mut tmp = [0u8; 1024];
+                let _ = s.read(&mut tmp).await;
+                let _ = s.write_all(&[b'x'; 9000]).await;
+                sleep(Duration::from_millis(200)).await;
+            }
+        });
+        let err = match PubsubVerifier::new(port, None).ws_connect(TEST_KEY).await {
+            Ok(_) => panic!("an endless header block must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("Handshake response header too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_stage1_reports_fresh_key_handshake_failure() {
+        // The first handshake succeeds; the server then dies before answering
+        // the fresh-key probe, whose failure must be attributed to that step.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut tmp = [0u8; 1024];
+            if let Ok((mut s, _)) = listener.accept().await {
+                let mut req = Vec::new();
+                loop {
+                    let n = s.read(&mut tmp).await.unwrap();
+                    req.extend_from_slice(&tmp[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&req).to_string();
+                let key = header_lookup(&req, "Sec-WebSocket-Key").unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                    ws_accept_key(&key)
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+            // Second connection: read the request, then vanish mid-handshake.
+            if let Ok((mut s, _)) = listener.accept().await {
+                let _ = s.read(&mut tmp).await;
+            }
+        });
+        let st = PubsubVerifier::new(port, None)
+            .test_stage1_handshake()
+            .await;
+        assert!(!st.passed, "a dead fresh-key probe must fail");
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Handshake (fresh key) failed"),
+            "error must blame the fresh-key step: {:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_rejects_bad_upgrade() {
+        let port = spawn_ws_mock(MockCfg {
+            accept: AcceptMode::Wrong,
+            ..Default::default()
+        })
+        .await;
+        let err = match PubsubVerifier::new(port, None).ws_connect(TEST_KEY).await {
+            Ok(_) => panic!("a bogus accept must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("Bad Sec-WebSocket-Accept"), "{err}");
+
+        let port = spawn_ws_mock(MockCfg {
+            accept: AcceptMode::No101,
+            ..Default::default()
+        })
+        .await;
+        let err = match PubsubVerifier::new(port, None).ws_connect(TEST_KEY).await {
+            Ok(_) => panic!("a 200 OK response must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("Expected 101 Switching Protocols"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_keeps_leftover_frame_bytes() {
+        // Coalesce the 101 header and a text frame in one server write: the
+        // surplus bytes must survive inside the connection read buffer.
+        let greet = server_frame(0x1, b"PUB chan_x early");
+        let port = spawn_ws_mock(MockCfg {
+            greet: Some(greet),
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, None);
+        let mut c = v.ws_connect(TEST_KEY).await.unwrap();
+        let (op, payload) = c.read_frame(Duration::from_millis(500)).await.unwrap();
+        assert_eq!((op, payload.as_slice()), (0x1, &b"PUB chan_x early"[..]));
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_times_out_on_silent_server() {
+        let port = spawn_ws_mock(MockCfg::default()).await;
+        let mut c = PubsubVerifier::new(port, None)
+            .ws_connect(TEST_KEY)
+            .await
+            .unwrap();
+        let err = c
+            .read_frame(Duration::from_millis(50))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_reports_server_close() {
+        let port = spawn_ws_mock(MockCfg {
+            close_after_upgrade: true,
+            ..Default::default()
+        })
+        .await;
+        let mut c = PubsubVerifier::new(port, None)
+            .ws_connect(TEST_KEY)
+            .await
+            .unwrap();
+        let err = c
+            .read_frame(Duration::from_millis(500))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Server closed WS connection"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_reassembles_split_delivery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut tmp = [0u8; 1024];
+            let mut req = Vec::new();
+            loop {
+                let n = s.read(&mut tmp).await.unwrap();
+                req.extend_from_slice(&tmp[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&req).to_string();
+            let key = header_lookup(&req, "Sec-WebSocket-Key").unwrap_or_default();
+            let resp = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                ws_accept_key(&key)
+            );
+            s.write_all(resp.as_bytes()).await.unwrap();
+            // Deliver one frame in two TCP segments.
+            let frame = server_frame(0x1, b"PUB split hello");
+            s.write_all(&frame[..3]).await.unwrap();
+            s.flush().await.unwrap();
+            sleep(Duration::from_millis(40)).await;
+            s.write_all(&frame[3..]).await.unwrap();
+            sleep(Duration::from_millis(300)).await;
+        });
+        let mut c = PubsubVerifier::new(port, None)
+            .ws_connect(TEST_KEY)
+            .await
+            .unwrap();
+        let (op, payload) = c.read_frame(Duration::from_millis(1000)).await.unwrap();
+        assert_eq!((op, payload.as_slice()), (0x1, &b"PUB split hello"[..]));
+    }
+
+    #[tokio::test]
+    async fn test_read_pub_skips_non_pub_text_and_matches_channel() {
+        let greet = server_frame(0x1, b"NOTICE welcome");
+        let port = spawn_ws_mock(MockCfg {
+            greet: Some(greet),
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, None);
+        let mut sub = v.ws_connect(TEST_KEY).await.unwrap();
+        sub.send(0x1, b"SUB chan_a").await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        let mut publ = v.ws_connect(TEST_KEY).await.unwrap();
+        publ.send(0x1, b"PUB chan_a hello").await.unwrap();
+        let got = v
+            .read_pub(&mut sub, "chan_a", Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(got, "PUB chan_a hello");
+    }
+
+    #[tokio::test]
+    async fn test_read_pub_times_out_on_missing_message() {
+        let port = spawn_ws_mock(MockCfg {
+            broadcast: BroadcastMode::Silent,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, None);
+        let mut sub = v.ws_connect(TEST_KEY).await.unwrap();
+        sub.send(0x1, b"SUB chan_a").await.unwrap();
+        sleep(Duration::from_millis(50)).await;
+        let mut publ = v.ws_connect(TEST_KEY).await.unwrap();
+        publ.send(0x1, b"PUB chan_a hello").await.unwrap();
+        let err = v
+            .read_pub(&mut sub, "chan_a", Duration::from_millis(100))
+            .await
+            .unwrap_err()
+            .to_string()
+            .to_lowercase();
+        // The inner read_frame fires its own deadline a hair before the
+        // outer "Timed out waiting for PUB" check, so both messages are
+        // legitimate; what matters is a bounded timeout, not a hang.
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_read_pub_rejects_server_close() {
+        let greet = server_frame(0x8, b"");
+        let port = spawn_ws_mock(MockCfg {
+            greet: Some(greet),
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, None);
+        let mut sub = v.ws_connect(TEST_KEY).await.unwrap();
+        let err = v
+            .read_pub(&mut sub, "chan_a", Duration::from_millis(500))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Server sent close frame"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_stage2_broadcast_passes_with_sub_ack_noise() {
+        // `ack_sub` adds "OK SUB ..." text frames the verifier must skip.
+        let port = spawn_ws_mock(MockCfg {
+            ack_sub: true,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage2_broadcast().await;
+        assert!(
+            st.passed,
+            "both subscribers must get the PUB: {:?}",
+            st.error
+        );
+        assert_eq!(st.stage, 2);
+    }
+
+    #[tokio::test]
+    async fn test_stage2_broadcast_flags_tampered_payload() {
+        let port = spawn_ws_mock(MockCfg {
+            broadcast: BroadcastMode::Tamper,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage2_broadcast().await;
+        assert!(!st.passed, "a corrupted payload must fail");
+        let err = st.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("sub1 got"),
+            "error must name the subscriber: {err}"
+        );
+        assert!(
+            err.contains("tampered"),
+            "error must show the payload: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage2_flags_subscriber_disconnect() {
+        let port = spawn_ws_mock(MockCfg {
+            broadcast: BroadcastMode::CloseSubscribers,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage2_broadcast().await;
+        assert!(!st.passed, "a closed subscriber must be reported as a miss");
+        let err = st.error.as_deref().unwrap_or("");
+        assert!(err.contains("sub1 missed PUB"), "{err}");
+        assert!(err.contains("close frame"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_stage3_isolation_and_pong_pass() {
+        let port = spawn_ws_mock(MockCfg::default()).await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage3_isolation_pong().await;
+        assert!(st.passed, "isolation + pong must pass: {:?}", st.error);
+        assert_eq!(st.stage, 3);
+    }
+
+    #[tokio::test]
+    async fn test_stage3_flags_isolation_violation() {
+        let port = spawn_ws_mock(MockCfg {
+            broadcast: BroadcastMode::AllChannels,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage3_isolation_pong().await;
+        assert!(!st.passed, "cross-channel delivery must fail");
+        let err = st.error.as_deref().unwrap_or("");
+        assert!(err.contains("Isolation violated"), "{err}");
+        assert!(err.contains("other_mockrun"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_stage3_flags_missing_pong() {
+        let port = spawn_ws_mock(MockCfg {
+            pong: false,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage3_isolation_pong().await;
+        assert!(!st.passed, "silence instead of a pong must fail");
+        let err = st.error.as_deref().unwrap_or("");
+        assert!(err.contains("pong wait"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_stage3_skips_noise_before_pong() {
+        let port = spawn_ws_mock(MockCfg {
+            ping_noise: true,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage3_isolation_pong().await;
+        assert!(
+            st.passed,
+            "noise before the pong must be skipped: {:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage3_flags_close_on_ping() {
+        let port = spawn_ws_mock(MockCfg {
+            close_on_ping: true,
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let st = v.test_stage3_isolation_pong().await;
+        assert!(!st.passed, "closing on ping must fail");
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Server closed connection on ping"),
+            "{:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage4_soak_passes_against_faithful_mock() {
+        let port = spawn_ws_mock(MockCfg::default()).await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let (st, p99, mps) = v.test_stage4_soak().await;
+        assert!(st.passed, "200x20 fan-out must pass: {:?}", st.error);
+        let p99 = p99.expect("a passing soak must report p99");
+        assert!(
+            p99 < 100.0,
+            "loopback p99 {p99}ms must be inside the budget"
+        );
+        assert!(
+            mps.unwrap_or(0.0) > 0.0,
+            "a passing soak must report a positive rate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage4_soak_flags_missing_deliveries() {
+        // One subscriber (the 200th) is dropped before it can subscribe:
+        // 199 x 20 = 3980 deliveries, not 4000.
+        let port = spawn_ws_mock(MockCfg {
+            drop_sub_at: Some(SOAK_SUBS - 1),
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let (st, _, _) = v.test_stage4_soak().await;
+        assert!(!st.passed, "missing deliveries must fail");
+        let expected = SOAK_SUBS * SOAK_MSGS;
+        let got = (SOAK_SUBS - 1) * SOAK_MSGS;
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains(&format!("Delivery {got}/{expected}")),
+            "{:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage4_soak_flags_p99_over_budget() {
+        // The first broadcast is delayed past the 100ms budget; every later
+        // PUB queues behind it, so the measured p99 must exceed the budget.
+        let port = spawn_ws_mock(MockCfg {
+            delay_first_pub: Duration::from_millis(120),
+            ..Default::default()
+        })
+        .await;
+        let v = PubsubVerifier::new(port, Some("mockrun"));
+        let (st, p99, _) = v.test_stage4_soak().await;
+        assert!(!st.passed, "a 120ms stall must break the latency budget");
+        assert!(
+            p99.unwrap_or(0.0) >= 100.0,
+            "p99 {p99:?} must be over budget"
+        );
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("p99"),
+            "{:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_all_reports_total_failure_on_dead_port() {
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let summary = PubsubVerifier::new(port, None).run_all().await;
+        assert_eq!(summary.total_stages, 4);
+        assert_eq!(summary.passed_count, 0);
+        assert_eq!(summary.pass_rate, 0.0);
+        assert_eq!(summary.soak_p99_ms, None);
+        assert_eq!(summary.soak_msgs_per_sec, None);
+        assert!(summary.stages.iter().all(|s| !s.passed));
+    }
+
+    #[tokio::test]
+    async fn test_run_all_passes_against_faithful_mock() {
+        let port = spawn_ws_mock(MockCfg::default()).await;
+        let summary = PubsubVerifier::new(port, Some("mockrun")).run_all().await;
+        assert_eq!(summary.passed_count, 4, "stages: {:?}", summary.stages);
+        assert_eq!(summary.total_stages, 4);
+        assert_eq!(summary.pass_rate, 100.0);
+        assert!(summary.soak_p99_ms.is_some());
+        assert!(summary.soak_msgs_per_sec.unwrap_or(0.0) > 0.0);
     }
 }
