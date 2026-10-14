@@ -245,10 +245,20 @@ Workstreams (in flight / planned):
 - [x] report/repair.rs 7→85.9% + report/cost_annotate.rs 28→56.4%
       (the suite also exposed and fixed the `total_cost_usd` annotation
       gate bug).
-- [ ] Wave 3 (launched): sandbox/docker.rs + bench/batch_ref.rs;
-      report/leaderboard.rs + report/portal.rs + remote.rs.
-- [ ] Wave 4: pipeline.rs, sandbox/opencode.rs + omp.rs, main.rs residual,
-      main_campaign.rs (bin-side seam), verifier/redis.rs residual.
+- [x] Wave 3 (landed): docker 47→76.5% + batch_ref 32→77.8%;
+      leaderboard/portal/remote suites (49 tests).
+- [x] Wave 4 (landed): pipeline.rs +139 production lines (eval-only
+      mock-candidate flows); opencode 96.0%, omp 96.3%, omp_updater
+      96.9% (fake-docker harnesses).
+- [ ] Wave 4b (in flight): main.rs + main_campaign.rs residual CLI
+      fixtures.
+- [ ] Remaining residuals after 4b: web/server.rs + queue.rs (prod
+      ~1,150), verifier/redis.rs (~578), verifier/http.rs (244),
+      report/cost_annotate.rs (296), cutoff_annotate/omp_updater/
+      tool_normalizer/bench-mod small gaps.
+Scheduling note: live-docker tests flake under heavy host load (parallel
+agent builds); the full lib suite is green when the host is quiet. If CI
+shows flakes, serialize live-docker tests with a shared test lock.
 Re-measure with `scripts/coverage.sh` after each wave; keep the CI gate
 at 80 so re-enabling Actions enforces the requirement.
 
