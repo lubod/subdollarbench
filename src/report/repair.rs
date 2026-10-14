@@ -453,4 +453,524 @@ mod tests {
         assert_eq!(chain_verdict(0.0), "failed_tests");
         assert_eq!(chain_verdict(77.8), "failed_tests");
     }
+
+    use crate::report::Store;
+    use serde_json::json;
+
+    fn unique_temp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sdb-repair-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// One trial-shaped run dir: `manifest.json` + an empty `workspace/`.
+    fn write_manifest(runs: &Path, id: &str, status: &str, pass_rate: Option<f64>) {
+        let dir = runs.join(id);
+        std::fs::create_dir_all(dir.join("workspace")).expect("workspace dir");
+        let mut doc = json!({
+            "run_id": id,
+            "model": "test-model",
+            "task": "redis",
+            "status": status,
+            "passed_stages": 2,
+            "total_stages": 4,
+            "efficiency_score": 0.42,
+            "cost_usd": 0.001,
+            "tokens": {"prompt_tokens": 10, "cached_tokens": 2, "completion_tokens": 3, "total_tokens": 15},
+        });
+        if let Some(p) = pass_rate {
+            doc["pass_rate"] = json!(p);
+        }
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&doc).expect("manifest json"),
+        )
+        .expect("write manifest");
+    }
+
+    fn manifest_doc(runs: &Path, id: &str) -> serde_json::Value {
+        let text = std::fs::read_to_string(runs.join(id).join("manifest.json")).expect("read");
+        serde_json::from_str(&text).expect("manifest json")
+    }
+
+    /// Mixed trial zoo: provable false positives (clean / test-stub
+    /// workspaces), a genuine flask cheat, agent_killed stamps at and below
+    /// 100%, plus dirs the scan must skip (merged parent with run.json, no
+    /// manifest, no workspace, non-dir entry).
+    fn build_cure_fixture(runs: &Path) {
+        write_manifest(runs, "task_m_1_w0_trial1", "disqualified_cheat", Some(50.0));
+        write_manifest(runs, "task_m_1_w0_trial2", "disqualified_cheat", Some(0.0));
+        std::fs::write(
+            runs.join("task_m_1_w0_trial2/workspace/server.py"),
+            "from flask import Flask\napp = Flask(__name__)\n",
+        )
+        .expect("genuine cheat");
+        write_manifest(
+            runs,
+            "task_m_1_w0_trial3",
+            "disqualified_cheat",
+            Some(100.0),
+        );
+        std::fs::write(
+            runs.join("task_m_1_w0_trial3/workspace/stub.py"),
+            "import http.server\nclass H(http.server.BaseHTTPRequestHandler): pass\n",
+        )
+        .expect("test-stub false positive");
+        // DQ with no pass_rate: the chain verdict must fall back to 0%.
+        write_manifest(runs, "task_m_1_w0_trial4", "disqualified_cheat", None);
+        write_manifest(runs, "task_m_1_w0_trial5", "agent_killed", Some(100.0));
+        write_manifest(runs, "task_m_1_w0_trial6", "agent_killed", Some(99.9));
+        write_manifest(runs, "task_m_1_w0_trial7", "completed", Some(100.0));
+        // Merged-parent dir (workspace + run.json) is never scanned/cured.
+        write_manifest(runs, "task_m_1_w0", "disqualified_cheat", Some(50.0));
+        std::fs::write(runs.join("task_m_1_w0/run.json"), "{}\n").expect("run.json");
+        std::fs::create_dir_all(runs.join("no_manifest_trial/workspace")).expect("workspace");
+        std::fs::create_dir_all(runs.join("bare_dir")).expect("bare dir");
+        std::fs::write(
+            runs.join("bare_dir/manifest.json"),
+            r#"{"status":"disqualified_cheat"}"#,
+        )
+        .expect("manifest without workspace");
+        std::fs::write(runs.join("notes.txt"), "not a run\n").expect("stray file");
+    }
+
+    #[test]
+    fn test_cure_scan_dry_run_classifies_only_provable_cases() {
+        let root = unique_temp("cure-dry");
+        let runs = root.join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        build_cure_fixture(&runs);
+
+        let (cured_dq, cured_killed, still_dq, scanned, warnings) =
+            cure_trial_manifests(&runs, false).expect("scan");
+
+        assert_eq!(scanned, 7, "only trial manifests with a status are scanned");
+        let mut dq = cured_dq;
+        dq.sort();
+        assert_eq!(
+            dq,
+            vec![
+                "task_m_1_w0_trial1 -> failed_tests".to_string(),
+                "task_m_1_w0_trial3 -> completed".to_string(),
+                "task_m_1_w0_trial4 -> failed_tests".to_string(),
+            ]
+        );
+        assert_eq!(cured_killed, vec!["task_m_1_w0_trial5".to_string()]);
+        assert_eq!(still_dq.len(), 1, "the flask cheat stays disqualified");
+        assert!(
+            still_dq[0].starts_with("task_m_1_w0_trial2: Anti-Cheat Violation"),
+            "{still_dq:?}"
+        );
+        assert!(warnings.is_empty());
+
+        // Dry run: every manifest on disk still carries its original stamp.
+        for id in [
+            "task_m_1_w0_trial1",
+            "task_m_1_w0_trial3",
+            "task_m_1_w0_trial4",
+            "task_m_1_w0",
+        ] {
+            assert_eq!(
+                manifest_doc(&runs, id)["status"],
+                "disqualified_cheat",
+                "{id}: dry run must not write"
+            );
+        }
+        assert_eq!(
+            manifest_doc(&runs, "task_m_1_w0_trial5")["status"],
+            "agent_killed",
+            "dry run must not write"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_cure_apply_changes_only_the_verdict_field() {
+        let root = unique_temp("cure-apply");
+        let runs = root.join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        build_cure_fixture(&runs);
+
+        let ids = [
+            "task_m_1_w0_trial1",
+            "task_m_1_w0_trial2",
+            "task_m_1_w0_trial3",
+            "task_m_1_w0_trial4",
+            "task_m_1_w0_trial5",
+            "task_m_1_w0_trial6",
+            "task_m_1_w0_trial7",
+            "task_m_1_w0",
+        ];
+        let before: Vec<serde_json::Value> = ids.iter().map(|id| manifest_doc(&runs, id)).collect();
+
+        let (cured_dq, cured_killed, still_dq, scanned, _) =
+            cure_trial_manifests(&runs, true).expect("apply");
+        assert_eq!(scanned, 7);
+        let mut dq = cured_dq;
+        dq.sort();
+        assert_eq!(
+            dq,
+            vec![
+                "task_m_1_w0_trial1 -> failed_tests".to_string(),
+                "task_m_1_w0_trial3 -> completed".to_string(),
+                "task_m_1_w0_trial4 -> failed_tests".to_string(),
+            ]
+        );
+        assert_eq!(cured_killed, vec!["task_m_1_w0_trial5".to_string()]);
+        assert_eq!(still_dq.len(), 1);
+
+        for (id, want) in [
+            ("task_m_1_w0_trial1", "failed_tests"),
+            ("task_m_1_w0_trial3", "completed"),
+            ("task_m_1_w0_trial4", "failed_tests"),
+            ("task_m_1_w0_trial5", "completed"),
+        ] {
+            let pos = ids.iter().position(|x| *x == id).unwrap();
+            let after = manifest_doc(&runs, id);
+            assert_eq!(after["status"], want, "{id} verdict");
+            // The verdict is the ONLY field a cure may change: strip it from
+            // both snapshots and require full equality (scores, tokens, cost).
+            let mut a = after.clone();
+            let mut b = before[pos].clone();
+            a.as_object_mut().unwrap().remove("status");
+            b.as_object_mut().unwrap().remove("status");
+            assert_eq!(a, b, "{id}: repair must not rescore");
+            assert_eq!(a["efficiency_score"], 0.42, "{id} score untouched");
+            assert_eq!(a["cost_usd"], 0.001, "{id} cost untouched");
+            assert_eq!(a["tokens"], b["tokens"], "{id} tokens untouched");
+        }
+        for id in [
+            "task_m_1_w0_trial2",
+            "task_m_1_w0_trial6",
+            "task_m_1_w0_trial7",
+            "task_m_1_w0",
+        ] {
+            let pos = ids.iter().position(|x| *x == id).unwrap();
+            assert_eq!(manifest_doc(&runs, id), before[pos], "{id}: untouched");
+        }
+        assert_eq!(
+            std::fs::read_to_string(runs.join("task_m_1_w0/run.json")).unwrap(),
+            "{}\n",
+            "parent run.json untouched"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_cure_scan_missing_runs_dir_is_an_error() {
+        let root = unique_temp("cure-missing");
+        let err = cure_trial_manifests(&root.join("nope"), false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("read runs dir"),
+            "missing runs dir must error, got: {err:#}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn result_row(id: &str, pass_rate: f64, status: Option<&str>) -> BenchmarkRunResult {
+        let mut v = json!({
+            "id": id,
+            "model": "test-model",
+            "task": "redis",
+            "language": "Go",
+            "pass_rate": pass_rate,
+            "passed_stages": 0,
+            "total_stages": 4,
+            "prompt_tokens": 10,
+            "cached_tokens": 0,
+            "completion_tokens": 5,
+            "total_cost_usd": 0.001,
+            "savings_percent": 0.0,
+            "efficiency_score": 0.5,
+            "timestamp": "2026-10-01T00:00:00Z"
+        });
+        if let Some(s) = status {
+            v["status"] = json!(s);
+        }
+        serde_json::from_value(v).expect("row fixture")
+    }
+
+    fn write_row(results: &Path, row: &BenchmarkRunResult) {
+        std::fs::write(
+            results.join(format!("{}.json", row.id)),
+            serde_json::to_string_pretty(row).expect("serialize row"),
+        )
+        .expect("write row");
+    }
+
+    fn read_dir_bytes(dir: &Path) -> BTreeMap<String, String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .flatten()
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    std::fs::read_to_string(e.path()).unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// Dry run must classify (groups, skips, remerges) and write nothing:
+    /// `--yes` is what mutates, and only the apply path may persist synced
+    /// statuses.
+    #[test]
+    fn test_consolidate_dry_run_classifies_and_writes_nothing() {
+        let root = unique_temp("consolidate-dry");
+        let results = root.join("results");
+        std::fs::create_dir_all(&results).unwrap();
+
+        let mut alpha1 = result_row("alpha_trial1", 100.0, Some("completed"));
+        alpha1.graded_under = Some("rules-a".to_string());
+        let mut alpha2 = result_row("alpha_trial2", 0.0, Some("failed_tests"));
+        alpha2.graded_under = Some("rules-a".to_string());
+        write_row(&results, &alpha1);
+        write_row(&results, &alpha2);
+
+        // Loose trial whose parent already exists: skipped, never clobbered.
+        let gamma_t1 = result_row("gamma_trial1", 100.0, Some("completed"));
+        let mut gamma = result_row("gamma", 100.0, Some("completed"));
+        gamma.subruns = vec![gamma_t1.clone()];
+        write_row(&results, &gamma_t1);
+        write_row(&results, &gamma);
+
+        // Merged parent whose embedded trial changed: re-merge bookkeeping.
+        let mut delta_t1 = result_row("delta_trial1", 100.0, Some("agent_killed"));
+        delta_t1.graded_under = Some("rules-d".to_string());
+        let mut delta = result_row("delta", 0.0, Some("agent_killed"));
+        delta.subruns = vec![delta_t1];
+        delta.graded_under = Some("rules-d".to_string());
+        delta.protocol = Some("fixed_n".to_string());
+        write_row(&results, &delta);
+
+        // Single non-trial row: belongs to no group and no parent.
+        write_row(&results, &result_row("epsilon", 50.0, Some("failed_tests")));
+        std::fs::write(results.join("ref_history.jsonl"), "{\"old\":true}\n").unwrap();
+        std::fs::write(results.join("notes.txt"), "not a result\n").unwrap();
+
+        let before = read_dir_bytes(&results);
+        let cured: BTreeMap<String, String> = [
+            ("alpha_trial1".to_string(), "completed".to_string()),
+            ("delta_trial1".to_string(), "completed".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let (consolidated, skipped, remerged, warnings, loose_groups, loose_trials) =
+            consolidate_and_remerge(&results, &cured, false).expect("dry run");
+
+        assert_eq!(consolidated, vec!["alpha".to_string()]);
+        assert_eq!(skipped, vec!["gamma".to_string()]);
+        assert_eq!(remerged, vec!["delta".to_string()]);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!((loose_groups, loose_trials), (2, 3));
+        assert!(
+            !results.join("alpha.json").exists(),
+            "dry run must not consolidate"
+        );
+        assert_eq!(
+            read_dir_bytes(&results),
+            before,
+            "dry run must leave every results file byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A merged parent with no changed subruns is never re-merged: dirty
+    /// tracking must not rewrite clean parents.
+    #[test]
+    fn test_consolidate_dry_run_leaves_clean_parents_alone() {
+        let root = unique_temp("consolidate-clean");
+        let results = root.join("results");
+        std::fs::create_dir_all(&results).unwrap();
+        let mut sub = result_row("zeta_trial1", 100.0, Some("completed"));
+        sub.graded_under = Some("rules-z".to_string());
+        let mut parent = result_row("zeta", 100.0, Some("completed"));
+        parent.subruns = vec![sub];
+        parent.graded_under = Some("rules-z".to_string());
+        write_row(&results, &parent);
+        let before = read_dir_bytes(&results);
+
+        let (consolidated, skipped, remerged, warnings, groups, trials) =
+            consolidate_and_remerge(&results, &BTreeMap::new(), false).expect("dry run");
+
+        assert!(consolidated.is_empty());
+        assert!(skipped.is_empty());
+        assert!(remerged.is_empty(), "clean parent must not re-merge");
+        assert!(warnings.is_empty());
+        assert_eq!((groups, trials), (0, 0));
+        assert_eq!(read_dir_bytes(&results), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `prune_stale_runs` reads the resolved primary store, so the test points
+    /// `SDB_BENCH_DB` at a temp DB. Env is process-global while other tests
+    /// run in parallel: hold it only across the call, restore it via a Drop
+    /// guard, and bail out defensively if another test owns the variable.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct BenchDbEnv {
+        saved: Option<String>,
+    }
+
+    impl BenchDbEnv {
+        fn set(path: &Path) -> Self {
+            let saved = std::env::var("SDB_BENCH_DB").ok();
+            std::env::set_var("SDB_BENCH_DB", path);
+            Self { saved }
+        }
+    }
+
+    impl Drop for BenchDbEnv {
+        fn drop(&mut self) {
+            match self.saved.take() {
+                Some(v) => std::env::set_var("SDB_BENCH_DB", v),
+                None => std::env::remove_var("SDB_BENCH_DB"),
+            }
+        }
+    }
+
+    fn run_manifest(run_id: &str, completed_at: &str) -> crate::report::RunManifest {
+        serde_json::from_value(json!({
+            "run_id": run_id,
+            "model": "test-model",
+            "task": "redis",
+            "status": "completed",
+            "language": "Go",
+            "started_at": "2026-10-01T00:00:00Z",
+            "completed_at": completed_at,
+            "duration_seconds": 1.0,
+            "pass_rate": 100.0,
+            "passed_stages": 4,
+            "total_stages": 4,
+            "stages": [],
+            "throughput_req_sec": null,
+            "tokens": {"prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 1, "total_tokens": 2},
+            "cost_usd": 0.0,
+            "savings_percent": 0.0,
+            "efficiency_score": 0.0,
+            "files": []
+        }))
+        .expect("manifest fixture")
+    }
+
+    #[test]
+    fn test_prune_stale_runs_dry_run_then_apply() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("prune");
+        let db = root.join("bench.db");
+        {
+            let store = Store::open(&db).expect("open temp db");
+            store
+                .upsert_run_manifest(&run_manifest("keep-1", "2026-10-03T00:00:00Z"))
+                .unwrap();
+            store
+                .upsert_run_manifest(&run_manifest("stale-1", "2026-10-02T00:00:00Z"))
+                .unwrap();
+            store
+                .upsert_run_manifest(&run_manifest("stale-2", "2026-10-01T00:00:00Z"))
+                .unwrap();
+        }
+        let runs = root.join("runs");
+        std::fs::create_dir_all(runs.join("keep-1")).unwrap();
+
+        let dry = {
+            let env = BenchDbEnv::set(&db);
+            if Store::resolve_db_path() != db {
+                drop(env);
+                eprintln!("skipping prune assertions: another test owns SDB_BENCH_DB");
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+            prune_stale_runs(&runs, false).expect("dry run")
+        };
+        let mut dry_sorted = dry.clone();
+        dry_sorted.sort();
+        assert_eq!(
+            dry_sorted,
+            vec!["stale-1".to_string(), "stale-2".to_string()]
+        );
+        {
+            let store = Store::open(&db).unwrap();
+            assert_eq!(store.run_manifest_count(), 3, "dry run must not delete");
+        }
+
+        let applied = {
+            let env = BenchDbEnv::set(&db);
+            if Store::resolve_db_path() != db {
+                drop(env);
+                eprintln!("skipping prune assertions: another test owns SDB_BENCH_DB");
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+            prune_stale_runs(&runs, true).expect("apply")
+        };
+        assert_eq!(applied.len(), 2);
+        {
+            let store = Store::open(&db).unwrap();
+            assert_eq!(store.run_manifest_count(), 1);
+            assert!(store.get_run_manifest("keep-1").is_some());
+            assert!(store.get_run_manifest("stale-1").is_none());
+            assert!(store.get_run_manifest("stale-2").is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Grader restoration after a repair merge: the file and the DB row both
+    /// carry the passed-through grader, and nothing else is rescored.
+    #[test]
+    fn test_restore_graded_under_writes_file_and_db_without_regrading() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("restore");
+        let db = root.join("bench.db");
+        {
+            let _ = Store::open(&db).expect("open temp db");
+        }
+        let results = root.join("results");
+        std::fs::create_dir_all(&results).unwrap();
+        let mut row = result_row("parent-restore", 100.0, Some("completed"));
+        row.graded_under = Some("rules-old".to_string());
+        row.efficiency_score = 1.75;
+        write_row(&results, &row);
+
+        let env = BenchDbEnv::set(&db);
+        if Store::resolve_db_path() != db {
+            drop(env);
+            eprintln!("skipping restore assertions: another test owns SDB_BENCH_DB");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        restore_graded_under(&results, "parent-restore", "rules-old-kept").expect("restore");
+        drop(env);
+
+        let after: BenchmarkRunResult = serde_json::from_str(
+            &std::fs::read_to_string(results.join("parent-restore.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after.graded_under.as_deref(), Some("rules-old-kept"));
+        assert_eq!(after.pass_rate, 100.0, "grader restore must not regrade");
+        assert_eq!(after.efficiency_score, 1.75, "score untouched");
+        assert_eq!(after.status.as_deref(), Some("completed"));
+
+        let store = Store::open(&db).unwrap();
+        let parents = store.load_all_parents();
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0].graded_under.as_deref(), Some("rules-old-kept"));
+        assert_eq!(parents[0].efficiency_score, 1.75);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_run_repair_refuses_non_canonical_dirs() {
+        let root = unique_temp("guard");
+        let err = match run_repair(&root.join("results"), &root.join("runs"), false) {
+            Ok(_) => panic!("non-canonical dirs must be refused"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("canonical repo dirs"), "{msg}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -122,13 +122,29 @@ fn needs_annotation_json<T: serde::Serialize>(row: &T) -> bool {
 /// Which rows still need the annotation. A `null` (typed `Option`
 /// round-tripped through the DB) counts as absent — the field only exists
 /// to say something.
+///
+/// Rows carry their recorded price under either key: legacy/result rows
+/// use `cost_usd` (the pre-fix live-delta field) while typed
+/// `BenchmarkRunResult` rows serialize `total_cost_usd`. A row with a real
+/// recorded cost anywhere is not a zero-cost row and must not be
+/// annotated; a row with no price field at all is treated as zero-cost
+/// (the annotation then adds the formula for evidence).
 fn needs_annotation(m: &Value) -> bool {
-    let zero_cost = m.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0) == 0.0;
     let has_formula = m
         .get("cost_formula_usd")
         .map(|v| !v.is_null())
         .unwrap_or(false);
-    zero_cost && !has_formula
+    if has_formula {
+        return false;
+    }
+    for key in ["cost_usd", "total_cost_usd"] {
+        if let Some(v) = m.get(key).and_then(|v| v.as_f64()) {
+            if v != 0.0 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Add a plain model string to the pending pricing set (deduped).
@@ -631,5 +647,283 @@ mod tests {
             "muse-spark after annotation: paid"
         );
         assert_eq!(tier(0.0, Some(0.0)), "free", "genuinely free stays free");
+    }
+
+    fn unique_temp(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("sdb-cost-annotate-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn typed_row(cost_usd: f64, formula: Option<f64>) -> crate::report::BenchmarkRunResult {
+        let mut v = json!({
+            "id": "typed-1",
+            "model": "test-model",
+            "task": "redis",
+            "language": "Go",
+            "pass_rate": 0.0,
+            "passed_stages": 0,
+            "total_stages": 4,
+            "prompt_tokens": 100,
+            "cached_tokens": 0,
+            "completion_tokens": 50,
+            "total_cost_usd": cost_usd,
+            "savings_percent": 0.0,
+            "efficiency_score": 0.0,
+            "timestamp": "2026-10-01T00:00:00Z"
+        });
+        if let Some(f) = formula {
+            v["cost_formula_usd"] = json!(f);
+        }
+        serde_json::from_value(v).expect("typed row fixture")
+    }
+
+    struct Unserializable;
+
+    impl serde::Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            _serializer: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("fixture cannot serialize"))
+        }
+    }
+
+    /// Exact token arithmetic: prompt at the prompt rate, cache reads at the
+    /// cache rate, completion at the completion rate — plus the epsilon rule
+    /// that keeps sub-micro-dollar rows reading as free.
+    #[test]
+    fn test_formula_cost_applies_exact_rates_and_epsilon() {
+        let p = ModelPricing::new(2.0, 4.0, 0.5);
+        let nested = json!({
+            "tokens": {"prompt_tokens": 1_000_000, "cached_tokens": 2_000_000, "completion_tokens": 500_000}
+        });
+        // 1.0M*2.0 + 2.0M*0.5 + 0.5M*4.0 = 2.0 + 1.0 + 2.0
+        assert_eq!(formula_cost(&nested, &p), Some(5.0));
+
+        // Cache reads bill at their own rate: using the prompt rate would
+        // yield 1.0 here instead of 2.5.
+        let cache_heavy = ModelPricing::new(0.5, 0.0, 2.0);
+        let cached = json!({
+            "tokens": {"prompt_tokens": 1_000_000, "cached_tokens": 1_000_000, "completion_tokens": 0}
+        });
+        assert_eq!(formula_cost(&cached, &cache_heavy), Some(2.5));
+
+        let p = ModelPricing::new(1.0, 0.0, 0.0);
+        let one_token = json!({
+            "tokens": {"prompt_tokens": 1, "cached_tokens": 0, "completion_tokens": 0}
+        });
+        assert_eq!(
+            formula_cost(&one_token, &p),
+            None,
+            "a single token on a cheap model sits at the epsilon: reads free"
+        );
+        let two_tokens = json!({
+            "tokens": {"prompt_tokens": 2, "cached_tokens": 0, "completion_tokens": 0}
+        });
+        assert_eq!(formula_cost(&two_tokens, &p), Some(2e-6));
+
+        assert_eq!(
+            formula_cost(&json!({}), &p),
+            None,
+            "no tokens, nothing to price"
+        );
+        assert_eq!(
+            formula_cost(&json!({"tokens": {"prompt_tokens": 5}}), &p),
+            None,
+            "partial token shape prices nothing"
+        );
+        assert_eq!(
+            formula_cost(
+                &json!({"tokens": {"prompt_tokens": 1.5, "cached_tokens": 0, "completion_tokens": 0}}),
+                &p
+            ),
+            None,
+            "non-integer token counts are not tokens"
+        );
+    }
+
+    /// Manifests nest tokens; result rows carry them flat. Both shapes must
+    /// price identically, and the nested shape wins when both are present.
+    #[test]
+    fn test_row_formula_cost_reads_nested_and_flat_shapes() {
+        let p = ModelPricing::new(2.0, 4.0, 0.5);
+        let flat = json!({
+            "prompt_tokens": 1_000_000, "cached_tokens": 2_000_000, "completion_tokens": 500_000
+        });
+        assert_eq!(row_formula_cost(&flat, &p), Some(5.0));
+        // Result rows always carry the trio; a missing flat key counts as 0.
+        let flat_no_cached = json!({"prompt_tokens": 1_000_000, "completion_tokens": 500_000});
+        assert_eq!(row_formula_cost(&flat_no_cached, &p), Some(4.0));
+        let both = json!({
+            "tokens": {"prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0},
+            "prompt_tokens": 1_000_000, "completion_tokens": 500_000
+        });
+        assert_eq!(
+            row_formula_cost(&both, &p),
+            None,
+            "nested tokens are authoritative when both shapes exist"
+        );
+        assert_eq!(row_formula_cost(&json!({"cost_usd": 0.0}), &p), None);
+        assert_eq!(row_formula_cost(&json!([]), &p), None, "non-object rows");
+    }
+
+    /// The annotation is additive: it writes the formula + source and never
+    /// rewrites the recorded cost or any score.
+    #[test]
+    fn test_set_annotation_never_touches_cost_usd_or_scores() {
+        let mut row = json!({
+            "cost_usd": 0.0,
+            "pass_rate": 87.5,
+            "efficiency_score": 1.25,
+            "effective_cost_usd": null
+        });
+        set_annotation(&mut row, 0.25, "legacy_zero_delta");
+        assert_eq!(row["cost_formula_usd"], 0.25);
+        assert_eq!(row["cost_source"], "legacy_zero_delta");
+        assert_eq!(row["cost_usd"], 0.0, "recorded cost is never rewritten");
+        assert_eq!(row["pass_rate"], 87.5, "scores are never rewritten");
+        assert_eq!(row["efficiency_score"], 1.25);
+        assert!(row["effective_cost_usd"].is_null());
+
+        set_annotation(&mut row, 0.5, "other-source");
+        assert_eq!(row["cost_formula_usd"], 0.5, "re-annotation replaces");
+        assert_eq!(row["cost_source"], "other-source");
+
+        let mut scalar = json!(3);
+        set_annotation(&mut scalar, 1.0, "x");
+        assert_eq!(scalar, json!(3), "non-object rows are left alone");
+    }
+
+    /// Bare `RunManifest` row (the shape stored in the `runs` table).
+    fn typed_manifest(cost_usd: f64, formula: Option<f64>) -> crate::report::RunManifest {
+        let mut v = json!({
+            "run_id": "typed-manifest-1",
+            "model": "test-model",
+            "task": "redis",
+            "status": "completed",
+            "language": "Go",
+            "started_at": "2026-10-01T00:00:00Z",
+            "completed_at": "2026-10-01T00:01:00Z",
+            "duration_seconds": 60.0,
+            "pass_rate": 100.0,
+            "passed_stages": 4,
+            "total_stages": 4,
+            "stages": [],
+            "throughput_req_sec": null,
+            "tokens": {"prompt_tokens": 100, "cached_tokens": 0, "completion_tokens": 50, "total_tokens": 150},
+            "cost_usd": cost_usd,
+            "savings_percent": 0.0,
+            "efficiency_score": 0.0,
+            "files": []
+        });
+        if let Some(f) = formula {
+            v["cost_formula_usd"] = json!(f);
+        }
+        serde_json::from_value(v).expect("typed manifest fixture")
+    }
+
+    /// DB rows are typed `Option`s: `Some`/`None` round-trips decide
+    /// idempotency, and a serialize failure must never annotate.
+    #[test]
+    fn test_needs_annotation_json_handles_null_round_trip_and_serialize_error() {
+        let zero = typed_manifest(0.0, None);
+        let v = serde_json::to_value(&zero).unwrap();
+        assert!(
+            v["cost_formula_usd"].is_null(),
+            "typed None must serialize as null (the db round-trip)"
+        );
+        assert!(needs_annotation_json(&zero));
+        assert!(needs_annotation(&v), "null must read as absent for db rows");
+
+        assert!(
+            !needs_annotation_json(&typed_manifest(0.01, None)),
+            "priced rows are skipped"
+        );
+        assert!(
+            !needs_annotation_json(&typed_manifest(0.0, Some(0.5))),
+            "annotated rows are skipped (idempotent re-runs)"
+        );
+        assert!(
+            !needs_annotation_json(&Unserializable),
+            "a row that cannot serialize is never annotated"
+        );
+    }
+
+    /// Typed parent rows serialize their price as `total_cost_usd`; the
+    /// annotation gate must honor both price keys, so a typed row with a
+    /// real recorded cost is NOT annotated (fixed 2026-10-14 after a
+    /// coverage test proved the old gate read only `cost_usd` and would
+    /// annotate priced parents; the tool's contract is "rows archived with
+    /// cost_usd: 0 gain cost_formula_usd"). A typed row at zero recorded
+    /// cost is the annotation target.
+    #[test]
+    fn test_needs_annotation_json_uses_both_recorded_cost_keys() {
+        let priced = typed_row(0.01, None);
+        let v = serde_json::to_value(&priced).unwrap();
+        assert!(
+            v.get("cost_usd").is_none(),
+            "typed result rows carry total_cost_usd, not cost_usd"
+        );
+        assert!(v["total_cost_usd"].as_f64().unwrap() > 0.0);
+        assert!(
+            !needs_annotation_json(&priced),
+            "a priced typed row must not gain a formula annotation"
+        );
+        assert!(
+            needs_annotation_json(&typed_row(0.0, None)),
+            "a zero-cost typed row is the annotation target"
+        );
+        assert!(
+            !needs_annotation_json(&typed_row(0.01, Some(0.5))),
+            "an existing formula stops re-annotation"
+        );
+        assert!(
+            !needs_annotation_json(&typed_row(0.0, Some(0.5))),
+            "annotated zero-cost rows stay annotated, never re-annotated"
+        );
+        // Legacy/result shapes keep the cost_usd key.
+        assert!(needs_annotation(&json!({"cost_usd": 0.0})));
+        assert!(!needs_annotation(&json!({"cost_usd": 0.02})));
+        // Null counts as absent; a real price under either key wins.
+        assert!(!needs_annotation(
+            &json!({"cost_usd": null, "total_cost_usd": 0.03})
+        ));
+        assert!(needs_annotation(&json!({"model": "x"})), "no price at all");
+    }
+
+    #[test]
+    fn test_collect_model_dedupes_and_skips_non_string_values() {
+        let mut models = vec!["a".to_string()];
+        collect_model_str("a", &mut models);
+        collect_model_str("b", &mut models);
+        collect_model(&json!({"model": "b"}), &mut models);
+        collect_model(&json!({"model": 7}), &mut models);
+        collect_model(&json!({}), &mut models);
+        assert_eq!(models, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// With no models there is nothing to price: no catalog request is made.
+    #[tokio::test]
+    async fn test_pricing_cache_with_no_models_is_empty() {
+        assert!(pricing_cache(&[]).await.is_empty());
+    }
+
+    /// The pass only ever touches the canonical repo dirs; a temp dir must be
+    /// refused before any store or network call.
+    #[tokio::test]
+    async fn test_run_cost_annotate_refuses_non_canonical_dirs() {
+        let dir = unique_temp("guard");
+        let err = match run_cost_annotate(&dir, &dir, false).await {
+            Ok(_) => panic!("non-canonical dirs must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("canonical repo dirs"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
