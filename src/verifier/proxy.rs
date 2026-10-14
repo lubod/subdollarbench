@@ -867,4 +867,673 @@ mod tests {
             r.error
         );
     }
+
+    // ---- Parsing edge cases and mock-server driven stage logic ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Canonical `upstream-N marker` body for a request index (round-robin).
+    fn marker_for(i: usize) -> Vec<u8> {
+        format!("upstream-{} marker\n", i % 3 + 1).into_bytes()
+    }
+
+    /// Three in-process upstreams serving the canonical marker bodies.
+    async fn spawn_marker_upstreams() -> Vec<(String, u16)> {
+        let mut ups = Vec::new();
+        for idx in 1u8..=3u8 {
+            let body = format!("upstream-{idx} marker\n").into_bytes();
+            let (port, _) = spawn_http_mock(move |_| (200, body.clone(), true)).await;
+            ups.push((format!("sdb-ut-marker-{idx}"), port));
+        }
+        ups
+    }
+
+    /// Minimal HTTP/1.1 server: one handler decision per request, persistent
+    /// connections until the handler asks for a close. Records request heads.
+    async fn spawn_http_mock<F>(handler: F) -> (u16, Arc<Mutex<Vec<String>>>)
+    where
+        F: Fn(usize) -> (u16, Vec<u8>, bool) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_out = seen.clone();
+        let idx = Arc::new(AtomicUsize::new(0));
+        let handler = Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = seen.clone();
+                let idx = idx.clone();
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        let head_end = loop {
+                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break p + 4;
+                            }
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                            }
+                        };
+                        seen.lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&buf[..head_end]).to_string());
+                        buf.drain(..head_end);
+                        let i = idx.fetch_add(1, Ordering::SeqCst);
+                        let (status, body, close) = handler(i);
+                        let reason = match status {
+                            200 => "OK",
+                            404 => "Not Found",
+                            500 => "Internal Server Error",
+                            502 => "Bad Gateway",
+                            503 => "Service Unavailable",
+                            _ => "Unknown",
+                        };
+                        let mut resp = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
+                            body.len(),
+                            if close { "close" } else { "keep-alive" }
+                        )
+                        .into_bytes();
+                        resp.extend_from_slice(&body);
+                        if sock.write_all(&resp).await.is_err() {
+                            return;
+                        }
+                        if close {
+                            let _ = sock.shutdown().await;
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, seen_out)
+    }
+
+    /// Raw-byte server: reads one request, writes the returned bytes, closes.
+    async fn spawn_raw_oneshot<F>(make: F) -> u16
+    where
+        F: Fn(usize) -> Vec<u8> + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let idx = Arc::new(AtomicUsize::new(0));
+        let make = Arc::new(make);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let make = make.clone();
+                let idx = idx.clone();
+                tokio::spawn(async move {
+                    let mut tmp = [0u8; 1024];
+                    let _ = sock.read(&mut tmp).await;
+                    let i = idx.fetch_add(1, Ordering::SeqCst);
+                    let _ = sock.write_all(&make(i)).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Raw-byte server that answers but keeps the socket open (no EOF).
+    async fn spawn_raw_hold<F>(make: F) -> u16
+    where
+        F: Fn(usize) -> Vec<u8> + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let idx = Arc::new(AtomicUsize::new(0));
+        let make = Arc::new(make);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let make = make.clone();
+                let idx = idx.clone();
+                tokio::spawn(async move {
+                    let mut tmp = [0u8; 1024];
+                    let _ = sock.read(&mut tmp).await;
+                    let i = idx.fetch_add(1, Ordering::SeqCst);
+                    let _ = sock.write_all(&make(i)).await;
+                    // Never close: framing (or the exchange deadline) must
+                    // decide when the response is complete.
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Reserved-then-dropped port nothing listens on.
+    async fn dead_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    #[test]
+    fn test_parse_status_line_edge_cases() {
+        assert_eq!(
+            parse_status_line("HTTP/1.1 204 No Content"),
+            Some(("HTTP/1.1".to_string(), 204))
+        );
+        assert_eq!(
+            parse_status_line("HTTP/1.1 200"),
+            Some(("HTTP/1.1".to_string(), 200))
+        );
+        assert_eq!(parse_status_line("HTTP/1.1 abc"), None);
+        assert_eq!(parse_status_line("HTTP/1.1 -1"), None);
+        assert_eq!(parse_status_line("HTTP/1.1 65536"), None);
+        assert_eq!(parse_status_line("HTTP/1.1\r"), None);
+    }
+
+    #[test]
+    fn test_parse_header_block_malformed_and_last_value_wins() {
+        let map =
+            parse_header_block("X-FF: 1\r\nX-FF: 2\r\nNoColon\r\n: empty\r\nEmpty-Value:\r\n");
+        assert_eq!(map.get("x-ff").map(String::as_str), Some("2"));
+        assert_eq!(map.get("empty-value").map(String::as_str), Some(""));
+        assert_eq!(map.len(), 2, "malformed lines must be skipped: {map:?}");
+    }
+
+    fn stub_response(headers: &[(&str, &str)]) -> HttpResponse {
+        HttpResponse {
+            version: "HTTP/1.1".to_string(),
+            status: 200,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_content_length_satisfied_framing_rules() {
+        // Chunked is complete by definition: decoding already required the
+        // terminal zero chunk.
+        let chunked = stub_response(&[("transfer-encoding", "chunked")]);
+        assert!(content_length_satisfied(b"", &chunked));
+        let chunked_upper = stub_response(&[("transfer-encoding", "Chunked")]);
+        assert!(content_length_satisfied(b"", &chunked_upper));
+
+        let cl = stub_response(&[("content-length", "5")]);
+        assert!(content_length_satisfied(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            &cl
+        ));
+        assert!(!content_length_satisfied(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel",
+            &cl
+        ));
+        assert!(
+            !content_length_satisfied(b"hello", &cl),
+            "no header terminator yet"
+        );
+
+        let bad = stub_response(&[("content-length", "many")]);
+        assert!(!content_length_satisfied(
+            b"HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\nbody",
+            &bad
+        ));
+
+        let none = stub_response(&[]);
+        assert!(!content_length_satisfied(
+            b"HTTP/1.1 200 OK\r\n\r\nbody",
+            &none
+        ));
+    }
+
+    #[test]
+    fn test_parse_http_response_http10_headers_and_invalid_lengths() {
+        let raw = b"HTTP/1.0 404 Not Found\r\nX-A: 1\r\nX-A: 2\r\nNoColon\r\n\r\nbody";
+        let resp = parse_http_response(raw).expect("must parse");
+        assert_eq!(resp.version, "HTTP/1.0");
+        assert_eq!(resp.status, 404);
+        assert_eq!(resp.header("x-a"), Some("2"));
+        assert_eq!(resp.body_text(), "body");
+        assert!(!resp.is_chunked());
+
+        assert!(
+            parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nbody").is_none()
+        );
+        assert!(
+            parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\nbody").is_none()
+        );
+    }
+
+    #[test]
+    fn test_chunked_trailer_is_ignored_after_terminal_chunk() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n";
+        let resp = parse_http_response(raw).expect("must parse");
+        assert_eq!(resp.body, b"hello".to_vec());
+        assert!(resp.is_chunked());
+    }
+
+    #[test]
+    fn test_body_text_is_lossy_for_non_utf8() {
+        let resp = HttpResponse {
+            version: "HTTP/1.1".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+            body: vec![0xff, b'o', b'k'],
+        };
+        assert_eq!(resp.body_text(), "\u{fffd}ok");
+    }
+
+    #[test]
+    fn test_body_marker_uses_list_order_and_empty_list() {
+        let markers = vec!["alpha".to_string(), "beta".to_string()];
+        // The first list entry that matches wins, regardless of text order.
+        assert_eq!(
+            ProxyVerifier::body_marker("x beta alpha", &markers),
+            Some(0)
+        );
+        assert_eq!(ProxyVerifier::body_marker("x beta", &markers), Some(1));
+        assert_eq!(ProxyVerifier::body_marker("anything", &[]), None);
+    }
+
+    #[test]
+    fn test_get_seed_prefix_contract() {
+        let v = ProxyVerifier::new(1, None, vec![]);
+        assert_eq!(v.get_seed_prefix("proxy"), "proxy");
+        let v = ProxyVerifier::new(1, Some("0123456789"), vec![]);
+        assert_eq!(v.get_seed_prefix("proxy"), "23456789");
+    }
+
+    #[test]
+    fn test_upstream_running_false_for_absent_container() {
+        // Docker absent or container absent: inspect must fail closed.
+        assert!(!ProxyVerifier::upstream_running("sdb-ut-absent-probe-91"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_request_and_response_contract() {
+        let (port, seen) = spawn_http_mock(|_| (200, b"hello-body".to_vec(), true)).await;
+        let (raw, resp) = ProxyVerifier::fetch(port).await.expect("mock must answer");
+
+        assert!(raw.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert_eq!(resp.version, "HTTP/1.1");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"hello-body".to_vec());
+        assert_eq!(resp.header("Content-Length"), Some("10"));
+        assert_eq!(resp.body_text(), "hello-body");
+        assert!(!resp.is_chunked());
+
+        let heads = seen.lock().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(
+            heads[0], "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "fetch must dial exactly this request"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_empty_and_unparseable_are_errors() {
+        let port = spawn_raw_oneshot(|_| Vec::new()).await;
+        let err = ProxyVerifier::fetch(port).await.unwrap_err();
+        assert!(err.starts_with("Empty response from 127.0.0.1:"), "{err}");
+
+        let port = spawn_raw_oneshot(|_| b"GARBAGE\r\n\r\n".to_vec()).await;
+        let err = ProxyVerifier::fetch(port).await.unwrap_err();
+        assert!(
+            err.starts_with("Failed to parse HTTP response from 127.0.0.1:"),
+            "{err}"
+        );
+
+        let err = ProxyVerifier::fetch(dead_port().await).await.unwrap_err();
+        assert!(err.starts_with("Failed to connect to 127.0.0.1:"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_chunked_framing_finishes_without_eof() {
+        let raw =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+                .to_vec();
+        let port = spawn_raw_hold(move |_| raw.clone()).await;
+        let start = Instant::now();
+        let (_, resp) = ProxyVerifier::fetch(port).await.expect("framed response");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must finish on the terminal chunk, not EOF or the deadline"
+        );
+        assert!(resp.is_chunked());
+        assert_eq!(resp.body, b"hello".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_times_out_when_framing_incomplete() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: keep-alive\r\n\r\nshort"
+            .to_vec();
+        let port = spawn_raw_hold(move |_| raw.clone()).await;
+        let start = Instant::now();
+        let err = ProxyVerifier::fetch(port).await.unwrap_err();
+        assert!(err.contains("Read from 127.0.0.1:"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(start.elapsed() >= Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(8));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_keepalive_counts_and_errors() {
+        // One socket, three framed 200s.
+        let (port, seen) = spawn_http_mock(|_| (200, b"live".to_vec(), false)).await;
+        assert_eq!(ProxyVerifier::fetch_keepalive(port, 3).await.unwrap(), 3);
+        assert_eq!(seen.lock().unwrap().len(), 3, "one connection, three GETs");
+
+        // A second response that closes the socket breaks the sequence.
+        let (port, _) = spawn_http_mock(|_| (200, b"live".to_vec(), true)).await;
+        assert_eq!(ProxyVerifier::fetch_keepalive(port, 1).await.unwrap(), 1);
+        assert!(ProxyVerifier::fetch_keepalive(port, 3).await.is_err());
+
+        // A non-200 inside the sequence must be named.
+        let (port, _) = spawn_http_mock(|i| {
+            if i == 1 {
+                (500, b"boom".to_vec(), false)
+            } else {
+                (200, b"ok".to_vec(), false)
+            }
+        })
+        .await;
+        let err = ProxyVerifier::fetch_keepalive(port, 3).await.unwrap_err();
+        assert_eq!(err, "keep-alive GET got 500");
+
+        // A server that answers once then hangs trips the per-read timeout
+        // instead of stalling verification forever.
+        let raw =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok".to_vec();
+        let port = spawn_raw_hold(move |_| raw.clone()).await;
+        let start = Instant::now();
+        let err = ProxyVerifier::fetch_keepalive(port, 3).await.unwrap_err();
+        assert!(err.contains("Read from 127.0.0.1:"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(start.elapsed() >= Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn test_learn_markers_happy_path_and_preconditions() {
+        // Fewer than three upstreams is rejected before any dial.
+        let v = ProxyVerifier::new(1, None, vec![("solo".to_string(), 1)]);
+        assert_eq!(
+            v.learn_markers().await.unwrap_err(),
+            "Need 3 upstreams, have 1"
+        );
+
+        // Three reachable stubs: canonical markers in upstream order.
+        let ups = spawn_marker_upstreams().await;
+        let markers = ProxyVerifier::new(1, None, ups)
+            .learn_markers()
+            .await
+            .unwrap();
+        assert_eq!(
+            markers,
+            vec![
+                "upstream-1 marker\n".to_string(),
+                "upstream-2 marker\n".to_string(),
+                "upstream-3 marker\n".to_string(),
+            ]
+        );
+
+        // A 500 upstream plus absent containers: loud harness fault naming the culprit.
+        let (bad, _) = spawn_http_mock(|_| (500, b"boom".to_vec(), true)).await;
+        let v = ProxyVerifier::new(
+            1,
+            None,
+            vec![
+                ("sdb-ut-absent-a".to_string(), bad),
+                ("sdb-ut-absent-b".to_string(), bad),
+                ("sdb-ut-absent-c".to_string(), bad),
+            ],
+        );
+        let err = v.learn_markers().await.unwrap_err();
+        assert!(err.contains("harness fixture fault"), "{err}");
+        assert!(err.contains("sdb-ut-absent-a"), "{err}");
+
+        // Reachable upstreams with empty bodies reach the same fault path.
+        let (empty, _) = spawn_http_mock(|_| (200, Vec::new(), true)).await;
+        let v = ProxyVerifier::new(
+            1,
+            None,
+            vec![
+                ("sdb-ut-absent-a".to_string(), empty),
+                ("sdb-ut-absent-b".to_string(), empty),
+                ("sdb-ut-absent-c".to_string(), empty),
+            ],
+        );
+        let err = v.learn_markers().await.unwrap_err();
+        assert!(err.contains("harness fixture fault"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_stage1_routing_pass_and_failures() {
+        let ups = spawn_marker_upstreams().await;
+
+        let (proxy, _) = spawn_http_mock(|i| (200, marker_for(i), false)).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage1()
+            .await;
+        assert!(r.passed, "round-robin proxy must pass: {:?}", r.error);
+        assert_eq!(r.stage, 1);
+        assert_eq!(r.name, "Stage 1: Basic routing (200 + marker)");
+
+        let (proxy, _) = spawn_http_mock(|_| (503, b"down".to_vec(), true)).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage1()
+            .await;
+        assert!(!r.passed);
+        assert_eq!(r.error.as_deref(), Some("Expected 200, got 503"));
+
+        let (proxy, _) = spawn_http_mock(|_| (200, b"static stub".to_vec(), true)).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage1()
+            .await;
+        assert!(!r.passed);
+        assert_eq!(r.error.as_deref(), Some("Body matches no upstream marker"));
+
+        let r = ProxyVerifier::new(dead_port().await, None, ups.clone())
+            .test_stage1()
+            .await;
+        assert!(!r.passed);
+        assert!(
+            r.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("GET / via proxy: Failed to connect"),
+            "{:?}",
+            r.error
+        );
+
+        // Marker-learning failure is reported with stage context.
+        let r = ProxyVerifier::new(1, None, vec![("solo".to_string(), 1)])
+            .test_stage1()
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("Upstream markers: Need 3 upstreams, have 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage2_round_robin_pass_and_failure_modes() {
+        let ups = spawn_marker_upstreams().await;
+
+        let (proxy, _) = spawn_http_mock(|i| (200, marker_for(i), false)).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage2()
+            .await;
+        assert!(r.passed, "even spread must pass: {:?}", r.error);
+        assert_eq!(r.name, "Stage 2: Round-robin across all 3 upstreams");
+
+        // A sticky proxy starves two upstreams.
+        let (proxy, _) = spawn_http_mock(|_| (200, marker_for(0), false)).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage2()
+            .await;
+        assert!(!r.passed);
+        assert_eq!(r.error.as_deref(), Some("Uneven spread, hits: [30, 0, 0]"));
+
+        // A mid-burst non-200 is reported with its index.
+        let (proxy, _) = spawn_http_mock(|i| {
+            if i == 3 {
+                (503, Vec::new(), false)
+            } else {
+                (200, marker_for(i), false)
+            }
+        })
+        .await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage2()
+            .await;
+        assert!(!r.passed);
+        assert_eq!(r.error.as_deref(), Some("GET 3: got 503"));
+
+        // A body matching no marker fails immediately.
+        let (proxy, _) = spawn_http_mock(|_| (200, b"mystery body".to_vec(), false)).await;
+        let r = ProxyVerifier::new(proxy, None, ups).test_stage2().await;
+        assert!(!r.passed);
+        assert_eq!(r.error.as_deref(), Some("GET 0 matched no upstream"));
+
+        // Marker-learning failure is reported with stage context.
+        let r = ProxyVerifier::new(1, None, vec![("solo".to_string(), 1)])
+            .test_stage2()
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("Upstream markers: Need 3 upstreams, have 1")
+        );
+
+        // An unreachable proxy is reported on the first GET.
+        let r = ProxyVerifier::new(dead_port().await, None, spawn_marker_upstreams().await)
+            .test_stage2()
+            .await;
+        assert!(!r.passed);
+        assert!(
+            r.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("GET 0: Failed to connect"),
+            "{:?}",
+            r.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage3_framing_and_keepalive_failure_modes() {
+        let ups = spawn_marker_upstreams().await;
+
+        // Faithful: HTTP/1.1 + Content-Length + three keep-alive GETs.
+        let (proxy, _) = spawn_http_mock(|_| (200, b"ok".to_vec(), false)).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage3()
+            .await;
+        assert!(r.passed, "framed keep-alive proxy must pass: {:?}", r.error);
+        assert_eq!(r.name, "Stage 3: Valid HTTP/1.1 framing + keep-alive");
+
+        // HTTP/1.0 status line is not HTTP/1.1.
+        let raw10 = b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec();
+        let proxy = spawn_raw_oneshot(move |_| raw10.clone()).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage3()
+            .await;
+        assert!(!r.passed);
+        assert_eq!(r.error.as_deref(), Some("Status line is not HTTP/1.1"));
+
+        // Close-delimited body: neither Content-Length nor chunked coding.
+        let raw_none =
+            b"HTTP/1.1 200 OK\r\nX-Note: no framing\r\nConnection: close\r\n\r\nok".to_vec();
+        let proxy = spawn_raw_oneshot(move |_| raw_none.clone()).await;
+        let r = ProxyVerifier::new(proxy, None, ups.clone())
+            .test_stage3()
+            .await;
+        assert!(!r.passed);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("No Content-Length or chunked framing")
+        );
+
+        // A proxy that closes after every response fails keep-alive.
+        let (proxy, _) = spawn_http_mock(|_| (200, b"ok".to_vec(), true)).await;
+        let r = ProxyVerifier::new(proxy, None, ups).test_stage3().await;
+        assert!(!r.passed);
+        assert!(
+            r.error.as_deref().unwrap_or("").starts_with("keep-alive:"),
+            "{:?}",
+            r.error
+        );
+
+        // An unreachable proxy fails before any framing check.
+        let r = ProxyVerifier::new(dead_port().await, None, vec![])
+            .test_stage3()
+            .await;
+        assert!(!r.passed);
+        assert!(
+            r.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("GET / via proxy: Failed to connect"),
+            "{:?}",
+            r.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_routing_aggregates_three_stages() {
+        let ups = spawn_marker_upstreams().await;
+        let (proxy, seen) = spawn_http_mock(|i| (200, marker_for(i), false)).await;
+        let summary = ProxyVerifier::new(proxy, None, ups).run_routing().await;
+
+        assert_eq!(summary.total_stages, 3);
+        assert_eq!(summary.passed_count, 3, "{:?}", summary.stages);
+        assert_eq!(summary.pass_rate, 100.0);
+        assert_eq!(summary.stages[0].stage, 1);
+        assert_eq!(summary.stages[1].stage, 2);
+        assert_eq!(summary.stages[2].stage, 3);
+        assert!(summary.stages.iter().all(|s| s.passed && s.error.is_none()));
+        // 1 (stage 1) + 30 (stage 2) + 1 + 3 (stage 3 fetch + keep-alive).
+        assert_eq!(seen.lock().unwrap().len(), 35);
+    }
+
+    #[tokio::test]
+    async fn test_run_failover_short_circuits_without_three_upstreams() {
+        let v = ProxyVerifier::new(1, None, vec![("only".to_string(), 1)]);
+        let r = v.run_failover().await;
+        assert!(!r.passed);
+        assert_eq!(r.stage, 4);
+        assert_eq!(r.name, "Stage 4: Failover (one upstream down)");
+        assert_eq!(r.error.as_deref(), Some("Need 3 upstreams, have 1"));
+    }
+
+    #[tokio::test]
+    async fn test_measure_throughput_pass_and_failures() {
+        let (proxy, _) = spawn_http_mock(|_| (200, b"ok".to_vec(), true)).await;
+        let fps = ProxyVerifier::new(proxy, None, vec![])
+            .measure_throughput()
+            .await
+            .expect("200 local 200s must measure");
+        assert!(fps > 0.0 && fps.is_finite(), "fps={fps}");
+
+        let (proxy, _) = spawn_http_mock(|_| (503, b"down".to_vec(), true)).await;
+        assert!(ProxyVerifier::new(proxy, None, vec![])
+            .measure_throughput()
+            .await
+            .is_none());
+
+        let dead = dead_port().await;
+        assert!(ProxyVerifier::new(dead, None, vec![])
+            .measure_throughput()
+            .await
+            .is_none());
+    }
 }
