@@ -219,16 +219,22 @@ non-redis acceptance adapters.
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`):
-**61.0% lines** — 36,283 lines total, 14,140 missed. The CI gate was
-raised to 80 (Q6) but enforcement is inert while Actions is disabled; the
-substantive requirement is the code itself at 80%.
+**76.58% lines** (33,309/43,494; regions 77.8%, functions 82.1%), up from
+61.03% before the waves. Note: the CI command counts test code in both
+numerator and denominator, so each new covered test line moves the ratio
+toward 100%; production gaps are tracked separately below and remain the
+honest target.
 
-Top gaps (missed lines): main.rs 3,090 · web/server.rs 2,621 ·
-pipeline.rs 2,177 · web/queue.rs 1,703 · sandbox/docker.rs 1,000 ·
-sandbox/opencode.rs 973 · verifier/redis.rs 801 · report/leaderboard.rs
-750 · verifier/pubsub.rs 733 · report/cost_annotate.rs 623 ·
-sandbox/omp.rs 588 · main_campaign.rs 580 (0%) · report/repair.rs 566
-(7%) · remote.rs 553 · verifier/{proxy,binproto,pdf,wal} ~2,400 combined.
+Top gaps (missed lines): pipeline.rs 1,542 · main.rs 1,117 ·
+web/server.rs 1,098 · web/queue.rs 798 · sandbox/docker.rs 711 ·
+sandbox/opencode.rs 620 · verifier/redis.rs 578 · report/leaderboard.rs
+439 · sandbox/omp.rs 377 · main_campaign.rs 342 · bench/batch_ref.rs 268
+· report/portal.rs 258 · verifier/http.rs 244 · remote.rs 196.
+
+Wave 1 (+15.5 pts): pubsub 31→95%, pdf 35→96.6%, proxy 58→88.4%, wal +
+binproto mock suites, judge 48→95.7%, review_cmd 0→96.9%, repair 7→85.9%,
+cost_annotate 28→56.4% (+ the total_cost_usd gate fix), CLI handlers
+(37 bin tests), web/server 48→75.8%, web/queue 35→67.7%.
 
 Workstreams (in flight / planned):
 - [x] Verifier suites with mock servers — **landed**: pubsub 31→95%, pdf
@@ -239,13 +245,10 @@ Workstreams (in flight / planned):
 - [x] report/repair.rs 7→85.9% + report/cost_annotate.rs 28→56.4%
       (the suite also exposed and fixed the `total_cost_usd` annotation
       gate bug).
-- [ ] main_campaign.rs (0%; bin-side, needs its own test seam).
-- [ ] web/{server,queue}.rs route/queue tests (biggest remaining:
-      2,621 + 1,703 missed).
-- [ ] pipeline.rs (2,177) / sandbox/{docker,opencode}.rs (1,000 + 973)
-      — integration-style (docker available here; CI runners have it).
-- [ ] report/leaderboard.rs (750 missed) / remote.rs (553) /
-      sandbox/omp.rs (588) — second wave.
+- [ ] Wave 3 (launched): sandbox/docker.rs + bench/batch_ref.rs;
+      report/leaderboard.rs + report/portal.rs + remote.rs.
+- [ ] Wave 4: pipeline.rs, sandbox/opencode.rs + omp.rs, main.rs residual,
+      main_campaign.rs (bin-side seam), verifier/redis.rs residual.
 Re-measure with `scripts/coverage.sh` after each wave; keep the CI gate
 at 80 so re-enabling Actions enforces the requirement.
 
