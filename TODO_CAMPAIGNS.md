@@ -251,6 +251,17 @@ at 80 so re-enabling Actions enforces the requirement.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-10, 2026-10-14 run 12, `..._181711`, RULES
+  `2026-10-14.13`): reached **0**. s0 PASS 3/3 ($0.0539, 28t, C). s1
+  **FAIL 0/4** ($0.0607, 13+12, regressions [1,2,4] sev 3): the model
+  rewrote `server.c` to add SET-options + pub/sub but dropped the RESP
+  parsing section in the rewrite (build: undefined `parse_command`); the
+  repair's reinsertion landed mid-`dispatch` (split function) and its
+  turn budget went to edit-tool syntax friction trying to cut/paste the
+  block; final build broken -> all stages refused. **Compliance fix
+  verified live** (no false DQ; the candidate used a `/dev/tcp` probe,
+  and client-mode nc/socat are now allowed by construction). $0.1145,
+  tickets/$ 8.7.
 - **ling-3.1-flash** (spec 0-10, 2026-10-14 run 11, `..._180418`, RULES
   `2026-10-14.12`): s0 PASS 3/3 ($0.0283, 19t, Python). s1 **invalidated
   by an anti-cheat false positive**: the model's own test script piped a
