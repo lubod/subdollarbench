@@ -8,6 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.7`: stage-7 (INFO) verifier fix. The link-counter check
+///   was unpassable: the test opened ONE connection before `info0` and
+///   then required `total_connections_received` to grow by `info1`, with
+///   nothing creating a second connection. It now opens and closes a
+///   second client inside the window. Found by adding a counting-mock
+///   test for the stage; stage 7 had never executed live on any run as of
+///   this date, so no recorded cells are affected. Rows stamped
+///   `2026-10-14.6` or earlier are not comparable without
+///   `backfill --yes`.
 /// - `2026-10-14.6`: campaign repair reserve floor 8 -> 12 (D6 amendment,
 ///   DECISIONS #12). Reserve is now `max(max_turns/4, 12)` capped at
 ///   `max_turns/2`, so initial caps for campaign tickets drop from 22->18
@@ -259,7 +268,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.6";
+pub const RULES_VERSION: &str = "2026-10-14.7";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

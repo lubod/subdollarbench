@@ -1138,6 +1138,21 @@ impl RedisVerifier {
         }
         expect_commands += 1;
 
+        // A second client connects (and leaves) inside the window: the
+        // connection counter must observe it. Without this the check below
+        // is unpassable — the only connection predates info0, so a
+        // faithful server's total_connections_received delta is zero.
+        let mut second = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("second client connect: {e}")),
+        };
+        match Self::send_resp_cmd(&mut second, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("second client PING: {r:?}")),
+            Err(e) => return fail(format!("second client PING failed: {e}")),
+        }
+        drop(second);
+
         let info1 = match Self::fetch_info(&mut stream).await {
             Ok(m) => m,
             Err(e) => return fail(e),
@@ -1626,6 +1641,158 @@ mod tests {
         assert_eq!(m2.get("keyspace_misses").map(String::as_str), Some("2"));
         let m3 = RedisVerifier::parse_info("UPTIME_IN_SECONDS:9\n");
         assert_eq!(m3.get("uptime_in_seconds").map(String::as_str), Some("9"));
+    }
+
+    /// Stateful RESP mock with INFO counters for stage 7. Tracks global
+    /// connections/commands/hits/misses/expired plus per-key PX expiry and
+    /// serves them as INFO lines. `freeze_expired` models a hardcoded
+    /// counter (`expired_keys` never moves) for the negative case.
+    async fn spawn_info_mock(freeze_expired: bool) -> u16 {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[derive(Default)]
+        struct Counters {
+            conns: i64,
+            cmds: i64,
+            hits: i64,
+            misses: i64,
+            expired: i64,
+        }
+        type State = (HashMap<String, String>, HashMap<String, Instant>, Counters);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state: Arc<Mutex<State>> = Arc::new(Mutex::new((
+            HashMap::new(),
+            HashMap::new(),
+            Counters::default(),
+        )));
+        let started = Instant::now();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let state = state.clone();
+                state.lock().unwrap().2.conns += 1;
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        let frame = (|| -> Option<(Vec<String>, usize)> {
+                            let s = std::str::from_utf8(&buf).ok()?;
+                            let mut lines = s.split("\r\n");
+                            let head = lines.next()?;
+                            let count: usize = head.strip_prefix('*')?.parse().ok()?;
+                            let mut args = Vec::new();
+                            let mut consumed = head.len() + 2;
+                            for _ in 0..count {
+                                let h = lines.next()?;
+                                let len: usize = h.strip_prefix('$')?.parse().ok()?;
+                                consumed += h.len() + 2;
+                                let data = lines.next()?;
+                                if data.len() != len {
+                                    return None;
+                                }
+                                args.push(data.to_string());
+                                consumed += len + 2;
+                            }
+                            Some((args, consumed))
+                        })();
+                        let Some((args, used)) = frame else { continue };
+                        buf.drain(..used);
+                        let cmd = args[0].to_uppercase();
+                        let reply = {
+                            let (db, exp, c) = &mut *state.lock().unwrap();
+                            c.cmds += 1;
+                            match cmd.as_str() {
+                                "PING" => "+PONG\r\n".to_string(),
+                                "SET" if args.len() == 3 => {
+                                    db.insert(args[1].clone(), args[2].clone());
+                                    exp.remove(&args[1]);
+                                    "+OK\r\n".to_string()
+                                }
+                                "SET" if args.len() == 5 && args[3].eq_ignore_ascii_case("PX") => {
+                                    let ms: u64 = args[4].parse().unwrap_or(0);
+                                    db.insert(args[1].clone(), args[2].clone());
+                                    exp.insert(
+                                        args[1].clone(),
+                                        Instant::now() + std::time::Duration::from_millis(ms),
+                                    );
+                                    "+OK\r\n".to_string()
+                                }
+                                "GET" if args.len() == 2 => {
+                                    let mut gone = false;
+                                    if let Some(dl) = exp.get(&args[1]) {
+                                        if Instant::now() >= *dl {
+                                            db.remove(&args[1]);
+                                            exp.remove(&args[1]);
+                                            c.expired += 1;
+                                            gone = true;
+                                        }
+                                    }
+                                    match if gone { None } else { db.get(&args[1]) } {
+                                        Some(v) => {
+                                            c.hits += 1;
+                                            format!("${}\r\n{}\r\n", v.len(), v)
+                                        }
+                                        None => {
+                                            c.misses += 1;
+                                            "$-1\r\n".to_string()
+                                        }
+                                    }
+                                }
+                                "INFO" => {
+                                    let up = started.elapsed().as_secs();
+                                    let expired = if freeze_expired { 0 } else { c.expired };
+                                    let body = format!(
+                                        "# Server\r\nuptime_in_seconds:{up}\r\n\
+                                         connected_clients:1\r\nrejected_connections:0\r\n\
+                                         # Stats\r\ntotal_connections_received:{}\r\n\
+                                         total_commands_processed:{}\r\nkeyspace_hits:{}\r\n\
+                                         keyspace_misses:{}\r\nexpired_keys:{expired}\r\n",
+                                        c.conns, c.cmds, c.hits, c.misses
+                                    );
+                                    format!("${}\r\n{}\r\n", body.len(), body)
+                                }
+                                _ => "-ERR unknown\r\n".to_string(),
+                            }
+                        };
+                        if socket.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// Stage 7 must pass against a faithful counting server and must reject
+    /// a frozen counter. Guards the verifier logic itself: writing this test
+    /// caught the connection-delta check being unpassable (the test never
+    /// opened a second connection; stage 7 had never executed live).
+    #[tokio::test]
+    async fn test_stage_info_mock_pass_and_frozen_counter_fail() {
+        let port = spawn_info_mock(false).await;
+        let v = RedisVerifier::new(port, Some("infomock"));
+        let st = v.test_stage_info().await;
+        assert!(st.passed, "faithful counters must pass: {:?}", st.error);
+
+        let port = spawn_info_mock(true).await;
+        let v = RedisVerifier::new(port, Some("infomock"));
+        let st = v.test_stage_info().await;
+        assert!(!st.passed, "a frozen expired_keys counter must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("expired_keys"),
+            "error should name expired_keys: {:?}",
+            st.error
+        );
     }
 
     /// Stateful RESP mock for stage 8: replies +OK to SETs until `fail_after`

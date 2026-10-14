@@ -259,6 +259,12 @@ non-redis acceptance adapters.
   differential vs ref-redis, malformed survival); anchors keep every
   stage network alive. Stage 7 (INFO) and stage 9 (tests&CI) remain
   unexecuted live; canary run 5 in flight chases them.
+  *(2026-10-14 follow-up: writing a counting-mock test for stage 7 found
+  its `total_connections_received` delta check unpassable — the test
+  never opened a second connection, so a faithful server's correctly flat
+  counter failed. Fixed: the test now connects/disconnects a second
+  client; mock test asserts pass + frozen-counter fail. RULES
+  `2026-10-14.7`. Stage 7 still needs a live execution.)*
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
   **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
   25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
