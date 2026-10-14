@@ -1358,7 +1358,17 @@ impl BenchmarkPipeline {
             && !v_outcome.infra_error
             && !config.eval_only
         {
-            logger.log(&format!(
+            // A fault with no runnable candidate produced no stage results:
+            // there is nothing to surgically repair, and the prompt's
+            // "fix your existing implementation" is meaningless (live: a
+            // quota-blocked model burned a repair round against an empty
+            // workspace). Skip straight to the verdict.
+            if v_outcome.stage_results.is_empty() {
+                logger.log(
+                    "[FEEDBACK] No stage results to feed back (no runnable candidate); skipping repair rounds.",
+                );
+            } else {
+                logger.log(&format!(
                 "[FEEDBACK] Initial attempt passed {} of {} stages ({:.1}%). Starting interactive repair loop (max {} rounds)...",
                 v_outcome.passed_stages,
                 v_outcome.total_stages,
@@ -1366,167 +1376,168 @@ impl BenchmarkPipeline {
                 config.feedback_rounds
             ));
 
-            for round in 1..=config.feedback_rounds {
-                if let Some(ref cf) = cancel_flag {
-                    if cf.load(Ordering::SeqCst) {
-                        sandbox.cleanup();
-                        return Err(anyhow!("Benchmark run was cancelled by user"));
+                for round in 1..=config.feedback_rounds {
+                    if let Some(ref cf) = cancel_flag {
+                        if cf.load(Ordering::SeqCst) {
+                            sandbox.cleanup();
+                            return Err(anyhow!("Benchmark run was cancelled by user"));
+                        }
                     }
-                }
 
-                // Pool check FIRST: an exhausted pool must break before
-                // stopping the candidate, writing FEEDBACK_REPORT.md, or
-                // recording a round that never runs. (Previously all three
-                // happened first, so the manifest recorded a phantom round.)
-                let global_max = config.max_turns;
-                let turns_remaining = match repair_round_allowance(
-                    global_max,
-                    omp_stats.steps_taken,
-                ) {
-                    RepairAllowance::Exhausted => {
-                        logger.log(&format!(
+                    // Pool check FIRST: an exhausted pool must break before
+                    // stopping the candidate, writing FEEDBACK_REPORT.md, or
+                    // recording a round that never runs. (Previously all three
+                    // happened first, so the manifest recorded a phantom round.)
+                    let global_max = config.max_turns;
+                    let turns_remaining = match repair_round_allowance(
+                        global_max,
+                        omp_stats.steps_taken,
+                    ) {
+                        RepairAllowance::Exhausted => {
+                            logger.log(&format!(
                             "[LIMIT] Global turn budget ({} turns) reached across attempts. Concluding run.",
                             global_max
                         ));
-                        break;
-                    }
-                    RepairAllowance::Uncapped => None,
-                    RepairAllowance::Capped(n) => Some(n),
-                };
-                feedback_rounds_used = round;
+                            break;
+                        }
+                        RepairAllowance::Uncapped => None,
+                        RepairAllowance::Capped(n) => Some(n),
+                    };
+                    feedback_rounds_used = round;
 
-                // 1. Stop candidate container to release ports and candidate name
-                let _ = sandbox.stop_candidate();
+                    // 1. Stop candidate container to release ports and candidate name
+                    let _ = sandbox.stop_candidate();
 
-                // 2. Format feedback prompt and save FEEDBACK_REPORT.md in workspace
-                let feedback_prompt = Self::format_feedback_prompt(
-                    config.task,
-                    v_outcome.passed_stages,
-                    v_outcome.total_stages,
-                    &v_outcome.stage_results,
-                    &v_outcome.candidate_logs,
-                );
-                let _ = fs::write(config.workdir.join("FEEDBACK_REPORT.md"), &feedback_prompt);
+                    // 2. Format feedback prompt and save FEEDBACK_REPORT.md in workspace
+                    let feedback_prompt = Self::format_feedback_prompt(
+                        config.task,
+                        v_outcome.passed_stages,
+                        v_outcome.total_stages,
+                        &v_outcome.stage_results,
+                        &v_outcome.candidate_logs,
+                    );
+                    let _ = fs::write(config.workdir.join("FEEDBACK_REPORT.md"), &feedback_prompt);
 
-                logger.log(&format!(
-                    "[FEEDBACK] ━━━ Repair Round {}/{} (Model: {}) ━━━",
-                    round, config.feedback_rounds, config.model
-                ));
+                    logger.log(&format!(
+                        "[FEEDBACK] ━━━ Repair Round {}/{} (Model: {}) ━━━",
+                        round, config.feedback_rounds, config.model
+                    ));
 
-                // Clean any lingering signal file before launching repair session
-                let _ = fs::remove_file(config.workdir.join("READY"));
+                    // Clean any lingering signal file before launching repair session
+                    let _ = fs::remove_file(config.workdir.join("READY"));
 
-                // 3. Launch agent for surgical fix with feedback prompt
-                let round_limits = AgentExecutionLimits {
-                    max_turns: turns_remaining,
-                    max_budget_usd: if config.budget_usd > 0.0 {
-                        Some(config.budget_usd)
-                    } else {
-                        None
-                    },
-                    timeout_seconds: if config.timeout_min > 0 {
-                        Some(config.timeout_min * 60)
-                    } else {
-                        None
-                    },
-                };
+                    // 3. Launch agent for surgical fix with feedback prompt
+                    let round_limits = AgentExecutionLimits {
+                        max_turns: turns_remaining,
+                        max_budget_usd: if config.budget_usd > 0.0 {
+                            Some(config.budget_usd)
+                        } else {
+                            None
+                        },
+                        timeout_seconds: if config.timeout_min > 0 {
+                            Some(config.timeout_min * 60)
+                        } else {
+                            None
+                        },
+                    };
 
-                let round_run_id = format!("{}_r{}", run_id, round);
-                let round_res = Self::run_agent_session(
-                    &config,
-                    &round_run_id,
-                    &feedback_prompt,
-                    round_limits,
-                    &sandbox,
-                    &logger,
-                    cancel_flag.clone(),
-                )
-                .await;
+                    let round_run_id = format!("{}_r{}", run_id, round);
+                    let round_res = Self::run_agent_session(
+                        &config,
+                        &round_run_id,
+                        &feedback_prompt,
+                        round_limits,
+                        &sandbox,
+                        &logger,
+                        cancel_flag.clone(),
+                    )
+                    .await;
 
-                match round_res {
-                    Ok(r_stats) => {
-                        prompt_tokens += r_stats.prompt_tokens;
-                        cached_tokens += r_stats.cached_tokens;
-                        completion_tokens += r_stats.completion_tokens;
-                        omp_stats.steps_taken += r_stats.steps_taken;
-                        omp_stats.total_tokens += r_stats.total_tokens;
-                        logger.log(&format!(
+                    match round_res {
+                        Ok(r_stats) => {
+                            prompt_tokens += r_stats.prompt_tokens;
+                            cached_tokens += r_stats.cached_tokens;
+                            completion_tokens += r_stats.completion_tokens;
+                            omp_stats.steps_taken += r_stats.steps_taken;
+                            omp_stats.total_tokens += r_stats.total_tokens;
+                            logger.log(&format!(
                             "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
                             round, r_stats.steps_taken, r_stats.prompt_tokens, r_stats.completion_tokens
                         ));
-                    }
-                    Err(e) => {
-                        logger.log(&format!(
-                            "[FEEDBACK ERROR] Round {} agent failed: {}",
-                            round, e
-                        ));
-                        // Count partial work against the pool even on failure,
-                        // mirroring the main agent path: a failed round still
-                        // burned turns and tokens.
-                        let partial = e
-                            .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
-                            .map(|oe| &oe.partial_stats)
-                            .or_else(|| {
-                                e.downcast_ref::<crate::sandbox::omp::OmpBillingError>()
-                                    .map(|be| &be.partial_stats)
-                            });
-                        if let Some(ps) = partial {
-                            prompt_tokens += ps.prompt_tokens;
-                            cached_tokens += ps.cached_tokens;
-                            completion_tokens += ps.completion_tokens;
-                            omp_stats.steps_taken += ps.steps_taken;
-                            omp_stats.total_tokens += ps.total_tokens;
+                        }
+                        Err(e) => {
+                            logger.log(&format!(
+                                "[FEEDBACK ERROR] Round {} agent failed: {}",
+                                round, e
+                            ));
+                            // Count partial work against the pool even on failure,
+                            // mirroring the main agent path: a failed round still
+                            // burned turns and tokens.
+                            let partial = e
+                                .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
+                                .map(|oe| &oe.partial_stats)
+                                .or_else(|| {
+                                    e.downcast_ref::<crate::sandbox::omp::OmpBillingError>()
+                                        .map(|be| &be.partial_stats)
+                                });
+                            if let Some(ps) = partial {
+                                prompt_tokens += ps.prompt_tokens;
+                                cached_tokens += ps.cached_tokens;
+                                completion_tokens += ps.completion_tokens;
+                                omp_stats.steps_taken += ps.steps_taken;
+                                omp_stats.total_tokens += ps.total_tokens;
+                            }
                         }
                     }
-                }
 
-                if let Some(ref cf) = cancel_flag {
-                    if cf.load(Ordering::SeqCst) {
-                        sandbox.cleanup();
-                        return Err(anyhow!("Benchmark run was cancelled by user"));
+                    if let Some(ref cf) = cancel_flag {
+                        if cf.load(Ordering::SeqCst) {
+                            sandbox.cleanup();
+                            return Err(anyhow!("Benchmark run was cancelled by user"));
+                        }
                     }
-                }
 
-                // 4. Re-verify the updated candidate
-                let _ = fs::remove_file(config.workdir.join("READY"));
-                let next_outcome = Self::run_verification(
-                    config.task,
-                    &config.workdir,
-                    &sandbox,
-                    port,
-                    &verifier_seed,
-                    false,
-                    config.worker,
-                    &logger,
-                    config
-                        .campaign_stage
-                        .as_ref()
-                        .map(|c| c.accepted_stages.as_slice()),
-                )
-                .await;
+                    // 4. Re-verify the updated candidate
+                    let _ = fs::remove_file(config.workdir.join("READY"));
+                    let next_outcome = Self::run_verification(
+                        config.task,
+                        &config.workdir,
+                        &sandbox,
+                        port,
+                        &verifier_seed,
+                        false,
+                        config.worker,
+                        &logger,
+                        config
+                            .campaign_stage
+                            .as_ref()
+                            .map(|c| c.accepted_stages.as_slice()),
+                    )
+                    .await;
 
-                logger.log(&format!(
-                    "[FEEDBACK] Round {} test result: {} of {} stages passed ({:.1}%)",
-                    round,
-                    next_outcome.passed_stages,
-                    next_outcome.total_stages,
-                    next_outcome.pass_rate
-                ));
-
-                if next_outcome.pass_rate > best_pass_rate {
-                    best_pass_rate = next_outcome.pass_rate;
-                }
-
-                if next_outcome.pass_rate >= 100.0 {
                     logger.log(&format!(
+                        "[FEEDBACK] Round {} test result: {} of {} stages passed ({:.1}%)",
+                        round,
+                        next_outcome.passed_stages,
+                        next_outcome.total_stages,
+                        next_outcome.pass_rate
+                    ));
+
+                    if next_outcome.pass_rate > best_pass_rate {
+                        best_pass_rate = next_outcome.pass_rate;
+                    }
+
+                    if next_outcome.pass_rate >= 100.0 {
+                        logger.log(&format!(
                         "[FEEDBACK] SUCCESS! Candidate surgically repaired to 100.0% stage pass in round {}!",
                         round
                     ));
-                    was_repaired = true;
-                    v_outcome = next_outcome;
-                    break;
-                } else {
-                    v_outcome = next_outcome;
+                        was_repaired = true;
+                        v_outcome = next_outcome;
+                        break;
+                    } else {
+                        v_outcome = next_outcome;
+                    }
                 }
             }
         }

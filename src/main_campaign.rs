@@ -430,7 +430,14 @@ fn print_rollup(r: &CampaignRollup) {
     }
     match r.reached {
         Some(id) => println!("reached: ticket {id}"),
-        None => println!("reached: none (ticket 0 failed)"),
+        None => {
+            let first = r.stages.first();
+            let stopped = match first.map(|s| s.status.as_str()) {
+                Some("fault") => "stopped: ticket 0 fault (harness/provider, not a model verdict)",
+                _ => "reached: none (ticket 0 failed)",
+            };
+            println!("{stopped}");
+        }
     }
     if r.over_budget {
         println!(

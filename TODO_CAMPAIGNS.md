@@ -213,8 +213,14 @@ non-redis acceptance adapters.
   tickets/$ 47.5. **Calibration signal**: the max/4 repair reserve (min 1)
   can be too small for slower models — consider a floor (e.g. 8 turns) or
   larger stage budgets once more cells confirm; do not tune on n=1.
-- **nemotron:free**: first launch crashed on a spec/binary mismatch mid-grid
-  (old binary, new gap-tolerant spec); rebuilt + relaunched.
+- **nemotron:free**: quota-blocked (`free-models-per-day-high-balance`,
+  retry ~10.4h). Recorded as a ticket-0 **FAULT** (1 turn, $0.0002) — the
+  throttle classification worked; acceptance counted 3 stages, campaign
+  stopped. Two refinements landed from this cell: the repair loop is now
+  SKIPPED when there are no stage results (no runnable candidate -> a
+  repair round is meaningless; the faulted cell burned one against an
+  empty workspace), and the rollup says "stopped: ticket 0 fault" instead
+  of "ticket 0 failed". Re-run next day.
 
 ## Open decisions (operator)
 
