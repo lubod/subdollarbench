@@ -283,6 +283,16 @@ non-redis acceptance adapters.
   end-to-end test against a real fixture git repo — green suite passes,
   toothless always-green suite is rejected. Stage 9 needs a live campaign
   run only if the ladder ever reaches t6.)*
+- **Ticket 7 (dashboard) built** (2026-10-14 late, RULES `2026-10-14.8`):
+  stage 10 verifier (offline HTML + `/api/stats` deltas + SSE JSON frame
+  under concurrent RESP traffic), worker-8090 port publishing gated on
+  acceptance id 10, prompt + spec ticket 7. **Validation: verifier logic
+  is mock-tested (pass / starved-SSE / frozen-stats); the port extras have
+  an args unit test. Live plumbing validation (candidate container with
+  the published port + the stage-10 block) still needs a run that reaches
+  t7 — no model has passed t3 yet.** Nemotron cell at 2026-10-15 00:05
+  runs the 8-ticket spec; its path through t0-t6 is behavior-identical to
+  earlier cells (stage 10 gates on acceptance only).
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
   **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
   25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
