@@ -71,11 +71,21 @@ fn repair_round_allowance(global_max: u32, steps_taken: u32) -> RepairAllowance 
 
 /// Initial-attempt cap: checkpoint at 50 (or max_turns) when feedback repair
 /// is on, full budget otherwise, unlimited when max_turns == 0.
-fn initial_turn_cap(max_turns: u32, feedback_rounds: u32) -> Option<u32> {
+fn initial_turn_cap(max_turns: u32, feedback_rounds: u32, reserve_repair: bool) -> Option<u32> {
     if max_turns == 0 {
         None
     } else if feedback_rounds > 0 {
-        Some(std::cmp::min(max_turns, INITIAL_TURN_CAP_WITH_FEEDBACK))
+        let mut cap = std::cmp::min(max_turns, INITIAL_TURN_CAP_WITH_FEEDBACK);
+        if reserve_repair {
+            // Campaign tickets must leave room for at least one repair
+            // attempt: the shared pool IS max_turns, and the live canary
+            // showed a 25-turn ticket consuming 25/25 on the initial
+            // attempt — the repair round never fired and a compile error
+            // went unfixed. Reserve a quarter of the pool (min 1 turn).
+            let reserve = (max_turns / 4).max(1);
+            cap = cap.min(max_turns.saturating_sub(reserve)).max(1);
+        }
+        Some(cap)
     } else {
         Some(max_turns)
     }
@@ -1216,7 +1226,11 @@ impl BenchmarkPipeline {
                 config.model, config.effort
             ));
 
-                let initial_turn_cap = initial_turn_cap(config.max_turns, config.feedback_rounds);
+                let initial_turn_cap = initial_turn_cap(
+                    config.max_turns,
+                    config.feedback_rounds,
+                    config.campaign_stage.is_some(),
+                );
 
                 let limits = AgentExecutionLimits {
                     max_turns: initial_turn_cap,
@@ -2198,13 +2212,23 @@ mod tests {
     #[test]
     fn test_initial_turn_cap_checkpoints_only_with_feedback() {
         // No cap configured: unlimited either way.
-        assert_eq!(initial_turn_cap(0, 0), None);
-        assert_eq!(initial_turn_cap(0, 2), None);
-        // Feedback on: checkpoint at 50 (or the smaller max_turns).
-        assert_eq!(initial_turn_cap(100, 2), Some(50));
-        assert_eq!(initial_turn_cap(30, 1), Some(30));
+        assert_eq!(initial_turn_cap(0, 0, false), None);
+        assert_eq!(initial_turn_cap(0, 2, false), None);
+        assert_eq!(initial_turn_cap(0, 2, true), None);
+        // Feedback on, single-shot: checkpoint at 50 (or the smaller max).
+        assert_eq!(initial_turn_cap(100, 2, false), Some(50));
+        assert_eq!(initial_turn_cap(30, 1, false), Some(30));
         // Feedback off: full budget up front.
-        assert_eq!(initial_turn_cap(100, 0), Some(100));
+        assert_eq!(initial_turn_cap(100, 0, false), Some(100));
+        // Campaign reserve (D6 option b): a quarter of the pool is kept for
+        // the repair round; big pools are unchanged (50-cap binds first).
+        assert_eq!(initial_turn_cap(100, 2, true), Some(50));
+        assert_eq!(initial_turn_cap(40, 2, true), Some(30));
+        assert_eq!(initial_turn_cap(25, 1, true), Some(19));
+        assert_eq!(initial_turn_cap(4, 1, true), Some(3));
+        assert_eq!(initial_turn_cap(1, 1, true), Some(1));
+        // No repair rounds means no reserve.
+        assert_eq!(initial_turn_cap(25, 0, true), Some(25));
     }
 
     #[test]

@@ -116,3 +116,15 @@ verifier).
 Next trigger: after the sdb-kv model grid validates the method; port
 order sdb-kv stage-2 -> sdb-edge -> sdb-queue -> sdb-http.
 Ref: `TODO_CAMPAIGNS.md` portfolio, `docs/PROPOSAL-iterative-campaigns.md`.
+
+## 12. Campaign repair reserve: initial cap = min(max_turns - max_turns/4, 50) (2026-10-14)
+Live canary evidence: a 25-turn ticket consumed the whole shared pool
+(25/25) on the initial attempt, the repair round never fired
+("Global turn budget reached across attempts"), and a last-minute rewrite
+shipped a compile error that repair would have caught. `max_turns` IS the
+pool; the old initial cap = min(max_turns, 50) left a 25-turn ticket with
+zero repair room. Option (b): campaign stages reserve a quarter of the
+pool (min 1 turn) for repair; single-shot behavior unchanged; pools >=50
+are unaffected (the 50-cap binds first). Revisit if models thrash against
+the reduced initial budget (watch cutoffs / regressions on the re-run).
+Ref: `src/pipeline.rs` initial_turn_cap, `TODO_CAMPAIGNS.md` D6.

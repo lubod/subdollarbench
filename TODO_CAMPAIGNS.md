@@ -182,12 +182,11 @@ non-redis acceptance adapters.
 - [ ] D3. Curve choice (G3).
 - [ ] D4. SPRT vs top-up (G2).
 - [ ] D5. Repo CI coverage gate 50 -> 80 (`--fail-under-lines`).
-- [ ] D6. Stage budgets: canary finding — `max_turns` is the shared pool
-  (initial cap = min(max_turns, 50) when feedback is on), so ticket 1's
-  25 turns were consumed by the initial attempt and the repair round
-  never ran. Options: (a) budget stages >=60 turns so the 50-cap leaves
-  headroom, (b) campaign-side reserve (initial = min(max_turns - max/4,
-  50)), (c) accept cap-exhaustion as a fail. Calibrate on the re-run.
+- [x] D6. Stage budgets (2026-10-14): option **(b)** implemented — campaign
+  stages reserve `max_turns/4` (min 1 turn) for the repair round; initial
+  cap = min(max_turns - reserve, 50). Single-shot behavior unchanged; big
+  pools unaffected (the 50-cap binds first). See DECISIONS #12. Canary
+  re-run under the policy (watch: does ticket 1 convert with repair room?).
 
 ## Rules & gates
 
