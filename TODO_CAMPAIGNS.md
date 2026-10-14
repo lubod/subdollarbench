@@ -247,6 +247,20 @@ Actions enforces the requirement.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-10, 2026-10-14 run 10, `..._172751`, RULES
+  `2026-10-14.12`): **reached 4 — new best; first run past s3.** s0 3/3
+  ($0.0265, 28t), s1 4/4 ($0.0260, 13t), s2 5/5 ($0.0484, 13+12 repair),
+  s3 durability **PASS 6/6 ($0.0675, 36t — the full pool)**: the Q2 raise
+  (30->36) was decisive (four prior 30-turn attempts died in this class).
+  s4 ENOSPC **PASS 7/7 ($0.0408, 30t)**: **stage 8's pass path executed
+  live for the first time** — the fault container ran and the model's
+  `SDB_DATA_DIR` + honest write-error implementation passed. s5 INFO
+  **FAIL 0/8** ($0.0486, 13+12, regressions [1..6,8] sev 3): the initial
+  attempt correctly failed stage 7 (`-ERR unknown command 'INFO'` —
+  **stage 7's first live execution**, verdict machinery correct); the
+  repair round botched the build (mangled `del`, unused imports, missing
+  return) and ran out; re-verification refused. $0.2578, tickets/$ 19.4,
+  5 regression-free. Harness clean (anchor, refs, ENOSPC lifecycle).
 - **LADDER COMPLETE (2026-10-14 evening):** all 11 tickets built —
   stages 1-13. Ticket 10 (3-node HA, RULES `2026-10-14.12`) per operator
   decision Q1: automatic failover (T=10s, deterministic leader), rejoin
