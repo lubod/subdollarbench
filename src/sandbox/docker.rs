@@ -114,6 +114,9 @@ pub struct CandidateRunExtras {
     pub tmpfs: Vec<String>,
     /// Environment variables for the container.
     pub env: Vec<(String, String)>,
+    /// Extra container ports published 1:1 on 127.0.0.1 (dashboard stage:
+    /// the worker's HTTP port must be reachable from the harness).
+    pub ports: Vec<u16>,
 }
 
 impl Default for SandboxManager {
@@ -1106,6 +1109,7 @@ impl SandboxManager {
             &CandidateRunExtras {
                 tmpfs: vec!["/data:size=8m".to_string()],
                 env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
+                ports: Vec::new(),
             },
         )
     }
@@ -1119,6 +1123,10 @@ impl SandboxManager {
         for (k, v) in &extras.env {
             out.push("-e".to_string());
             out.push(format!("{k}={v}"));
+        }
+        for p in &extras.ports {
+            out.push("-p".to_string());
+            out.push(format!("127.0.0.1:{p}:{p}"));
         }
         out
     }
@@ -1972,6 +1980,24 @@ mod gc_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Dashboard plumbing: extra ports must publish 1:1 on loopback, and
+    /// the ENOSPC extras must stay single-purpose.
+    #[test]
+    fn test_candidate_extras_args() {
+        use super::{CandidateRunExtras, SandboxManager};
+        let extras = CandidateRunExtras {
+            tmpfs: vec!["/data:size=8m".to_string()],
+            env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
+            ports: vec![8090],
+        };
+        let args = SandboxManager::candidate_extras_args(&extras);
+        assert!(args.windows(2).any(|w| w == ["--tmpfs", "/data:size=8m"]));
+        assert!(args.windows(2).any(|w| w == ["-e", "SDB_DATA_DIR=/data"]));
+        assert!(args.windows(2).any(|w| w == ["-p", "127.0.0.1:8090:8090"]));
+        let none = CandidateRunExtras::default();
+        assert!(SandboxManager::candidate_extras_args(&none).is_empty());
+    }
+
     #[test]
     fn test_egress_proxy_allowlist_blocks_exfil() {
         use super::egress_allowed;

@@ -187,9 +187,9 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
         }
         let mut seen = HashSet::new();
         for id in a {
-            if !(1..=9).contains(id) {
+            if !(1..=10).contains(id) {
                 bail!(
-                    "campaign '{}': stage {} acceptance id {} out of range 1..=9",
+                    "campaign '{}': stage {} acceptance id {} out of range 1..=10",
                     spec.name,
                     s.id,
                     id
@@ -714,11 +714,17 @@ mod tests {
         let bad: CampaignSpec = serde_json::from_value(v).unwrap();
         assert!(validate_spec(&bad, &lc.root).is_err());
 
-        // Out-of-range acceptance id.
+        // Out-of-range acceptance id (id 10 is valid now: dashboard stage).
         let mut v = good.clone();
-        v["stages"][0]["acceptance"]["redis_stages"] = serde_json::json!([10]);
+        v["stages"][0]["acceptance"]["redis_stages"] = serde_json::json!([11]);
         let bad: CampaignSpec = serde_json::from_value(v).unwrap();
         assert!(validate_spec(&bad, &lc.root).is_err());
+
+        // Stage 10 (dashboard) is a valid acceptance id.
+        let mut v = good.clone();
+        v["stages"][0]["acceptance"]["redis_stages"] = serde_json::json!([1, 10]);
+        let ok: CampaignSpec = serde_json::from_value(v).unwrap();
+        assert!(validate_spec(&ok, &lc.root).is_ok());
 
         // Unsupported task.
         let mut v = good;

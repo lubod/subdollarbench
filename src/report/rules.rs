@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.8`: campaign ticket 7 (dashboard). New pipeline-level
+///   stage 10: `GET /` (offline HTML, no absolute http(s) src/href), `GET
+///   /api/stats` (JSON mirror of the INFO counters; deltas must track
+///   scripted RESP traffic), `GET /events` (text/event-stream with a JSON
+///   `data:` frame inside 2s while RESP traffic runs, all RESP commands
+///   answered). The candidate container publishes the worker's 8090 port
+///   only when a ticket's acceptance includes id 10. Runs only when a
+///   ticket's acceptance explicitly includes id 10; single-shot totals
+///   unchanged; acceptance ids up to 10. Rows stamped `2026-10-14.7` or
+///   earlier are not comparable without `backfill --yes`.
 /// - `2026-10-14.7`: stage-7 (INFO) verifier fix. The link-counter check
 ///   was unpassable: the test opened ONE connection before `info0` and
 ///   then required `total_connections_received` to grow by `info1`, with
@@ -268,7 +278,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.7";
+pub const RULES_VERSION: &str = "2026-10-14.8";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

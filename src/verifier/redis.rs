@@ -1313,6 +1313,347 @@ impl RedisVerifier {
             error: None,
         }
     }
+
+    /// Stage 10 (campaign dashboard ticket; explicit acceptance only): an
+    /// offline dashboard beside RESP. Checks, in order:
+    ///   - `GET /` -> 200 text/html, non-empty, no external resources
+    ///     (absolute http(s) src/href references; the sandbox has no egress);
+    ///   - `GET /api/stats` -> JSON mirroring the INFO counters; the deltas
+    ///     must track scripted RESP traffic (same discipline as stage 7, so
+    ///     a static stats page cannot pass);
+    ///   - `GET /events` -> text/event-stream emitting at least one `data:`
+    ///     JSON frame inside a 2s window while RESP traffic runs;
+    ///   - the RESP port keeps answering while the SSE stream is open.
+    pub async fn test_stage_dashboard(&self, dashboard_port: u16) -> StageResult {
+        let name = "Stage 10: dashboard (HTTP + SSE)".to_string();
+        let fail = |e: String| StageResult {
+            stage: 10,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        const REQUIRED: &[&str] = &[
+            "total_connections_received",
+            "total_commands_processed",
+            "keyspace_hits",
+            "keyspace_misses",
+            "expired_keys",
+            "rejected_connections",
+            "connected_clients",
+            "uptime_in_seconds",
+        ];
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return fail(format!("http client: {e}")),
+        };
+        let base = format!("http://127.0.0.1:{dashboard_port}");
+
+        // ---- GET / : offline HTML ----
+        let root = match client.get(format!("{base}/")).send().await {
+            Ok(r) => r,
+            Err(e) => return fail(format!("GET / failed: {e}")),
+        };
+        if root.status() != reqwest::StatusCode::OK {
+            return fail(format!("GET / -> {}", root.status()));
+        }
+        let ctype = root
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        if !ctype.contains("text/html") {
+            return fail(format!("GET / content-type {ctype:?}, want text/html"));
+        }
+        let body = match root.text().await {
+            Ok(t) => t,
+            Err(e) => return fail(format!("GET / body: {e}")),
+        };
+        if body.trim().is_empty() {
+            return fail("GET / returned an empty body".to_string());
+        }
+        for needle in ["src=\"http", "src='http", "href=\"http", "href='http"] {
+            if body.contains(needle) {
+                return fail(format!(
+                    "GET / references an external resource ({needle}...); the sandbox has no egress"
+                ));
+            }
+        }
+
+        // ---- /api/stats deltas under scripted RESP traffic ----
+        let stats0 = match Self::fetch_dashboard_stats(&client, &base).await {
+            Ok(m) => m,
+            Err(e) => return fail(e),
+        };
+        for f in REQUIRED {
+            if !stats0.contains_key(*f) {
+                return fail(format!(
+                    "/api/stats is missing '{f}' (must mirror INFO; {} fields returned)",
+                    stats0.len()
+                ));
+            }
+        }
+        // Fresh RESP connection inside the window so the connection counter
+        // has something to observe (same trap stage 7 originally had).
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("resp connect: {e}")),
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.get_seed_prefix("dash").hash(&mut h);
+        "dashboard-stage-v1".hash(&mut h);
+        let mut rng = h.finish() | 1;
+        fn xnext(r: &mut u64) -> u64 {
+            *r ^= *r << 13;
+            *r ^= *r >> 7;
+            *r ^= *r << 17;
+            *r
+        }
+        let hits = 4 + (xnext(&mut rng) % 9) as usize;
+        let misses = 4 + (xnext(&mut rng) % 9) as usize;
+        let tag = format!("{:08x}", xnext(&mut rng));
+        let mut expect_commands: i64 = 0;
+        for i in 0..hits {
+            let k = format!("dash_{tag}_{i}");
+            let v = format!("v{i}");
+            match Self::send_resp_cmd(&mut stream, &["SET", &k, &v]).await {
+                Ok(r) if r.trim() == "+OK" => {}
+                Ok(r) => return fail(format!("SET {k}: {r:?}")),
+                Err(e) => return fail(format!("SET {k} failed: {e}")),
+            }
+            expect_commands += 1;
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.contains(&v) => {}
+                Ok(r) => return fail(format!("GET {k}: {r:?}")),
+                Err(e) => return fail(format!("GET {k} failed: {e}")),
+            }
+            expect_commands += 1;
+        }
+        for i in 0..misses {
+            let k = format!("dash_miss_{tag}_{i}");
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.starts_with("$-1") => {}
+                Ok(r) => return fail(format!("GET missing {k}: {r:?}")),
+                Err(e) => return fail(format!("GET missing {k} failed: {e}")),
+            }
+            expect_commands += 1;
+        }
+        let ek = format!("dash_exp_{tag}");
+        match Self::send_resp_cmd(&mut stream, &["SET", &ek, "1", "PX", "150"]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return fail(format!("SET PX: {r:?}")),
+            Err(e) => return fail(format!("SET PX failed: {e}")),
+        }
+        expect_commands += 1;
+        sleep(Duration::from_millis(400)).await;
+        match Self::send_resp_cmd(&mut stream, &["GET", &ek]).await {
+            Ok(r) if r.starts_with("$-1") => {}
+            Ok(r) => return fail(format!("expired key still present on RESP: {r:?}")),
+            Err(e) => return fail(format!("GET expired failed: {e}")),
+        }
+        expect_commands += 1;
+
+        let stats1 = match Self::fetch_dashboard_stats(&client, &base).await {
+            Ok(m) => m,
+            Err(e) => return fail(e),
+        };
+        let delta = |f: &str| -> Option<i64> { Some(stats1.get(f)? - stats0.get(f)?) };
+        for f in REQUIRED {
+            match delta(f) {
+                Some(v) if v >= 0 => {}
+                Some(v) => return fail(format!("/api/stats '{f}' went backwards ({v})")),
+                None => {
+                    return fail(format!(
+                        "/api/stats '{f}' missing or non-numeric after traffic"
+                    ))
+                }
+            }
+        }
+        let hits_d = delta("keyspace_hits").unwrap_or(0);
+        let miss_d = delta("keyspace_misses").unwrap_or(0);
+        let cmds_d = delta("total_commands_processed").unwrap_or(0);
+        let conns_d = delta("total_connections_received").unwrap_or(0);
+        let exp_d = delta("expired_keys").unwrap_or(0);
+        if hits_d < hits as i64 {
+            return fail(format!(
+                "/api/stats hits delta {hits_d} < executed hits {hits}"
+            ));
+        }
+        if miss_d < misses as i64 {
+            return fail(format!(
+                "/api/stats misses delta {miss_d} < executed misses {misses}"
+            ));
+        }
+        if cmds_d < expect_commands {
+            return fail(format!(
+                "/api/stats commands delta {cmds_d} < executed {expect_commands}"
+            ));
+        }
+        if conns_d < 1 {
+            return fail(format!(
+                "/api/stats connections delta {conns_d}: a new RESP client did not count"
+            ));
+        }
+        if exp_d < 1 {
+            return fail(format!(
+                "/api/stats expired_keys delta {exp_d} < 1 after a key expired"
+            ));
+        }
+        if stats1.get("connected_clients").copied().unwrap_or(0) < 1 {
+            return fail(
+                "/api/stats connected_clients < 1 while clients are connected".to_string(),
+            );
+        }
+
+        // ---- /events SSE under concurrent RESP traffic (raw socket so the
+        // stream stays open; reqwest buffering would hide partial frames) ----
+        let mut sse = match TcpStream::connect(("127.0.0.1", dashboard_port)).await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("SSE connect: {e}")),
+        };
+        let req = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{dashboard_port}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        if let Err(e) = sse.write_all(req.as_bytes()).await {
+            return fail(format!("SSE request write: {e}"));
+        }
+        let mut sse_buf: Vec<u8> = Vec::new();
+        let read_sse = async {
+            let mut tmp = [0u8; 2048];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(left, sse.read(&mut tmp)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) => break,
+                    Ok(Ok(n)) => {
+                        sse_buf.extend_from_slice(&tmp[..n]);
+                        if let Some(frame) = Self::parse_sse_data(&sse_buf) {
+                            return Some(frame);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            None
+        };
+        let resp_traffic = async {
+            let mut answered = 0usize;
+            let mut wanted = 0usize;
+            if let Ok(mut c) = self.connect().await {
+                for i in 0..12 {
+                    let k = format!("sse_{tag}_{i}");
+                    wanted += 1;
+                    if Self::send_resp_cmd(&mut c, &["SET", &k, "v"]).await.is_ok() {
+                        answered += 1;
+                    }
+                    wanted += 1;
+                    if Self::send_resp_cmd(&mut c, &["GET", &k]).await.is_ok() {
+                        answered += 1;
+                    }
+                    sleep(Duration::from_millis(40)).await;
+                }
+            }
+            (answered, wanted)
+        };
+        let (sse_frame, (answered, wanted)) = tokio::join!(read_sse, resp_traffic);
+        if wanted == 0 || answered < wanted {
+            return fail(format!(
+                "RESP degraded while the SSE stream was open ({answered}/{wanted} answered)"
+            ));
+        }
+        let head = String::from_utf8_lossy(&sse_buf[..sse_buf.len().min(1024)]).to_lowercase();
+        if !head.starts_with("http/1.1 200") && !head.starts_with("http/1.0 200") {
+            let shown = String::from_utf8_lossy(&sse_buf[..sse_buf.len().min(80)]).to_string();
+            return fail(format!("GET /events status line: {shown:?}"));
+        }
+        if !head.contains("text/event-stream") {
+            return fail("GET /events content-type is not text/event-stream".to_string());
+        }
+        let Some(frame) = sse_frame else {
+            return fail(
+                "no SSE `data:` frame within 2s (stream open, RESP traffic running)".to_string(),
+            );
+        };
+        if serde_json::from_str::<serde_json::Value>(&frame).is_err() {
+            return fail(format!("SSE data frame is not JSON: {frame:?}"));
+        }
+        StageResult {
+            stage: 10,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
+    /// GET `{base}/api/stats` and flatten the JSON into lowercased
+    /// key -> integer (numbers directly, numeric strings parsed). Nested
+    /// objects are walked so a `{"stats": {...}}` shape still mirrors INFO.
+    async fn fetch_dashboard_stats(
+        client: &reqwest::Client,
+        base: &str,
+    ) -> std::result::Result<std::collections::HashMap<String, i64>, String> {
+        let resp = client
+            .get(format!("{base}/api/stats"))
+            .send()
+            .await
+            .map_err(|e| format!("GET /api/stats failed: {e}"))?;
+        if resp.status() != reqwest::StatusCode::OK {
+            return Err(format!("GET /api/stats -> {}", resp.status()));
+        }
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("GET /api/stats is not JSON: {e}"))?;
+        let mut out = std::collections::HashMap::new();
+        fn walk(v: &serde_json::Value, out: &mut std::collections::HashMap<String, i64>) {
+            if let serde_json::Value::Object(map) = v {
+                for (k, val) in map {
+                    match val {
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                out.insert(k.to_lowercase(), i);
+                            } else if let Some(f) = n.as_f64() {
+                                out.insert(k.to_lowercase(), f as i64);
+                            }
+                        }
+                        serde_json::Value::String(s) => {
+                            if let Ok(i) = s.trim().parse::<i64>() {
+                                out.insert(k.to_lowercase(), i);
+                            }
+                        }
+                        serde_json::Value::Object(_) => walk(val, out),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        walk(&value, &mut out);
+        Ok(out)
+    }
+
+    /// First `data:` payload in a raw SSE byte stream, if any. SSE frames
+    /// are `data: <payload>` lines framed by blank lines; chunked transfer
+    /// size lines simply never match the prefix.
+    fn parse_sse_data(buf: &[u8]) -> Option<String> {
+        let text = String::from_utf8_lossy(buf);
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some(rest) = line.strip_prefix("data:") {
+                let payload = rest.trim();
+                if !payload.is_empty() {
+                    return Some(payload.to_string());
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1791,6 +2132,242 @@ mod tests {
         assert!(
             st.error.as_deref().unwrap_or("").contains("expired_keys"),
             "error should name expired_keys: {:?}",
+            st.error
+        );
+    }
+
+    /// Combined RESP + HTTP mock for stage 10: RESP serves the KV subset
+    /// with counters; HTTP serves `/` (offline HTML), `/api/stats` (JSON
+    /// mirror of the counters) and `/events` (a `data:` SSE frame).
+    /// `freeze_stats` serves constant counters; `starve_events` sends
+    /// comment-only SSE so the frame check must fail.
+    async fn spawn_dashboard_mock(freeze_stats: bool, starve_events: bool) -> (u16, u16) {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[derive(Default)]
+        struct Counters {
+            conns: i64,
+            cmds: i64,
+            hits: i64,
+            misses: i64,
+            expired: i64,
+        }
+        type State = (HashMap<String, String>, HashMap<String, Instant>, Counters);
+        let state: Arc<Mutex<State>> = Arc::new(Mutex::new((
+            HashMap::new(),
+            HashMap::new(),
+            Counters::default(),
+        )));
+
+        let resp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resp_port = resp_listener.local_addr().unwrap().port();
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = resp_listener.accept().await {
+                    let state = state.clone();
+                    state.lock().unwrap().2.conns += 1;
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            let n = match socket.read(&mut tmp).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            buf.extend_from_slice(&tmp[..n]);
+                            let frame = (|| -> Option<(Vec<String>, usize)> {
+                                let s = std::str::from_utf8(&buf).ok()?;
+                                let mut lines = s.split("\r\n");
+                                let head = lines.next()?;
+                                let count: usize = head.strip_prefix('*')?.parse().ok()?;
+                                let mut args = Vec::new();
+                                let mut consumed = head.len() + 2;
+                                for _ in 0..count {
+                                    let h = lines.next()?;
+                                    let len: usize = h.strip_prefix('$')?.parse().ok()?;
+                                    consumed += h.len() + 2;
+                                    let data = lines.next()?;
+                                    if data.len() != len {
+                                        return None;
+                                    }
+                                    args.push(data.to_string());
+                                    consumed += len + 2;
+                                }
+                                Some((args, consumed))
+                            })();
+                            let Some((args, used)) = frame else { continue };
+                            buf.drain(..used);
+                            let cmd = args[0].to_uppercase();
+                            let reply = {
+                                let (db, exp, c) = &mut *state.lock().unwrap();
+                                c.cmds += 1;
+                                match cmd.as_str() {
+                                    "PING" => "+PONG\r\n".to_string(),
+                                    "SET" if args.len() == 3 => {
+                                        db.insert(args[1].clone(), args[2].clone());
+                                        exp.remove(&args[1]);
+                                        "+OK\r\n".to_string()
+                                    }
+                                    "SET"
+                                        if args.len() == 5
+                                            && args[3].eq_ignore_ascii_case("PX") =>
+                                    {
+                                        let ms: u64 = args[4].parse().unwrap_or(0);
+                                        db.insert(args[1].clone(), args[2].clone());
+                                        exp.insert(
+                                            args[1].clone(),
+                                            Instant::now() + std::time::Duration::from_millis(ms),
+                                        );
+                                        "+OK\r\n".to_string()
+                                    }
+                                    "GET" if args.len() == 2 => {
+                                        let mut gone = false;
+                                        if let Some(dl) = exp.get(&args[1]) {
+                                            if Instant::now() >= *dl {
+                                                db.remove(&args[1]);
+                                                exp.remove(&args[1]);
+                                                c.expired += 1;
+                                                gone = true;
+                                            }
+                                        }
+                                        match if gone { None } else { db.get(&args[1]) } {
+                                            Some(v) => {
+                                                c.hits += 1;
+                                                format!("${}\r\n{}\r\n", v.len(), v)
+                                            }
+                                            None => {
+                                                c.misses += 1;
+                                                "$-1\r\n".to_string()
+                                            }
+                                        }
+                                    }
+                                    _ => "-ERR unknown\r\n".to_string(),
+                                }
+                            };
+                            if socket.write_all(reply.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = http_listener.accept().await {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        let head_end = loop {
+                            let n = match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => n,
+                            };
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break pos + 4;
+                            }
+                            if buf.len() > 16 * 1024 {
+                                return;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                        let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                        if path.starts_with("/events") {
+                            let _ = sock
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
+                                )
+                                .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                            if starve_events {
+                                let _ = sock.write_all(b": keep-alive\n\n").await;
+                            } else {
+                                let cmds = state.lock().unwrap().2.cmds;
+                                let _ = sock
+                                    .write_all(
+                                        format!("data: {{\"commands\":{cmds}}}\n\n").as_bytes(),
+                                    )
+                                    .await;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            return;
+                        }
+                        let (ctype, body) = if path == "/" {
+                            (
+                                "text/html; charset=utf-8",
+                                "<!DOCTYPE html><html><body><h1>sdb-kv</h1></body></html>"
+                                    .to_string(),
+                            )
+                        } else if path.starts_with("/api/stats") {
+                            let (_, _, c) = &*state.lock().unwrap();
+                            let (conns, cmds, hits, misses, expired) = if freeze_stats {
+                                (1, 1, 1, 1, 0)
+                            } else {
+                                (c.conns, c.cmds, c.hits, c.misses, c.expired)
+                            };
+                            (
+                                "application/json",
+                                format!(
+                                    "{{\"total_connections_received\":{conns},\"total_commands_processed\":{cmds},\"keyspace_hits\":{hits},\"keyspace_misses\":{misses},\"expired_keys\":{expired},\"rejected_connections\":0,\"connected_clients\":1,\"uptime_in_seconds\":1}}"
+                                ),
+                            )
+                        } else {
+                            ("text/plain", "nope".to_string())
+                        };
+                        let status = if path == "/" || path.starts_with("/api/stats") {
+                            "200 OK"
+                        } else {
+                            "404 Not Found"
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+        }
+
+        (resp_port, http_port)
+    }
+
+    /// Stage 10 must pass against a faithful HTTP+SSE dashboard mock and
+    /// must reject a starved event stream and frozen stats.
+    #[tokio::test]
+    async fn test_stage_dashboard_mock_pass_and_failures() {
+        let (resp_port, http_port) = spawn_dashboard_mock(false, false).await;
+        let v = RedisVerifier::new(resp_port, Some("dashmock"));
+        let st = v.test_stage_dashboard(http_port).await;
+        assert!(st.passed, "faithful dashboard must pass: {:?}", st.error);
+
+        let (resp_port, http_port) = spawn_dashboard_mock(false, true).await;
+        let v = RedisVerifier::new(resp_port, Some("dashmock"));
+        let st = v.test_stage_dashboard(http_port).await;
+        assert!(!st.passed, "a starved SSE stream must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("data:"),
+            "error should name the missing data frame: {:?}",
+            st.error
+        );
+
+        let (resp_port, http_port) = spawn_dashboard_mock(true, false).await;
+        let v = RedisVerifier::new(resp_port, Some("dashmock"));
+        let st = v.test_stage_dashboard(http_port).await;
+        assert!(!st.passed, "frozen stats must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("delta"),
+            "error should name the delta: {:?}",
             st.error
         );
     }

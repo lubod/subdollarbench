@@ -707,7 +707,21 @@ impl BenchmarkPipeline {
                 }
                 (0.0, 0, accepted_total, Vec::new())
             } else {
-                if let Err(e) = sandbox.start_candidate_in_docker(workdir, port) {
+                // Dashboard ticket: the worker's HTTP port must be reachable
+                // from the harness, so publish it on the candidate container.
+                // Only when the acceptance asks for stage 10 — publishing an
+                // unneeded port would add a collision failure mode.
+                let extras = crate::sandbox::docker::CandidateRunExtras {
+                    ports: if matches!(task, TaskType::Redis)
+                        && accepted.map(|a| a.contains(&10)).unwrap_or(false)
+                    {
+                        vec![crate::web::server::worker_port(8090, worker)]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                };
+                if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
                     if crate::sandbox::docker::SandboxManager::is_model_packaging_error(
                         &e.to_string(),
                     ) {
@@ -951,7 +965,7 @@ impl BenchmarkPipeline {
                             ));
                             stages.push(st);
                             let _ = sandbox.stop_candidate();
-                            let _ = sandbox.start_candidate_in_docker(workdir, port);
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
                             let _ = sandbox.wait_for_port(port, 25).await;
                         }
                         // Stage 9 (tests & CI) is explicit-acceptance only.
@@ -987,6 +1001,39 @@ impl BenchmarkPipeline {
                                         error: Some(format!("tests stage task failed: {e}")),
                                     },
                                 }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                        }
+                        // Stage 10 (dashboard, HTTP + SSE) is explicit-
+                        // acceptance only; the candidate container published
+                        // the worker's 8090 port above.
+                        if accepted.map(|a| a.contains(&10)).unwrap_or(false) {
+                            let name10 = "Stage 10: dashboard (HTTP + SSE)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 10,
+                                    name: name10.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                verifier
+                                    .test_stage_dashboard(crate::web::server::worker_port(
+                                        8090, worker,
+                                    ))
+                                    .await
                             };
                             let status_str = if st.passed { "PASS" } else { "FAIL" };
                             logger.log(&format!(
