@@ -237,6 +237,14 @@ impl RedisVerifier {
             error: Some(e),
         };
         use tokio::io::AsyncWriteExt;
+        // Self-seeding: the slow frame's answer must be known regardless of
+        // what earlier verifications (or the model's own smoke tests) left
+        // in a durable WAL. The old version assumed `GET foo` returns the
+        // value "foo" and failed advisory on any candidate carrying a `foo`
+        // key (live 2026-10-14: an agent's own `SET foo bar` made every
+        // slow-sender check red).
+        let slow_key = format!("slow_{}", self.get_seed_prefix("snd"));
+        let slow_val = "slow-ok";
         // Half-open sender: partial frame, long pause, then completion.
         let mut slow = match self.connect().await {
             Ok(s) => s,
@@ -269,10 +277,17 @@ impl RedisVerifier {
                 )
             }
         }
+        // Seed the answer the completing frame should observe.
+        match Self::send_resp_cmd(&mut other, &["SET", &slow_key, slow_val]).await {
+            Ok(r) if r.trim() == "+OK" => {}
+            Ok(r) => return fail(format!("seed SET got {r:?} during half-open")),
+            Err(e) => return fail(format!("seed SET failed during half-open: {e}")),
+        }
         // Complete the slow frame; expect a well-formed bulk reply.
+        let completion = format!("T\r\n${}\r\n{}\r\n", slow_key.len(), slow_key);
         if tokio::time::timeout(
             Duration::from_secs(3),
-            slow.write_all(b"T\r\n$3\r\nfoo\r\n"),
+            slow.write_all(completion.as_bytes()),
         )
         .await
         .is_err()
@@ -280,13 +295,13 @@ impl RedisVerifier {
             return fail("completion write failed".to_string());
         }
         match tokio::time::timeout(Duration::from_secs(5), Self::read_resp_reply(&mut slow)).await {
-            Ok(Ok(r)) if r.contains("foo") => StageResult {
+            Ok(Ok(r)) if r.contains(slow_val) => StageResult {
                 stage: 102,
                 name,
                 passed: true,
                 error: None,
             },
-            Ok(Ok(r)) => fail(format!("slow-frame reply {r:?}, want bulk foo")),
+            Ok(Ok(r)) => fail(format!("slow-frame reply {r:?}, want bulk {slow_val}")),
             Ok(Err(e)) => fail(format!("slow-frame read failed: {e}")),
             Err(_) => fail("slow-frame reply timed out".to_string()),
         }
@@ -1344,6 +1359,10 @@ mod tests {
 
     /// Tolerant mock: ignores unknown bytes, answers PING and foo bulk.
     /// Models a server that survives garbage and serves concurrent clients.
+    /// Also honors the stage-102 self-seed: any SET acks, and any frame
+    /// carrying the slow key answers with the seeded value (the real
+    /// verifier SETs `slow_<seed>` on the parallel connection, then reads
+    /// it back through the half-open frame).
     async fn spawn_tolerant_mock() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1359,6 +1378,10 @@ mod tests {
                         let upper = String::from_utf8_lossy(&buf[..n]).to_uppercase();
                         let reply = if upper.contains("PING") {
                             Some(&b"+PONG\r\n"[..])
+                        } else if upper.contains("SET") {
+                            Some(&b"+OK\r\n"[..])
+                        } else if upper.contains("SLOW_") {
+                            Some(&b"$7\r\nslow-ok\r\n"[..])
                         } else if upper.contains("FOO") {
                             Some(&b"$3\r\nfoo\r\n"[..])
                         } else {
