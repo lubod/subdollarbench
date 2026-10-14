@@ -71,6 +71,40 @@ fn repair_round_allowance(global_max: u32, steps_taken: u32) -> RepairAllowance 
 
 /// Initial-attempt cap: checkpoint at 50 (or max_turns) when feedback repair
 /// is on, full budget otherwise, unlimited when max_turns == 0.
+/// Campaign perf-gate ratio: the perf ticket requires >= 1.3x the
+/// candidate's own genesis-stage GET throughput, measured with the same
+/// bench method (median of the reps) on both sides.
+pub const PERF_GATE_RATIO: f64 = 1.3;
+
+/// Pure perf-gate decision: `(ok, human-readable detail)`. A missing
+/// baseline (single-shot runs, no genesis measurement) skips the gate
+/// rather than failing it; a present baseline with no measurement fails —
+/// a candidate that cannot produce a throughput number does not pass a
+/// throughput gate.
+pub fn perf_gate_verdict(base: Option<f64>, measured: Option<f64>) -> (bool, String) {
+    match (base, measured) {
+        (Some(b), Some(m)) if b > 0.0 => (
+            m >= b * PERF_GATE_RATIO,
+            format!(
+                "measured {m:.0} req/sec vs genesis {b:.0} req/sec (ratio {:.2}x, gate {:.2}x)",
+                m / b,
+                PERF_GATE_RATIO
+            ),
+        ),
+        (Some(b), None) if b > 0.0 => (
+            false,
+            format!(
+                "no candidate throughput measured (genesis baseline {b:.0} req/sec needs {:.0} req/sec)",
+                b * PERF_GATE_RATIO
+            ),
+        ),
+        _ => (
+            true,
+            "no genesis baseline recorded; throughput gate skipped".to_string(),
+        ),
+    }
+}
+
 fn initial_turn_cap(max_turns: u32, feedback_rounds: u32, reserve_repair: bool) -> Option<u32> {
     if max_turns == 0 {
         None
@@ -400,6 +434,11 @@ pub struct BenchmarkConfig {
     /// acceptance subset that decides this stage's verdict. None for
     /// single-shot runs (behavior identical to before campaigns existed).
     pub campaign_stage: Option<crate::campaign::CampaignStageConfig>,
+    /// Campaign genesis-stage candidate GET throughput (median of the bench
+    /// reps, same method used for every stage). The perf stage's ticket
+    /// requires >= PERF_GATE_RATIO x this value. None outside campaigns or
+    /// when the genesis measurement is missing.
+    pub baseline_rps: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -1148,6 +1187,36 @@ impl BenchmarkPipeline {
                             let _ = sandbox.stop_candidate();
                             let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
                             let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        // Stage 12 (perf) is explicit-acceptance only: the
+                        // protocol checks run here; the throughput ratio
+                        // gate is applied after the bench (same method on
+                        // both sides) further down.
+                        if accepted.map(|a| a.contains(&12)).unwrap_or(false) {
+                            let name12 = "Stage 12: pipelining (in order) + latency";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 12,
+                                    name: name12.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                verifier.test_stage_perf().await
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
                         }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();
@@ -2012,10 +2081,10 @@ impl BenchmarkPipeline {
             }
         }
 
-        let pass_rate = v_outcome.pass_rate;
-        let passed_stages = v_outcome.passed_stages;
+        let mut pass_rate = v_outcome.pass_rate;
+        let mut passed_stages = v_outcome.passed_stages;
         let total_stages = v_outcome.total_stages;
-        let stage_results = v_outcome.stage_results;
+        let mut stage_results = v_outcome.stage_results;
         let extra_robustness = v_outcome.extra_robustness;
         let extra_throughput = v_outcome.extra_throughput;
         let disqualified = v_outcome.disqualified;
@@ -2267,6 +2336,46 @@ impl BenchmarkPipeline {
                         ratio
                     ));
                 }
+            }
+        }
+
+        // 8b. Campaign perf gate (acceptance includes stage 12): the
+        // candidate must beat its own genesis-stage GET throughput,
+        // measured with the same bench method, by >= PERF_GATE_RATIO. Only
+        // applied when the protocol checks passed (a failed stage is
+        // already a failure) and a genesis baseline exists; the pass_rate
+        // recompute below uses the acceptance subset total.
+        if config
+            .campaign_stage
+            .as_ref()
+            .map(|c| c.accepted_stages.contains(&12))
+            .unwrap_or(false)
+            && stage_results.iter().any(|s| s.stage == 12 && s.passed)
+        {
+            let accepted_ids: Option<&[u32]> = config
+                .campaign_stage
+                .as_ref()
+                .map(|c| c.accepted_stages.as_slice());
+            let (ok, detail) = perf_gate_verdict(config.baseline_rps, throughput);
+            if ok {
+                logger.log(&format!("  [PERF] throughput gate ok: {detail}"));
+            } else {
+                logger.log(&format!("  [PERF] throughput gate FAILED: {detail}"));
+                if let Some(s) = stage_results.iter_mut().find(|s| s.stage == 12) {
+                    s.passed = false;
+                    s.error = Some(detail);
+                }
+                passed_stages = stage_results
+                    .iter()
+                    .filter(|s| {
+                        s.passed && accepted_ids.map(|a| a.contains(&s.stage)).unwrap_or(true)
+                    })
+                    .count() as u32;
+                pass_rate = if total_stages > 0 {
+                    passed_stages as f64 / total_stages as f64 * 100.0
+                } else {
+                    0.0
+                };
             }
         }
 
@@ -2798,6 +2907,25 @@ mod tests {
     }
 
     #[test]
+    fn test_perf_gate_verdict() {
+        // 1.3x boundary: exactly 130 passes, 129 fails with the ratio shown.
+        let (ok, detail) = perf_gate_verdict(Some(100.0), Some(130.0));
+        assert!(ok, "{detail}");
+        let (ok, detail) = perf_gate_verdict(Some(100.0), Some(129.0));
+        assert!(!ok);
+        assert!(detail.contains("1.29x"), "{detail}");
+        // Baseline present, measurement missing: fail (no number, no gate).
+        let (ok, detail) = perf_gate_verdict(Some(100.0), None);
+        assert!(!ok);
+        assert!(detail.contains("130"), "{detail}");
+        // No baseline (single-shot / genesis measurement missing): skipped.
+        assert!(perf_gate_verdict(None, Some(500.0)).0);
+        assert!(perf_gate_verdict(None, None).0);
+        // Degenerate baseline: skipped, never a division by zero.
+        assert!(perf_gate_verdict(Some(0.0), Some(1.0)).0);
+    }
+
+    #[test]
     fn test_initial_turn_cap_checkpoints_only_with_feedback() {
         // No cap configured: unlimited either way.
         assert_eq!(initial_turn_cap(0, 0, false), None);
@@ -2900,6 +3028,7 @@ mod tests {
             harness: Harness::Omp,
             feedback_rounds: 0,
             campaign_stage: None,
+            baseline_rps: None,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -2932,6 +3061,7 @@ mod tests {
             harness: Harness::Omp,
             feedback_rounds: 0,
             campaign_stage: None,
+            baseline_rps: None,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);

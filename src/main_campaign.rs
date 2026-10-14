@@ -322,6 +322,7 @@ async fn run_one_stage(
         stage.id, stage.kind, stage.title, stage.acceptance.redis_stages, stage.budget_usd
     ));
 
+    let baseline_rps = read_baseline_rps(cdir);
     let config = BenchmarkConfig {
         model: model.to_string(),
         task: TaskType::parse(&lc.spec.task)?,
@@ -347,9 +348,30 @@ async fn run_one_stage(
             continuity: stage.id > 0,
             accepted_stages: stage.acceptance.redis_stages.clone(),
         }),
+        baseline_rps,
     };
 
     let output = BenchmarkPipeline::execute(config, logger, cancel).await?;
+
+    // The genesis stage's measured GET throughput becomes the perf gate's
+    // baseline (same bench method every stage; the manifest only carries a
+    // throughput when the stage hit 100%).
+    if stage.id == 0 {
+        if let Some(tp) = output.manifest.throughput_req_sec {
+            if tp > 0.0 {
+                let v = serde_json::json!({
+                    "throughput_req_sec": tp,
+                    "reference_throughput_req_sec": output.manifest.reference_throughput_req_sec,
+                    "source": "campaign genesis stage bench (median GET)",
+                    "campaign": campaign_id,
+                });
+                let _ = std::fs::write(
+                    cdir.join("baseline.json"),
+                    serde_json::to_string_pretty(&v).unwrap_or_default(),
+                );
+            }
+        }
+    }
 
     // Evidence: console + manifest + git commit + diff.
     let console = buf.lock().unwrap().join("\n");
@@ -402,6 +424,15 @@ async fn run_one_stage(
 /// starts its own stage history (archived candidates may carry their own).
 fn copy_workspace(src: &Path, dst: &Path) -> Result<()> {
     campaign::copy_dir_excluding_git(src, dst)
+}
+
+/// Campaign perf baseline: the genesis stage's measured GET throughput
+/// (median of the bench reps). Missing/unreadable -> None, and the perf
+/// gate is then skipped rather than failed.
+fn read_baseline_rps(cdir: &Path) -> Option<f64> {
+    let text = std::fs::read_to_string(cdir.join("baseline.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("throughput_req_sec").and_then(|t| t.as_f64())
 }
 
 fn print_rollup(r: &CampaignRollup) {

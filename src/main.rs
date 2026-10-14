@@ -237,6 +237,7 @@ async fn run_trial_batch(
             worker: 0,
             feedback_rounds: p.feedback_rounds,
             campaign_stage: None,
+            baseline_rps: None,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await {
             Ok(output) => {
@@ -434,6 +435,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     worker: 0,
                     feedback_rounds,
                     campaign_stage: None,
+                    baseline_rps: None,
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;

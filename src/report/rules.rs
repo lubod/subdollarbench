@@ -8,6 +8,17 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.10`: campaign ticket 9 (perf). New pipeline-level stage
+///   12: pipelining in order (200 commands in one write, positional reply
+///   checks via a frame-at-a-time reader — coalesced replies used to break
+///   the shared one-shot reader), a sequential-GET p99 budget (<= 10ms over
+///   300 GETs), and a post-bench throughput gate: the stage's own bench
+///   measurement (same method as every stage) must reach >= PERF_GATE_RATIO
+///   (1.3x) the genesis-stage measurement, carried in the campaign's
+///   `baseline.json`. The gate only applies when a ticket's acceptance
+///   includes id 12 and a baseline exists; single-shot totals unchanged;
+///   acceptance ids up to 12. Rows stamped `2026-10-14.9` or earlier are
+///   not comparable without `backfill --yes`.
 /// - `2026-10-14.9`: campaign ticket 8 (security). New pipeline-level
 ///   stage 11, run with the candidate restarted under `SDB_PASSWORD` and a
 ///   64MB memory cap (restored afterwards so advisory probes see the
@@ -289,7 +300,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.9";
+pub const RULES_VERSION: &str = "2026-10-14.10";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

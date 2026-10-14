@@ -1794,6 +1794,128 @@ impl RedisVerifier {
         }
     }
 
+    /// Stage 12 (campaign perf ticket; explicit acceptance only): pipelined
+    /// RESP correctness plus a latency sanity budget. The throughput gate
+    /// itself (>= PERF_GATE_RATIO x own genesis measurement) is applied by
+    /// the pipeline after the same bench method runs for this stage, so the
+    /// numbers are comparable; this stage guarantees the protocol works
+    /// under pipelining and that a sane GET is not pathologically slow.
+    pub async fn test_stage_perf(&self) -> StageResult {
+        let name = "Stage 12: pipelining (in order) + latency".to_string();
+        let fail = |e: String| StageResult {
+            stage: 12,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let tag = self.get_seed_prefix("perf");
+        let batch = 100usize;
+
+        // ---- one write, 200 pipelined commands, ordered replies ----
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect: {e}")),
+        };
+        let mut payload = Vec::new();
+        for i in 0..batch {
+            payload.extend_from_slice(
+                Self::format_resp_cmd(&["SET", &format!("perf_{tag}_{i}"), &format!("v{i}")])
+                    .as_bytes(),
+            );
+        }
+        for i in 0..batch {
+            payload.extend_from_slice(
+                Self::format_resp_cmd(&["GET", &format!("perf_{tag}_{i}")]).as_bytes(),
+            );
+        }
+        if let Err(e) = stream.write_all(&payload).await {
+            return fail(format!("pipelined write: {e}"));
+        }
+        // Pipelined replies can coalesce in the receive buffer, so read
+        // exactly one RESP frame per call — never the whole buffer (the
+        // shared read_resp_reply returns everything it accumulated, which
+        // is fine for one-outstanding-command flows and wrong here).
+        let mut rbuf: Vec<u8> = Vec::new();
+        for i in 0..batch {
+            match Self::read_pipelined_frame(&mut stream, &mut rbuf).await {
+                Ok(r) if r.trim() == "+OK" => {}
+                Ok(r) => {
+                    return fail(format!(
+                        "pipelined SET #{i} reply {r:?}, want +OK (replies out of order?)"
+                    ))
+                }
+                Err(e) => return fail(format!("pipelined SET #{i} read failed: {e}")),
+            }
+        }
+        for i in 0..batch {
+            match Self::read_pipelined_frame(&mut stream, &mut rbuf).await {
+                Ok(r) if r.contains(&format!("v{i}")) => {}
+                Ok(r) => {
+                    return fail(format!(
+                        "pipelined GET #{i} reply {r:?}, want v{i} (replies out of order?)"
+                    ))
+                }
+                Err(e) => return fail(format!("pipelined GET #{i} read failed: {e}")),
+            }
+        }
+
+        // ---- sequential GET latency budget ----
+        let mut lat = Vec::with_capacity(300);
+        for i in 0..300usize {
+            let k = format!("perf_{tag}_{}", i % batch);
+            let t0 = std::time::Instant::now();
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.starts_with('$') => {}
+                Ok(r) => return fail(format!("sequential GET returned {r:?}")),
+                Err(e) => return fail(format!("sequential GET failed: {e}")),
+            }
+            lat.push(t0.elapsed());
+        }
+        lat.sort();
+        let p50 = lat[lat.len() / 2];
+        let p99 = lat[(lat.len() * 99) / 100];
+        let budget = Duration::from_millis(10);
+        if p99 > budget {
+            return fail(format!(
+                "sequential GET p99 {:.1}ms exceeds the {:?} budget (p50 {:.1}ms)",
+                p99.as_secs_f64() * 1000.0,
+                budget,
+                p50.as_secs_f64() * 1000.0
+            ));
+        }
+        StageResult {
+            stage: 12,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
+    /// One RESP frame from a stream that may hold several coalesced frames
+    /// (pipelined replies). `buf` carries the unconsumed tail between calls.
+    async fn read_pipelined_frame(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(used) = Self::parse_resp_frame(buf) {
+                let frame = String::from_utf8_lossy(&buf[..used]).to_string();
+                buf.drain(..used);
+                return Ok(frame);
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(anyhow!("read timed out waiting for a pipelined reply"));
+            }
+            let mut tmp = [0u8; 8192];
+            let n = tokio::time::timeout(left, stream.read(&mut tmp))
+                .await
+                .map_err(|_| anyhow!("read timed out waiting for a pipelined reply"))??;
+            if n == 0 {
+                return Err(anyhow!("server closed the connection mid-pipeline"));
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+    }
+
     /// GET `{base}/api/stats` and flatten the JSON into lowercased
     /// key -> integer (numbers directly, numeric strings parsed). Nested
     /// objects are walked so a `{"stats": {...}}` shape still mirrors INFO.
@@ -2808,6 +2930,105 @@ mod tests {
         assert!(
             st.error.as_deref().unwrap_or("").contains("buffering"),
             "error should name the buffering: {:?}",
+            st.error
+        );
+    }
+
+    /// Pipelining-capable KV mock: every complete frame already in the read
+    /// buffer is answered before the next read (real pipelining). With
+    /// `flip_first_get` the first GET reply is poisoned, modelling a server
+    /// whose pipelined replies are out of order.
+    async fn spawn_perf_mock(flip_first_get: bool) -> u16 {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let db: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let mut flipped = false;
+                    loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        loop {
+                            let frame = (|| -> Option<(Vec<String>, usize)> {
+                                let s = std::str::from_utf8(&buf).ok()?;
+                                let mut lines = s.split("\r\n");
+                                let head = lines.next()?;
+                                let count: usize = head.strip_prefix('*')?.parse().ok()?;
+                                let mut args = Vec::new();
+                                let mut consumed = head.len() + 2;
+                                for _ in 0..count {
+                                    let h = lines.next()?;
+                                    let len: usize = h.strip_prefix('$')?.parse().ok()?;
+                                    consumed += h.len() + 2;
+                                    let data = lines.next()?;
+                                    if data.len() != len {
+                                        return None;
+                                    }
+                                    args.push(data.to_string());
+                                    consumed += len + 2;
+                                }
+                                Some((args, consumed))
+                            })();
+                            let Some((args, used)) = frame else { break };
+                            buf.drain(..used);
+                            let reply = {
+                                let mut db = db.lock().unwrap();
+                                match args[0].to_uppercase().as_str() {
+                                    "SET" if args.len() == 3 => {
+                                        db.insert(args[1].clone(), args[2].clone());
+                                        "+OK\r\n".to_string()
+                                    }
+                                    "GET" if args.len() == 2 => {
+                                        if flip_first_get && !flipped {
+                                            flipped = true;
+                                            "$5\r\nWRONG\r\n".to_string()
+                                        } else {
+                                            match db.get(&args[1]) {
+                                                Some(v) => format!("${}\r\n{}\r\n", v.len(), v),
+                                                None => "$-1\r\n".to_string(),
+                                            }
+                                        }
+                                    }
+                                    _ => "-ERR unknown\r\n".to_string(),
+                                }
+                            };
+                            if socket.write_all(reply.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// Stage 12 must pass against a faithful pipelining mock and must catch
+    /// a wrong pipelined reply with the order hint.
+    #[tokio::test]
+    async fn test_stage_perf_mock_pass_and_misorder_fail() {
+        let port = spawn_perf_mock(false).await;
+        let v = RedisVerifier::new(port, Some("perfmock"));
+        let st = v.test_stage_perf().await;
+        assert!(st.passed, "faithful pipelining must pass: {:?}", st.error);
+
+        let port = spawn_perf_mock(true).await;
+        let v = RedisVerifier::new(port, Some("perfmock"));
+        let st = v.test_stage_perf().await;
+        assert!(!st.passed, "a wrong pipelined reply must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("out of order"),
+            "error should hint at reply order: {:?}",
             st.error
         );
     }

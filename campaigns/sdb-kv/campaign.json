@@ -175,6 +175,30 @@
       },
       "budget_usd": 0.15,
       "max_turns": 30
+    },
+    {
+      "id": 9,
+      "type": "perf",
+      "title": "Pipelining & throughput",
+      "prompt": "stages/9_perf/prompt.md",
+      "acceptance": {
+        "redis_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
     }
   ]
 }
