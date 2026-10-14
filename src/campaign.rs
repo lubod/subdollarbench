@@ -187,9 +187,9 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
         }
         let mut seen = HashSet::new();
         for id in a {
-            if !(1..=8).contains(id) {
+            if !(1..=9).contains(id) {
                 bail!(
-                    "campaign '{}': stage {} acceptance id {} out of range 1..=8",
+                    "campaign '{}': stage {} acceptance id {} out of range 1..=9",
                     spec.name,
                     s.id,
                     id
@@ -519,6 +519,29 @@ pub fn git_commit_stage(
     Ok((hash, stat))
 }
 
+/// Recursive copy excluding `.git`: the stage history belongs to the
+/// original workspace; scratch copies (tests sensitivity scenarios) start
+/// clean. Used by the tests/CI stage.
+pub fn copy_dir_excluding_git(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_dir_excluding_git(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .map_err(|e| anyhow::anyhow!("copy {} -> {}: {e}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Full patch of the latest stage commit (evidence for review).
 pub fn git_head_patch(workdir: &Path) -> Result<String> {
     let out = std::process::Command::new("git")
@@ -693,7 +716,7 @@ mod tests {
 
         // Out-of-range acceptance id.
         let mut v = good.clone();
-        v["stages"][0]["acceptance"]["redis_stages"] = serde_json::json!([9]);
+        v["stages"][0]["acceptance"]["redis_stages"] = serde_json::json!([10]);
         let bad: CampaignSpec = serde_json::from_value(v).unwrap();
         assert!(validate_spec(&bad, &lc.root).is_err());
 

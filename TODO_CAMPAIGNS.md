@@ -138,18 +138,21 @@ non-redis acceptance adapters.
 
 ## Slice D — tests stage (coverage with teeth)
 
-- [ ] D1. `./test.sh` contract: offline, deterministic (two runs), time
-  cap, exit 0 = green.
-- [ ] D2. Coverage adapters: Go (`go test -coverprofile`), Node
-  (`--test --experimental-test-coverage`), Python (`coverage` in the
-  image); other languages: self-report + sensitivity only (documented).
-- [ ] D3. Sensitivity checker: scratch copy, sentinel reverts (stage 1
-  expiry, stage 5 observability), require non-zero exit; compile failure
-  counts as caught.
-- [ ] D4. Persistent gate: from stage 6 on, `test.sh` green + >=80%
-  coverage are part of cumulative acceptance (regression if dropped).
-- [ ] D5. Sandbox image: add tooling (python coverage; optional
-  cargo-llvm-cov); bump image version + document.
+- [x] D1. `./test.sh` contract (2026-10-14.4): offline (network-none
+  container), deterministic (two runs), <=3min per run, exit 0 = green.
+- [x] D2. Coverage adapters: Go measured by the harness
+  (`go test -coverprofile` + `go tool cover -func`); other languages read
+  a self-reported `coverage.txt` ("coverage: NN.N%") — sensitivity check
+  carries the anti-fake weight there (documented limitation).
+- [x] D3. Sensitivity checker: scratch copy (no .git), stage-1 expiry
+  diff reversed from the stage-0 commit, `./test.sh` must fail; compile
+  failure counts as caught.
+- [x] D4. Persistent gate: ticket 6 ships `./test.sh`; every later ticket's
+  acceptance includes id 9 (ticket 6 = [1..9]). Ladder entries for 7+ must
+  carry 9 in their acceptance list.
+- [ ] D5. Sandbox image: python `coverage` preinstall and/or
+  `cargo-llvm-cov` remain optional (only if a future grid model needs a
+  real adapter for its language).
 
 ## Slice E — dashboard + security
 

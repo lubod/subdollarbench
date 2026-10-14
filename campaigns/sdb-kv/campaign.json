@@ -58,6 +58,15 @@
       "acceptance": { "redis_stages": [1, 2, 3, 4, 5, 6, 7, 8] },
       "budget_usd": 0.10,
       "max_turns": 25
+    },
+    {
+      "id": 6,
+      "type": "engineering",
+      "title": "Tests & CI gate",
+      "prompt": "stages/6_tests/prompt.md",
+      "acceptance": { "redis_stages": [1, 2, 3, 4, 5, 6, 7, 8, 9] },
+      "budget_usd": 0.20,
+      "max_turns": 35
     }
   ]
 }

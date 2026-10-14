@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.4`: campaign tests & CI gate (ticket 6). New pipeline-
+///   level stage 9: two offline `./test.sh` runs (deterministic, <=3min
+///   each), coverage >=80% (Go measured via `go test -coverprofile` +
+///   `go tool cover -func`; other languages read a self-reported
+///   `coverage.txt` "coverage: NN.N%" line), and a revert-sensitivity
+///   check (stage-1 expiry diff reversed in a scratch copy must make the
+///   suite fail). Runs only when a ticket's acceptance explicitly
+///   includes id 9; single-shot totals unchanged; acceptance ids up to 9.
+///   Rows stamped `2026-10-14.3` or earlier are not comparable without
+///   `backfill --yes`.
 /// - `2026-10-14.3`: campaign ENOSPC incident (ticket 4). New redis
 ///   verifier stage 8 "ENOSPC incident (log volume full)": the pipeline
 ///   restarts the candidate with `SDB_DATA_DIR` on an 8MB tmpfs, fills it
@@ -232,7 +242,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.3";
+pub const RULES_VERSION: &str = "2026-10-14.4";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

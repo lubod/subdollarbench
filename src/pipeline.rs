@@ -159,6 +159,205 @@ fn is_zero_output_non_result(eval_only: bool, total_tokens: u64, workspace_files
     !eval_only && total_tokens == 0 && workspace_files == 0
 }
 
+/// CI-stage wall-clock cap for one `./test.sh` run.
+const TEST_RUN_TIMEOUT_SECS: u64 = 180;
+
+/// Last `n` bytes of tool output, never splitting a UTF-8 char.
+fn output_tail(s: &str, n: usize) -> String {
+    let t = s.trim();
+    if t.len() <= n {
+        return t.to_string();
+    }
+    let mut cut = t.len() - n;
+    while cut < t.len() && !t.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!("…{}", &t[cut..])
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("git {:?}: {e}", args))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// `stage N: ...` commit hash from `git log --format=%H %s` output.
+fn parse_stage_commit(log: &str, stage: u32) -> Option<String> {
+    let needle = format!("stage {stage}:");
+    log.lines()
+        .find(|l| l.contains(&needle))
+        .and_then(|l| l.split_whitespace().next())
+        .map(|h| h.to_string())
+}
+
+/// Total line of `go tool cover -func` ("total: (statements) 87.5%").
+fn parse_go_coverage_total(out: &str) -> Option<f64> {
+    out.lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("total:"))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|p| p.trim_end_matches('%').parse::<f64>().ok())
+}
+
+/// Self-reported coverage line ("coverage: 87.5%").
+fn parse_self_coverage(text: &str) -> Option<f64> {
+    for line in text.lines() {
+        let low = line.to_ascii_lowercase();
+        let Some(pos) = low.find("coverage") else {
+            continue;
+        };
+        let rest = &line[pos..];
+        let num: String = rest
+            .chars()
+            .skip_while(|c| !(c.is_ascii_digit() || *c == '.'))
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if let Ok(v) = num.parse::<f64>() {
+            if (0.0..=100.0).contains(&v) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Stage 9 (tests & CI): the ticket ships `./test.sh`; this checks it does
+/// what a CI gate is for:
+///   1. green + deterministic: two offline runs, exit 0, bounded time;
+///   2. coverage >= 80%: Go measured by the harness
+///      (`go test -coverprofile` + `go tool cover -func`); other languages
+///      read a self-reported `coverage.txt` line ("coverage: NN.N%");
+///   3. sensitivity: reverting the stage-1 (expiry) diff in a scratch copy
+///      must make `./test.sh` FAIL — a suite that stays green without the
+///      feature is decoration, not tests.
+fn run_tests_ci_blocking(
+    sandbox: SandboxManager,
+    workdir: PathBuf,
+    logger: Arc<dyn PipelineLogger>,
+) -> crate::verifier::StageResult {
+    let name = "Stage 9: tests & CI (coverage + sensitivity)".to_string();
+    let fail = |e: String| crate::verifier::StageResult {
+        stage: 9,
+        name: name.clone(),
+        passed: false,
+        error: Some(e),
+    };
+    if !workdir.join("test.sh").is_file() {
+        return fail("./test.sh is missing at the repo root".to_string());
+    }
+    let run_suite = |dir: &Path| {
+        sandbox.run_workspace_command(
+            dir,
+            "if [ -x ./test.sh ]; then ./test.sh; else bash ./test.sh; fi",
+            TEST_RUN_TIMEOUT_SECS,
+        )
+    };
+    for attempt in 1..=2u32 {
+        match run_suite(&workdir) {
+            Ok((true, _)) => logger.log(&format!(
+                "  [TESTS] ./test.sh green (run {attempt}/2, offline, <= {TEST_RUN_TIMEOUT_SECS}s)"
+            )),
+            Ok((false, out)) => {
+                return fail(format!(
+                    "./test.sh exited non-zero (run {attempt}/2): {}",
+                    output_tail(&out, 500)
+                ))
+            }
+            Err(e) => return fail(format!("./test.sh could not run (run {attempt}/2): {e}")),
+        }
+    }
+    let coverage = if workdir.join("go.mod").is_file() {
+        match sandbox.run_workspace_command(
+            &workdir,
+            "go test ./... -coverprofile=/tmp/sdb-cov.out >/dev/null 2>&1; go tool cover -func=/tmp/sdb-cov.out | tail -n 1",
+            TEST_RUN_TIMEOUT_SECS,
+        ) {
+            Ok((_, out)) => parse_go_coverage_total(&out),
+            Err(e) => return fail(format!("coverage measurement failed: {e}")),
+        }
+    } else {
+        std::fs::read_to_string(workdir.join("coverage.txt"))
+            .ok()
+            .and_then(|t| parse_self_coverage(&t))
+    };
+    let Some(cov) = coverage else {
+        return fail(
+            "no coverage signal: Go projects are measured by the harness via `go test -coverprofile`; other languages must write a `coverage: NN.N%` line into coverage.txt"
+                .to_string(),
+        );
+    };
+    logger.log(&format!("  [TESTS] coverage {cov:.1}% (gate 80%)"));
+    if cov < 80.0 {
+        return fail(format!("coverage {cov:.1}% is below the 80% gate"));
+    }
+    let Some(parent) = workdir.parent() else {
+        return fail("workspace has no parent directory".to_string());
+    };
+    let scenario = parent.join(format!("s9-scenario-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scenario);
+    if let Err(e) = crate::campaign::copy_dir_excluding_git(&workdir, &scenario) {
+        let _ = std::fs::remove_dir_all(&scenario);
+        return fail(format!("scratch copy failed: {e}"));
+    }
+    let revert = (|| -> Result<(), String> {
+        let log = git_in(&workdir, &["log", "--format=%H %s"])?;
+        let s0 = parse_stage_commit(&log, 0)
+            .ok_or_else(|| "no `stage 0` commit in the workspace history".to_string())?;
+        let s1 = parse_stage_commit(&log, 1)
+            .ok_or_else(|| "no `stage 1` commit in the workspace history".to_string())?;
+        let changed = git_in(&workdir, &["diff", "--name-only", &s0, &s1])?;
+        for f in changed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let target = scenario.join(f);
+            match git_in(&workdir, &["show", &format!("{s0}:{f}")]) {
+                Ok(content) => {
+                    if let Some(p) = target.parent() {
+                        let _ = std::fs::create_dir_all(p);
+                    }
+                    let _ = std::fs::write(&target, content);
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&target);
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = revert {
+        let _ = std::fs::remove_dir_all(&scenario);
+        return fail(format!("sensitivity setup failed: {e}"));
+    }
+    let sens = run_suite(&scenario);
+    let _ = std::fs::remove_dir_all(&scenario);
+    match sens {
+        Ok((false, _)) => logger.log(
+            "  [TESTS] sensitivity ok: the suite goes red with the stage-1 (expiry) feature reverted",
+        ),
+        Ok((true, _)) => {
+            return fail(
+                "./test.sh stayed green with the stage-1 (expiry) feature reverted — the tests do not catch regressions"
+                    .to_string(),
+            )
+        }
+        Err(e) => return fail(format!("sensitivity run could not execute: {e}")),
+    }
+    crate::verifier::StageResult {
+        stage: 9,
+        name,
+        passed: true,
+        error: None,
+    }
+}
+
 #[derive(Clone)]
 pub struct BenchmarkConfig {
     pub model: String,
@@ -742,6 +941,50 @@ impl BenchmarkPipeline {
                             let _ = sandbox.stop_candidate();
                             let _ = sandbox.start_candidate_in_docker(workdir, port);
                             let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        // Stage 9 (tests & CI) is explicit-acceptance only.
+                        // Runs host-side checks (test.sh twice, coverage,
+                        // revert-sensitivity) in isolated sandbox containers.
+                        if accepted.map(|a| a.contains(&9)).unwrap_or(false) {
+                            let name9 = "Stage 9: tests & CI (coverage + sensitivity)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 9,
+                                    name: name9.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                let sandbox9 = SandboxManager::with_id(&format!("s9-w{worker}"));
+                                let workdir9 = workdir.to_path_buf();
+                                let logger9 = logger.clone();
+                                match tokio::task::spawn_blocking(move || {
+                                    run_tests_ci_blocking(sandbox9, workdir9, logger9)
+                                })
+                                .await
+                                {
+                                    Ok(st) => st,
+                                    Err(e) => crate::verifier::StageResult {
+                                        stage: 9,
+                                        name: name9.to_string(),
+                                        passed: false,
+                                        error: Some(format!("tests stage task failed: {e}")),
+                                    },
+                                }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
                         }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();
@@ -2365,6 +2608,33 @@ mod tests {
         assert!(!is_zero_output_non_result(false, 1500, 2));
         // Eval-only has no agent by design.
         assert!(!is_zero_output_non_result(true, 0, 0));
+    }
+
+    #[test]
+    fn test_stage_commit_parsing() {
+        let log = "aaaa111 stage 0: MVP: RESP server [pass]\nbbbb222 stage 1: Expiry [fail]\ncccc333 not a stage line\n";
+        assert_eq!(parse_stage_commit(log, 0).as_deref(), Some("aaaa111"));
+        assert_eq!(parse_stage_commit(log, 1).as_deref(), Some("bbbb222"));
+        assert_eq!(parse_stage_commit(log, 2), None);
+    }
+
+    #[test]
+    fn test_coverage_parsers() {
+        // go tool cover -func tail
+        assert_eq!(
+            parse_go_coverage_total("total:\t(statements)\t87.5%"),
+            Some(87.5)
+        );
+        assert_eq!(
+            parse_go_coverage_total("sdb-kv/main.go:12:\tfoo\t90.0%\ntotal:\t(statements)\t79.9%"),
+            Some(79.9)
+        );
+        assert_eq!(parse_go_coverage_total("no total here"), None);
+        // self-reported
+        assert_eq!(parse_self_coverage("coverage: 81.2%\n"), Some(81.2));
+        assert_eq!(parse_self_coverage("# Coverage\nlines: 80.0%"), None);
+        assert_eq!(parse_self_coverage("Coverage summary: 100%"), Some(100.0));
+        assert_eq!(parse_self_coverage("nothing"), None);
     }
 
     #[tokio::test]

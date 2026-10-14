@@ -1173,6 +1173,65 @@ impl SandboxManager {
     }
 
     /// Actively poll the target TCP port until the candidate is ready, up to timeout_secs
+    /// Run a command against a directory mounted as `/workspace` inside the
+    /// sandbox image, network-isolated (`--network none`) and time-capped.
+    /// Used by the tests/CI stage: the candidate's suite must run offline.
+    /// The container is named so a timeout kill cannot leave it behind.
+    pub fn run_workspace_command(
+        &self,
+        dir: &Path,
+        cmd: &str,
+        timeout_secs: u64,
+    ) -> Result<(bool, String)> {
+        let canonical = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            dir.canonicalize().unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .map(|c| c.join(dir))
+                    .unwrap_or_else(|_| crate::config::get_repo_root().join(dir))
+            })
+        };
+        let name = format!("subdollar-tests-{}", self.instance_id);
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let mount = format!("{}:/workspace", canonical.display());
+        let cap = (timeout_secs + 10).to_string();
+        let output = Command::new("timeout")
+            .args([
+                "-k",
+                "5",
+                &cap,
+                "docker",
+                "run",
+                "--rm",
+                "--name",
+                &name,
+                "--network",
+                "none",
+                "--memory=2g",
+                "--cpus=2.0",
+                "--pids-limit=256",
+                "-v",
+                &mount,
+                "-w",
+                "/workspace",
+                "subdollar-sandbox",
+                "bash",
+                "-c",
+                cmd,
+            ])
+            .output()
+            .map_err(|e| anyhow!("failed to run workspace command: {e}"))?;
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+        let err = String::from_utf8_lossy(&output.stderr);
+        if !err.trim().is_empty() {
+            text.push_str("\n--- stderr ---\n");
+            text.push_str(&err);
+        }
+        Ok((output.status.success(), text))
+    }
+
     pub async fn wait_for_port(&self, port: u16, timeout_secs: u64) -> bool {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs);

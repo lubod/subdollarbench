@@ -371,23 +371,7 @@ async fn run_one_stage(
 /// Recursive copy of a seed workspace; `.git` is excluded so the campaign
 /// starts its own stage history (archived candidates may carry their own).
 fn copy_workspace(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".git" {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        if entry.file_type()?.is_dir() {
-            copy_workspace(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)
-                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
-        }
-    }
-    Ok(())
+    campaign::copy_dir_excluding_git(src, dst)
 }
 
 fn print_rollup(r: &CampaignRollup) {
