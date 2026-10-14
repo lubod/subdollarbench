@@ -1437,7 +1437,7 @@ mod tests {
                                     "+OK\r\n".to_string()
                                 }
                                 "GET" if args.len() == 2 => match db.get(&args[1]) {
-                                    Some(v) if flip_get && !poisoned => {
+                                    Some(_) if flip_get && !poisoned => {
                                         poisoned = true;
                                         format!("${}\r\nWRONG\r\n", "WRONG".len())
                                     }
