@@ -42,27 +42,34 @@ cost-first thesis has signal.
 
 ## Slice A — campaign core
 
-- [ ] A1. `src/campaign.rs`: CampaignSpec/StageSpec (versioned serde),
+Shipped 2026-10-14 (`src/campaign.rs`, `main_campaign.rs`, pipeline
+plumbing; suite 382/0): spec+loader+validation, stage loop with workspace
+continuity, per-stage prompt override, acceptance-subset verdicts,
+regression detection with severity weights, git-per-stage (commit +
+patch + stat), rollup + `sdb campaign {list,dry-run,run}` with
+`over_budget`. Open: the live canary gate below (needs spend) and
+non-redis acceptance adapters.
+
+- [x] A1. `src/campaign.rs`: CampaignSpec/StageSpec (versioned serde),
   loader + validation (dense ids, prompts exist, acceptance known),
   malformed-spec tests. `campaigns/sdb-kv/campaign.json` is the fixture.
-- [ ] A2. Stage loop on `BenchmarkPipeline`: workspace continuity (skip
+- [x] A2. Stage loop on `BenchmarkPipeline`: workspace continuity (skip
   wipe on stage>0), per-stage prompt override (campaign path), READY
   section reused, run_id `<campaign>_s<N>`, per-stage budget/turn caps.
-- [ ] A3. Cumulative acceptance: verifier stage-subset filter (redis
+- [x] A3. Cumulative acceptance: verifier stage-subset filter (redis
   stages by id); stage verdict = suites 0..i; regression detection with
-  severity weights (genesis core > feature > metrics).
-- [ ] A4. `git`-per-stage: init after S0 verification; commit after each
-  stage (`stage N: <title>`); diff stat + patch archived per stage;
-  churn on the rollup; judge reads diffs.
-- [ ] A5. Rollup + CLI: `runs/<campaign>/campaign.json` (per-stage
-  verdict/cost/turns/duration/coverage/sensitivity; regression-free
-  tickets / $; survival vector; `reached`); `sdb campaign
-  {list,dry-run,run}`; stop-on-budget records `over_budget`, never a
-  model failure.
-- [ ] A6. Tests: orchestrator with a mock verifier; stage-continuity
-  unit tests; CLI tests; e2e dry-run.
-- Gate: canary campaign (1 model, stages 0-3); break stage 0 manually to
-  prove the regression alarm fires.
+  severity weights (genesis core > feature > metrics). Other tasks: later.
+- [x] A4. `git`-per-stage: init after S0 verification; commit after each
+  stage (`stage N: <title> [verdict]`); diff patch + stat archived per
+  stage; churn on the rollup; judge reads diffs (wiring later).
+- [x] A5. Rollup + CLI: `runs/<campaign>/campaign.json` (per-stage
+  verdict/cost/turns/duration; regression-free tickets / $; survival
+  vector; `reached`); `sdb campaign {list,dry-run,run}`; stop-on-budget
+  records `over_budget`, never a model failure.
+- [x] A6. Tests: mock-executor orchestrator tests; loader/validation;
+  git helper; e2e eval-only CLI smoke (evidence tree verified).
+- [ ] Gate: canary campaign (1 model, stages 0-3); break stage 0 manually
+  to prove the regression alarm fires. (Needs spend approval.)
 
 ## Slice B — stage suites (expiry, pubsub)
 

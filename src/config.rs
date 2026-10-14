@@ -22,6 +22,50 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum CampaignAction {
+    /// List bundled campaigns
+    List,
+    /// Print the stage plan (no spend, no engine)
+    DryRun {
+        /// Campaign name (directory under ./campaigns)
+        #[arg(long)]
+        name: String,
+        /// Model, for display only in dry-run
+        #[arg(long, default_value = "(unset)")]
+        model: String,
+    },
+    /// Run a campaign end-to-end from the CLI (foreground, no engine needed)
+    Run {
+        /// Campaign name (directory under ./campaigns)
+        #[arg(long)]
+        name: String,
+        /// Model identifier on OpenRouter
+        #[arg(long)]
+        model: String,
+        /// Reasoning effort / thinking level
+        #[arg(short = 'e', long, default_value = "high")]
+        effort: String,
+        /// Agent harness (omp | opencode)
+        #[arg(long, value_enum, default_value_t = Harness::Omp)]
+        harness: Harness,
+        /// Campaign budget cap in USD; the ladder stops (over_budget) once
+        /// cumulative effective cost reaches it
+        #[arg(short = 'b', long, default_value_t = 1.00)]
+        budget_usd: f64,
+        /// Per-stage agent timeout backstop (minutes; cost is the real bound)
+        #[arg(long, default_value_t = 60)]
+        timeout_min: u64,
+        /// OpenRouter API key (defaults to OPENROUTER_API_KEY)
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
+        api_key: Option<String>,
+        /// Skip tickets entirely and verify the existing workspace per stage
+        /// (no API calls; useful for suite development)
+        #[arg(long, default_value_t = false)]
+        eval_only: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run an autonomous benchmark on a model using an agent harness (omp | opencode)
     Run {
@@ -341,6 +385,13 @@ pub enum Commands {
         /// Path to results directory
         #[arg(long, default_value = "./results")]
         results_dir: String,
+    },
+
+    /// [operate] Campaign mode: ordered tickets on one living workspace,
+    /// cumulative acceptance, cost-first (see campaigns/ and TODO_CAMPAIGNS.md)
+    Campaign {
+        #[command(subcommand)]
+        action: CampaignAction,
     },
 
     /// [operate] Plan an effort x model x task comparison wave (prints shell commands)

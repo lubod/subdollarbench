@@ -1,4 +1,5 @@
 pub mod bench;
+pub mod campaign;
 pub mod config;
 pub mod cost;
 pub mod pipeline;

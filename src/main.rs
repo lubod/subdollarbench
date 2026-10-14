@@ -22,6 +22,7 @@ use subdollarbench::verifier::{
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
 
+mod main_campaign;
 mod main_queue;
 mod review_cmd;
 
@@ -235,6 +236,7 @@ async fn run_trial_batch(
             batch_reference: batch_ref.as_ref().map(|b| b.reference()),
             worker: 0,
             feedback_rounds: p.feedback_rounds,
+            campaign_stage: None,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await {
             Ok(output) => {
@@ -431,6 +433,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     batch_reference: batch_ref.as_ref().map(|b| b.reference()),
                     worker: 0,
                     feedback_rounds,
+                    campaign_stage: None,
                 };
 
                 let pipe_res = BenchmarkPipeline::execute(pipe_config, logger.clone(), None).await;
@@ -1929,6 +1932,35 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
             println!("pruned {gone_c} containers, {gone_n} networks");
         }
+
+        Commands::Campaign { action } => match action {
+            subdollarbench::config::CampaignAction::List => main_campaign::list()?,
+            subdollarbench::config::CampaignAction::DryRun { name, model } => {
+                main_campaign::dry_run(&name, &model)?
+            }
+            subdollarbench::config::CampaignAction::Run {
+                name,
+                model,
+                effort,
+                harness,
+                budget_usd,
+                timeout_min,
+                api_key,
+                eval_only,
+            } => {
+                main_campaign::run(
+                    name,
+                    model,
+                    effort,
+                    harness,
+                    budget_usd,
+                    timeout_min,
+                    api_key,
+                    eval_only,
+                )
+                .await?
+            }
+        },
 
         Commands::Matrix {
             models,

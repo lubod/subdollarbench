@@ -952,6 +952,7 @@ pub async fn run_extension_batch(
             batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
             worker,
             feedback_rounds: spec.feedback_rounds,
+            campaign_stage: None,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), Some(Arc::clone(cancel)))
             .await
@@ -1608,6 +1609,7 @@ pub async fn execute_run_body(
             batch_reference: batch_ref.as_ref().map(|b| b.reference()),
             worker,
             feedback_rounds: req.feedback_rounds.unwrap_or(0),
+            campaign_stage: None,
         };
 
         let pipe_res = BenchmarkPipeline::execute(

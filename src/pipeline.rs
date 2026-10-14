@@ -173,6 +173,10 @@ pub struct BenchmarkConfig {
     /// If initial verification fails, verifier diagnostics are fed back to the
     /// agent in the same workspace to surgically fix bugs.
     pub feedback_rounds: u32,
+    /// Campaign ticket: prompt override, workspace continuity, and the
+    /// acceptance subset that decides this stage's verdict. None for
+    /// single-shot runs (behavior identical to before campaigns existed).
+    pub campaign_stage: Option<crate::campaign::CampaignStageConfig>,
 }
 
 #[derive(Debug)]
@@ -407,9 +411,11 @@ impl BenchmarkPipeline {
         }
     }
 
-    // Eight params (task + workdir + sandbox + port + seed + agent flag +
-    // worker + logger): the verifier fans out per task and needs them all;
-    // bundling into a struct is churn without a second caller.
+    // Nine params (task + workdir + sandbox + port + seed + agent flag +
+    // worker + logger + accepted stages): the verifier fans out per task and
+    // needs them all; bundling into a struct is churn without a second
+    // caller. `accepted` is the campaign ticket's acceptance subset (None =
+    // full suite, identical to pre-campaign behavior).
     #[allow(clippy::too_many_arguments)]
     fn run_verification<'a>(
         task: TaskType,
@@ -420,6 +426,7 @@ impl BenchmarkPipeline {
         agent_failed: bool,
         worker: u8,
         logger: &'a Arc<dyn PipelineLogger>,
+        accepted: Option<&'a [u32]>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = VerificationOutcome> + Send + 'a>> {
         Box::pin(async move {
             logger
@@ -444,6 +451,13 @@ impl BenchmarkPipeline {
             let mut extra_robustness: Vec<crate::verifier::StageResult> = Vec::new();
             let mut infra_error = false;
 
+            // A campaign ticket is judged on its acceptance subset; the
+            // early-return branches (disqualification, no runnable code)
+            // must count that subset, not the full task suite.
+            let accepted_total = accepted
+                .map(|a| a.len() as u32)
+                .unwrap_or_else(|| task.total_stages());
+
             let (pass_rate, passed_stages, total_stages, stage_results) = if disqualified {
                 let reason = disqualification_reason
                     .clone()
@@ -454,7 +468,7 @@ impl BenchmarkPipeline {
                     passed: false,
                     error: Some(reason),
                 }];
-                (0.0, 0, task.total_stages(), stages)
+                (0.0, 0, accepted_total, stages)
             } else if !has_runnable {
                 infra_error = candidate_check_error.is_some();
                 if let Some(e) = &candidate_check_error {
@@ -468,7 +482,7 @@ impl BenchmarkPipeline {
                 } else {
                     logger.log("[SETUP] No runnable start.sh or Dockerfile found in ./workspace! Skipping verification.");
                 }
-                (0.0, 0, task.total_stages(), Vec::new())
+                (0.0, 0, accepted_total, Vec::new())
             } else {
                 if let Err(e) = sandbox.start_candidate_in_docker(workdir, port) {
                     if crate::sandbox::docker::SandboxManager::is_model_packaging_error(
@@ -534,12 +548,22 @@ impl BenchmarkPipeline {
 
                 match task {
                     TaskType::Redis => {
+                        // Campaign acceptance subset: None = full suite (old
+                        // behavior). A ticket runs every suite for evidence
+                        // but is scored only on its accepted ids, and the
+                        // destructive AOF stage runs only when accepted.
+                        let allowed = |n: u32| accepted.map(|a| a.contains(&n)).unwrap_or(true);
                         let verifier = RedisVerifier::new(port, Some(verifier_seed));
                         let summary = verifier.run_all().await;
                         let mut stages = summary.stages.clone();
                         for s in &summary.stages {
                             let status_str = if s.passed { "PASS" } else { "FAIL" };
                             let err_str = s.error.as_deref().unwrap_or("");
+                            let scope = if allowed(s.stage) {
+                                ""
+                            } else {
+                                " (not in ticket acceptance)"
+                            };
                             logger.log(&format!(
                                 "  Stage {}: {} -> {} {}",
                                 s.stage,
@@ -547,8 +571,18 @@ impl BenchmarkPipeline {
                                 status_str,
                                 err_str
                             ));
+                            if !scope.is_empty() {
+                                logger.log(&format!("    ^ accepted scope: excluded{scope}"));
+                            }
                         }
-                        if summary.pass_rate == 100.0 {
+                        if !allowed(6) {
+                            logger.log("[VERIFY] AOF crash-recovery stage is outside this ticket's acceptance; skipping the destructive kill.");
+                        } else if summary
+                            .stages
+                            .iter()
+                            .filter(|s| allowed(s.stage))
+                            .all(|s| s.passed)
+                        {
                             let fail6 = |e: String| crate::verifier::StageResult {
                                 stage: 6,
                                 name: "Stage 6: AOF crash recovery".to_string(),
@@ -607,9 +641,15 @@ impl BenchmarkPipeline {
                             logger.log("  Stage 6: AOF crash recovery -> FAIL skipped due to failure in earlier stages");
                             stages.push(st);
                         }
-                        let ps = stages.iter().filter(|s| s.passed).count() as u32;
-                        let ts = stages.len() as u32;
-                        let pr = ps as f64 / ts as f64 * 100.0;
+                        let verdict: Vec<&crate::verifier::StageResult> =
+                            stages.iter().filter(|s| allowed(s.stage)).collect();
+                        let ps = verdict.iter().filter(|s| s.passed).count() as u32;
+                        let ts = verdict.len() as u32;
+                        let pr = if ts > 0 {
+                            ps as f64 / ts as f64 * 100.0
+                        } else {
+                            0.0
+                        };
                         for s in verifier.run_robustness().await {
                             log_robust(logger, std::slice::from_ref(&s));
                             extra_robustness.push(s);
@@ -995,16 +1035,26 @@ impl BenchmarkPipeline {
             );
         }
         // 1. Prepare Workspace
-        if !config.eval_only {
-            if config.workdir.exists() {
-                let _ = fs::remove_dir_all(&config.workdir);
-            }
-            fs::create_dir_all(&config.workdir)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&config.workdir, fs::Permissions::from_mode(0o777));
-            }
+        // Campaign continuity: stage > 0 continues in the workspace the
+        // model already built. The wipe is what makes a single-shot run
+        // pristine; for a ticket the existing repo IS the input.
+        let continuity = config
+            .campaign_stage
+            .as_ref()
+            .map(|c| c.continuity)
+            .unwrap_or(false);
+        if !config.eval_only && config.workdir.exists() && !continuity {
+            let _ = fs::remove_dir_all(&config.workdir);
+        }
+        // Eval-only and campaign runs may arrive with an existing workspace;
+        // create when missing so verification and the git-evidence path
+        // always have a directory (creating an empty one never hides a
+        // candidate: the runnable check still fails on it).
+        fs::create_dir_all(&config.workdir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&config.workdir, fs::Permissions::from_mode(0o777));
         }
 
         let sandbox = SandboxManager::with_id(&run_id);
@@ -1106,13 +1156,28 @@ impl BenchmarkPipeline {
             }
         }
 
-        // 4. Read prompt
-        let prompt_file = get_repo_root()
-            .join("tasks")
-            .join(config.task.to_string())
-            .join("prompt.md");
-        let prompt_content = fs::read_to_string(&prompt_file)
-            .map_err(|_| anyhow!("Could not read prompt file: {}", prompt_file.display()))?;
+        // 4. Read prompt (campaign tickets override the task prompt; port
+        // templating + the READY contract apply to both).
+        let prompt_content = if let Some(cs) = &config.campaign_stage {
+            logger.log(&format!(
+                "[CAMPAIGN] Ticket {}: reading campaign prompt {}",
+                cs.stage,
+                cs.prompt_path.display()
+            ));
+            fs::read_to_string(&cs.prompt_path).map_err(|_| {
+                anyhow!(
+                    "Could not read campaign stage prompt: {}",
+                    cs.prompt_path.display()
+                )
+            })?
+        } else {
+            let prompt_file = get_repo_root()
+                .join("tasks")
+                .join(config.task.to_string())
+                .join("prompt.md");
+            fs::read_to_string(&prompt_file)
+                .map_err(|_| anyhow!("Could not read prompt file: {}", prompt_file.display()))?
+        };
         // Port templating (parallel workers): prompt files carry the canonical
         // port; worker>0 cells substitute their offset port so agents build on
         // the ports their containers actually publish. Worker 0 is verbatim.
@@ -1234,6 +1299,10 @@ impl BenchmarkPipeline {
             agent_failed,
             config.worker,
             &logger,
+            config
+                .campaign_stage
+                .as_ref()
+                .map(|c| c.accepted_stages.as_slice()),
         )
         .await;
 
@@ -1387,6 +1456,10 @@ impl BenchmarkPipeline {
                     false,
                     config.worker,
                     &logger,
+                    config
+                        .campaign_stage
+                        .as_ref()
+                        .map(|c| c.accepted_stages.as_slice()),
                 )
                 .await;
 
@@ -2184,6 +2257,7 @@ mod tests {
             worker: 0,
             harness: Harness::Omp,
             feedback_rounds: 0,
+            campaign_stage: None,
         };
 
         let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -2215,6 +2289,7 @@ mod tests {
             worker: 0,
             harness: Harness::Omp,
             feedback_rounds: 0,
+            campaign_stage: None,
         };
 
         struct CaptureLogger(std::sync::Mutex<Vec<String>>);
