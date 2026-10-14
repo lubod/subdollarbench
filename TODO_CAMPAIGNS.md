@@ -218,6 +218,16 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-9, 2026-10-14 run 9, `..._170557`, RULES
+  `2026-10-14.10`): reached **0** — first cell to fall at s1. s0 3/3
+  ($0.0395, 28t), s1 expiry **FAIL 3/4** ($0.0430, 13 initial + 12
+  repair). C this time. s1's initial attempt left `SET ... PX` as an
+  unknown arity (`argc != 3`) and `entry_expired` defined but never
+  called; the repair round diagnosed both correctly, started the pub/sub
+  and expiry edits, then burned turns on edit-tool line-anchor churn
+  (struct redefinition rejected twice) and hit the cap with none of the
+  fixes landed; re-verification unchanged (3/4). $0.0826, tickets/$ 12.1,
+  1 regression-free. Harness clean.
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 8, `..._162654`): reached
   **2** — s0 3/3 ($0.0316, 28/28 — used the full new initial cap), s1 4/4
   ($0.0319, 13/13), s2 5/5 ($0.0276, **13/13 initial, no repair needed** —

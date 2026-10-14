@@ -120,6 +120,21 @@ pub fn validate_comparison_wave(results: &[BenchmarkRunResult]) -> anyhow::Resul
             detail.join("; ")
         );
     }
+    // Evaluation protocol (stop-on-pass vs fixed_n vs SPRT): statistics are
+    // protocol-dependent by construction (scoring-v2 §1, operator decision
+    // Q4), so a wave must not pool rows measured under different protocols.
+    // Legacy rows without a stamp group as "unknown" and never mix with a
+    // stamped protocol.
+    let protocols: BTreeSet<String> = results
+        .iter()
+        .map(|r| r.protocol.clone().unwrap_or_else(|| "unknown".to_string()))
+        .collect();
+    if protocols.len() > 1 {
+        anyhow::bail!(
+            "matrix-report: refusing to pool runs across evaluation protocols ({}) — ranks are only comparable within one protocol; filter to a single protocol before comparing (legacy rows without a stamp group as 'unknown')",
+            protocols.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -365,6 +380,47 @@ mod tests {
         b.harness = Some("opencode".to_string());
         let err = validate_comparison_wave(&[a, b]).unwrap_err();
         assert!(format!("{err:#}").contains("harness"));
+    }
+
+    /// Q4: a wave must not pool rows measured under different evaluation
+    /// protocols; unstamped legacy rows group as "unknown" and do not mix
+    /// with a stamped protocol either.
+    #[test]
+    fn test_wave_mixed_protocol_refused() {
+        let mut a = wave_run(
+            "a1",
+            "model-a",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        let mut b = wave_run(
+            "b1",
+            "model-b",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        a.protocol = Some("sequential_cap".to_string());
+        b.protocol = Some("fixed_n".to_string());
+        let err = validate_comparison_wave(&[a.clone(), b]).unwrap_err();
+        assert!(format!("{err:#}").contains("protocols"));
+
+        // Same protocol: fine.
+        let mut c = a.clone();
+        c.id = "c1".to_string();
+        assert!(validate_comparison_wave(&[a.clone(), c]).is_ok());
+
+        // Stamped vs unstamped (legacy) also refuses: "unknown" is a class.
+        let legacy = wave_run(
+            "l1",
+            "model-b",
+            Some("high"),
+            Some("r1"),
+            "2026-09-25T00:00:00Z",
+        );
+        let err = validate_comparison_wave(&[a, legacy]).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown"));
     }
 
     #[test]

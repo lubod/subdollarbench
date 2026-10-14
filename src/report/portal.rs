@@ -104,6 +104,10 @@ pub struct PortalSummary {
 pub struct ModelRollupRow {
     pub model: String,
     pub harness: String,
+    /// Comparability class: rules regime stamp (`rules_of`) and evaluation
+    /// protocol. Statistics never pool across classes (Q4).
+    pub regime: String,
+    pub protocol: String,
     pub n_tasks: usize,
     pub tasks: Vec<String>,
     pub n_parents: usize,
@@ -286,6 +290,7 @@ a:hover { text-decoration: underline; }
 }
 .badge-pass { background: rgba(63, 185, 80, 0.18); color: var(--grn); border: 1px solid rgba(63, 185, 80, 0.4); }
 .badge-fail { background: rgba(248, 81, 73, 0.16); color: var(--red); border: 1px solid rgba(248, 81, 73, 0.4); }
+.badge-protocol { background: rgba(188, 140, 255, 0.14); color: #bc8cff; border: 1px solid rgba(188, 140, 255, 0.4); }
 .badge-info { background: rgba(88, 166, 255, 0.16); color: var(--acc); border: 1px solid rgba(88, 166, 255, 0.4); }
 .badge-effort { background: rgba(210, 153, 34, 0.18); color: var(--warning); border: 1px solid rgba(210, 153, 34, 0.4); }
 .badge-count { background: rgba(88, 166, 255, 0.2); color: var(--acc); border-radius: 999px; font-size: 0.65rem; padding: 1px 6px; }
@@ -953,7 +958,7 @@ const PORTAL_JS: &str = concat!(
     for (const r of RUNS_DATA) {
       if (boardTier !== 'all' && tierOf(r) !== boardTier) continue;
       const task = (r.task || '').toLowerCase();
-      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task + '\u0001' + ((r.harness || 'omp').toLowerCase());
+      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + task + '\u0001' + ((r.harness || 'omp').toLowerCase()) + '\u0001' + (r.rules_version || 'legacy') + '\u0001' + (r.protocol || 'unknown');
       const n = r.total_trials || (r.subruns && r.subruns.length) || 1;
       const existing = canonical[key];
       if (!existing) {
@@ -974,12 +979,15 @@ const PORTAL_JS: &str = concat!(
       }
     }
 
-    // 2. Aggregate only canonical runs across tasks
+    // 2. Aggregate only canonical runs across tasks, within one
+    // comparability class (regime + protocol): Q4 — never pool statistics
+    // across rule sets or evaluation protocols.
     const groups = {};
     for (const r of Object.values(canonical)) {
-      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + ((r.harness || 'omp').toLowerCase());
+      const key = (r.model || '?') + '\u0001' + (r.effort || 'auto') + '\u0001' + ((r.harness || 'omp').toLowerCase()) + '\u0001' + (r.rules_version || 'legacy') + '\u0001' + (r.protocol || 'unknown');
       const g = groups[key] || (groups[key] = {
         model: r.model || '?', effort: r.effort || 'auto', harness: (r.harness || 'omp'),
+        regime: r.rules_version || 'legacy', protocol: r.protocol || 'unknown',
         tasks: {}, nTrials: 0, nPass: 0, sumAvg: 0, nParents: 0,
         sumCost: 0, sumApiCost: 0, sumTurns: 0,
       });
@@ -1000,6 +1008,7 @@ const PORTAL_JS: &str = concat!(
       const [lo, hi] = wilson95(g.nPass, g.nTrials);
       return {
         model: g.model, effort: g.effort, harness: g.harness,
+        regime: g.regime, protocol: g.protocol,
         nTasks: Object.keys(g.tasks).length,
         tasks: Object.keys(g.tasks).sort().join(', '),
         avgPct: g.sumAvg / Math.max(1, g.nParents),
@@ -1045,6 +1054,7 @@ const PORTAL_JS: &str = concat!(
           </div>
           <span class="badge badge-effort">effort: ${escapeHtml(r.effort)}</span>
             <span class="badge" title="Agent harness">harness: ${escapeHtml(r.harness || 'omp')}</span>
+            <span class="badge badge-protocol" title="rules regime ${escapeHtml(r.regime || 'legacy')}">${escapeHtml(r.protocol || 'unknown')}</span>
         </div></td>
         <td style="text-align: center;">${r.nTasks} <span style="font-size: 0.7rem; color: var(--mut);">${escapeHtml(r.tasks)}</span></td>
         <td style="text-align: center; font-weight: 700;">${r.avgPct.toFixed(0)}%</td>
@@ -1300,15 +1310,19 @@ impl PortalExporter {
     }
 
     /// Aggregate parents into one row per model+harness across all tasks.
-    /// Step 1 (dedup): one canonical parent per (model, effort, task) —
-    /// highest trial count wins, latest timestamp breaks ties — mirroring
-    /// the `aggregateModels` cross-task rollup in PORTAL_JS. Step 2: group
-    /// canonical parents by model only (no per-task split).
+    /// Step 1 (dedup): one canonical parent per (model, effort, task,
+    /// harness, rules regime, protocol) — highest trial count wins, latest
+    /// timestamp breaks ties — mirroring the `aggregateModels` cross-task
+    /// rollup in PORTAL_JS. Step 2: group canonical parents by (model,
+    /// harness, regime, protocol): rank only within one comparability
+    /// class (scoring-v2 §1, operator decision Q4) — pooled statistics
+    /// must never mix rule sets or evaluation protocols, and each row
+    /// carries its protocol badge.
     fn rollup_models(
         results: &[crate::report::leaderboard::BenchmarkRunResult],
     ) -> Vec<ModelRollupRow> {
         let mut canonical: HashMap<
-            (String, String, String, String),
+            (String, String, String, String, String, String),
             &crate::report::leaderboard::BenchmarkRunResult,
         > = HashMap::new();
         for r in results {
@@ -1321,6 +1335,8 @@ impl PortalExporter {
                 r.effort.clone().unwrap_or_else(|| "auto".to_string()),
                 r.task.to_lowercase(),
                 crate::report::leaderboard::BenchmarkRunResult::harness_of(r).to_string(),
+                crate::report::leaderboard::BenchmarkRunResult::rules_of(r),
+                r.protocol.clone().unwrap_or_else(|| "unknown".to_string()),
             );
             let n = r.total_trials.unwrap_or(r.subruns.len() as u32).max(1);
             let replace = match canonical.get(&key) {
@@ -1353,12 +1369,14 @@ impl PortalExporter {
                 _ => 0,
             }
         }
-        let mut groups: HashMap<(String, String), Acc> = HashMap::new();
+        let mut groups: HashMap<(String, String, String, String), Acc> = HashMap::new();
         for r in canonical.into_values() {
             let g = groups
                 .entry((
                     r.model.clone(),
                     crate::report::leaderboard::BenchmarkRunResult::harness_of(r).to_string(),
+                    crate::report::leaderboard::BenchmarkRunResult::rules_of(r),
+                    r.protocol.clone().unwrap_or_else(|| "unknown".to_string()),
                 ))
                 .or_insert_with(|| Acc {
                     tasks: HashSet::new(),
@@ -1393,12 +1411,14 @@ impl PortalExporter {
 
         let mut rows: Vec<ModelRollupRow> = groups
             .into_iter()
-            .map(|((model, harness), g)| {
+            .map(|((model, harness, regime, protocol), g)| {
                 let (p1_lo, p1_hi) = wilson_interval_95(g.n_trials, g.n_pass);
                 let mut tasks: Vec<String> = g.tasks.into_iter().collect();
                 tasks.sort();
                 ModelRollupRow {
                     harness,
+                    regime,
+                    protocol,
                     n_tasks: tasks.len(),
                     tasks,
                     model,
@@ -1426,11 +1446,18 @@ impl PortalExporter {
                 }
             })
             .collect();
-        // Rank by average pass rate (desc), then P@1 lower bound, then cost.
+        // Rank only within one comparability class (regime, protocol) — the
+        // class keys sort first so mixed-class tables stay contiguous and
+        // each row's badge names its class (operator decision Q4).
         rows.sort_by(|a, b| {
-            b.avg_pass_rate
-                .partial_cmp(&a.avg_pass_rate)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            a.regime
+                .cmp(&b.regime)
+                .then_with(|| a.protocol.cmp(&b.protocol))
+                .then_with(|| {
+                    b.avg_pass_rate
+                        .partial_cmp(&a.avg_pass_rate)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| {
                     b.p1_lo
                         .partial_cmp(&a.p1_lo)
@@ -1502,7 +1529,7 @@ impl PortalExporter {
             }
             trs.push_str(&format!(
                 "<tr class=\"mrow\"><td style=\"text-align:center;\">{rank}</td>\
-                 <td><span class=\"mname\" title=\"{model}\">{short}</span> <span class=\"badge badge-effort\">{harness}</span><br><span class=\"tdots\" title=\"{tasks}\">{dots}</span></td>\
+                 <td><span class=\"mname\" title=\"{model}\">{short}</span> <span class=\"badge badge-effort\">{harness}</span> <span class=\"badge badge-protocol\" title=\"rules regime {regime}\">{protocol}</span><br><span class=\"tdots\" title=\"{tasks}\">{dots}</span></td>\
                  <td class=\"bignum\">{avg:.0}<span class=\"pct\">%</span></td>\
                  <td>{ci_bar}<br><span class=\"mut\">{p1:.0}% ({lo:.0}-{hi:.0})</span></td>\
                  <td style=\"text-align:center;\" title=\"API ${total_api:.4} / effective ${total:.4}\"><b>${total_api:.2}</b><br><span class=\"mut\">${avg_api:.2}/run</span></td>\
@@ -1510,6 +1537,8 @@ impl PortalExporter {
                 rank = rank,
                 model = Self::esc(&r.model),
                 harness = Self::esc(&r.harness),
+                protocol = Self::esc(&r.protocol),
+                regime = Self::esc(&r.regime),
                 short = [
                     Self::esc(LeaderboardManager::short_model_name(&r.model)),
                     Self::esc(LeaderboardManager::pricing_badge(&r.model)),

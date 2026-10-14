@@ -655,7 +655,19 @@ impl BenchmarkRunResult {
             None
         };
         let max_feedback_rounds = agg.iter().filter_map(|r| r.feedback_rounds).max();
-        let merged_protocol: Option<String> = subruns.iter().find_map(|s| s.protocol.clone());
+        // Protocols must not pool silently: subruns measured under different
+        // protocols carry incomparable statistics (scoring-v2 §1, operator
+        // decision Q4). A mixed parent is stamped "mixed"; the report gate
+        // refuses to rank it.
+        let merged_protocol: Option<String> = {
+            let distinct: std::collections::BTreeSet<String> =
+                subruns.iter().filter_map(|s| s.protocol.clone()).collect();
+            match distinct.len() {
+                0 => None,
+                1 => distinct.into_iter().next(),
+                _ => Some("mixed".to_string()),
+            }
+        };
         Some(BenchmarkRunResult {
             id: parent_id.to_string(),
             model: best.model.clone(),

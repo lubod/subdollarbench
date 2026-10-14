@@ -153,3 +153,31 @@ at 17-30 initial turns either, while repair starts from a precise failure
 report on a near-complete file. Graceful degradation for tiny pools is
 unchanged (10->5, 4->2, 1->1). Revisit if small tickets start failing
 initially where they used to pass.
+
+## 13. Operator decisions (2026-10-14): HA, s3 pool, protocol gating, linear curve, CI gate (2026-10-14)
+
+Six open questions answered by the operator (full detail:
+`docs/OPEN-QUESTIONS.md`); all landed the same day under RULES
+`2026-10-14.11` unless noted:
+
+- **HA finale (ticket 10)**: automatic failover — survivors promote the
+  replica with the highest replication offset (tie: lowest port) within
+  **T = 10s**; the network-partition stretch check is deferred. The build
+  follows the proposal's Stage 10 launch/replication/sync-ack/rejoin
+  contract.
+- **s3 durability pool 30 -> 36 turns** (initial ~24 + 12 repair):
+  four consecutive ling cells died at the 30-turn wall in the same
+  "repair ran out mid-refactor" class. Cells measured earlier used 30
+  (loose comparability; grid log notes it per cell).
+- **Protocol gating (scoring-v2 option A)**: `validate_comparison_wave`
+  refuses mixed-protocol waves (legacy stamps group as `unknown`);
+  `merge_subruns` stamps mixed parents `mixed`; portal rollups group and
+  badge by (rules regime, protocol). SPRT (C) and top-up (B) deferred.
+- **Throughput pricing is linear**: `score = base_eff x speed_ratio`
+  (retires `r(1+2r)`, where 2x speed could cost 10x and tie). Revisit if
+  a wave shows r > 1.5 is a reliable quality signal.
+- **Bench CI coverage gate 50 -> 80** (`--fail-under-lines 80`),
+  dogfooding the campaign's own §6 standard. Actions stays disabled, so
+  the gate is inert until CI is re-enabled; the bench measured ~70% lines
+  and needs coverage work on docker-gated paths first (TODO_CAMPAIGNS
+  hygiene).

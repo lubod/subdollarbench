@@ -173,13 +173,15 @@ impl ModelPricing {
     }
 
     /// Calculates the Throughput-Adjusted Score.
-    /// Score = Base Efficiency * speed_ratio * (1.0 + 2.0 * speed_ratio)
+    /// Score = Base Efficiency * speed_ratio (linear; operator decision
+    /// 2026-10-14, Q5: speed priced proportionally until a wave shows
+    /// r > 1.5 is a reliable quality signal).
     /// where speed_ratio = candidate_tp / reference_tp.
     ///
-    /// At speed_ratio = 1.0 (matching reference baseline), multiplier is 3.0x.
-    /// At speed_ratio = 0.0 (crash / 0 req/s), multiplier is 0.0x.
-    /// Sub-reference throughput drops off quadratically to penalize slow implementations,
-    /// while high throughput earns superlinear rewards.
+    /// At speed_ratio = 1.0 (matching reference baseline), the score equals
+    /// base efficiency. At speed_ratio = 0.0 (crash / 0 req/s), 0.0x.
+    /// Superlinear curves were retired: r(1+2r) let a 2x-faster model cost
+    /// 10x per solve and still tie.
     pub fn calculate_throughput_score(
         pass_rate: f64,
         effective_cost_usd: f64,
@@ -250,7 +252,7 @@ impl ModelPricing {
             return None;
         }
         let speed_ratio = cand_tp / ref_tp;
-        Some(base_eff * speed_ratio * (1.0 + 2.0 * speed_ratio))
+        Some(base_eff * speed_ratio)
     }
 
     pub fn new(
@@ -865,7 +867,7 @@ mod tests {
 
         let tp_score =
             ModelPricing::calculate_throughput_score(100.0, eff, Some(30_000.0), Some(30_000.0));
-        assert!((tp_score.unwrap() - (score * 3.0)).abs() < 1e-3);
+        assert!((tp_score.unwrap() - (score * 1.0)).abs() < 1e-3);
 
         // No live reference -> no score (refless tasks rank by P@1/cost).
         for task in ["redis", "pdf", "wal", "proxy", "pubsub", "http"] {
@@ -891,15 +893,15 @@ mod tests {
         let tp_none = ModelPricing::calculate_throughput_score(100.0, eff, None, Some(30_000.0));
         assert_eq!(tp_none, None);
 
-        // Sub-reference performance (half-speed: ratio 0.5 => multiplier 0.5 * (1 + 1) = 1.0)
+        // Linear pricing: half-speed (=0.5x) and 2x-speed scores are the
+        // base efficiency scaled by the ratio (operator decision Q5).
         let tp_half =
             ModelPricing::calculate_throughput_score(100.0, eff, Some(15_000.0), Some(30_000.0));
-        assert!((tp_half.unwrap() - (score * 1.0)).abs() < 1e-3);
+        assert!((tp_half.unwrap() - (score * 0.5)).abs() < 1e-3);
 
-        // Superlinear high performance (2x speed: ratio 2.0 => multiplier 2.0 * (1 + 4) = 10.0)
         let tp_double =
             ModelPricing::calculate_throughput_score(100.0, eff, Some(60_000.0), Some(30_000.0));
-        assert!((tp_double.unwrap() - (score * 10.0)).abs() < 1e-3);
+        assert!((tp_double.unwrap() - (score * 2.0)).abs() < 1e-3);
     }
 
     /// The regression this fixes: the compute floor is the denominator of the

@@ -214,6 +214,10 @@ board.
 
 ## Bench-side note
 
-The bench's own CI gate is currently `--fail-under-lines 50` (measured
-~70%). If the intent was also to raise the *repo's* gate: set it to 80 and
-keep it there; Slice A ships with its own tests so the gate holds.
+The bench's own CI gate was raised from `--fail-under-lines 50` to **80**
+on 2026-10-14 (operator decision Q6, `docs/OPEN-QUESTIONS.md`) — dogfooding
+the §6 coverage standard the campaign demands of models. GitHub Actions is
+currently disabled; the gate enforces once CI is re-enabled/scoped. The
+bench measured ~70% lines at the time of the raise, so re-enabling CI
+requires adding coverage for the docker-gated paths (or a measured
+exemption), tracked in TODO_CAMPAIGNS hygiene.

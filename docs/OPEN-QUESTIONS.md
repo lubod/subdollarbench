@@ -1,83 +1,70 @@
 # Open questions needing a product call
 
 Collected 2026-10-14 (end of the campaign build day). Each item has the
-data, the options, and a recommendation. Nothing here blocks the current
-ladder (tickets 0-9 are built); these shape what comes next.
+data, the options, and a recommendation.
+
+**All six answered by the operator on 2026-10-14 — resolutions inline.**
 
 ## Q1. Ticket 10 (three-node HA finale) — failover semantics & partition scope
 
-The proposal (`docs/PROPOSAL-iterative-campaigns.md`, "Stage 10 — HA
-contract") already specifies the *shape*: launch contract
-`./start.sh --port <p> --data <dir> [--replicaof host:port]`; nodes at
-7001/7002/7003 (+ worker offset); `ROLE` master/replica; replication with
-reads on replicas within 3s; sync-ack (a write is acknowledged only after
->=1 replica confirms); failover ("within T seconds exactly one survivor
-reports `ROLE master`"); rejoin ("restart the old master; it returns as a
-replica, never co-master, and converges"); the full accumulated suite
-re-runs against the cluster's current master. The partition test is
-marked **(stretch)**.
+**RESOLVED (option a): automatic failover, deterministic rule, T=10s;
+partition check deferred to a follow-up.** Survivors promote the replica
+with the highest replication offset (tie: lowest port) within 10 seconds
+of the master's loss. The network-partition stretch check (isolate a
+minority; majority serves; minority cannot elect itself) becomes a later
+ticket/probe rather than v1 scope. Build follows the proposal's Stage 10
+contract: `./start.sh --port <p> --data <dir> [--replicaof host:port]`,
+nodes 7001-7003, `ROLE`, sync-ack, rejoin, full-suite re-run against the
+cluster's current master.
 
-What is still a judgment call:
+## Q2. s3 (durability) pool calibration
 
-- **D1 — failover mechanics.** The contract implies *automatic* failover
-  (nothing about an operator PROMOTE command). Options:
-  - **(a) Automatic, deterministic rule** (recommended): survivors pick
-    the replica with the highest replication offset (tie: lowest port),
-    and it becomes master within T. Test-friendly: SIGKILL the master,
-    poll `ROLE` on both survivors, require exactly one master within T,
-    and every acked write present.
-  - **(b) Manual promotion**: the harness sends a `PROMOTE` command.
-    More deterministic for testing, but adds protocol surface and is a
-    weaker HA story ("ops must intervene").
-- **T** (the failover deadline): propose **10 seconds** (generous for
-  budget models; the harness uses a 45s stage timeout).
-- **D2 — partition scope.** Proposed: build the core replica/sync-ack/
-  failover/rejoin checks NOW; leave the network-partition stretch check
-  (isolate a minority, majority keeps serving, minority cannot elect
-  itself) as a follow-up ticket or a lenient advisory probe. Building
-  real partition safety (split-brain prevention) is a consensus-sized
-  problem; the core contract already distinguishes good from bad clusters.
-- **Harness shape**: three candidate containers on the run network
-  (aliases `ha1/ha2/ha3`), same workspace image, separate `--data` dirs,
-  ports published for the harness. One new sandbox method + a stateful
-  verifier; no model-visible difference beyond the launch contract.
+**RESOLVED (option a): s3 pool raised 30 -> 36 turns.**
+Initial cap ~24 + 12-turn repair. Data: ling failed s3 four consecutive
+times in the same "repair ran out mid-refactor" class (runs 4, 5, 7, 8;
+~36+ turns needed). Cost per attempt +~20%; unlocks live data for
+tickets 4-9. Cells measured before this change used the 30-turn pool
+(loose comparability, documented in the grid log). RULES
+`2026-10-14.11`.
 
-**Ask: confirm (a) automatic with the offset rule and T=10s, and
-partition-as-follow-up. Then ticket 10 can be built.**
+## Q3. Perf baseline visibility
 
-## Q2. s3 (durability) pool calibration — the wall every model hits
+**RESOLVED (option a): keep blind for v1.** The perf ticket's 1.3x
+gate stays a prompt-level instruction without exposing the numeric
+baseline; revisit (prompt templating) only if the grid shows clean
+near-misses.
 
-Data (2026-10-14): ling failed s3 **four consecutive times** in the same
-class — the repair round ran out mid-refactor while fixing compile
-errors (runs 4, 5, 7, 8). Its s3 attempts are large refactors needing
-~36+ turns total; the ticket pool is 30 (reserve 12 -> initial 18 after
-the D6 amendment). Earlier, with 22 initial + 8 repair, ling passed s3
-once (run 2, Python path) and failed once (run 4, Go path).
+## Q4. Scoring protocol validity
 
-Options:
-- **(a) Raise s3's pool to 36** (initial ~24 + repair 12): the model's
-  initial attempt gets closer to a working build; cost per attempt rises
-  (~20%). Recommended if the goal is to let models reach tickets 4-9
-  (which are otherwise never exercised live).
-- **(b) Raise the repair floor to 16** (initial 14): more repair room,
-  less initial — mismatched to ling's profile (it under-uses repairs for
-  surveying).
-- **(c) Keep 30**: s3 stays the discriminator; the ladder's upper half
-  rarely yields data.
+**RESOLVED (option a): gate boards by protocol now.**
+- `matrix-report::validate_comparison_wave` refuses to pool runs across
+  protocols; legacy rows group as `unknown` (never mix with a stamp).
+- `merge_subruns` stamps a parent `mixed` when its subruns disagree
+  (previously it silently took the first protocol).
+- Portal rollups group and badge by (rules regime, protocol): pooled
+  statistics never span comparability classes.
+SPRT (option C) and top-up (option B) are deferred until a method wave
+needs them. RULES `2026-10-14.11`.
 
-**Ask: (a), (b), or (c)?** Nemotron's cell tonight adds a second model's
-data point to this call.
+## Q5. Throughput curve
 
-## Q3. Perf baseline visibility (small)
+**RESOLVED: linear pricing, score = base efficiency x speed_ratio**
+(was r(1+2r), where a 2x-faster model could cost 10x per solve and tie).
+Revisit only if a wave shows r > 1.5 is a reliable quality signal.
+RULES `2026-10-14.11`.
 
-Ticket 9's gate compares against the candidate's own genesis throughput.
-The perf prompt cannot currently state the baseline *number* (prompt
-files are static). Models optimize blind — fine for v1 (a Go rewrite
-clears 1.3x easily), but if the grid shows near-misses, render the
-baseline into the ticket prompt (needs a prompt-template hook in the
-campaign loader).
+## Q6. Bench's own CI coverage gate
 
-## Q4. Scoring v2 (already written up; unchanged)
+**RESOLVED (against the recommendation): raise to 80% now.**
+`.github/workflows/ci.yml` now enforces
+`cargo llvm-cov --fail-under-lines 80`, dogfooding the coverage standard
+the campaign demands of models. GitHub Actions remains disabled, so the
+gate is inert until CI is re-enabled/scoped; the bench measured ~70%
+lines when raised, so re-enabling CI requires coverage work on the
+docker-gated paths (tracked in TODO_CAMPAIGNS hygiene) or a measured
+exemption.
 
-Throughput curve / SPRT vs top-up / CI coverage gate -- see
-`docs/PROPOSAL-scoring-v2.md`. Still awaiting a decision.
+## Q7 (display-only). Pareto frontier regeneration
+
+No scoring change; regenerate the portal's frontier section on the next
+drain. (Accepted by default; no answer needed.)

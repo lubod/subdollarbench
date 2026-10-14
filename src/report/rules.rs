@@ -8,6 +8,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.11`: operator decisions (docs/OPEN-QUESTIONS.md).
+///   (Q2) s3 durability pool 30 -> 36 turns (initial ~24 + 12 repair):
+///   four consecutive cells showed refactors dying at the 30-turn wall.
+///   (Q4) evaluation-protocol gating: `validate_comparison_wave` refuses
+///   to pool runs across protocols (legacy rows group as `unknown`),
+///   `merge_subruns` stamps mixed-protocol parents `mixed` instead of
+///   silently taking the first, and portal rollups group + badge by
+///   (rules regime, protocol). (Q5) throughput pricing is now linear:
+///   score = base efficiency x speed_ratio (was r(1+2r): a 2x-faster
+///   model could cost 10x per solve and tie). Rows stamped
+///   `2026-10-14.10` or earlier are not comparable without
+///   `backfill --yes`.
 /// - `2026-10-14.10`: campaign ticket 9 (perf). New pipeline-level stage
 ///   12: pipelining in order (200 commands in one write, positional reply
 ///   checks via a frame-at-a-time reader — coalesced replies used to break
@@ -300,7 +312,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.10";
+pub const RULES_VERSION: &str = "2026-10-14.11";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

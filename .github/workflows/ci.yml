@@ -49,4 +49,4 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Check test code coverage
-        run: cargo llvm-cov --all-targets --summary-only --fail-under-lines 50
+        run: cargo llvm-cov --all-targets --summary-only --fail-under-lines 80
