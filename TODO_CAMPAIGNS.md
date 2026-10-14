@@ -231,19 +231,23 @@ sandbox/omp.rs 588 · main_campaign.rs 580 (0%) · report/repair.rs 566
 (7%) · remote.rs 553 · verifier/{proxy,binproto,pdf,wal} ~2,400 combined.
 
 Workstreams (in flight / planned):
-- [x] Verifier suites with mock servers (pubsub, wal, binproto, pdf,
-      proxy) — delegated, following the redis.rs mock patterns.
+- [x] Verifier suites with mock servers — **landed**: pubsub 31→95%, pdf
+      35→96.6%, proxy 58→88.4%, wal + binproto (mock suites in, 23+17
+      tests green), judge 48→95.7%, review_cmd 0→96.9%.
 - [x] main.rs CLI handler tests via the existing in-process `run_cli`
-      seam — delegated, offline variants only (no live-engine commands,
-      no data mutations).
-- [ ] report/{repair,cost_annotate,judge}.rs + review_cmd.rs
-      (fixture-driven; repair is 7%).
-- [ ] web/{server,queue}.rs route/queue tests (biggest remaining).
-- [ ] pipeline.rs / sandbox/{docker,opencode}.rs — integration-style
-      (docker available in this env; CI runner needs it too).
+      seam — landed (37 bin tests green; offline variants only).
+- [x] report/repair.rs 7→85.9% + report/cost_annotate.rs 28→56.4%
+      (the suite also exposed and fixed the `total_cost_usd` annotation
+      gate bug).
 - [ ] main_campaign.rs (0%; bin-side, needs its own test seam).
-Re-measure after each wave; keep the CI gate at 80 so re-enabling
-Actions enforces the requirement.
+- [ ] web/{server,queue}.rs route/queue tests (biggest remaining:
+      2,621 + 1,703 missed).
+- [ ] pipeline.rs (2,177) / sandbox/{docker,opencode}.rs (1,000 + 973)
+      — integration-style (docker available here; CI runners have it).
+- [ ] report/leaderboard.rs (750 missed) / remote.rs (553) /
+      sandbox/omp.rs (588) — second wave.
+Re-measure with `scripts/coverage.sh` after each wave; keep the CI gate
+at 80 so re-enabling Actions enforces the requirement.
 
 ## Grid log (sdb-kv, omp, high effort)
 
