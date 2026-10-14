@@ -10,3 +10,7 @@ portal/
 # SQLite primary store (rebuilt by migrate --yes on fresh checkout)
 bench.db
 bench.db-*
+# Manual backups: dot-form (bench.db.bak-<date>) was NOT covered by the
+# dash pattern above, so `git add -A` re-added them and one carried an
+# OpenRouter key into an unpushed commit (2026-10-14 incident, purged).
+bench.db.bak-*
