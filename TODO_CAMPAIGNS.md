@@ -218,6 +218,20 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-6, 2026-10-14 run 8, `..._162654`): reached
+  **2** — s0 3/3 ($0.0316, 28/28 — used the full new initial cap), s1 4/4
+  ($0.0319, 13/13), s2 5/5 ($0.0276, **13/13 initial, no repair needed** —
+  the trimmed initial is not starving the smaller tickets), s3 durability
+  **FAIL 0/6** ($0.0494, 18 + 12, regressions [1..5]). $0.1405,
+  tickets/$ 21.4. Go again. Initial attempt died mid-refactor (mangled
+  edit -> syntax errors); the repair reconstructed `GetEx`, made `Persist`
+  WAL-durable, fixed two call sites, and hit the cap exactly as its first
+  `go build` ran (5 call-site mismatches left: Del/Append/ExpireAt/
+  ExpireAfter now return two values). One more build-fix cycle would have
+  landed it. **s3 pattern across runs 4/5/7/8: four consecutive failures,
+  all "repair ran out mid-fix" on large Go refactors (~36+ turns needed
+  vs the 30-turn pool).** Feeding the D6/pool calibration; nemotron cell
+  tonight is the second model's evidence.
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 7, `..._160300`): reached
   **2** — s0 3/3 ($0.0219, 20t), s1 4/4 ($0.0302, 13t at the reduced cap),
   s2 5/5 ($0.0455, 13 initial + 12 repair — the repair converted the
