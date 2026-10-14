@@ -38,7 +38,9 @@ cost-first thesis has signal.
 5. **Tests are a deliverable**: 80% coverage enforced with a sensitivity
    check (revert sentinel -> suite must go red).
 6. Dashboard/UI stage + **3-node HA finale** (auto-failover contract).
-7. Campaign #1 = **sdb-kv**; #2 sdb-log (wal+pubsub); #3 sdb-edge (proxy).
+7. **Campaign portfolio (compose, don't 1:1)**: single-shot tasks retire to
+   genesis/history; campaigns absorb them as capability stages. See the
+   portfolio table below.
 
 ## Slice A — campaign core
 

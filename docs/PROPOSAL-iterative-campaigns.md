@@ -144,17 +144,31 @@ at the budget cap and records `reached`.
 Rule of thumb: prove through the client-visible path; keep partial fault
 evidence; fresh randomness per run; faults reversible and loud.
 
-## Alternative campaign apps (pecking order)
+## Campaign portfolio (composition, not 1:1)
 
-1. **sdb-log** (wal + pubsub fused): durable log -> subscriptions +
-   offsets -> retention/compaction -> crash matrix -> replication -> HA.
-2. **sdb-edge** (proxy): routing, health checks, balancing, caching/ETag,
-   rate limits, TLS, dashboard. Failure machinery already exists.
-3. **sdb-http**: files/uploads, Range/conditional GET, compression,
-   streaming, auth, caps, dashboard.
-4. **sdb-wire** (binproto): v1 -> v2 evolution with backward compatibility
-   as the headline.
-5. **sdb-doc** (pdf): decompression bombs, malformed structures; niche.
+Seven single-shot tasks do NOT become seven campaigns: capability suites
+compose, and verifier rigor (seeded, byte-level, anti-cheat hardened) is
+the expensive asset worth reusing — see DECISIONS #11.
+
+| Single-shot task | Home | Note |
+|---|---|---|
+| redis | **sdb-kv** (v1, 11-stage ladder) | genesis ticket + stages 1-6 acceptance |
+| pubsub | inside sdb-kv | already ticket 2 |
+| wal | inside sdb-kv | already ticket 3 (AOF/SIGKILL) |
+| binproto | sdb-kv extension wave | "admin binary protocol v1 -> v2" ticket |
+| proxy | **sdb-edge** | routing, health, balancing, caching, TLS, limits |
+| http | **sdb-http** | files/uploads, Range, conditional GET, compression |
+| pdf | single-shot only, deprioritized | narrow surface; keep as archive |
+| -- | **sdb-queue** (the one NEW app) | leases, ack/nack, retries, DLQ = temporal state machines; reuses wal patterns |
+
+Porting order (cost-first): sdb-kv grid -> sdb-kv stage-2 wave
+(disk-resident/compaction + admin binary protocol) -> sdb-edge ->
+sdb-queue -> sdb-http -> optional sdb-doc/sdb-wire only if a gap remains.
+
+Single-shot boards: retained as genesis/history within their stamps; no
+new development except as campaign stages; nothing is deleted
+(archive/annotate doctrine — DNS is the only removal precedent, for an
+unsound verifier).
 
 ## Harness changes
 
@@ -194,7 +208,9 @@ board.
    checker) + stage 7 dashboard (HTTP/SSE probes).
 5. Slice E: stage 8 security + stage 9 perf + stage 10 HA.
 6. Canary: one cheap model, full ladder; prove the regression alarm;
-   publish the cost curve. Then the model grid, then sdb-log (#2).
+   publish the cost curve. Then the model grid, then the sdb-kv stage-2
+   wave (disk-resident/compaction + admin binary protocol), then sdb-edge,
+   sdb-queue, sdb-http (portfolio order above).
 
 ## Bench-side note
 

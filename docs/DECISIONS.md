@@ -102,3 +102,17 @@ Bumped (not silent) because stage-4 verdicts can differ: consistency with
 the file's every-change-bumps history outweighs the "same wire behavior"
 argument, and the strictness delta deserves visibility. Ref:
 `src/verifier/proxy.rs`, `TODO_EFFORT.md §M`.
+
+## 11. Campaign portfolio: compose capability stages, don't run 7 campaigns (2026-10-14)
+Seven single-shot tasks do not become seven campaigns: verifier rigor
+(seeded, byte-level, anti-cheat hardened) is the expensive asset and
+campaigns compose it — sdb-kv absorbs redis/pubsub/wal (tickets 1-3) plus
+later disk/compaction + admin binary protocol; sdb-edge <- proxy;
+sdb-http <- http; **sdb-queue** is the one new app (leases/ack/nack/DLQ
+= temporal state machines); pdf deprioritized to archive. Single-shot
+boards retire to genesis/history within their stamps; nothing is deleted
+(archive/annotate; DNS is the only removal precedent, for an unsound
+verifier).
+Next trigger: after the sdb-kv model grid validates the method; port
+order sdb-kv stage-2 -> sdb-edge -> sdb-queue -> sdb-http.
+Ref: `TODO_CAMPAIGNS.md` portfolio, `docs/PROPOSAL-iterative-campaigns.md`.
