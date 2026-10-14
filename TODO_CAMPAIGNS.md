@@ -76,9 +76,19 @@ non-redis acceptance adapters.
   destructive AOF kill only at s3, git commits + patches + rollup
   (reached 3, tickets/$ computed). Regression logic proven by
   mock-executor tests (pass->fail flips, fault status, budget stop).
-- [ ] Gate, part 2 (spend): live agent campaign (1 model, stages 0-3).
-  A real mid-campaign regression is the only missing end-to-end proof of
-  the alarm — workspace changes between stages require the agent.
+- [x] Gate, part 2 (spend) — **regression alarm proven live** (2026-10-14,
+  ling, stages 0-1): ticket 0 PASS (3/3, $0.0610, 40 turns, git e46ed9d);
+  ticket 1 FAILED with real regressions: the model exhausted its 25-turn
+  pool mid-refactor, its last-minute full-file rewrite shipped a compile
+  error (`ok declared and not used`), the server never started, and
+  [1, 2, 4] were flagged as regressions (sev 3); the failing state is
+  committed as ef63f1b [fail]. Ladder stopped at reached=0. Rollup:
+  $0.1095, regression-free 1, tickets/$ 9.1. Fail taxonomy for this
+  canary: budget-exhaustion + no-compile, not wrong expiry semantics.
+- Calibration finding for D6: `max_turns` IS the shared pool (initial
+  cap = min(max_turns, 50) with feedback on), so a 25-turn ticket leaves
+  zero repair headroom — the repair round never ran ("Global turn budget
+  reached across attempts"). Re-run after D6 is settled.
 
 ## Slice B — stage suites (expiry, pubsub)
 
@@ -172,7 +182,12 @@ non-redis acceptance adapters.
 - [ ] D3. Curve choice (G3).
 - [ ] D4. SPRT vs top-up (G2).
 - [ ] D5. Repo CI coverage gate 50 -> 80 (`--fail-under-lines`).
-- [ ] D6. Stage budgets: calibrate from the Slice A canary.
+- [ ] D6. Stage budgets: canary finding — `max_turns` is the shared pool
+  (initial cap = min(max_turns, 50) when feedback is on), so ticket 1's
+  25 turns were consumed by the initial attempt and the repair round
+  never ran. Options: (a) budget stages >=60 turns so the 50-cap leaves
+  headroom, (b) campaign-side reserve (initial = min(max_turns - max/4,
+  50)), (c) accept cap-exhaustion as a fail. Calibrate on the re-run.
 
 ## Rules & gates
 
