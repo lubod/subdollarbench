@@ -303,6 +303,24 @@ non-redis acceptance adapters.
   restores it afterwards. **Validation: threaded mock test (faithful
   pass / skipped-auth fail / buffered-oversize fail); live plumbing
   awaits a t8-reaching run.**
+- **Ticket 9 (perf) built** (2026-10-14 late, RULES `2026-10-14.10`):
+  stage 12 — pipelining in order (200 commands in one write, positional
+  checks; mock test caught the coalesced-reply reader bug and now covers
+  pass + wrong-reply fail), 300-GET sequential p99 budget (10ms), and a
+  post-bench gate requiring the stage's own bench measurement to reach
+  >= 1.3x the genesis-stage value (carried via `baseline.json`; pure
+  `perf_gate_verdict` unit-tested). Measurement study: 5 consecutive
+  same-code runs on an idle machine spread 21.6k-22.0k rps (~1%), well
+  under the 30% gate; within-campaign stage-to-stage spread for the same
+  code was ~5% — the earlier 55k->31k swings were implementation changes
+  plus concurrent host builds. **The prompt cannot tell the model its
+  exact baseline number (static prompt files); models optimize blind —
+  acceptable for v1, noted below.**
+- **Open calibration question (for the user)**: ling has failed s3 four
+  consecutive times in the "repair ran out mid-refactor" class (runs
+  4/5/7/8; needs ~36+ turns vs the 30-turn pool). Options: raise s3's
+  pool to 36, raise the repair floor to 16, or keep it as the
+  discriminator. Nemotron's cell tonight is the second model's evidence.
 - **ling-3.1-flash** (spec 0-6, 2026-10-14 run 4, `..._144606`): reached
   **2** — s0 3/3 ($0.0400, 30t), s1 4/4 ($0.0496, 17t), s2 5/5 ($0.0424,
   25t), s3 durability **FAIL 5/6** ($0.0610, 22 initial + 8 repair = 30t).
