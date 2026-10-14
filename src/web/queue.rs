@@ -154,6 +154,20 @@ pub fn load_orphans(
     let Some(store) = LeaderboardManager::open_store_if_exists() else {
         return empty;
     };
+    select_orphans_from_store(&store, parent_id, model, task, known_ids, attempted)
+}
+
+/// Store-backed half of [`load_orphans`], split out so tests can exercise
+/// the read + select path against an explicit temp DB (no process-global
+/// SDB_BENCH_DB override racing other tests).
+fn select_orphans_from_store(
+    store: &Store,
+    parent_id: &str,
+    model: &str,
+    task: &str,
+    known_ids: &std::collections::HashSet<String>,
+    attempted: Option<std::ops::RangeInclusive<u32>>,
+) -> OrphanReport {
     select_orphan_trials(
         store.load_trials_for_parent(parent_id),
         model,
@@ -2453,5 +2467,763 @@ mod tests {
             Some(v) => std::env::set_var(crate::config::AUTO_EXTEND_BUDGET_ENV, v),
             None => std::env::remove_var(crate::config::AUTO_EXTEND_BUDGET_ENV),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Coverage additions: pure planning/pump/proxy/persistence logic.
+    //
+    // Queues are only driven through idle, paused, saturated, malformed, or
+    // engine-refused states. Run bodies dispatched here always carry an
+    // unknown task (refused before any pipeline/sandbox work) and extend
+    // bodies reference a parent that does not exist. Store-backed checks
+    // use explicit temp paths / tempfile stores; the one SDB_BENCH_DB
+    // override is mutex-serialized and restored immediately.
+    // ---------------------------------------------------------------------
+
+    use crate::web::server::TEST_ENV_LOCK;
+
+    fn test_state() -> AppState {
+        let (log_sender, _) = broadcast::channel(100);
+        AppState {
+            log_sender,
+            is_running: Arc::new(AtomicBool::new(false)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            current_run: Arc::new(RwLock::new(None)),
+            last_run: Arc::new(RwLock::new(None)),
+            log_buffer: Arc::new(RwLock::new(Vec::new())),
+            task_handle: Arc::new(std::sync::Mutex::new(None)),
+            queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            queue_seq: Arc::new(AtomicU64::new(0)),
+            queue_paused: Arc::new(AtomicBool::new(false)),
+            auto_extend_spent: Arc::new(AtomicU64::new(0)),
+            running_slots: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            worker_runs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            worker_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            worker_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            store: Arc::new(tempfile_mem_store()),
+            db_fallback: false,
+            engine_url: String::new(),
+        }
+    }
+
+    fn run_kind(task: &str) -> QueueKind {
+        let mut req = test_queue_item("fixture").run_request().unwrap().clone();
+        req.task = task.to_string();
+        QueueKind::Run(req)
+    }
+
+    fn running_item(id: &str) -> QueuedRun {
+        let mut item = test_queue_item(id);
+        item.status = QueueStatus::Running;
+        item
+    }
+
+    fn active_info(run_id: &str) -> ActiveRunInfo {
+        ActiveRunInfo {
+            run_id: run_id.to_string(),
+            model: "m".to_string(),
+            task: "redis".to_string(),
+            effort: "high".to_string(),
+            started_at: "2026-01-02T00:00:00Z".to_string(),
+            turns: 0,
+            max_turns: 100,
+            cost_usd: 0.0,
+            tokens: 0,
+            duration_secs: None,
+            subrun: None,
+            total_subruns: None,
+            budget_usd: 0.1,
+            timeout_min: 1,
+            trials: 1,
+            eval_only: false,
+            extend_if_unstable: false,
+            max_trials: 9,
+            review_model: None,
+        }
+    }
+
+    #[test]
+    fn test_default_knobs_match_cli_documented_values() {
+        assert_eq!(default_trials(), 9);
+        assert_eq!(default_max_trials(), 9);
+        assert!(default_max_trials() >= default_trials());
+        assert_eq!(default_max_turns(), 100);
+        assert_eq!(default_budget(), 1.00);
+        assert_eq!(default_timeout_min(), Some(120));
+        // RunRequest serde defaults ride on the same fns.
+        let req: RunRequest = serde_json::from_value(
+            serde_json::json!({"model": "m", "task": "redis", "eval_only": true}),
+        )
+        .unwrap();
+        assert_eq!(req.max_turns, 100);
+        assert_eq!(req.timeout_min, Some(120));
+        assert_eq!(req.budget_usd, 1.00);
+        assert_eq!(req.trials, 9);
+        assert_eq!(req.max_trials, 9);
+        assert!(req.harness.is_none());
+    }
+
+    #[test]
+    fn test_queued_run_accessors_for_extend_kind() {
+        let ext = QueuedRun {
+            id: "e1".to_string(),
+            enqueued_at: "2026-01-02T00:00:00Z".to_string(),
+            status: QueueStatus::Pending,
+            note: None,
+            refusals: 0,
+            not_before: None,
+            kind: QueueKind::Extend(ExtendRequest {
+                parent_run_id: "p1".to_string(),
+                trials: 2,
+                max_turns: None,
+                budget_usd: None,
+                timeout_min: None,
+                eval_only: None,
+                api_key: Some("sk-secret".to_string()),
+            }),
+        };
+        assert!(ext.run_request().is_none());
+        assert!(!serde_json::to_string(&ext.redacted())
+            .unwrap()
+            .contains("sk-secret"));
+        // A Run-kind entry still exposes its request through the accessor.
+        let run = test_queue_item("qr");
+        assert!(run.run_request().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_pump_queue_paused_saturated_empty_and_backoff() {
+        // Paused: no claim, item untouched.
+        let state = test_state();
+        push_queue_item(&state, run_kind("no-such-task"));
+        pause_queue(&state, "ut pause");
+        assert!(!pump_queue(&state));
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert_eq!(state.queue.lock().unwrap()[0].status, QueueStatus::Pending);
+
+        // Saturated: every slot held.
+        resume_queue(&state);
+        for w in 0..worker_count() as u8 {
+            state.running_slots.lock().unwrap().insert(w);
+        }
+        assert!(!pump_queue(&state));
+
+        // Empty queue: slot claimed then released, no leak.
+        let state = test_state();
+        assert!(!pump_queue(&state));
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert!(!state.is_running.load(Ordering::SeqCst));
+
+        // Backoff window: parked item is skipped until not_before elapses.
+        let state = test_state();
+        push_queue_item(&state, run_kind("no-such-task"));
+        {
+            let mut q = state.queue.lock().unwrap();
+            q[0].not_before = Some("2999-01-01T00:00:00Z".to_string());
+        }
+        assert!(!pump_queue(&state));
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert_eq!(state.queue.lock().unwrap()[0].status, QueueStatus::Pending);
+
+        // Past backoff: dispatch proceeds; the unknown task is refused
+        // synchronously (no pipeline/sandbox work), parked with a note.
+        {
+            let mut q = state.queue.lock().unwrap();
+            q[0].not_before = Some("2000-01-01T00:00:00Z".to_string());
+        }
+        assert!(pump_queue(&state));
+        let q = state.queue.lock().unwrap();
+        assert_eq!(q[0].status, QueueStatus::Pending);
+        assert_eq!(q[0].refusals, 1);
+        assert!(q[0].note.as_deref().unwrap_or("").contains("unknown task"));
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert!(!state.is_running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_pump_queue_dispatches_extend_and_skips_missing_parent() {
+        let state = test_state();
+        let ext = ExtendRequest {
+            parent_run_id: "sdb_ut_missing_parent".to_string(),
+            trials: 3,
+            max_turns: None,
+            budget_usd: None,
+            timeout_min: None,
+            eval_only: None,
+            api_key: None,
+        };
+        let qid = push_queue_item(&state, QueueKind::Extend(ext));
+        assert!(pump_queue(&state));
+        // The extend body runs async; wait for its terminal transition.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let done = {
+                let q = state.queue.lock().unwrap();
+                q.iter()
+                    .find(|i| i.id == qid)
+                    .map(|i| i.status == QueueStatus::Done)
+                    .unwrap_or(false)
+            };
+            if done || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let q = state.queue.lock().unwrap();
+        let item = q.iter().find(|i| i.id == qid).unwrap();
+        assert_eq!(item.status, QueueStatus::Done);
+        assert!(
+            item.note
+                .as_deref()
+                .unwrap_or("")
+                .contains("gone; skipping"),
+            "missing parent must be named: {:?}",
+            item.note
+        );
+        assert!(state.running_slots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_kick_runner_idle_branches_and_unknown_task_dispatch() {
+        // Paused kick is a no-op.
+        let state = test_state();
+        let qid = push_queue_item(&state, run_kind("redis"));
+        pause_queue(&state, "ut");
+        assert!(!kick_runner(&state, &qid).await);
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        resume_queue(&state);
+
+        // Unknown id: claimed slot is released; treated as already handled.
+        assert!(kick_runner(&state, "q_no_such").await);
+        assert!(state.running_slots.lock().unwrap().is_empty());
+
+        // Non-pending id: same release-and-return.
+        {
+            let mut q = state.queue.lock().unwrap();
+            q.iter_mut().find(|i| i.id == qid).unwrap().status = QueueStatus::Done;
+        }
+        assert!(kick_runner(&state, &qid).await);
+        assert!(state.running_slots.lock().unwrap().is_empty());
+
+        // Pending but inside backoff: no dispatch, slot released.
+        let state = test_state();
+        {
+            let mut item = test_queue_item("q_wait");
+            item.not_before = Some("2999-01-01T00:00:00Z".to_string());
+            state.queue.lock().unwrap().push_back(item);
+        }
+        assert!(!kick_runner(&state, "q_wait").await);
+        assert!(state.running_slots.lock().unwrap().is_empty());
+
+        // Ready + unknown task: dispatched, refused, parked Pending.
+        let state = test_state();
+        let qid = push_queue_item(&state, run_kind("no-such-task"));
+        assert!(kick_runner(&state, &qid).await);
+        let q = state.queue.lock().unwrap();
+        assert_eq!(q[0].refusals, 1);
+        assert_eq!(q[0].status, QueueStatus::Pending);
+        assert!(state.running_slots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_queue_skips_when_handle_or_worker_live() {
+        // A live worker handle (even without slots) marks the engine busy.
+        let state = test_state();
+        state
+            .queue
+            .lock()
+            .unwrap()
+            .push_back(running_item("q_handle"));
+        let handle = tokio::spawn(async { tokio::time::sleep(Duration::from_millis(30)).await });
+        state.worker_handles.lock().unwrap().insert(0, handle);
+        assert_eq!(reconcile_queue(&state), 0);
+        assert_eq!(state.queue.lock().unwrap()[0].status, QueueStatus::Running);
+
+        // A live worker_runs entry marks it busy too.
+        let state = test_state();
+        state
+            .queue
+            .lock()
+            .unwrap()
+            .push_back(running_item("q_worker"));
+        state
+            .worker_runs
+            .write()
+            .unwrap()
+            .insert(2, active_info("redis_m_20260102_w2"));
+        assert_eq!(reconcile_queue(&state), 0);
+        assert_eq!(state.queue.lock().unwrap()[0].status, QueueStatus::Running);
+    }
+
+    #[test]
+    fn test_park_refused_unknown_id_is_terminal_noop() {
+        let state = test_state();
+        assert!(park_refused(&state, "q_absent", "nobody home"));
+        assert!(state.queue.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pump_queue_throttles_free_model_over_two_live() {
+        let state = test_state();
+        // Two live free-model runs are already in flight.
+        for w in 0..2u8 {
+            let mut info = active_info(&format!("free_w{w}"));
+            info.model = "vendor/model:free".to_string();
+            state.worker_runs.write().unwrap().insert(w, info);
+        }
+        let mut item = test_queue_item("q_free");
+        match &mut item.kind {
+            QueueKind::Run(r) => r.model = "vendor/model:free".to_string(),
+            QueueKind::Extend(_) => panic!("fixture is a Run"),
+        }
+        state.queue.lock().unwrap().push_back(item);
+        // No slots are actually held, so pump claims one, skips the
+        // throttled free cell (2 already live), and releases cleanly.
+        assert!(!pump_queue(&state));
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert_eq!(state.queue.lock().unwrap()[0].status, QueueStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_execute_run_body_cancel_before_trial_is_loud_and_clean() {
+        // Cancelled before trial 1: the body must exit through the normal
+        // unwind (release slot, clear cancel flag, mark the queue row with
+        // a zero-evidence reason) without ever reaching the pipeline.
+        let state = test_state();
+        let worker = claim_slot(&state).expect("free worker");
+        let req = test_queue_item("q_cancel").run_request().unwrap().clone();
+        let qid = push_queue_item(&state, QueueKind::Run(req.clone()));
+        state.cancel_requested.store(true, Ordering::SeqCst);
+        execute_run_body(state.clone(), req, Some(qid.clone()), worker).await;
+
+        {
+            let q = state.queue.lock().unwrap();
+            let item = q.iter().find(|i| i.id == qid).unwrap();
+            assert_eq!(item.status, QueueStatus::Done);
+            assert!(
+                item.note.as_deref().unwrap_or("").contains("ZERO TRIALS"),
+                "zero-evidence Done must be loud: {:?}",
+                item.note
+            );
+        }
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert!(!state.is_running.load(Ordering::SeqCst));
+        assert!(
+            state.cancel_flags.lock().unwrap().is_empty(),
+            "per-run cancel flags must not leak across cells"
+        );
+        let log = state.log_buffer.read().unwrap();
+        assert!(log
+            .iter()
+            .any(|l| l.contains("[STOP] Run cancelled by user before next trial.")));
+        assert!(log
+            .iter()
+            .any(|l| l.contains("[STATUS] No trials completed")));
+        assert!(log.iter().any(|l| l.contains("[QUEUE-EVIDENCE]")));
+    }
+
+    #[tokio::test]
+    async fn test_mark_queue_done_unknown_id_is_noop() {
+        let state = test_state();
+        mark_queue_done(&state, "q_absent", Some("nothing to mark"));
+        assert!(state.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_push_queue_item_evicts_finished_history_past_cap() {
+        let state = test_state();
+        let mut ids = Vec::new();
+        for _ in 0..101 {
+            ids.push(push_queue_item(&state, run_kind("redis")));
+        }
+        assert_eq!(state.queue.lock().unwrap().len(), 101);
+        mark_queue_done(&state, &ids[0], Some("done"));
+        mark_queue_done(&state, &ids[1], Some("done"));
+        // Two more pushes overflow the 100-entry cap; both finished rows
+        // are evicted before any pending row is touched.
+        push_queue_item(&state, run_kind("redis"));
+        push_queue_item(&state, run_kind("redis"));
+        let q = state.queue.lock().unwrap();
+        assert_eq!(q.len(), 101);
+        assert!(
+            q.iter().all(|i| i.status == QueueStatus::Pending),
+            "no finished rows may survive the history cap"
+        );
+        assert!(!q.iter().any(|i| i.id == ids[0] || i.id == ids[1]));
+    }
+
+    #[test]
+    fn test_pause_resume_log_and_flag_lifecycle() {
+        let state = test_state();
+        pause_queue(&state, "insufficient credit");
+        assert!(state.queue_paused.load(Ordering::SeqCst));
+        assert!(state
+            .log_buffer
+            .read()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("Queue paused: insufficient credit")));
+        resume_queue(&state);
+        assert!(!state.queue_paused.load(Ordering::SeqCst));
+        assert!(state
+            .log_buffer
+            .read()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("Queue resumed by operator")));
+    }
+
+    #[test]
+    fn test_db_mirror_swallows_panics_and_db_try_is_non_fatal() {
+        let state = test_state();
+        // A panicking mirror closure must never take the queue path down.
+        db_mirror(&state, "ut panic", |_| panic!("mirror boom"));
+        db_try("ut err", Err(anyhow::anyhow!("db unavailable")));
+        db_try("ut ok", Ok(()));
+        // State remains fully usable after the swallowed panic.
+        let id = push_queue_item(&state, run_kind("redis"));
+        assert!(id.starts_with('q'));
+        assert_eq!(state.queue.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_queue_store_roundtrip_replay_and_seq() {
+        let db = std::env::temp_dir().join(format!(
+            "sdb-ut-queue-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let store = Store::open(&db).expect("temp queue db");
+        assert!(replay_queue(&store).is_empty());
+        assert_eq!(queue_seq_start(&store), 0);
+
+        let mut q1 = test_queue_item("q1");
+        q1.status = QueueStatus::Pending;
+        store.enqueue_run(&q1).unwrap();
+        // A finished row contributes to the sequence high-water mark but is
+        // not replayed.
+        let mut q7 = test_queue_item("q7");
+        q7.status = QueueStatus::Done;
+        store.enqueue_run(&q7).unwrap();
+        // Running rows reset to Pending on replay (previous process died).
+        store
+            .update_queue_status("q1", "Running", Some("2026-01-02T00:00:00Z"), None)
+            .unwrap();
+        let replayed = replay_queue(&store);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].id, "q1");
+        assert_eq!(replayed[0].status, QueueStatus::Pending);
+        assert_eq!(queue_seq_start(&store), 7);
+        // Non-numeric ids are ignored by the sequence scan.
+        let mut qx = test_queue_item("qx");
+        qx.status = QueueStatus::Pending;
+        store.enqueue_run(&qx).unwrap();
+        assert_eq!(queue_seq_start(&store), 7);
+
+        store.enqueue_run(&test_queue_item("q8")).unwrap();
+        assert_eq!(store.load_queue(false).len(), 3); // q1, qx, q8
+        assert_eq!(store.clear_finished_queue().unwrap(), 1); // q7
+        store.remove_queued("q8").unwrap();
+        let left: Vec<String> = store.load_queue(true).into_iter().map(|i| i.id).collect();
+        assert_eq!(left, vec!["q1".to_string(), "qx".to_string()]);
+        drop(store);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn test_load_orphans_reads_store_trials() {
+        let dir = std::env::temp_dir().join(format!(
+            "sdb-ut-orphans-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("bench.db");
+        let store = Store::open(&db).unwrap();
+        let mut parent = trow("ut_parent", "completed", 50.0);
+        parent.subruns = vec![
+            trow("ut_parent_trial1", "completed", 100.0),
+            trow("ut_parent_trial2", "infra_error", 0.0),
+            trow("ut_parent_trial3", "failed_tests", 0.0),
+        ];
+        store.upsert_parent(&parent).unwrap();
+
+        let known = std::collections::HashSet::new();
+        let rep = select_orphans_from_store(&store, "ut_parent", "m", "redis", &known, None);
+        assert_eq!(
+            rep.absorb.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["ut_parent_trial1", "ut_parent_trial3"]
+        );
+        assert_eq!(rep.skipped_unscored, 1);
+        assert_eq!(rep.skipped_mismatch, 0);
+        assert_eq!(rep.skipped_attempted, 0);
+        // Attempted range excludes the fresh batch's own numbers.
+        let attempted = 1..=1;
+        let rep2 =
+            select_orphans_from_store(&store, "ut_parent", "m", "redis", &known, Some(attempted));
+        assert_eq!(
+            rep2.absorb
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ut_parent_trial3"]
+        );
+        assert_eq!(rep2.skipped_attempted, 1);
+        // A parent with no stored trials yields an all-zero report.
+        let rep3 = select_orphans_from_store(&store, "ut_absent", "m", "redis", &known, None);
+        assert!(rep3.absorb.is_empty());
+        assert_eq!(rep3.skipped_unscored, 0);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_web_logger_rewrites_live_telemetry_and_updates_cards() {
+        let state = test_state();
+        let info = active_info("redis_m_20260102_w3");
+        *state.current_run.write().unwrap() = Some(info.clone());
+        state.worker_runs.write().unwrap().insert(3, info);
+        let logger = WebLogger {
+            tx: state.log_sender.clone(),
+            log_buf: state.log_buffer.clone(),
+            current_run: state.current_run.clone(),
+            trial_idx: 2,
+            total_trials: 4,
+            worker: 3,
+            worker_bufs: state.worker_buffers.clone(),
+            worker_runs: state.worker_runs.clone(),
+        };
+        // Multi-trial LIVE lines are rewritten per-subrun; multi-line
+        // messages are split into one console line each.
+        logger.log("[LIVE] Turn 5/100 | Spent: $0.10\nsecond line");
+        // Telemetry without explicit subrun= gets the current counters.
+        logger.log("[TELEMETRY] turn=7 max_turns=50 spent=0.25 tokens=123");
+        // Telemetry with subrun=/total_subruns= keeps them, but still
+        // updates the card counters.
+        logger
+            .log("[TELEMETRY] turn=8 max_turns=60 spent=0.30 tokens=200 subrun=3 total_subruns=9");
+
+        let buf = state.log_buffer.read().unwrap();
+        assert!(buf.iter().any(|l| l.contains("Subrun 2/4 |")));
+        assert!(buf.iter().any(|l| l.contains("second line")));
+        assert!(buf.iter().any(|l| l.contains("subrun=2 total_subruns=4")));
+        assert!(buf.iter().any(|l| l.contains("subrun=3 total_subruns=9")));
+        drop(buf);
+        let runs = state.worker_runs.read().unwrap();
+        let card = runs.get(&3).unwrap();
+        assert_eq!(card.turns, 8);
+        assert_eq!(card.max_turns, 60);
+        assert!((card.cost_usd - 0.30).abs() < 1e-9);
+        assert_eq!(card.tokens, 200);
+        assert_eq!(card.subrun, Some(3));
+        assert_eq!(card.total_subruns, Some(9));
+        let shared = state.current_run.read().unwrap().clone().unwrap();
+        assert_eq!(shared.turns, 8);
+        assert_eq!(shared.tokens, 200);
+        // Worker-private buffer mirrors the shared one.
+        assert_eq!(
+            state
+                .worker_buffers
+                .read()
+                .unwrap()
+                .get(&3)
+                .map(|v| v.len()),
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_extension_batch_cancel_and_empty_counts() {
+        let state = test_state();
+        let (tx, _rx) = broadcast::channel(16);
+        let cancel = Arc::new(AtomicBool::new(true));
+        let spec = ExtBatchSpec {
+            model: "m".to_string(),
+            task: TaskType::Wal,
+            effort: "low".to_string(),
+            harness: "omp".to_string(),
+            max_turns: 1,
+            budget_usd: 0.1,
+            timeout_min: 1,
+            api_key: None,
+            eval_only: true,
+            save_results: false,
+            review_model: None,
+            parent_run_id: "sdb_ut_cancel_parent".to_string(),
+            start_idx: 2,
+            count: 1,
+            display_total: 2,
+            feedback_rounds: 0,
+        };
+        let noop = |_m: &str| {};
+        let out = run_extension_batch(
+            &tx,
+            &state.log_buffer,
+            &state.current_run,
+            &cancel,
+            &noop,
+            spec,
+            0,
+            &state.worker_buffers,
+            &state.worker_runs,
+        )
+        .await;
+        assert!(out.results.is_empty());
+        assert_eq!(out.passing, 0);
+        assert_eq!(out.errors, 0);
+        assert!(!out.billing_tripped);
+        assert!(out.drift.is_none());
+        assert!(state
+            .log_buffer
+            .read()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("[STOP] Extension cancelled by user.")));
+
+        // count == 0: no loop body, clean empty result (setup-refusal shape).
+        let spec0 = ExtBatchSpec {
+            model: "m".to_string(),
+            task: TaskType::Wal,
+            effort: "low".to_string(),
+            harness: "omp".to_string(),
+            max_turns: 1,
+            budget_usd: 0.1,
+            timeout_min: 1,
+            api_key: None,
+            eval_only: true,
+            save_results: false,
+            review_model: None,
+            parent_run_id: "sdb_ut_zero_parent".to_string(),
+            start_idx: 5,
+            count: 0,
+            display_total: 5,
+            feedback_rounds: 0,
+        };
+        let out0 = run_extension_batch(
+            &tx,
+            &state.log_buffer,
+            &state.current_run,
+            &cancel,
+            &noop,
+            spec0,
+            0,
+            &state.worker_buffers,
+            &state.worker_runs,
+        )
+        .await;
+        assert!(out0.results.is_empty());
+        assert!(!out0.billing_tripped);
+    }
+
+    /// Mock engine capturing method/token/body; ephemeral port only.
+    async fn serve_capture_engine(seen: Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        async fn capture(
+            axum::extract::State(seen): axum::extract::State<Arc<std::sync::Mutex<Vec<String>>>>,
+            req: axum::extract::Request,
+        ) -> String {
+            let method = req.method().to_string();
+            let auth = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                .await
+                .unwrap_or_default();
+            seen.lock().unwrap().push(format!(
+                "{method}|{auth}|{}",
+                String::from_utf8_lossy(&body)
+            ));
+            "captured".to_string()
+        }
+        let app = axum::Router::new()
+            .route("/cap", axum::routing::any(capture))
+            .with_state(seen);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn test_proxy_read_status_header_and_query_passthrough() {
+        async fn teapot(
+            axum::extract::Query(q): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >,
+        ) -> axum::response::Response {
+            (
+                axum::http::StatusCode::IM_A_TEAPOT,
+                [
+                    ("x-console-total", "42"),
+                    ("content-type", "text/plain; charset=utf-8"),
+                ],
+                format!("q={}", q.get("q").cloned().unwrap_or_default()),
+            )
+                .into_response()
+        }
+        let app = axum::Router::new().route("/teapot", axum::routing::get(teapot));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut state = test_state();
+        state.engine_url = format!("http://127.0.0.1:{port}");
+
+        let resp = proxy_read(&state, "/teapot", "?q=hi").await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::IM_A_TEAPOT);
+        assert_eq!(
+            resp.headers()
+                .get("x-console-total")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "42"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "q=hi");
+
+        // Empty engine_url = single-process mode, no proxying.
+        let plain = test_state();
+        assert!(proxy_read(&plain, "/teapot", "").await.is_none());
+        assert!(proxy_mutation(&plain, "POST", "/cap", None).await.is_none());
+    }
+
+    // Env serialization deliberately spans awaits: the vars must stay
+    // pinned for the requests under test. No handler takes TEST_ENV_LOCK,
+    // so the guard cannot deadlock the runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_proxy_mutation_forwards_method_token_and_body() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SDB_UI_TOKEN", "sdb-test-ui-token");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = serve_capture_engine(seen.clone()).await;
+        let mut state = test_state();
+        state.engine_url = engine;
+
+        let del = proxy_mutation(&state, "DELETE", "/cap", None)
+            .await
+            .unwrap();
+        assert_eq!(del.status(), 200);
+        let post = proxy_mutation(&state, "POST", "/cap", Some(serde_json::json!({"a": 1})))
+            .await
+            .unwrap();
+        assert_eq!(post.status(), 200);
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0], "DELETE|Bearer sdb-test-ui-token|");
+        assert_eq!(captured[1], "POST|Bearer sdb-test-ui-token|{\"a\":1}");
     }
 }

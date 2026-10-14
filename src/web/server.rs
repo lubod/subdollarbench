@@ -701,88 +701,97 @@ pub(crate) async fn get_models(headers: HeaderMap) -> Json<Vec<SubDollarModel>> 
     let mut models = Vec::new();
     if let Ok(resp) = req.send().await {
         if let Ok(data) = resp.json::<OpenRouterResponse>().await {
-            for item in data.data {
-                // Skip Batch API variants: queued, minutes-to-hours latency,
-                // unusable for interactive agentic runs.
-                if item.id.ends_with(":batch") {
-                    continue;
-                }
-                let prompt_p = item
-                    .pricing
-                    .as_ref()
-                    .and_then(|p| p.prompt.as_ref())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0)
-                    * 1_000_000.0;
+            models = parse_openrouter_models(data);
+        }
+    }
 
-                let comp_p = item
-                    .pricing
-                    .as_ref()
-                    .and_then(|p| p.completion.as_ref())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0)
-                    * 1_000_000.0;
+    Json(models)
+}
 
-                let supported_params = item.supported_parameters.as_ref();
-                let has_reasoning_param = supported_params
-                    .map(|params| {
-                        params
-                            .iter()
-                            .any(|p| p == "reasoning" || p == "reasoning_effort")
-                    })
-                    .unwrap_or(false);
+/// Pure OpenRouter payload -> under-$1 listing mapping (pricing filter,
+/// reasoning metadata, meta/ "max" sanitization, cheapest-first sort).
+/// Split from the network call so every rule is testable without an API
+/// key or egress.
+fn parse_openrouter_models(data: OpenRouterResponse) -> Vec<SubDollarModel> {
+    let mut models = Vec::new();
+    for item in data.data {
+        // Skip Batch API variants: queued, minutes-to-hours latency,
+        // unusable for interactive agentic runs.
+        if item.id.ends_with(":batch") {
+            continue;
+        }
+        let prompt_p = item
+            .pricing
+            .as_ref()
+            .and_then(|p| p.prompt.as_ref())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            * 1_000_000.0;
 
-                let reasoning_obj = item.reasoning.as_ref();
-                let mut supported_efforts = reasoning_obj
-                    .and_then(|r| r.supported_efforts.clone())
-                    .unwrap_or_default();
+        let comp_p = item
+            .pricing
+            .as_ref()
+            .and_then(|p| p.completion.as_ref())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            * 1_000_000.0;
 
-                // Upstream providers (like Meta) reject "max" with 400 invalid_request_error.
-                // Sanitize: clamp out "max" if upstream endpoint strictly forbids it
-                if item.id.starts_with("meta/") {
-                    supported_efforts.retain(|e| e != "max");
-                }
+        let supported_params = item.supported_parameters.as_ref();
+        let has_reasoning_param = supported_params
+            .map(|params| {
+                params
+                    .iter()
+                    .any(|p| p == "reasoning" || p == "reasoning_effort")
+            })
+            .unwrap_or(false);
 
-                let default_effort = reasoning_obj.and_then(|r| r.default_effort.clone());
-                let supports_max_tokens = reasoning_obj
-                    .and_then(|r| r.supports_max_tokens)
-                    .unwrap_or(false);
+        let reasoning_obj = item.reasoning.as_ref();
+        let mut supported_efforts = reasoning_obj
+            .and_then(|r| r.supported_efforts.clone())
+            .unwrap_or_default();
 
-                let reasoning_mandatory = reasoning_obj.and_then(|r| r.mandatory).unwrap_or(false);
+        // Upstream providers (like Meta) reject "max" with 400 invalid_request_error.
+        // Sanitize: clamp out "max" if upstream endpoint strictly forbids it
+        if item.id.starts_with("meta/") {
+            supported_efforts.retain(|e| e != "max");
+        }
 
-                let is_reasoning = has_reasoning_param
-                    || !supported_efforts.is_empty()
-                    || supports_max_tokens
-                    || reasoning_mandatory
-                    || reasoning_obj
-                        .and_then(|r| r.default_enabled)
-                        .unwrap_or(false);
+        let default_effort = reasoning_obj.and_then(|r| r.default_effort.clone());
+        let supports_max_tokens = reasoning_obj
+            .and_then(|r| r.supports_max_tokens)
+            .unwrap_or(false);
 
-                // Free ($0/$0) models are the cheapest possible and must list:
-                // distinguish explicitly-free (pricing present, both zero)
-                // from unpriced (no pricing at all — still hidden).
-                let has_pricing = item
-                    .pricing
-                    .as_ref()
-                    .is_some_and(|p| p.prompt.is_some() || p.completion.is_some());
-                if (prompt_p + comp_p) / 2.0 <= 1.0
-                    && ((prompt_p > 0.0 || comp_p > 0.0) || has_pricing)
-                {
-                    models.push(SubDollarModel {
-                        id: item.id,
-                        name: item.name,
-                        prompt_price_per_m: prompt_p,
-                        completion_price_per_m: comp_p,
-                        context_length: item.context_length.unwrap_or(0),
-                        created: item.created.unwrap_or(0),
-                        supported_efforts,
-                        default_effort,
-                        is_reasoning,
-                        reasoning_mandatory,
-                        supports_max_tokens,
-                    });
-                }
-            }
+        let reasoning_mandatory = reasoning_obj.and_then(|r| r.mandatory).unwrap_or(false);
+
+        let is_reasoning = has_reasoning_param
+            || !supported_efforts.is_empty()
+            || supports_max_tokens
+            || reasoning_mandatory
+            || reasoning_obj
+                .and_then(|r| r.default_enabled)
+                .unwrap_or(false);
+
+        // Free ($0/$0) models are the cheapest possible and must list:
+        // distinguish explicitly-free (pricing present, both zero)
+        // from unpriced (no pricing at all — still hidden).
+        let has_pricing = item
+            .pricing
+            .as_ref()
+            .is_some_and(|p| p.prompt.is_some() || p.completion.is_some());
+        if (prompt_p + comp_p) / 2.0 <= 1.0 && ((prompt_p > 0.0 || comp_p > 0.0) || has_pricing) {
+            models.push(SubDollarModel {
+                id: item.id,
+                name: item.name,
+                prompt_price_per_m: prompt_p,
+                completion_price_per_m: comp_p,
+                context_length: item.context_length.unwrap_or(0),
+                created: item.created.unwrap_or(0),
+                supported_efforts,
+                default_effort,
+                is_reasoning,
+                reasoning_mandatory,
+                supports_max_tokens,
+            });
         }
     }
 
@@ -792,7 +801,7 @@ pub(crate) async fn get_models(headers: HeaderMap) -> Json<Vec<SubDollarModel>> 
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Json(models)
+    models
 }
 
 pub(crate) async fn get_prompt(AxumPath(task): AxumPath<String>) -> Result<String, StatusCode> {
@@ -1827,13 +1836,28 @@ pub(crate) async fn compare_runs(
     let ws_a = runs_dir.join(&clean_a).join("workspace");
     let ws_b = runs_dir.join(&clean_b).join("workspace");
 
+    let file_diffs = compare_workspaces(&ws_a, &ws_b);
+
+    Ok(Json(RunComparisonResponse {
+        run_a: manifest_a,
+        run_b: manifest_b,
+        metric_diff,
+        file_diffs,
+    }))
+}
+
+/// Per-file diff assembly for `compare_runs`: one entry per path present in
+/// either workspace, with a unified diff for modified/added/removed files.
+/// Split from the handler so the whole status matrix is testable against
+/// temp dirs.
+fn compare_workspaces(ws_a: &Path, ws_b: &Path) -> Vec<FileDiffEntry> {
     let files_a = if ws_a.exists() {
-        RunArchiver::scan_workspace_files(&ws_a)
+        RunArchiver::scan_workspace_files(ws_a)
     } else {
         Vec::new()
     };
     let files_b = if ws_b.exists() {
-        RunArchiver::scan_workspace_files(&ws_b)
+        RunArchiver::scan_workspace_files(ws_b)
     } else {
         Vec::new()
     };
@@ -1896,12 +1920,7 @@ pub(crate) async fn compare_runs(
         });
     }
 
-    Ok(Json(RunComparisonResponse {
-        run_a: manifest_a,
-        run_b: manifest_b,
-        metric_diff,
-        file_diffs,
-    }))
+    file_diffs
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2546,6 +2565,9 @@ pub(crate) async fn update_sandbox_omp(
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
+
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -4592,5 +4614,1400 @@ mod tests {
             ),
             Err(_) => eprintln!("node not found; skipping GUI JS parse check"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Coverage additions: idle/synthetic-state route tests.
+    //
+    // Every test here binds 127.0.0.1:0 (never 3000/3001: the live engine
+    // owns those) and never mutates the repo's bench.db / runs / results /
+    // tasks / portal. Run/queue fixtures live in the per-test tempfile
+    // store; mutating routes are only driven down validation, rejection, or
+    // engine-proxy paths, never through a real dispatch.
+    // ---------------------------------------------------------------------
+
+    /// Bind ephemeral + serve `state`'s full router; returns the base URL.
+    async fn serve_test_app(state: AppState) -> String {
+        let app = UiServer::build_app(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Client that always presents the shared probe token, so mutating
+    /// routes pass the guard whether or not SDB_UI_TOKEN is configured.
+    fn authed_client() -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {TEST_UI_TOKEN}")).unwrap(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
+    }
+
+    async fn response_text(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// Idle-state worker fixture for status/console route tests.
+    fn active_run_info(run_id: &str) -> ActiveRunInfo {
+        ActiveRunInfo {
+            run_id: run_id.to_string(),
+            model: "sdb-ut-model".to_string(),
+            task: "redis".to_string(),
+            effort: "high".to_string(),
+            started_at: "2026-01-02T00:00:00Z".to_string(),
+            turns: 1,
+            max_turns: 100,
+            cost_usd: 0.01,
+            tokens: 42,
+            duration_secs: None,
+            subrun: Some(1),
+            total_subruns: Some(1),
+            budget_usd: 0.1,
+            timeout_min: 1,
+            trials: 1,
+            eval_only: false,
+            extend_if_unstable: false,
+            max_trials: 9,
+            review_model: None,
+        }
+    }
+
+    /// Minimal valid manifest for DB-fixture route tests.
+    fn test_manifest(id: &str) -> RunManifest {
+        serde_json::from_value(serde_json::json!({
+            "run_id": id,
+            "model": "sdb-ut-model",
+            "task": "redis",
+            "status": "completed",
+            "language": "Rust",
+            "started_at": "2026-01-02T00:00:00Z",
+            "completed_at": "2026-01-02T00:01:00Z",
+            "duration_seconds": 60.0,
+            "pass_rate": 100.0,
+            "passed_stages": 4,
+            "total_stages": 4,
+            "stages": [],
+            "throughput_req_sec": 1234.0,
+            "tokens": {
+                "prompt_tokens": 10,
+                "cached_tokens": 0,
+                "completion_tokens": 20,
+                "total_tokens": 30
+            },
+            "cost_usd": 0.01,
+            "savings_percent": 0.0,
+            "efficiency_score": 1.0,
+            "files": []
+        }))
+        .expect("test manifest must deserialize")
+    }
+
+    #[test]
+    fn parse_openrouter_models_filters_prices_and_reasoning() {
+        let payload: OpenRouterResponse = serde_json::from_value(serde_json::json!({
+            "data": [
+                {
+                    "id": "free/model", "name": "Free", "context_length": 1000,
+                    "created": 1, "pricing": {"prompt": "0", "completion": "0"}
+                },
+                {
+                    "id": "cheap/model", "name": "Cheap",
+                    "pricing": {"prompt": "0.0000001", "completion": "0.0000002"},
+                    "supported_parameters": ["reasoning"]
+                },
+                {
+                    "id": "maxed/model", "name": "Maxed",
+                    "pricing": {"prompt": "0.00000005", "completion": "0.00000005"},
+                    "reasoning": {"supports_max_tokens": true}
+                },
+                {
+                    "id": "meta/max-model", "name": "Meta",
+                    "pricing": {"prompt": "0.0000001", "completion": "0.0000001"},
+                    "supported_parameters": ["reasoning_effort"],
+                    "reasoning": {
+                        "mandatory": true,
+                        "supported_efforts": ["max", "high"],
+                        "default_effort": "high"
+                    }
+                },
+                {
+                    "id": "expensive/model", "name": "Expensive",
+                    "pricing": {"prompt": "0.001", "completion": "0.001"}
+                },
+                {"id": "unpriced/model", "name": "No pricing at all"},
+                {
+                    "id": "batch/model:batch", "name": "Batch only",
+                    "pricing": {"prompt": "0", "completion": "0"}
+                },
+                {
+                    "id": "default-on/model", "name": "Default-on",
+                    "pricing": {"prompt": "0.0000001", "completion": "0.0000001"},
+                    "reasoning": {"default_enabled": true}
+                }
+            ]
+        }))
+        .unwrap();
+
+        let models = parse_openrouter_models(payload);
+
+        // Batch variants skipped, expensive/unpriced hidden, cheapest first.
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "free/model",
+                "maxed/model",
+                "meta/max-model",
+                "default-on/model",
+                "cheap/model"
+            ]
+        );
+        let free = &models[0];
+        assert_eq!(free.prompt_price_per_m, 0.0);
+        assert_eq!(free.context_length, 1000);
+        assert!(!free.is_reasoning);
+        assert!(free.supported_efforts.is_empty());
+        // meta/ "max" is clamped; mandatory reasoning is surfaced.
+        let meta = models.iter().find(|m| m.id == "meta/max-model").unwrap();
+        assert_eq!(meta.supported_efforts, vec!["high"]);
+        assert_eq!(meta.default_effort.as_deref(), Some("high"));
+        assert!(meta.reasoning_mandatory);
+        assert!(meta.is_reasoning);
+        // supports_max_tokens alone marks reasoning.
+        let maxed = models.iter().find(|m| m.id == "maxed/model").unwrap();
+        assert!(maxed.supports_max_tokens);
+        assert!(maxed.is_reasoning);
+        // default_enabled alone marks reasoning too.
+        let default_on = models.iter().find(|m| m.id == "default-on/model").unwrap();
+        assert!(default_on.is_reasoning);
+        // A reasoning param is enough without a reasoning object.
+        let cheap = models.iter().find(|m| m.id == "cheap/model").unwrap();
+        assert!(cheap.is_reasoning);
+    }
+
+    #[tokio::test]
+    async fn read_routes_idle_state_smoke() {
+        let state = create_test_state();
+        // DB fixture keeps /api/runs on the store path (no real-dir scan).
+        state
+            .store
+            .upsert_run_manifest(&test_manifest("sdb_ut_read_fixture"))
+            .unwrap();
+        let base = serve_test_app(state.clone()).await;
+        let client = authed_client();
+
+        // Static shell + shared leaf JS.
+        let res = client.get(&base).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.text().await.unwrap().contains("SubDollarBench"));
+        let res = client
+            .get(format!("{base}/static/shared.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .contains("javascript"));
+
+        // Status/int env/integrity on idle state.
+        let res = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let status: StatusResponse = res.json().await.unwrap();
+        assert!(!status.is_running);
+        assert!(!status.proxy);
+        assert!(!status.db_fallback);
+
+        let res = client.get(format!("{base}/api/env")).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let env: EnvironmentInfo = res.json().await.unwrap();
+        assert!(!env.os.is_empty());
+
+        let res = client
+            .get(format!("{base}/api/integrity"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let integrity: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(integrity["ok"], serde_json::Value::Bool(true));
+        assert_eq!(integrity["orphans"], 0);
+
+        // Queue is empty and redacted; console empty with a total header.
+        let res = client
+            .get(format!("{base}/api/queue"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let queue: Vec<QueuedRun> = res.json().await.unwrap();
+        assert!(queue.is_empty());
+
+        let res = client
+            .get(format!("{base}/api/console"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers()
+                .get("X-Console-Total")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+
+        // DB-backed run listing + detail.
+        let res = client.get(format!("{base}/api/runs")).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let runs: Vec<serde_json::Value> = res.json().await.unwrap();
+        let fixture = runs
+            .iter()
+            .find(|r| r["run_id"] == "sdb_ut_read_fixture")
+            .expect("store fixture must be listed");
+        assert_eq!(fixture["portal_hidden"], serde_json::Value::Bool(false));
+        assert_eq!(fixture["poisoned"], serde_json::Value::Bool(false));
+        let res = client
+            .get(format!("{base}/api/runs/sdb_ut_read_fixture"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let detail: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(detail["run_id"], "sdb_ut_read_fixture");
+
+        // Unknown-run guards across the run subroutes.
+        for path in [
+            "/api/runs/sdb_ut_missing",
+            "/api/runs/sdb_ut_missing/log",
+            "/api/runs/sdb_ut_missing/review",
+            "/api/runs/sdb_ut_missing/files",
+            "/api/runs/sdb_ut_missing/file?file=main.rs",
+        ] {
+            let res = client.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(res.status(), 404, "{path} must 404 on a missing run");
+        }
+        for path in ["/api/runs/..%2Fetc/files", "/api/runs/..%2Fetc/review"] {
+            let res = client.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(res.status(), 400, "{path} must reject traversal");
+        }
+
+        // Prompt read + guard (read-only: never a write probe).
+        let res = client
+            .get(format!("{base}/api/prompt/redis"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(!res.text().await.unwrap().is_empty());
+        let res = client
+            .get(format!("{base}/api/prompt/..%2Fetc"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+
+        // Compare + campaign guards.
+        let res = client
+            .get(format!("{base}/api/compare?run_a=..%2Fx&run_b=y"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        let res = client
+            .get(format!("{base}/api/compare?run_a=x&run_b=..%2Fy"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        let res = client
+            .get(format!("{base}/api/compare?run_a=none_a&run_b=none_b"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+        let res = client
+            .get(format!("{base}/api/campaigns"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let res = client
+            .get(format!("{base}/api/campaigns/..%2Fetc/log"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        let res = client
+            .get(format!("{base}/api/campaigns/sdb_ut_missing_campaign/log"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+
+        // Sandbox harness status (docker-image probe only; no containers).
+        let res = client
+            .get(format!("{base}/api/sandbox/opencode"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        let res = client.get(format!("{base}/nope")).send().await.unwrap();
+        assert_eq!(res.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn run_poison_and_visibility_missing_run_404() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        for path in [
+            "/api/runs/sdb_ut_missing/poison",
+            "/api/runs/sdb_ut_missing/portal",
+        ] {
+            let res = client
+                .post(format!("{base}{path}"))
+                .json(&serde_json::json!({"poisoned": true, "hidden": true}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 404, "{path} must 404 before any write");
+        }
+        let res = client
+            .post(format!("{base}/api/runs/..%2Fetc/poison"))
+            .json(&serde_json::json!({"poisoned": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn console_worker_tail_and_since_cursors() {
+        let state = create_test_state();
+        for i in 0..10 {
+            push_console_line(&state.log_buffer, format!("L{i}"));
+        }
+        let fetch = |worker: Option<u8>, tail: Option<usize>, since: Option<usize>| {
+            let state = state.clone();
+            async move {
+                let req = axum::extract::Request::builder()
+                    .uri("/api/console")
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                let resp = get_active_console(
+                    State(state),
+                    Query(ConsoleQuery {
+                        worker,
+                        tail,
+                        since,
+                    }),
+                    req,
+                )
+                .await;
+                let total = resp
+                    .headers()
+                    .get("X-Console-Total")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                (total, response_text(resp).await)
+            }
+        };
+        // Full buffer and explicit tail.
+        let (total, body) = fetch(None, None, None).await;
+        assert_eq!(total, "10");
+        assert!(body.starts_with("L0\nL1"));
+        assert!(body.ends_with("L9"));
+        let (_, body) = fetch(None, Some(3), None).await;
+        assert_eq!(body, "L7\nL8\nL9");
+        // Unknown worker: empty body, total 0.
+        let (total, body) = fetch(Some(7), None, None).await;
+        assert_eq!(total, "0");
+        assert!(body.is_empty());
+        // Delta cursors.
+        let (_, body) = fetch(None, None, Some(7)).await;
+        assert_eq!(body, "L7\nL8\nL9");
+        let (_, body) = fetch(None, None, Some(10)).await;
+        assert!(body.starts_with("L0"), "past-end cursor re-syncs the tail");
+        // Known cursor below the tail window re-sends the window, not a hole.
+        let (_, body) = fetch(None, Some(3), Some(1)).await;
+        assert_eq!(body, "L7\nL8\nL9");
+    }
+
+    #[tokio::test]
+    async fn queue_crud_over_http_paused_and_validation() {
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
+        let state = create_test_state();
+        let base = serve_test_app(state.clone()).await;
+        let client = authed_client();
+
+        // Pause first: enqueue's kick becomes a no-op, so no dispatch.
+        let res = client
+            .post(format!("{base}/api/queue/pause"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.unwrap()["paused"],
+            true
+        );
+        assert!(state.queue_paused.load(Ordering::SeqCst));
+
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&queue_test_req())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let first: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(first["started"], false);
+        assert_eq!(first["position"], 1);
+        let id = first["id"].as_str().unwrap().to_string();
+
+        // Identical pending cell dedupes instead of double-spending.
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&queue_test_req())
+            .send()
+            .await
+            .unwrap();
+        let dup: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(dup["deduped"], true);
+        assert_eq!(dup["id"].as_str().unwrap(), id);
+
+        // Remove unknown -> 404; remove pending -> 200.
+        let res = client
+            .delete(format!("{base}/api/queue/q999"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+        let res = client
+            .delete(format!("{base}/api/queue/{id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.text().await.unwrap().contains("Removed"));
+
+        // Clear keeps pending rows, drops finished history.
+        let mut req = queue_test_req();
+        req.trials = 2;
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&req)
+            .send()
+            .await
+            .unwrap();
+        let id2 = res.json::<serde_json::Value>().await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut req = queue_test_req();
+        req.trials = 3;
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&req)
+            .send()
+            .await
+            .unwrap();
+        let id3 = res.json::<serde_json::Value>().await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let mut q = state.queue.lock().unwrap();
+            q.iter_mut().find(|i| i.id == id3).unwrap().status = QueueStatus::Done;
+        }
+        let res = client
+            .delete(format!("{base}/api/queue"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.text().await.unwrap().contains("Cleared 1"));
+        assert_eq!(test_queue_of(&state).await.len(), 1);
+
+        // Unknown task and malformed JSON are rejected before any dispatch.
+        let mut bad = queue_test_req();
+        bad.task = "no-such-task".to_string();
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        assert!(res.text().await.unwrap().contains("Unknown task"));
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .header("content-type", "application/json")
+            .body("{ not json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        assert_eq!(test_queue_of(&state).await.len(), 1);
+
+        // Resume with only a parked pending row would kick it, so clear
+        // first; resume itself must flip the flag and report ok.
+        assert!(remove_queued_run(State(state.clone()), AxumPath(id2))
+            .await
+            .is_ok());
+        let res = client
+            .post(format!("{base}/api/queue/resume"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.unwrap()["paused"],
+            false
+        );
+        assert!(!state.queue_paused.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn start_run_validation_over_http() {
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
+        let state = create_test_state();
+        let base = serve_test_app(state.clone()).await;
+        let client = authed_client();
+
+        // Unknown task: slot is claimed then released, nothing dispatches.
+        let mut req = queue_test_req();
+        req.task = "no-such-task".to_string();
+        let res = client
+            .post(format!("{base}/api/run"))
+            .json(&req)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        assert!(res.text().await.unwrap().contains("Unknown task"));
+        assert!(state.running_slots.lock().unwrap().is_empty());
+        assert!(!state.is_running.load(Ordering::SeqCst));
+
+        // Malformed JSON is rejected by the extractor.
+        let res = client
+            .post(format!("{base}/api/run"))
+            .header("content-type", "application/json")
+            .body("{ nope")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+
+        // All workers busy -> 409 without touching the request.
+        for w in 0..worker_count() as u8 {
+            state.running_slots.lock().unwrap().insert(w);
+        }
+        state.is_running.store(true, Ordering::SeqCst);
+        let res = client
+            .post(format!("{base}/api/run"))
+            .json(&queue_test_req())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 409);
+        state.running_slots.lock().unwrap().clear();
+        state.is_running.store(false, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn csrf_and_method_guards_over_http() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = reqwest::Client::new();
+        let authed = authed_client();
+
+        // Cross-site mutations are rejected before any handler/body parse.
+        let res = client
+            .post(format!("{base}/api/queue/resume"))
+            .header("Origin", "https://evil.example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 403);
+        let res = client
+            .post(format!("{base}/api/login"))
+            .header("Referer", "https://evil.example.com/pwn")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 403);
+        // Reads stay open regardless of Origin.
+        let res = client
+            .get(format!("{base}/api/status"))
+            .header("Origin", "https://evil.example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        // Method mismatches are 405s (past the guard), unknown routes 404.
+        for (method, path) in [
+            ("PUT", "/api/queue"),
+            ("GET", "/api/run"),
+            ("POST", "/api/status"),
+            ("DELETE", "/api/run"),
+        ] {
+            let res = authed
+                .request(method.parse().unwrap(), format!("{base}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 405, "{method} {path}");
+        }
+        let res = authed
+            .post(format!("{base}/api/does-not-exist"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+    }
+
+    fn test_cookie_of(resp: &reqwest::Response) -> String {
+        resp.headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|c| c.strip_prefix("sdb_session="))
+            .map(|c| c.split(';').next().unwrap_or("").to_string())
+            .expect("session cookie")
+    }
+
+    // Env serialization deliberately spans awaits: the vars must stay
+    // pinned for the requests under test. No handler takes TEST_ENV_LOCK,
+    // so the guard cannot deadlock the runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn login_session_bearer_and_logout_gates() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev: Vec<(&str, Option<String>)> = ["SDB_UI_TOKEN", "SDB_UI_USER", "SDB_UI_PASS"]
+            .into_iter()
+            .map(|k| (k, std::env::var(k).ok()))
+            .collect();
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
+        std::env::set_var("SDB_UI_USER", "sdb-ut-user");
+        std::env::set_var("SDB_UI_PASS", "sdb-ut-pass");
+
+        let base = serve_test_app(create_test_state()).await;
+        let client = reqwest::Client::new();
+        let restore = move || {
+            for (k, v) in prev {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        };
+
+        // Unauthenticated /api/me advertises a required login.
+        let res = client.get(format!("{base}/api/me")).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let me: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(me["login"], false);
+        assert_eq!(me["login_required"], true);
+
+        // Wrong password -> 401; right one mints a session cookie.
+        let res = client
+            .post(format!("{base}/api/login"))
+            .json(&serde_json::json!({"user": "sdb-ut-user", "pass": "wrong"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+        let res = client
+            .post(format!("{base}/api/login"))
+            .json(&serde_json::json!({"user": "sdb-ut-user", "pass": "sdb-ut-pass"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 204);
+        let cookie = test_cookie_of(&res);
+
+        // Session cookie satisfies /api/me and the mutating gate.
+        let res = client
+            .get(format!("{base}/api/me"))
+            .header("Cookie", format!("sdb_session={cookie}"))
+            .send()
+            .await
+            .unwrap();
+        let me: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(me["login"], true);
+        assert_eq!(me["user"], "sdb-ut-user");
+        let res = client
+            .post(format!("{base}/api/queue/resume"))
+            .header("Cookie", format!("sdb_session={cookie}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        // No session/bearer while login is configured -> 401 login hint.
+        let res = client
+            .post(format!("{base}/api/queue/resume"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+        assert!(res.text().await.unwrap().contains("login required"));
+        // Bearer still works alongside login.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {TEST_UI_TOKEN}")).unwrap(),
+        );
+        let res = client
+            .post(format!("{base}/api/queue/resume"))
+            .headers(headers)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        // Logout drops the server-side session.
+        let res = client
+            .post(format!("{base}/api/logout"))
+            .header("Cookie", format!("sdb_session={cookie}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 204);
+        let res = client
+            .get(format!("{base}/api/me"))
+            .header("Cookie", format!("sdb_session={cookie}"))
+            .send()
+            .await
+            .unwrap();
+        let me: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(me["login"], false);
+
+        restore();
+    }
+
+    /// Mock engine for GUI-proxy route tests: canned, deterministic, and
+    /// entirely in-process (ephemeral port; never 3000/3001).
+    async fn serve_mock_engine() -> String {
+        async fn queue_post(Json(b): Json<serde_json::Value>) -> Response {
+            if b["model"] == "fail-me" {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "engine refused").into_response();
+            }
+            Json(serde_json::json!({"id": "qe1", "started": false, "position": 1})).into_response()
+        }
+        let app = Router::new()
+            .route(
+                "/api/status",
+                axum::routing::get(|| async { Json(serde_json::json!({"proxied": true})) }),
+            )
+            .route(
+                "/api/queue",
+                axum::routing::get(|| async { Json(serde_json::json!([])) })
+                    .post(queue_post)
+                    .delete(|| async { "Cleared 0" }),
+            )
+            .route(
+                "/api/queue/:id",
+                axum::routing::delete(|| async { "Removed qe1 from queue" }),
+            )
+            .route(
+                "/api/queue/pause",
+                axum::routing::post(|| async {
+                    Json(serde_json::json!({"ok": true, "paused": true}))
+                }),
+            )
+            .route(
+                "/api/queue/resume",
+                axum::routing::post(|| async {
+                    Json(serde_json::json!({"ok": true, "paused": false}))
+                }),
+            )
+            .route(
+                "/api/console",
+                axum::routing::get(|| async { ([("x-console-total", "1")], "engine line") }),
+            )
+            .route(
+                "/api/run/stop",
+                axum::routing::post(|| async { "Benchmark run stopped" }),
+            )
+            .route(
+                "/api/run",
+                axum::routing::post(|| async { "Benchmark started" }),
+            )
+            .route(
+                "/api/runs/:id/extend",
+                axum::routing::post(|| async { Json(serde_json::json!({"started": "parent1"})) }),
+            );
+        serve_test_app_on(app).await
+    }
+
+    async fn serve_test_app_on(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn proxy_mode_reads_mutations_and_errors() {
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
+        let engine = serve_mock_engine().await;
+        let mut state = create_test_state();
+        state.engine_url = engine;
+        let base = serve_test_app(state.clone()).await;
+        let client = authed_client();
+
+        // Reads pass through (get_status + get_queue + console header copy).
+        let res = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.unwrap()["proxied"],
+            true
+        );
+        let res = client
+            .get(format!("{base}/api/queue"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.text().await.unwrap(), "[]");
+        let res = client
+            .get(format!("{base}/api/console"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers()
+                .get("x-console-total")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(res.text().await.unwrap(), "engine line");
+
+        // Mutations forward and parse engine responses.
+        let res = client
+            .post(format!("{base}/api/queue/resume"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.unwrap()["paused"],
+            false
+        );
+        let res = client
+            .post(format!("{base}/api/queue/pause"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&queue_test_req())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.json::<serde_json::Value>().await.unwrap()["id"], "qe1");
+        // Engine-side refusal keeps the engine status.
+        let mut fail = queue_test_req();
+        fail.model = "fail-me".to_string();
+        let res = client
+            .post(format!("{base}/api/queue"))
+            .json(&fail)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 500);
+        assert_eq!(res.text().await.unwrap(), "engine refused");
+        let res = client
+            .delete(format!("{base}/api/queue/qe1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.text().await.unwrap().contains("Removed qe1"));
+        let res = client
+            .delete(format!("{base}/api/queue"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.text().await.unwrap(), "Cleared 0");
+        let res = client
+            .post(format!("{base}/api/run"))
+            .json(&queue_test_req())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.text().await.unwrap(), "Benchmark started");
+        let res = client
+            .post(format!("{base}/api/runs/parent1/extend"))
+            .json(&serde_json::json!({"trials": 3}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.unwrap()["started"],
+            "parent1"
+        );
+        let res = client
+            .post(format!("{base}/api/run/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        // Unreachable engine: 502, never a local dispatch.
+        let mut dead = create_test_state();
+        dead.engine_url = "http://127.0.0.1:9".to_string();
+        let dead_base = serve_test_app(dead.clone()).await;
+        let res = client
+            .get(format!("{dead_base}/api/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 502);
+        assert!(res.text().await.unwrap().contains("engine unreachable"));
+        let res = client
+            .post(format!("{dead_base}/api/queue/resume"))
+            .send()
+            .await
+            .unwrap();
+        // Proxy handlers translate an unreachable engine into a 200
+        // {"ok": false} envelope for the GUI (the status code is not
+        // forwarded) — pin that shape so a silent local fallback can't
+        // masquerade as a successful remote resume.
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.json::<serde_json::Value>().await.unwrap()["ok"], false);
+        assert!(state.queue.lock().unwrap().is_empty());
+    }
+
+    /// Read from `sock` until the accumulated bytes contain `needle` or
+    /// `wait` elapses. Used by the raw-socket SSE test (reqwest's stream
+    /// feature is deliberately not enabled).
+    async fn read_until(
+        sock: &mut tokio::net::TcpStream,
+        buf: &mut Vec<u8>,
+        needle: &str,
+        wait: Duration,
+    ) -> bool {
+        use tokio::io::AsyncReadExt;
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut chunk = [0u8; 4096];
+        loop {
+            if String::from_utf8_lossy(buf).contains(needle) {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            match tokio::time::timeout(left, sock.read(&mut chunk)).await {
+                Ok(Ok(0)) => return false,
+                Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+                _ => return String::from_utf8_lossy(buf).contains(needle),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_logs_initial_live_and_lag_notice() {
+        use tokio::io::AsyncWriteExt;
+        let mut state = create_test_state();
+        state
+            .log_buffer
+            .write()
+            .unwrap()
+            .push("[initial] boot line".to_string());
+        let (tx, _keep_rx) = broadcast::channel(2);
+        state.log_sender = tx;
+        let base = serve_test_app(state.clone()).await;
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        sock.write_all(b"GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut seen_raw = Vec::new();
+        assert!(
+            read_until(
+                &mut sock,
+                &mut seen_raw,
+                "text/event-stream",
+                Duration::from_secs(3)
+            )
+            .await,
+            "SSE route must answer with text/event-stream"
+        );
+        let head = String::from_utf8_lossy(&seen_raw);
+        assert!(head.contains("HTTP/1.1 200"), "head: {head}");
+        assert!(
+            read_until(
+                &mut sock,
+                &mut seen_raw,
+                "[initial] boot line",
+                Duration::from_secs(3)
+            )
+            .await,
+            "SSE replay must carry the buffered console tail"
+        );
+
+        // Live broadcast lines reach the stream.
+        state.log_sender.send("[live] now".to_string()).unwrap();
+        assert!(
+            read_until(
+                &mut sock,
+                &mut seen_raw,
+                "[live] now",
+                Duration::from_secs(3)
+            )
+            .await,
+            "live broadcast line must reach the stream"
+        );
+
+        // Overflow the 2-slot channel without reading between sends: the
+        // stream must surface a catch-up notice instead of silent drops.
+        for i in 0..8 {
+            let _ = state.log_sender.send(format!("burst {i}"));
+        }
+        assert!(
+            read_until(
+                &mut sock,
+                &mut seen_raw,
+                "STREAM NOTICE",
+                Duration::from_secs(3)
+            )
+            .await,
+            "lagging stream must emit the catch-up notice; saw: {}",
+            String::from_utf8_lossy(&seen_raw)
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_logs_proxy_snapshot_and_engine_down_notice() {
+        use tokio::io::AsyncWriteExt;
+        // Engine up: the one-shot console snapshot is replayed as SSE data.
+        let engine = serve_mock_engine().await;
+        let mut state = create_test_state();
+        state.engine_url = engine;
+        let base = serve_test_app(state).await;
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        sock.write_all(b"GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        assert!(
+            read_until(&mut sock, &mut buf, "engine line", Duration::from_secs(3)).await,
+            "proxy SSE must replay the engine console snapshot"
+        );
+
+        // Engine down: a clear notice, never a hang or empty stream.
+        let mut dead = create_test_state();
+        dead.engine_url = "http://127.0.0.1:9".to_string();
+        let dead_base = serve_test_app(dead).await;
+        let dead_port: u16 = dead_base.rsplit(':').next().unwrap().parse().unwrap();
+        let mut dsock = tokio::net::TcpStream::connect(("127.0.0.1", dead_port))
+            .await
+            .unwrap();
+        dsock
+            .write_all(b"GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut dbuf = Vec::new();
+        assert!(
+            read_until(
+                &mut dsock,
+                &mut dbuf,
+                "engine console down",
+                Duration::from_secs(3)
+            )
+            .await,
+            "dead proxy engine must surface the down notice"
+        );
+    }
+
+    #[test]
+    fn compare_workspaces_status_matrix_and_missing_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "sdb_ut_compare_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("same.rs"), "fn main() {}\n").unwrap();
+        fs::write(b.join("same.rs"), "fn main() {}\n").unwrap();
+        fs::write(a.join("changed.rs"), "a\nb\nc\n").unwrap();
+        fs::write(b.join("changed.rs"), "a\nx\nc\n").unwrap();
+        fs::write(a.join("gone.rs"), "old\n").unwrap();
+        fs::write(b.join("new.rs"), "new\n").unwrap();
+        // Nested path exercises the recursive workspace scan.
+        fs::create_dir_all(a.join("src")).unwrap();
+        fs::create_dir_all(b.join("src")).unwrap();
+        fs::write(a.join("src/lib.rs"), "one\n").unwrap();
+        fs::write(b.join("src/lib.rs"), "two\n").unwrap();
+
+        let entries = compare_workspaces(&a, &b);
+        let by = |p: &str| entries.iter().find(|e| e.path == p).unwrap();
+        assert_eq!(by("same.rs").status, "identical");
+        assert!(by("same.rs").diff.is_empty());
+        assert_eq!(by("changed.rs").status, "modified");
+        let changed = by("changed.rs").diff.clone();
+        assert!(changed.contains("-b") && changed.contains("+x"));
+        assert_eq!(by("gone.rs").status, "removed_in_b");
+        assert_eq!(by("gone.rs").lines_a, 1);
+        assert_eq!(by("gone.rs").lines_b, 0);
+        assert_eq!(by("new.rs").status, "added_in_b");
+        assert_eq!(by("new.rs").lines_b, 1);
+        assert_eq!(by("src/lib.rs").status, "modified");
+        // Sorted paths keep the GUI diff order stable.
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        let mut sorted = paths.clone();
+        sorted.sort_unstable();
+        assert_eq!(paths, sorted);
+        // Both sides missing -> empty; one side missing -> added/removed.
+        assert!(compare_workspaces(&dir.join("nope_a"), &dir.join("nope_b")).is_empty());
+        let one = compare_workspaces(&a, &dir.join("nope_b"));
+        assert!(one.iter().all(|e| e.status == "removed_in_b"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn status_current_run_derives_from_worker_map() {
+        let state = create_test_state();
+        state
+            .worker_runs
+            .write()
+            .unwrap()
+            .insert(2, active_run_info("redis_sdb-ut_20260102_w2"));
+        let resp = get_status(State(state.clone())).await;
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["is_running"], true);
+        assert_eq!(v["current_run"]["run_id"], "redis_sdb-ut_20260102_w2");
+        assert_eq!(v["current_run"]["turns"], 1);
+        assert_eq!(v["workers"]["2"]["tokens"], 42);
+        assert_eq!(v["queue_paused"], false);
+    }
+
+    #[tokio::test]
+    async fn stop_run_idle_full_and_queue_only_paths() {
+        // Nothing running -> 400.
+        let state = create_test_state();
+        let resp = stop_run(
+            State(state.clone()),
+            Query(StopQuery { run: String::new() }),
+        )
+        .await;
+        assert_eq!(resp.status(), 400);
+        assert!(!state.is_running.load(Ordering::SeqCst));
+
+        // Full stop: flag cleared, Running queue rows cancelled, logs written.
+        let state = create_test_state();
+        state.queue.lock().unwrap().push_back(QueuedRun {
+            id: "q_ut_stop_me".to_string(),
+            enqueued_at: "2026-01-02T00:00:00Z".to_string(),
+            status: QueueStatus::Running,
+            note: None,
+            refusals: 0,
+            not_before: None,
+            kind: QueueKind::Run(queue_test_req()),
+        });
+        state.is_running.store(true, Ordering::SeqCst);
+        let resp = stop_run(
+            State(state.clone()),
+            Query(StopQuery { run: String::new() }),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert!(!state.is_running.load(Ordering::SeqCst));
+        assert!(state.cancel_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            state.queue.lock().unwrap()[0].status,
+            QueueStatus::Cancelled
+        );
+        assert!(state
+            .log_buffer
+            .read()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("stopped by user")));
+
+        // Fragment naming no live cell -> 404 (engine flagged busy).
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        let resp = stop_run(
+            State(state.clone()),
+            Query(StopQuery {
+                run: "sdb-ut-no-such-run".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), 404);
+
+        // Queue-only match (no worker_runs): cancels the row, no sandbox
+        // cleanup path is touched because `hits` is empty.
+        let state = create_test_state();
+        state.is_running.store(true, Ordering::SeqCst);
+        state.queue.lock().unwrap().push_back(QueuedRun {
+            id: "sdb_ut_cell_20260102".to_string(),
+            enqueued_at: "2026-01-02T00:00:00Z".to_string(),
+            status: QueueStatus::Running,
+            note: None,
+            refusals: 0,
+            not_before: None,
+            kind: QueueKind::Run(queue_test_req()),
+        });
+        let resp = stop_run(
+            State(state.clone()),
+            Query(StopQuery {
+                run: "sdb_ut_cell".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state.queue.lock().unwrap()[0].status,
+            QueueStatus::Cancelled
+        );
+        assert!(state.worker_runs.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn integrity_reports_refused_queue_shapes() {
+        let state = create_test_state();
+        let mut done = test_queue_item("q_refused_final");
+        done.status = QueueStatus::Done;
+        done.note = Some("refused-final (4 refusals): load gate".to_string());
+        let mut parked = test_queue_item("q_refused_parked");
+        parked.note = Some("refused (attempt 1/3): load gate".to_string());
+        let mut other = test_queue_item("q_plain");
+        other.status = QueueStatus::Done;
+        other.note = Some("5/9 trials passing".to_string());
+        {
+            let mut q = state.queue.lock().unwrap();
+            q.push_back(done);
+            q.push_back(parked);
+            q.push_back(other);
+        }
+        let Json(body) = get_integrity(State(state.clone())).await;
+        assert!(!body.ok, "a terminally refused cell needs a human");
+        assert_eq!(body.refused_final, 1);
+        assert_eq!(body.pending_refused, 1);
+        assert_eq!(body.orphans, 0);
+        assert_eq!(body.junk_parents, 0);
+    }
+
+    #[tokio::test]
+    async fn extend_invalid_id_rejected_over_http() {
+        std::env::set_var("SDB_UI_TOKEN", TEST_UI_TOKEN);
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let res = client
+            .post(format!("{base}/api/runs/..%2Fetc/extend"))
+            .json(&serde_json::json!({"trials": 3}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+    }
+
+    #[test]
+    fn unified_diff_lookahead_covers_insert_and_delete_runs() {
+        let ins = generate_unified_diff("m.rs", "a\nb\nc\n", "a\ninserted\nb\nc\n");
+        assert!(
+            !ins.lines()
+                .any(|l| l.starts_with('-') && !l.starts_with("---")),
+            "pure insert: {ins}"
+        );
+        assert!(ins.contains("+inserted"));
+        let del = generate_unified_diff("m.rs", "a\nb\nc\n", "a\nc\n");
+        assert!(del.contains("-b"));
+        assert!(
+            !del.lines()
+                .any(|l| l.starts_with('+') && !l.starts_with("+++")),
+            "pure delete: {del}"
+        );
+        // A farther-apart insertion exercises the 2..=5 lookahead window.
+        let far = generate_unified_diff("m.rs", "a\nb\nc\nd\n", "a\nb\nc\nx\nd\n");
+        assert!(far.contains("+x"));
+    }
+
+    // Env serialization deliberately spans the handler await; no code
+    // path in the handler takes TEST_ENV_LOCK.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn balance_check_without_key_stays_offline() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::set_var("OPENROUTER_API_KEY", "");
+        let state = create_test_state();
+        let Json(body) = balance_check_handler(State(state)).await;
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["reason"], "no API key configured");
+        match prev {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn clean_run_id_and_host_normalization_edges() {
+        assert_eq!(clean_run_id("abc").as_deref(), Some("abc"));
+        assert!(clean_run_id("").is_none());
+        assert!(clean_run_id("a/b").is_none());
+        assert!(clean_run_id(".").is_none());
+        assert_eq!(host_without_port("[::1]:3000"), "::1");
+        assert_eq!(host_without_port("[::1]"), "::1");
+        assert_eq!(host_without_port("Example.COM:8080"), "example.com");
+        assert_eq!(host_without_port("bench.example.com"), "bench.example.com");
+        assert!(is_loopback_host("localhost"));
+        assert!(!is_loopback_host("bench.example.com"));
+        assert_eq!(
+            origin_host_from_url("https://user@bench.example.com:9443/path"),
+            "bench.example.com"
+        );
     }
 }
