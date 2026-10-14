@@ -783,6 +783,15 @@ impl RedisVerifier {
         let counter_key = format!("cnt_{}", seed_prefix);
         let non_num_key = format!("str_{}", seed_prefix);
 
+        // State-independent precondition: a repair re-verification runs
+        // against a durable candidate whose WAL already holds this stage's
+        // seeded counter from the previous attempt (seed = hash(run_id),
+        // stable per stage), so a bare INCR would answer :2 and the ticket
+        // would be scored as a false regression (live: 2026-10-14 s4 round
+        // 2, "Expected :1, got :2"). DEL first, like any redis test that
+        // needs a fresh counter; DEL itself is stage 2's contract.
+        let _ = Self::send_resp_cmd(&mut stream, &["DEL", &counter_key]).await;
+
         let incr1 = match Self::send_resp_cmd(&mut stream, &["INCR", &counter_key]).await {
             Ok(r) => r,
             Err(e) => {

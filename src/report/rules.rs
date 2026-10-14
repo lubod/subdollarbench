@@ -8,6 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.5`: stage-4 INCR state-independence fix. A repair
+///   re-verification runs against a durable candidate whose WAL already
+///   holds the seeded counter from the previous attempt (the seed is
+///   stable per stage), so a bare `INCR` answered `:2` and the ticket was
+///   scored as a false regression (live: s4 round 2, "Expected :1, got
+///   :2"). The verifier now DELs the seeded counter first. Single-shot
+///   (fresh candidate) semantics are identical; only re-verifications
+///   change. Rows stamped `2026-10-14.4` or earlier are not comparable
+///   without `backfill --yes`.
 /// - `2026-10-14.4`: campaign tests & CI gate (ticket 6). New pipeline-
 ///   level stage 9: two offline `./test.sh` runs (deterministic, <=3min
 ///   each), coverage >=80% (Go measured via `go test -coverprofile` +
@@ -242,7 +251,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.4";
+pub const RULES_VERSION: &str = "2026-10-14.5";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -208,6 +208,19 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-5, 2026-10-14 run 3, `..._140445`): s0-s3 PASS
+  3/3/4/5/6 (30t/17t/25t/22t, $0.0286/$0.0333/$0.0369/$0.0752), then s4
+  **invalidated by a harness murder**: while the AOF probe had the candidate
+  SIGKILLed (2s window), the engine's 60s periodic `prune_labeled_networks`
+  sweep — which cannot see foreground CLI campaigns (its busy check only
+  covers engine worker_runs) — saw the 354s-old stage network with zero
+  *running* endpoints and removed it; `docker start` then failed with
+  "network ... not found", stage 8 was skipped, and the repair re-verification
+  added a second false regression (stage 4 INCR :2 from WAL state carryover).
+  Rollup says reached 3 / regressions [4,6] but both are harness artifacts.
+  Fixes: run anchor container (network never looks empty; see `ensure_run_anchor`)
+  + stage-4 DEL-first (RULES 2026-10-14.5). **Rerun in flight** to replace
+  this cell; keep the dir as incident evidence, do not quote its numbers.
 - **ling-3.1-flash** (spec 0-3, D6b): reached **3** tickets — s0 3/3 (30t),
   s1 4/4 (19t), s2 5/5 (19t), s3 6/6 (23t + 7 repair). 4/4 regression-free,
   $0.1743, tickets/$ 22.9. Repair converted a 3-line compile error.
@@ -270,6 +283,16 @@ non-redis acceptance adapters.
   with stderr on failure, and the campaign CLI wires SIGINT/SIGTERM to the
   pipeline cancel flag so cleanup guards reap running containers. After a
   hard kill, `prune --yes` remains the belt.
+- [x] Incident fix (2026-10-14, engine-sweep murder): the engine's 60s
+  periodic reconcile runs `prune_labeled_networks` while a foreground CLI
+  campaign is live (the busy check only sees engine-owned worker runs), and
+  a stopped candidate counts as zero endpoints — so a >300s-old stage net
+  whose candidate is in its AOF kill window was removed mid-stage (s4
+  "network ... not found"). Structural fix: every run network now carries a
+  `subdollar-anchor-*` container (`ensure_run_anchor`) that keeps the
+  network non-empty for the run's whole intended life; zombie anchors are
+  reaped by the orphan sweep's 3h age gate. Side effect: fixes the
+  equivalent race for any future sweeper, ours or not.
 - [x] Cleanup (2026-10-14): pre-purge recovery branch + `refs/original`
   dropped, stale stash dropped, reflog expired, gc pruned the leaked-key
   blobs (verified absent). Stale root logs removed; data archived + reset

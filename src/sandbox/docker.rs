@@ -146,6 +146,74 @@ impl SandboxManager {
         format!("subdollar-candidate-{}", self.instance_id)
     }
 
+    pub fn anchor_container_name(&self) -> String {
+        format!("subdollar-anchor-{}", self.instance_id)
+    }
+
+    /// Keep at least one container attached to the run network for the whole
+    /// intended life of the run.
+    ///
+    /// Docker's `{{len .Containers}}` counts only *running* endpoints: a
+    /// candidate stopped for its kill -9 window (or the gap between agent
+    /// phase and candidate start) makes the network look empty, and every
+    /// staleness gate is "empty AND older than 300s". A foreground campaign
+    /// is invisible to the engine's 60s periodic sweep (its `busy` check
+    /// only covers engine-owned worker_runs), so the sweep's
+    /// `prune_labeled_networks` reached into a live stage: live incident
+    /// 2026-10-14, s4 network 354s old, candidate killed for the AOF probe
+    /// -> sweep removed the network -> `docker start` died with
+    /// "network ... not found" and the ticket was scored as a model
+    /// regression. The anchor makes the network non-empty for its entire
+    /// intended life; a zombie anchor (hard-killed CLI) is reaped by the
+    /// orphan sweep's 3h age gate, after which the net prunes normally.
+    pub fn ensure_run_anchor(&self) -> Result<()> {
+        let name = self.anchor_container_name();
+        let inspect = Command::new("docker")
+            .args(["inspect", "--format", "{{.State.Running}}", &name])
+            .output();
+        if let Ok(o) = inspect {
+            if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true" {
+                return Ok(());
+            }
+        }
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=anchor",
+                "--name",
+                &name,
+                "--network",
+                &self.network_name(),
+                "--memory=32m",
+                "--cpus=0.1",
+                "--pids-limit=32",
+                "--entrypoint",
+                "tail",
+                REF_REDIS_IMAGE,
+                "-f",
+                "/dev/null",
+            ])
+            .output()
+            .map_err(|e| anyhow!("run anchor spawn failed: {e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            // A concurrent ensure_network may have won the name race.
+            if !err.contains("already exists") {
+                return Err(anyhow!(
+                    "run anchor failed to start (network would be sweepable): {}",
+                    err.trim()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn egress_proxy_name(&self) -> String {
         format!("subdollar-egress-{}", self.instance_id)
     }
@@ -314,10 +382,12 @@ impl SandboxManager {
             if out.status.success() {
                 info!("Created run network {} ({})", net, subnet);
                 Self::verify_network_exists(&net)?;
+                self.ensure_run_anchor()?;
                 return Ok(());
             }
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             if stderr.contains("already exists") {
+                self.ensure_run_anchor()?;
                 return Ok(());
             }
             if Self::is_pool_exhausted(&stderr) {
@@ -1483,6 +1553,7 @@ impl SandboxManager {
     fn owned_container_names(&self) -> Vec<String> {
         let mut names = vec![
             self.candidate_container_name(),
+            self.anchor_container_name(),
             self.ref_redis_name(),
             self.ref_http_name(),
             self.ref_pdf_name(),
