@@ -2295,6 +2295,13 @@ mod tests {
         std::env::set_var("SDB_BENCH_POLICY", "0");
         assert!(install_bench_policy_extension(&dir).is_none());
 
+        // Write failure degrades to None, never a panic (bench must not fail here).
+        std::env::remove_var("SDB_BENCH_POLICY");
+        assert!(
+            install_bench_policy_extension(Path::new("/nonexistent-covtest-dir")).is_none(),
+            "unwritable agent dir must degrade to no-policy"
+        );
+
         match prev {
             Some(v) => std::env::set_var("SDB_BENCH_POLICY", v),
             None => std::env::remove_var("SDB_BENCH_POLICY"),
@@ -2927,6 +2934,903 @@ mod tests {
         running.store(false, Ordering::SeqCst);
         let _ = handle.join();
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Unit coverage for the deterministic helpers
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_agent_execution_limits_default_matches_documented_values() {
+        let d = AgentExecutionLimits::default();
+        assert_eq!(d.max_turns, Some(100));
+        assert_eq!(d.max_budget_usd, Some(0.50));
+        assert_eq!(d.timeout_seconds, Some(900));
+    }
+
+    #[test]
+    fn test_omp_billing_error_display_prefixes_billing() {
+        let e = OmpBillingError {
+            reason: "provider rate-limited (HTTP 429)".to_string(),
+            partial_stats: OmpSessionStats::default(),
+        };
+        assert_eq!(e.to_string(), "billing: provider rate-limited (HTTP 429)");
+        let boxed: Box<dyn std::error::Error> = Box::new(e);
+        assert!(boxed.to_string().starts_with("billing:"));
+    }
+
+    #[test]
+    fn test_classify_billing_error_structured_variants() {
+        use crate::sandbox::omp::classify_billing_error as c;
+        assert!(c(r#"{"error":{"code":429}}"#).unwrap().contains("429"));
+        assert!(c(r#"{"error":"payment_required"}"#)
+            .unwrap()
+            .contains("402"));
+        assert!(c(r#"{"error":"insufficient_credit"}"#)
+            .unwrap()
+            .contains("402"));
+        assert!(c(r#"{"message":"payment required"}"#)
+            .unwrap()
+            .contains("402"));
+        assert!(c(r#"{"message":"credit exhausted"}"#)
+            .unwrap()
+            .contains("402"));
+        assert!(c(r#"{"message":"out of credit"}"#).unwrap().contains("402"));
+        assert!(c(r#"{"message":"rate limit exceeded"}"#)
+            .unwrap()
+            .contains("429"));
+        assert!(c(r#"{"message":"too many requests"}"#)
+            .unwrap()
+            .contains("429"));
+        assert!(c(r#"{"message":"unauthorized api key"}"#)
+            .unwrap()
+            .contains("401"));
+        assert!(c(r#"{"message":"unauthorized token"}"#)
+            .unwrap()
+            .contains("401"));
+        assert!(c("status: 401 bad token").unwrap().contains("401"));
+        assert!(c("unauthorized token supplied").unwrap().contains("401"));
+        assert!(c("status 402").unwrap().contains("402"));
+        assert!(c("HTTP/2 429").unwrap().contains("429"));
+        // Messages that merely mention numbers stay untouched.
+        assert!(c(r#"{"message":"done, 401 tests passed"}"#).is_none());
+        assert!(c(r#"{"message":""}"#).is_none());
+    }
+
+    #[test]
+    fn test_extract_token_line_variants() {
+        use OmpRunner as R;
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"message":{"usage":{"input":3,"output":4,"cacheRead":5}}}"#)
+                .unwrap();
+        assert_eq!(
+            R::extract_token_line(&v).unwrap(),
+            "[TOKENS] Turn usage - input: 3, output: 4, cached: 5"
+        );
+        // Alternate provider spellings.
+        let v2: serde_json::Value = serde_json::from_str(
+            r#"{"message":{"usage":{"prompt_tokens":7,"completion_tokens":8,"cache_read_input_tokens":9}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            R::extract_token_line(&v2).unwrap(),
+            "[TOKENS] Turn usage - input: 7, output: 8, cached: 9"
+        );
+        // All-zero / missing usage renders nothing.
+        let v3: serde_json::Value = serde_json::from_str(r#"{"message":{"usage":{}}}"#).unwrap();
+        assert!(R::extract_token_line(&v3).is_none());
+        let v4: serde_json::Value = serde_json::from_str(r#"{"message":{}}"#).unwrap();
+        assert!(R::extract_token_line(&v4).is_none());
+    }
+
+    #[test]
+    fn test_cap_line_counts_chars_and_truncates() {
+        assert_eq!(OmpRunner::cap_line("short"), "short");
+        let exactly = "x".repeat(2000);
+        assert_eq!(OmpRunner::cap_line(&exactly).chars().count(), 2000);
+        let long = "y".repeat(2100);
+        let capped = OmpRunner::cap_line(&long);
+        assert!(capped.starts_with(&"y".repeat(2000)));
+        assert!(capped.ends_with("... (+100 chars)"));
+        // Multi-byte input never panics and truncates by char count.
+        let cjk = "你".repeat(2100);
+        let capped_cjk = OmpRunner::cap_line(&cjk);
+        assert!(capped_cjk.ends_with("... (+100 chars)"));
+    }
+
+    #[test]
+    fn test_collect_jsonl_files_walks_nested_dirs() {
+        let dir = std::env::temp_dir().join(format!("sdb_collect_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("nested/deeper")).unwrap();
+        std::fs::write(dir.join("a.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("nested/b.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("nested/deeper/c.txt"), "not jsonl").unwrap();
+        let mut out = Vec::new();
+        OmpRunner::collect_jsonl_files(&dir, &mut out);
+        assert_eq!(out.len(), 2, "nested jsonl files must be found");
+        assert!(out.iter().all(|(_, p)| p.extension().unwrap() == "jsonl"));
+        // Missing dir is silently empty.
+        let mut none = Vec::new();
+        OmpRunner::collect_jsonl_files(&dir.join("nope"), &mut none);
+        assert!(none.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_renamed_path_registers_disconnect() {
+        // Rename keeps the FD's link count at 1 while the recorded path
+        // points nowhere: still a disconnect.
+        let p = std::env::temp_dir().join(format!("sdb_disc_renamed_{}", std::process::id()));
+        let other =
+            std::env::temp_dir().join(format!("sdb_disc_renamed_other_{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(&other);
+        std::fs::write(&p, "x\n").unwrap();
+        let fd = File::open(&p).unwrap();
+        std::fs::rename(&p, &other).unwrap();
+        assert!(OmpRunner::session_disconnected(&fd, &p));
+        let _ = std::fs::remove_file(&other);
+    }
+
+    #[test]
+    fn test_convert_bench_event_rejects_other_versions_and_truncates() {
+        assert!(OmpRunner::convert_bench_event(
+            r#"[BENCH-EVENT] {"v":2,"kind":"message","role":"assistant","text":"x"}"#
+        )
+        .is_none());
+        // >35 code lines in a tool call are truncated.
+        let code = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\\n");
+        let line = format!(
+            r#"[BENCH-EVENT] {{"v":1,"kind":"tool_call","tool":"write","intent":"","command":"","path":"","code":"{}"}}"#,
+            code
+        );
+        let out = OmpRunner::convert_bench_event(&line).unwrap();
+        assert!(out.iter().any(|l| l.contains("(+5 lines omitted)")));
+        assert!(!out.iter().any(|l| l.contains("line 39")));
+        // Empty tool output and >40 output lines.
+        let ev =
+            r#"[BENCH-EVENT] {"v":1,"kind":"tool_result","tool":"bash","ok":true,"output":""}"#;
+        let out = OmpRunner::convert_bench_event(ev).unwrap();
+        assert!(out.iter().any(|l| l.contains("(empty output)")));
+        let long_out = (0..45)
+            .map(|i| format!("o{i}"))
+            .collect::<Vec<_>>()
+            .join("\\n");
+        let ev = format!(
+            r#"[BENCH-EVENT] {{"v":1,"kind":"tool_result","tool":"bash","ok":true,"output":"{}"}}"#,
+            long_out
+        );
+        let out = OmpRunner::convert_bench_event(&ev).unwrap();
+        assert!(out.iter().any(|l| l.contains("(+5 more lines)")));
+    }
+
+    #[test]
+    fn test_format_session_line_user_content_string() {
+        let line = r#"{"message":{"role":"user","content":"plain text brief"}}"#;
+        let out = OmpRunner::format_session_line(line).unwrap();
+        assert!(out.iter().any(|l| l.contains("[PROMPT]")));
+        assert!(out.iter().any(|l| l.contains("plain text brief")));
+    }
+
+    #[test]
+    fn test_format_session_line_tool_variants_and_edits() {
+        // tool_use item type + stringified arguments + multi-line command.
+        let line = serde_json::json!({
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "bash", "arguments": "{\"command\":\"cargo build\\ncargo test\"}"}
+            ]}
+        })
+        .to_string();
+        let out = OmpRunner::format_session_line(&line).unwrap();
+        assert!(out.iter().any(|l| l == "[ACTION] bash"));
+        assert!(out.iter().any(|l| l.contains("$ cargo build")));
+        assert!(out.iter().any(|l| l.contains("$ cargo test")));
+
+        // function_call item type with toolName and empty intent.
+        let line = r#"{"message":{"role":"assistant","content":[{"type":"function_call","toolName":"read","intent":"","args":{"path":"/workspace/a.rs"}}]}}"#;
+        let out = OmpRunner::format_session_line(line).unwrap();
+        assert!(out.iter().any(|l| l == "[ACTION] read"));
+        assert!(out.iter().any(|l| l.contains("path: /workspace/a.rs")));
+
+        // Edit-style args: first-line previews of old and new text.
+        let line = r#"{"message":{"role":"assistant","content":[{"type":"toolCall","name":"edit","intent":"tweak","arguments":{"oldText":"before line\nold","newText":"after line\nnew"}}]}}"#;
+        let out = OmpRunner::format_session_line(line).unwrap();
+        assert!(out.iter().any(|l| l == "  - before line"));
+        assert!(out.iter().any(|l| l == "  + after line"));
+
+        // Long code in arguments truncates at 35 lines.
+        let long = (0..40)
+            .map(|i| format!("code {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line = serde_json::json!({
+            "message": {"role": "assistant", "content": [
+                {"type": "toolCall", "name": "write", "arguments": {"content": long}}
+            ]}
+        })
+        .to_string();
+        let out = OmpRunner::format_session_line(&line).unwrap();
+        assert!(out.iter().any(|l| l.contains("(+5 lines omitted)")));
+    }
+
+    #[test]
+    fn test_format_session_line_tool_start_long_code_and_session_exit() {
+        let long = (0..30)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line = serde_json::json!({
+            "customType": "tool_execution_start",
+            "data": {"toolName": "write", "args": {"code": long}}
+        })
+        .to_string();
+        let out = OmpRunner::format_session_line(&line).unwrap();
+        assert!(out.iter().any(|l| l.contains("(+10 lines)")));
+        let out = OmpRunner::format_session_line(r#"{"customType":"session_exit"}"#).unwrap();
+        assert_eq!(out, vec!["[SESSION] Agent session concluded.".to_string()]);
+    }
+
+    #[test]
+    fn test_fallback_extract_files_from_session_writes_code_blocks() {
+        let dir = std::env::temp_dir().join(format!("sdb_fallback_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("s.jsonl");
+        let line = serde_json::json!({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "here is main\n```rust\nfn main() {}\n```"}
+            ]}
+        })
+        .to_string();
+        std::fs::write(&session, format!("{line}\n")).unwrap();
+        let wd = dir.join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        OmpRunner::fallback_extract_files_from_session(&session, &wd);
+        assert!(
+            wd.join("main.rs").exists(),
+            "fenced write must be extracted"
+        );
+        assert!(std::fs::read_to_string(wd.join("main.rs"))
+            .unwrap()
+            .contains("fn main"));
+        // Missing session file is a silent no-op.
+        OmpRunner::fallback_extract_files_from_session(&dir.join("nope.jsonl"), &wd);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_task_guidance_prompt_sniffing() {
+        let (port, cmd, snippet) = OmpRunner::task_guidance(None, "Build a PDF extractor service");
+        assert_eq!(port, 8090);
+        assert!(cmd.contains("8090"));
+        assert!(snippet.contains("PDF"));
+        let (port, cmd, _) = OmpRunner::task_guidance(None, "implement a redis clone");
+        assert_eq!(port, 6379);
+        assert!(cmd.contains("redis-cli"));
+        let (port, cmd, _) = OmpRunner::task_guidance(None, "build a hello world server");
+        assert_eq!(port, 8080);
+        assert!(cmd.contains("8080"));
+    }
+
+    #[test]
+    fn test_extract_latest_session_stats_rejects_missing_file() {
+        assert!(OmpRunner::extract_latest_session_stats(Some(Path::new(
+            "/nonexistent/covtest-session.jsonl"
+        )))
+        .is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Tailer branch coverage (deterministic, temp-dir sessions)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_tailer_stops_on_cancel_flag() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_cancel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("cancel.jsonl");
+        std::fs::write(&session, "{}\n").unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        ctx.cancel_flag = Some(Arc::new(AtomicBool::new(true)));
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        handle.join().expect("tailer must exit on cancel");
+        running.store(false, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tailer_trips_billing_and_reports() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_bill_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("billing.jsonl");
+        std::fs::write(
+            &session,
+            "{\"error\":{\"code\":402,\"message\":\"payment required\"}}\n",
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        let billing = ctx.billing_tripped.clone();
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        let mut saw_billing = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) if line.contains("[BILLING]") => {
+                    saw_billing = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    if billing.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(billing.load(Ordering::SeqCst), "billing flag must trip");
+        assert!(saw_billing, "the [BILLING] console line must be sent");
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tailer_zero_usage_assistant_reports_infinity() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_zero_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("zero.jsonl");
+        let line = r#"{"message":{"role":"assistant","usage":{},"content":[{"type":"text","text":"hi"}]}}"#;
+        std::fs::write(&session, format!("{line}\n")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        ctx.limits.max_turns = None;
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        let mut saw_live = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) if line.contains("[LIVE] Turn 1/∞") => {
+                    saw_live = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {}
+            }
+        }
+        assert!(
+            saw_live,
+            "zero-usage assistant turn must still report [LIVE]"
+        );
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tailer_resumes_after_session_rotation() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_rot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("active.jsonl");
+        let first = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"first","args":{"command":"echo A"}}}"#;
+        std::fs::write(&session, format!("{first}\n")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        // Wait for the first line to render, so lines_seen is 1.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_first = false;
+        while std::time::Instant::now() < deadline && !saw_first {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(l) if l.contains("[ACTION] bash: first") => saw_first = true,
+                _ => {}
+            }
+        }
+        assert!(saw_first, "pre-rotation line must render");
+        // Atomic rotate, OMP-style: temp file renamed over the live path.
+        let second = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"second","args":{"command":"echo B"}}}"#;
+        let tmp = dir.join("active.jsonl.tmp");
+        std::fs::write(&tmp, format!("{first}\n{second}\n")).unwrap();
+        std::fs::rename(&tmp, &session).unwrap();
+        let mut saw_rotation = false;
+        let mut saw_second = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline && !(saw_rotation && saw_second) {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(l) if l.contains("[TAIL] session file rotated") => saw_rotation = true,
+                Ok(l) if l.contains("[ACTION] bash: second") => saw_second = true,
+                _ => {}
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        assert!(saw_rotation, "rotation must be announced");
+        assert!(
+            saw_second,
+            "post-rotation lines must render without re-counting the first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tailer_drains_remaining_lines_on_exit() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_drain_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("drain.jsonl");
+        let line = r#"{"customType":"tool_execution_start","data":{"toolName":"bash","intent":"drained","args":{"command":"echo done"}}}"#;
+        std::fs::write(&session, format!("{line}\npartial without newline")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Stopped from the start: the drain loop owns the read.
+        let running = Arc::new(AtomicBool::new(false));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running);
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        let _ = handle.join();
+        let mut saw = false;
+        while let Ok(l) = rx.try_recv() {
+            if l.contains("[ACTION] bash: drained") {
+                saw = true;
+            }
+        }
+        assert!(saw, "complete lines must be drained at process exit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tailer_reassembles_partial_line_seekback() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_partial_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("partial.jsonl");
+        std::fs::write(&session, "partial without newline").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        // Let the tailer hit the partial line and seek back before the rest
+        // arrives.
+        std::thread::sleep(Duration::from_millis(400));
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&session)
+                .unwrap();
+            f.write_all(b" and completed\n").unwrap();
+        }
+        let mut saw = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if let Ok(l) = rx.recv_timeout(Duration::from_millis(200)) {
+                if l.contains("[OMP] partial without newline and completed") {
+                    saw = true;
+                    break;
+                }
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        assert!(saw, "partial line must be reassembled after seek-back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tailer_emits_waiting_heartbeat_after_idle() {
+        let dir = std::env::temp_dir().join(format!("sdb_tail_wait_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("idle.jsonl");
+        std::fs::write(&session, "").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        ctx.limits.max_turns = Some(2);
+        let handle = std::thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        // The heartbeat fires on the first idle window past 3s.
+        let mut saw_waiting = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(l) if l.contains("[WAITING] Turn 1/2") => {
+                    saw_waiting = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {}
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        assert!(saw_waiting, "idle tailer must heartbeat");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Fake-docker subprocess harness
+    // -----------------------------------------------------------------
+    //
+    // `run_agent_with_logger` resolves `docker` through PATH and spawns it,
+    // so a temp-dir script named `docker` is a complete stand-in for the
+    // container runtime. PATH is process-global, so the scenarios run in a
+    // re-exec'd child of this test binary: the parent only writes the fake
+    // binary and asserts the child's exit status, while the child owns every
+    // env mutation (PATH/HOME/scenario). Each scenario uses a unique run id,
+    // so it never sees the live ~/.omp session dirs and cleans up its own.
+    const DRIVER_ENV: &str = "SDB_COVTEST_OMP_DRIVER";
+    const BIN_ENV: &str = "SDB_COVTEST_OMP_BIN";
+    const WORK_ENV: &str = "SDB_COVTEST_OMP_WORK";
+
+    fn covtest_limits(max_turns: u32, max_budget: f64, timeout: u64) -> AgentExecutionLimits {
+        AgentExecutionLimits {
+            max_turns: Some(max_turns),
+            max_budget_usd: Some(max_budget),
+            timeout_seconds: Some(timeout),
+        }
+    }
+
+    /// Deterministic fake `docker`. `rm`/`kill` touch a kill file while a
+    /// scenario script is up (so polling scenarios die the instant the
+    /// runner reaps them); `run` seeds the session dir with the scenario's
+    /// session jsonl and/or emits stderr.
+    const FAKE_DOCKER: &str = r#"#!/bin/sh
+# covtest fake `docker`: no engine, no containers, deterministic output.
+scenario="${SDB_COVTEST_SCENARIO:-}"
+state="${SDB_COVTEST_STATE:-}"
+started="${state}.started"
+kill="${state}.kill"
+sessions="${SDB_COVTEST_SESSIONDIR:-}"
+
+seed_success_session() {
+  if [ -n "$sessions" ]; then
+    mkdir -p "$sessions"
+    {
+      printf '%s\n' '{"type":"thinking_level_change","thinkingLevel":"high"}'
+      printf '%s\n' '{"message":{"role":"assistant","usage":{"input":11,"output":3,"cacheRead":2},"content":[{"type":"text","text":"here is the server\n```rust\nfn main() {}\n```"}]}}'
+    } > "$sessions/session.jsonl"
+  fi
+}
+
+seed_turn_session() {
+  if [ -n "$sessions" ]; then
+    mkdir -p "$sessions"
+    printf '%s\n' '{"message":{"role":"assistant","usage":{"input":4,"output":1},"content":[{"type":"text","text":"working"}]}}' > "$sessions/session.jsonl"
+  fi
+}
+
+wait_for_kill() {
+  i=0
+  while [ "$i" -lt 100 ]; do
+    if [ -f "$kill" ]; then exit 0; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  exit 0
+}
+
+case "$1" in
+  rm|kill)
+    if [ -n "$state" ] && [ -f "$started" ]; then : > "$kill"; fi
+    exit 0
+    ;;
+  run)
+    : > "$started"
+    case "$scenario" in
+      success|network|openrouter|relative)
+        seed_success_session
+        printf '%s\n' '[BENCH-EVENT] {"v":1,"kind":"message","role":"assistant","text":"hello from extension","thinking":"plan"}'
+        printf '%s\n' 'plain progress line'
+        sleep 0.6
+        exit 0
+        ;;
+      nonzero)
+        printf '%s\n' 'omp exploded: model not found' >&2
+        exit 9
+        ;;
+      ready)
+        if [ -n "$SDB_COVTEST_WORKDIR" ]; then : > "$SDB_COVTEST_WORKDIR/READY"; fi
+        wait_for_kill
+        ;;
+      timeout|cancel)
+        wait_for_kill
+        ;;
+      max_turns)
+        seed_turn_session
+        wait_for_kill
+        ;;
+      billing)
+        printf '%s\n' 'HTTP/1.1 402 Payment Required' >&2
+        sleep 0.5
+        exit 0
+        ;;
+    esac
+    exit 1
+    ;;
+esac
+exit 1
+"#;
+
+    fn run_omp_scenario(
+        name: &str,
+        root: &Path,
+        limits: AgentExecutionLimits,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> (
+        Result<OmpSessionStats>,
+        Vec<String>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        run_omp_scenario_opts(name, root, limits, cancel, "covtest-model", None, false)
+    }
+
+    fn run_omp_scenario_opts(
+        name: &str,
+        root: &Path,
+        limits: AgentExecutionLimits,
+        cancel: Option<Arc<AtomicBool>>,
+        model: &str,
+        network: Option<&str>,
+        relative_workdir: bool,
+    ) -> (
+        Result<OmpSessionStats>,
+        Vec<String>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let workdir = if relative_workdir {
+            PathBuf::from(format!("ws-{name}"))
+        } else {
+            root.join(format!("ws-{name}"))
+        };
+        std::fs::create_dir_all(&workdir).unwrap();
+        for suffix in ["started", "kill"] {
+            let _ = std::fs::remove_file(root.join(format!("state-{name}.{suffix}")));
+        }
+        let host_omp = OmpRunner::get_host_omp_dir();
+        let run_id = format!("covtest-{}-omp-{name}", std::process::id());
+        let session_dir = host_omp.join("agent").join("sessions").join(&run_id);
+        let _ = std::fs::remove_dir_all(&session_dir);
+        std::env::set_var("SDB_COVTEST_SCENARIO", name);
+        std::env::set_var("SDB_COVTEST_STATE", root.join(format!("state-{name}")));
+        std::env::set_var("SDB_COVTEST_WORKDIR", &workdir);
+        std::env::set_var("SDB_COVTEST_SESSIONDIR", &session_dir);
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let logs_c = logs.clone();
+        let res = <OmpRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+            AgentRunSpec {
+                model,
+                prompt: "covtest prompt",
+                workdir: &workdir,
+                api_key: Some("sk-covtest"),
+                limits,
+                effort: Some("high"),
+                network,
+                task: None,
+                run_id: Some(&run_id),
+                cancel_flag: cancel,
+                worker: 0,
+            },
+            move |line| logs_c.lock().unwrap().push(line),
+        );
+        let _ = std::fs::remove_dir_all(&session_dir);
+        let logs = logs.lock().unwrap().clone();
+        (res, logs, workdir, session_dir)
+    }
+
+    // Everything below relies on the fake `docker` being first on PATH.
+    fn omp_driver() {
+        let bin = std::env::var(BIN_ENV).expect("SDB_COVTEST_OMP_BIN");
+        let work = PathBuf::from(std::env::var(WORK_ENV).expect("SDB_COVTEST_OMP_WORK"));
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin, old_path));
+        let home = work.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        // No shared-policy write; install coverage lives in its own test.
+        std::env::set_var("SDB_BENCH_POLICY", "0");
+
+        let root = work.join("scenarios");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut passed = 0usize;
+
+        // 1. Clean exit 0 with a session file: stats come from the session,
+        //    and the fenced code block is fallback-extracted.
+        {
+            let (res, _logs, workdir, session_dir) =
+                run_omp_scenario("success", &root, covtest_limits(10, 1.0, 10), None);
+            let st = res.expect("clean exit 0 must be Ok");
+            assert_eq!(st.steps_taken, 1, "assistant session line counts as a step");
+            assert_eq!(st.prompt_tokens, 11);
+            assert_eq!(st.completion_tokens, 3);
+            assert_eq!(st.cached_tokens, 2);
+            assert_eq!(st.total_tokens, 16);
+            assert_eq!(st.effort_effective.as_deref(), Some("high"));
+            assert!(
+                workdir.join("main.rs").exists(),
+                "session fallback must extract the fenced write"
+            );
+            assert!(!session_dir.exists(), "scenario cleans its own session dir");
+            passed += 1;
+        }
+
+        // 2. Non-zero exit: typed execution error.
+        {
+            let (res, _logs, _, _) =
+                run_omp_scenario("nonzero", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("exit 9 must be an error");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(exec.message.contains("Some(9)"), "{}", exec.message);
+            passed += 1;
+        }
+
+        // 3. READY signal: reaped and scored like a normal exit.
+        {
+            let (res, logs, _, _) =
+                run_omp_scenario("ready", &root, covtest_limits(10, 1.0, 10), None);
+            res.expect("READY conclusion must be Ok");
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("signaled completion via /workspace/READY")));
+            passed += 1;
+        }
+
+        // 4. Watchdog timeout: reaped and concluded (stopped_by_limit).
+        {
+            let (res, logs, _, _) =
+                run_omp_scenario("timeout", &root, covtest_limits(10, 1.0, 1), None);
+            res.expect("watchdog stop is a normal conclusion");
+            assert!(logs.iter().any(|l| l.contains("Watchdog")));
+            passed += 1;
+        }
+
+        // 5. Cancel flag: reaped at the first loop turn.
+        {
+            let cancel = Arc::new(AtomicBool::new(true));
+            let (res, logs, _, _) =
+                run_omp_scenario("cancel", &root, covtest_limits(10, 1.0, 10), Some(cancel));
+            res.expect("cancel conclusion is a normal stop");
+            assert!(logs.iter().any(|l| l.contains("Cancellation requested")));
+            passed += 1;
+        }
+
+        // 6. Max turns: the tailer trips the limit and the run stops Ok.
+        {
+            let (res, logs, _, _) =
+                run_omp_scenario("max_turns", &root, covtest_limits(1, 1.0, 10), None);
+            res.expect("turn limit stop is a normal conclusion");
+            assert!(logs.iter().any(|l| l.contains("Reached turn limit")));
+            passed += 1;
+        }
+
+        // 7. Billing phrase on stderr: pause envelope, never a score.
+        {
+            let (res, logs, _, _) =
+                run_omp_scenario("billing", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("stderr 402 must trip");
+            assert!(err.downcast_ref::<OmpBillingError>().is_some());
+            assert!(logs.iter().any(|l| l.contains("[STDERR]")));
+            passed += 1;
+        }
+
+        // 8. Model id already openrouter/-prefixed: passed through untouched.
+        {
+            let (res, _, _, _) = run_omp_scenario_opts(
+                "openrouter",
+                &root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                "openrouter/covtest/model",
+                None,
+                false,
+            );
+            res.expect("prefixed model id must run");
+            passed += 1;
+        }
+
+        // 9. Explicit run network (egress filter off): forwarded to docker.
+        {
+            let (res, _, _, _) = run_omp_scenario_opts(
+                "network",
+                &root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                "covtest-model",
+                Some("covtest-net"),
+                false,
+            );
+            res.expect("explicit network must not change the run outcome");
+            passed += 1;
+        }
+
+        // 10. Relative workdir resolution: canonicalized, run still Ok.
+        {
+            let rel_root = root.clone();
+            std::env::set_current_dir(&rel_root).unwrap();
+            let (res, _, workdir, _) = run_omp_scenario_opts(
+                "relative",
+                &rel_root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                "covtest-model",
+                None,
+                true,
+            );
+            res.expect("relative workdir must resolve and run");
+            assert!(workdir.join("main.rs").exists());
+            passed += 1;
+        }
+
+        println!("fake-docker omp scenarios passed ({passed})");
+    }
+
+    /// Re-exec'd child entry point: the parent sets DRIVER_ENV, so a normal
+    /// suite run is a no-op.
+    #[test]
+    fn fake_docker_driver() {
+        if std::env::var(DRIVER_ENV).ok().as_deref() != Some("1") {
+            return;
+        }
+        omp_driver();
+    }
+
+    /// Parent-side scenario launcher: writes the fake `docker` and runs the
+    /// driver in a child process so PATH/HOME mutations never leak into the
+    /// parallel test suite.
+    #[test]
+    fn test_omp_runner_fake_docker_scenarios() {
+        let root = std::env::temp_dir().join(format!("covtest-omp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let docker = root.join("bin/docker");
+        std::fs::write(&docker, FAKE_DOCKER).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sandbox::omp::tests::fake_docker_driver",
+                "--nocapture",
+            ])
+            .env(DRIVER_ENV, "1")
+            .env(BIN_ENV, root.join("bin"))
+            .env(WORK_ENV, &root)
+            .output()
+            .expect("spawn fake-docker driver child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "fake-docker omp driver failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("fake-docker omp scenarios passed"),
+            "driver must report its scenarios; got:\n{stdout}\n{stderr}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

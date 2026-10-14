@@ -1380,4 +1380,688 @@ mod tests {
         // cutoff-recovery arm's case, not billing.
         assert!(!OpenCodeRunner::is_throttled_noop(false, 0, 0));
     }
+
+    #[test]
+    fn test_add_step_maps_usage_losslessly() {
+        let mut st = OmpSessionStats::default();
+        let tokens = ev(r#"{"input":100,"output":20,"reasoning":5,"cache":{"read":7}}"#);
+        OpenCodeRunner::add_step(&mut st, &tokens, 0.25);
+        assert_eq!(st.prompt_tokens, 100);
+        assert_eq!(
+            st.completion_tokens, 25,
+            "output+reasoning bills as completion"
+        );
+        assert_eq!(st.cached_tokens, 7);
+        assert_eq!(st.total_tokens, 125);
+        // Missing/odd fields degrade to zero, never panic.
+        OpenCodeRunner::add_step(&mut st, &serde_json::Value::Null, 1.0);
+        OpenCodeRunner::add_step(&mut st, &ev(r#"{"input":"nope","output":-3}"#), 0.0);
+        assert_eq!(st.prompt_tokens, 100);
+        assert_eq!(st.completion_tokens, 25);
+        assert_eq!(st.cached_tokens, 7);
+        assert_eq!(st.total_tokens, 125);
+        // cache as a scalar / missing object is tolerated.
+        let mut st2 = OmpSessionStats::default();
+        OpenCodeRunner::add_step(&mut st2, &ev(r#"{"input":4,"cache":3}"#), 0.0);
+        assert_eq!(st2.prompt_tokens, 4);
+        assert_eq!(st2.cached_tokens, 0);
+    }
+
+    #[test]
+    fn test_backoff_sleep_exits_immediately_on_deadline_or_cancel() {
+        // Past deadline: no sleep, false.
+        assert!(!OpenCodeRunner::backoff_sleep(
+            0,
+            SystemTime::now() - Duration::from_secs(1),
+            &None
+        ));
+        // Pre-set cancel flag: no sleep, false.
+        let cancel = Some(Arc::new(AtomicBool::new(true)));
+        assert!(!OpenCodeRunner::backoff_sleep(
+            3,
+            SystemTime::now() + Duration::from_secs(3600),
+            &cancel
+        ));
+        // Inactive cancel flag + far deadline would sleep; verified by the
+        // dedicated fake-docker scenario instead of blocking this test.
+    }
+
+    #[test]
+    fn test_backoff_sleep_sleeps_then_deadline_returns_false() {
+        // A 400ms horizon walks one 500ms slice (the sleep line) before the
+        // deadline check flips to false.
+        let started = std::time::Instant::now();
+        let ok =
+            OpenCodeRunner::backoff_sleep(0, SystemTime::now() + Duration::from_millis(400), &None);
+        assert!(!ok, "deadline must stop the backoff");
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "at least one sleep slice must have run"
+        );
+    }
+
+    #[test]
+    fn test_is_rate_limit_event_structural_shapes() {
+        // type slug containing rate-limit.
+        assert!(OpenCodeRunner::is_rate_limit_event(
+            &ev(r#"{"error":{"type":"provider.rate-limit"}}"#),
+            ""
+        ));
+        // statusCode spelled without the underscore.
+        assert!(OpenCodeRunner::is_rate_limit_event(
+            &ev(r#"{"error":{"statusCode":429}}"#),
+            ""
+        ));
+        // Nested arrays are walked.
+        assert!(OpenCodeRunner::is_rate_limit_event(
+            &ev(r#"{"errors":["not this",{"code":429}]}"#),
+            ""
+        ));
+        // Object keys that merely contain 429 digits never match.
+        assert!(!OpenCodeRunner::is_rate_limit_event(
+            &ev(r#"{"toolCallId":"call_429abc","tokens":{"output":429}}"#),
+            ""
+        ));
+        // Raw phrases from either case.
+        assert!(OpenCodeRunner::is_rate_limit_event(
+            &serde_json::Value::Null,
+            "Too Many Requests"
+        ));
+        assert!(OpenCodeRunner::is_rate_limit_event(
+            &serde_json::Value::Null,
+            "rate_limit_exceeded"
+        ));
+    }
+
+    #[test]
+    fn test_workspace_has_content_walks_subdirectories() {
+        let dir = std::env::temp_dir().join(format!("ws_nested_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/deep")).unwrap();
+        assert!(!OpenCodeRunner::workspace_has_content(&dir));
+        std::fs::write(dir.join("src/deep/lib.rs"), "fn main() {}").unwrap();
+        assert!(
+            OpenCodeRunner::workspace_has_content(&dir),
+            "nested candidate files must count"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // A missing directory is empty, not a panic.
+        assert!(!OpenCodeRunner::workspace_has_content(&dir));
+    }
+
+    #[test]
+    fn test_resolve_model_id_trims_whitespace() {
+        assert_eq!(
+            OpenCodeRunner::resolve_model_id("  openrouter/inclusionai/ling-3.1-flash  ").unwrap(),
+            "openrouter/inclusionai/ling-3.1-flash"
+        );
+    }
+
+    #[test]
+    fn test_run_agent_rejects_non_openrouter_model_before_docker() {
+        // Fail-fast guard: no container, no session, no spend.
+        let dir = std::env::temp_dir().join(format!("oc_bad_model_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel: Option<Arc<AtomicBool>> = None;
+        let res = <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+            AgentRunSpec {
+                model: "opencode/ling-3.1-flash-free",
+                prompt: "covtest",
+                workdir: &dir,
+                api_key: None,
+                limits: covtest_limits(10, 1.0, 10),
+                effort: None,
+                network: None,
+                task: None,
+                run_id: Some("covtest-oc-bad-model"),
+                cancel_flag: cancel,
+                worker: 0,
+            },
+            |_line| {},
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("OpenRouter-only"), "unexpected: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Fake-docker subprocess harness
+    // -----------------------------------------------------------------
+    //
+    // `run_agent_with_logger` resolves `docker` through PATH and spawns it,
+    // so a temp-dir script named `docker` is a complete stand-in for the
+    // container runtime. PATH is process-global, so the scenarios run in a
+    // re-exec'd child of this test binary: the parent only writes the fake
+    // binary and asserts the child's exit status, while the child owns every
+    // env mutation (PATH/HOME/scenario) and the parallel suite never sees
+    // them. The child also isolates ~/.config/opencode lookups behind a temp
+    // HOME.
+    const DRIVER_ENV: &str = "SDB_COVTEST_OC_DRIVER";
+    const BIN_ENV: &str = "SDB_COVTEST_OC_BIN";
+    const WORK_ENV: &str = "SDB_COVTEST_OC_WORK";
+
+    fn covtest_limits(
+        max_turns: u32,
+        max_budget: f64,
+        timeout: u64,
+    ) -> crate::sandbox::omp::AgentExecutionLimits {
+        crate::sandbox::omp::AgentExecutionLimits {
+            max_turns: Some(max_turns),
+            max_budget_usd: Some(max_budget),
+            timeout_seconds: Some(timeout),
+        }
+    }
+
+    /// Deterministic fake `docker`. `rm`/`kill` touch a kill file while a
+    /// scenario script is up (so polling scenarios die the instant the
+    /// runner reaps them); `run` emits the scenario's NDJSON.
+    const FAKE_DOCKER: &str = r#"#!/bin/sh
+# covtest fake `docker`: no engine, no containers, deterministic output.
+scenario="${SDB_COVTEST_SCENARIO:-}"
+state="${SDB_COVTEST_STATE:-}"
+started="${state}.started"
+kill="${state}.kill"
+
+wait_for_kill() {
+  i=0
+  while [ "$i" -lt 100 ]; do
+    if [ -f "$kill" ]; then exit 0; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  exit 0
+}
+
+case "$1" in
+  rm|kill)
+    if [ -n "$state" ] && [ -f "$started" ]; then : > "$kill"; fi
+    exit 0
+    ;;
+  run)
+    : > "$started"
+    case "$scenario" in
+      success|network|rel)
+        printf '%s\n' \
+          '{"type":"step_start","sessionID":"ses_covtest"}' \
+          '{"type":"tool_use","part":{"tool":"write"}}' \
+          '{"type":"text","part":{"text":"working on it"}}' \
+          '{"type":"step_finish","part":{"tokens":{"input":100,"output":20,"reasoning":5,"cache":{"read":7}},"cost":0.01}}' \
+          ''
+        printf '%s\n' '' 'note: incidental stderr' '{"type":"weird","note":"rate_limit"}' >&2
+        i=0
+        while [ "$i" -lt 25 ]; do
+          printf 'stderr noise line %s\n' "$i" >&2
+          i=$((i + 1))
+        done
+        exit 0
+        ;;
+      rel_missing)
+        printf '%s\n' '{"type":"tool_use","part":{"tool":"write"}}'
+        exit 0
+        ;;
+      text_rate)
+        printf '%s\n' \
+          '{"type":"step_start"}' \
+          '{"type":"tool_use","part":{"tool":"write"}}' \
+          '{"type":"step_finish","tokens":{"input":5,"output":5}}' \
+          '{"type":"text","part":{"text":"all good","status":429}}'
+        exit 0
+        ;;
+      malformed)
+        printf '%s\n' \
+          '{"type":"step_start"}' \
+          'not json at all' \
+          '{"type":"weird","x":1}' \
+          '{"type":"tool_use","part":{"tool":"write"}}' \
+          '{"type":"step_finish","tokens":{"input":9,"output":1}}'
+        exit 0
+        ;;
+      cutoff)
+        exit 0
+        ;;
+      nonzero)
+        printf '%s\n' 'fatal: kaboom' >&2
+        exit 3
+        ;;
+      nonzero_empty)
+        exit 7
+        ;;
+      billing)
+        printf '%s\n' '{"type":"text","part":{"text":"insufficient credit balance"}}'
+        exit 0
+        ;;
+      billing_stderr)
+        printf '%s\n' 'HTTP/1.1 402 Payment Required' >&2
+        exit 0
+        ;;
+      rate)
+        printf '%s\n' '{"type":"error","error":{"type":"provider.rate-limit","status":429}}'
+        exit 0
+        ;;
+      variant)
+        n=0
+        if [ -n "$state" ] && [ -f "${state}.count" ]; then n=$(cat "${state}.count"); fi
+        n=$((n + 1))
+        if [ -n "$state" ]; then printf '%s' "$n" > "${state}.count"; fi
+        if [ "$n" -eq 1 ]; then
+          printf '%s\n' '{"type":"error","error":{"type":"provider.no-route","message":"Variant unavailable for openrouter/x: max"}}'
+          exit 1
+        fi
+        printf '%s\n' '{"type":"step_start"}' '{"type":"tool_use","part":{"tool":"write"}}'
+        exit 0
+        ;;
+      turn_limit)
+        printf '%s\n' '{"type":"step_start"}' '{"type":"step_start"}'
+        exit 0
+        ;;
+      budget_limit)
+        printf '%s\n' '{"type":"step_start"}' '{"type":"step_finish","part":{"tokens":{"input":10,"output":10},"cost":1.0}}'
+        exit 0
+        ;;
+      ready)
+        if [ -n "$SDB_COVTEST_WORKDIR" ]; then : > "$SDB_COVTEST_WORKDIR/READY"; fi
+        wait_for_kill
+        ;;
+      timeout|cancel)
+        wait_for_kill
+        ;;
+    esac
+    exit 1
+    ;;
+esac
+exit 1
+"#;
+
+    fn run_oc_scenario(
+        name: &str,
+        root: &std::path::Path,
+        limits: crate::sandbox::omp::AgentExecutionLimits,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> (Result<OmpSessionStats>, Vec<String>) {
+        run_oc_scenario_opts(name, root, limits, cancel, None, false, true)
+    }
+
+    fn run_oc_scenario_opts(
+        name: &str,
+        root: &std::path::Path,
+        limits: crate::sandbox::omp::AgentExecutionLimits,
+        cancel: Option<Arc<AtomicBool>>,
+        network: Option<&str>,
+        relative_workdir: bool,
+        create_workdir: bool,
+    ) -> (Result<OmpSessionStats>, Vec<String>) {
+        let workdir = if relative_workdir {
+            PathBuf::from(format!("ws-{name}"))
+        } else {
+            root.join(format!("ws-{name}"))
+        };
+        if create_workdir {
+            std::fs::create_dir_all(&workdir).unwrap();
+        }
+        for suffix in ["started", "kill", "count"] {
+            let _ = std::fs::remove_file(root.join(format!("state-{name}.{suffix}")));
+        }
+        std::env::set_var("SDB_COVTEST_SCENARIO", name);
+        std::env::set_var("SDB_COVTEST_STATE", root.join(format!("state-{name}")));
+        std::env::set_var("SDB_COVTEST_WORKDIR", &workdir);
+        let run_id = format!("covtest-oc-{}-{name}", std::process::id());
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let logs_c = logs.clone();
+        let res = <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+            AgentRunSpec {
+                model: "openrouter/covtest/model",
+                prompt: "covtest prompt",
+                workdir: &workdir,
+                api_key: Some("sk-covtest"),
+                limits,
+                effort: Some("high"),
+                network,
+                task: None,
+                run_id: Some(&run_id),
+                cancel_flag: cancel,
+                worker: 0,
+            },
+            move |line| logs_c.lock().unwrap().push(line),
+        );
+        let logs = logs.lock().unwrap().clone();
+        (res, logs)
+    }
+
+    // Everything below relies on the fake `docker` being first on PATH.
+    fn oc_driver() {
+        let bin = std::env::var(BIN_ENV).expect("SDB_COVTEST_OC_BIN");
+        let work = PathBuf::from(std::env::var(WORK_ENV).expect("SDB_COVTEST_OC_WORK"));
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin, old_path));
+        let home = work.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let root = work.join("scenarios");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut passed = 0usize;
+
+        // 1. Clean exit 0 with a tool call and token stats.
+        {
+            let (res, logs) = run_oc_scenario("success", &root, covtest_limits(10, 1.0, 10), None);
+            let st = res.expect("clean exit 0 must be Ok");
+            assert_eq!(st.steps_taken, 1, "step_start events count turns");
+            assert_eq!(st.prompt_tokens, 100);
+            assert_eq!(st.completion_tokens, 25, "output+reasoning join completion");
+            assert_eq!(st.cached_tokens, 7);
+            assert_eq!(st.total_tokens, 125);
+            assert_eq!(st.effort_effective.as_deref(), Some("#high"));
+            assert!(logs.iter().any(|l| l.contains("[ACTION] write")));
+            assert!(logs.iter().any(|l| l.contains("[RESPONSE] working on it")));
+            assert!(logs.iter().any(|l| l.contains("[TELEMETRY] turn=1")));
+            passed += 1;
+        }
+
+        // 2. Malformed and unknown NDJSON lines are logged, not fatal.
+        {
+            let (res, logs) =
+                run_oc_scenario("malformed", &root, covtest_limits(10, 1.0, 10), None);
+            let st = res.expect("unknown lines must not fail the run");
+            assert_eq!(st.steps_taken, 1);
+            assert_eq!(st.prompt_tokens, 9);
+            assert_eq!(st.total_tokens, 10);
+            assert!(logs.iter().any(|l| l == "[LOG] not json at all"));
+            assert!(logs.iter().any(|l| l.contains("[LOG] {\"type\":\"weird\"")));
+            passed += 1;
+        }
+
+        // 3. Clean exit 0 that never acted: two capped cutoff recoveries,
+        //    then the clean exit is accepted.
+        {
+            let (res, logs) = run_oc_scenario("cutoff", &root, covtest_limits(10, 1.0, 10), None);
+            let st = res.expect("post-recovery clean exit must conclude Ok");
+            assert_eq!(st.steps_taken, 0);
+            let recovered = logs
+                .iter()
+                .filter(|l| l.contains("[CUTOFF-RECOVER]"))
+                .count();
+            assert_eq!(recovered, 2, "cap is MAX_CUTOFF_RECOVERIES");
+            passed += 1;
+        }
+
+        // 4. Non-zero exit: the stderr tail joins the message.
+        {
+            let (res, _) = run_oc_scenario("nonzero", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("exit 3 must be an error");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(exec.message.contains("code 3"), "{}", exec.message);
+            assert!(exec.message.contains("fatal: kaboom"), "{}", exec.message);
+            passed += 1;
+        }
+
+        // 4b. Empty stderr tail: the message degrades to the code only.
+        {
+            let (res, _) =
+                run_oc_scenario("nonzero_empty", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("exit 7 must be an error");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(
+                exec.message.contains("no further detail"),
+                "{}",
+                exec.message
+            );
+            passed += 1;
+        }
+
+        // 5. Billing phrase in a text event pauses in the billing envelope.
+        {
+            let (res, logs) = run_oc_scenario("billing", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("billing phrase must trip");
+            assert!(err.downcast_ref::<OmpBillingError>().is_some());
+            assert!(logs.iter().any(|l| l.contains("[BILLING]")));
+            passed += 1;
+        }
+
+        // 6. Billing phrase on stderr takes the same envelope.
+        {
+            let (res, _) =
+                run_oc_scenario("billing_stderr", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("stderr 402 must trip");
+            assert!(err.downcast_ref::<OmpBillingError>().is_some());
+            passed += 1;
+        }
+
+        // 6b. Rate-limit phrase inside a text event with real token usage:
+        //     still a normal Ok (the resume arm only takes non-zero exits).
+        {
+            let (res, _) = run_oc_scenario("text_rate", &root, covtest_limits(10, 1.0, 10), None);
+            let st = res.expect("clean exit with a phrase in text is still a verdict");
+            assert_eq!(st.total_tokens, 10);
+            passed += 1;
+        }
+
+        // 7. Provider 429 with zero model output: backoff starts and the
+        //    short deadline cuts it (never a ranked 0%).
+        {
+            let (res, logs) = run_oc_scenario("rate", &root, covtest_limits(10, 1.0, 1), None);
+            let err = res.expect_err("backoff interrupted by the deadline");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(
+                exec.message.contains("backoff interrupted"),
+                "{}",
+                exec.message
+            );
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("[RETRY] provider rate-limited with zero model output")));
+            passed += 1;
+        }
+
+        // 8. Variant resolution failure: one prose-only retry, then Ok.
+        {
+            let (res, logs) = run_oc_scenario("variant", &root, covtest_limits(10, 1.0, 10), None);
+            let st = res.expect("prose-only retry must succeed");
+            assert_eq!(st.steps_taken, 1);
+            assert_eq!(st.effort_effective.as_deref(), Some("prose-only"));
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("[VARIANT] model variant unavailable")));
+            assert!(logs.iter().any(|l| l.contains("resuming prose-only")));
+            passed += 1;
+        }
+
+        // 9. Wall-clock timeout: reaped and reported.
+        {
+            let (res, _) = run_oc_scenario("timeout", &root, covtest_limits(10, 1.0, 1), None);
+            let err = res.expect_err("timeout must fail the attempt");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(exec.message.contains("timeout reached"), "{}", exec.message);
+            passed += 1;
+        }
+
+        // 10. Cancel flag: reported as user cancellation.
+        {
+            let cancel = Arc::new(AtomicBool::new(true));
+            let (res, _) =
+                run_oc_scenario("cancel", &root, covtest_limits(10, 1.0, 10), Some(cancel));
+            let err = res.expect_err("cancel must fail the attempt");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(
+                exec.message.contains("cancelled by user"),
+                "{}",
+                exec.message
+            );
+            passed += 1;
+        }
+
+        // 11. Max-turns limit: partial stats, no error.
+        {
+            let (res, _) = run_oc_scenario("turn_limit", &root, covtest_limits(1, 1.0, 10), None);
+            let st = res.expect("limit stop is a normal conclusion");
+            assert_eq!(st.steps_taken, 2);
+            passed += 1;
+        }
+
+        // 12. Budget cap: partial stats, no error.
+        {
+            let (res, _) =
+                run_oc_scenario("budget_limit", &root, covtest_limits(10, 0.001, 10), None);
+            let st = res.expect("budget stop is a normal conclusion");
+            assert_eq!(st.total_tokens, 20);
+            passed += 1;
+        }
+
+        // 13. READY signal scores exactly like a normal exit.
+        {
+            let (res, logs) = run_oc_scenario("ready", &root, covtest_limits(10, 1.0, 10), None);
+            res.expect("READY conclusion must be Ok");
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("signaled completion via /workspace/READY")));
+            passed += 1;
+        }
+
+        // 14. Egress filter on with no run network: fail closed pre-spawn.
+        {
+            std::env::set_var("SDB_EGRESS_FILTER", "1");
+            let (res, _) = run_oc_scenario("egress", &root, covtest_limits(10, 1.0, 10), None);
+            std::env::remove_var("SDB_EGRESS_FILTER");
+            let err = res.expect_err("filtered run without a proxy sidecar must bail");
+            assert!(
+                err.to_string()
+                    .contains("refusing to run the agent unfiltered"),
+                "{}",
+                err
+            );
+            passed += 1;
+        }
+
+        // 15. Explicit run network (egress filter off): forwarded to docker.
+        {
+            let (res, _) = run_oc_scenario_opts(
+                "network",
+                &root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                Some("covtest-net"),
+                false,
+                true,
+            );
+            res.expect("explicit network must not change the run outcome");
+            passed += 1;
+        }
+
+        // 16. Relative workdir resolution: canonicalized, run still Ok.
+        {
+            let rel_root = root.clone();
+            std::env::set_current_dir(&rel_root).unwrap();
+            let (res, _) = run_oc_scenario_opts(
+                "rel",
+                &rel_root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                None,
+                true,
+                true,
+            );
+            res.expect("relative workdir must resolve and run");
+            passed += 1;
+        }
+
+        // 16b. Missing relative workdir: fallback resolution, run still Ok.
+        {
+            let (res, _) = run_oc_scenario_opts(
+                "rel_missing",
+                &root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                None,
+                true,
+                false,
+            );
+            res.expect("missing relative workdir must fall back and run");
+            passed += 1;
+        }
+
+        // 17. Egress filter on with a run network: the sidecar start is
+        //     attempted, fails against the fake engine, and fails closed.
+        {
+            std::env::set_var("SDB_EGRESS_FILTER", "1");
+            let (res, _) = run_oc_scenario_opts(
+                "egress_net",
+                &root,
+                covtest_limits(10, 1.0, 10),
+                None,
+                Some("subdollar-net-covtest"),
+                false,
+                true,
+            );
+            std::env::remove_var("SDB_EGRESS_FILTER");
+            let err = res.expect_err("sidecar failure must fail closed");
+            assert!(
+                err.to_string()
+                    .contains("refusing to run the agent unfiltered"),
+                "{}",
+                err
+            );
+            passed += 1;
+        }
+
+        println!("fake-docker opencode scenarios passed ({passed})");
+    }
+
+    /// Re-exec'd child entry point: the parent sets DRIVER_ENV, so a normal
+    /// suite run is a no-op.
+    #[test]
+    fn fake_docker_driver() {
+        if std::env::var(DRIVER_ENV).ok().as_deref() != Some("1") {
+            return;
+        }
+        oc_driver();
+    }
+
+    /// Parent-side scenario launcher: writes the fake `docker` and runs the
+    /// driver in a child process so PATH/HOME mutations never leak into the
+    /// parallel test suite.
+    #[test]
+    fn test_opencode_runner_fake_docker_scenarios() {
+        let root = std::env::temp_dir().join(format!("covtest-oc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let docker = root.join("bin/docker");
+        std::fs::write(&docker, FAKE_DOCKER).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sandbox::opencode::tests::fake_docker_driver",
+                "--nocapture",
+            ])
+            .env(DRIVER_ENV, "1")
+            .env(BIN_ENV, root.join("bin"))
+            .env(WORK_ENV, &root)
+            .output()
+            .expect("spawn fake-docker driver child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "fake-docker opencode driver failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("fake-docker opencode scenarios passed"),
+            "driver must report its scenarios; got:\n{stdout}\n{stderr}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
