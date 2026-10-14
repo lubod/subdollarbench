@@ -216,6 +216,35 @@ non-redis acceptance adapters.
 - [ ] H4. Paper inputs: survival curves, $/ticket, harness deltas,
   regression-free rates.
 
+## Coverage campaign (operator requirement: bench code >= 80% lines)
+
+Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`):
+**61.0% lines** — 36,283 lines total, 14,140 missed. The CI gate was
+raised to 80 (Q6) but enforcement is inert while Actions is disabled; the
+substantive requirement is the code itself at 80%.
+
+Top gaps (missed lines): main.rs 3,090 · web/server.rs 2,621 ·
+pipeline.rs 2,177 · web/queue.rs 1,703 · sandbox/docker.rs 1,000 ·
+sandbox/opencode.rs 973 · verifier/redis.rs 801 · report/leaderboard.rs
+750 · verifier/pubsub.rs 733 · report/cost_annotate.rs 623 ·
+sandbox/omp.rs 588 · main_campaign.rs 580 (0%) · report/repair.rs 566
+(7%) · remote.rs 553 · verifier/{proxy,binproto,pdf,wal} ~2,400 combined.
+
+Workstreams (in flight / planned):
+- [x] Verifier suites with mock servers (pubsub, wal, binproto, pdf,
+      proxy) — delegated, following the redis.rs mock patterns.
+- [x] main.rs CLI handler tests via the existing in-process `run_cli`
+      seam — delegated, offline variants only (no live-engine commands,
+      no data mutations).
+- [ ] report/{repair,cost_annotate,judge}.rs + review_cmd.rs
+      (fixture-driven; repair is 7%).
+- [ ] web/{server,queue}.rs route/queue tests (biggest remaining).
+- [ ] pipeline.rs / sandbox/{docker,opencode}.rs — integration-style
+      (docker available in this env; CI runner needs it too).
+- [ ] main_campaign.rs (0%; bin-side, needs its own test seam).
+Re-measure after each wave; keep the CI gate at 80 so re-enabling
+Actions enforces the requirement.
+
 ## Grid log (sdb-kv, omp, high effort)
 
 - **LADDER COMPLETE (2026-10-14 evening):** all 11 tickets built —
