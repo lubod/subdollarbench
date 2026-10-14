@@ -218,6 +218,20 @@ non-redis acceptance adapters.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **ling-3.1-flash** (spec 0-6, 2026-10-14 run 6, `..._154729`): reached
+  **1** — s0 3/3 ($0.0281, 18t), s1 4/4 ($0.0260, 13t — first live use of
+  the 12-turn reserve, passed at the reduced initial cap), s2 pub/sub
+  **FAIL 0/5** ($0.0368, 13 initial + 12 repair, regressions [1,2,3,4]
+  sev 3). $0.0909, tickets/$ 22.0, 2 regression-free. Python again. The
+  initial attempt was close (4/5): the pub/sub handlers existed but
+  `dispatch` never routed SUBSCRIBE/UNSUBSCRIBE/PUBLISH. The repair round
+  diagnosed it correctly, then fumbled the edit tool — `PUT 476*:` was a
+  whole-function block replace (it meant the signature line), and a second
+  operation line inside the same edit became literal text (`PUT 522>`),
+  destroying the dispatch body; the last turns went to fighting the damage
+  and the re-verification hit a SyntaxError -> 0/5 -> regressions
+  [1,2,3,4]. A genuine "repair made it worse" cell: exactly the cardinal
+  sin the regression-free metric is built to catch. Harness clean.
 - **Harness validation — eval-only replay** (2026-10-14, `..._151415`, no
   model calls): seeded the run-3 workspace through the full 0-6 spec.
   t0-t3 **PASS** (3/3, 4/4, 5/5, 6/6 — the AOF SIGKILL/restart is clean on
