@@ -2567,6 +2567,85 @@ mod tests {
         fn log(&self, _msg: &str) {}
     }
 
+    /// Stage 9 end-to-end against real fixtures (needs Docker + the
+    /// `subdollar-sandbox` image, like the other container-backed sandbox
+    /// tests). Builds a temp git repo with genuine stage-0/stage-1 commits,
+    /// a green offline `test.sh` that checks the stage-1 marker, and a
+    /// coverage self-report, then drives `run_tests_ci_blocking`:
+    ///   - the good fixture must PASS (suite green twice, then red once the
+    ///     stage-1 revert lands in the scratch copy);
+    ///   - a toothless suite (always green) must FAIL with the
+    ///     "stayed green" verdict.
+    #[test]
+    fn test_tests_ci_sensitivity_end_to_end() {
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!("s9-ci-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let good = root.join("good");
+        std::fs::create_dir_all(&good).unwrap();
+
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&good)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(good.join("main.py"), "MARKER = \"off\"\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 0: MVP [pass]"]);
+        std::fs::write(good.join("main.py"), "MARKER = \"on\"\nEXPIRY = True\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 1: Expiry [pass]"]);
+        std::fs::write(good.join("coverage.txt"), "coverage: 85.0%\n").unwrap();
+        std::fs::write(
+            good.join("test.sh"),
+            "#!/bin/sh\nset -e\ngrep -q '^EXPIRY = True' main.py\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                good.join("test.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+
+        let st = run_tests_ci_blocking(
+            SandboxManager::with_id(&format!("s9-good-{}", std::process::id())),
+            good.clone(),
+            Arc::new(DummyLogger),
+        );
+        assert!(st.passed, "good fixture must pass: {:?}", st.error);
+
+        // Toothless: suite always green -> the stage-1 revert cannot turn it
+        // red and the gate must reject it.
+        std::fs::write(good.join("test.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let st = run_tests_ci_blocking(
+            SandboxManager::with_id(&format!("s9-bad-{}", std::process::id())),
+            good.clone(),
+            Arc::new(DummyLogger),
+        );
+        assert_eq!(st.stage, 9);
+        assert!(!st.passed, "toothless suite must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("stayed green"),
+            "expected 'stayed green' verdict: {:?}",
+            st.error
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn test_initial_turn_cap_checkpoints_only_with_feedback() {
         // No cap configured: unlimited either way.
