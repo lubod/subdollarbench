@@ -204,9 +204,12 @@ rsync -az --delete ./portal/ <vps>:/srv/bench/
 
 ## 💰 Pricing Engine & Efficiency Scoring
 
-Parent rows aggregate **all** trials (pass or fail). The headline score is an
-expected-utility form — pass rate scaled by Pass@1, divided by the mean trial
-cost — i.e. the inverse of **cost per solved task**:
+Parent rows aggregate **scored** trials (pass or fail); harness and agent
+non-results (`agent_failed`, `infra_error`, `agent_killed`) and cheat
+verdicts are excluded at trial level (`2026-10-13`) — a fault's stages
+were never measured, so scoring it 0% understated models. The headline
+score is an expected-utility form — pass rate scaled by Pass@1, divided
+by the mean trial cost — i.e. the inverse of **cost per solved task**:
 
 $$\text{Efficiency Score} = \frac{\text{Pass@1 (\%)}}{\text{Mean Effective Cost (Cents)}} = \frac{100 / (\text{cost per solved task in \$})}{100}$$
 
@@ -217,9 +220,11 @@ would double-count failure, since Pass@1 already prices it. (Pre-`.3` docs
 wrote pass% × P@1; the code always did P@1 alone — verified on mixed rows,
 e.g. qwen 55.6/0.1465 → 3.8 = P@1/eff.)
 
-Failed trials still burn API + compute, so the mean is over every trial, not
-just passing ones (since `2026-10-03.1`; the old passing-only mean understated
-spend by a median 1.44x). Failure is priced once, in the Pass@1 multiplier.
+Failed **scored** trials still burn API + compute, so the mean is over
+every scored trial, not just passing ones (since `2026-10-03.1`; the old
+passing-only mean understated spend by a median 1.44x). Failure is priced
+once, in the Pass@1 multiplier; excluded non-results contribute neither
+cost nor denominator.
 
 Where **Effective Cost ($C_{\text{eff}}$)** is API billing plus a compute floor:
 

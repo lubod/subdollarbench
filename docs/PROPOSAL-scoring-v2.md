@@ -75,10 +75,12 @@ Options:
 
 Recommendation: linear or cap until a wave demonstrates that r>1.5 is a
 reliable quality signal (e.g., speed ratio explains residual pass rate
-after controlling for cost). Also add `bench_n` to `ref_history.jsonl`
-rows and make `deviation()` compare only same-n regimes — the cross-batch
-warning currently fires against the mixed n=5000/n=100000 history
-(log-only today, but it should be regime-correct before it ever gates).
+after controlling for cost). DONE (2026-10-14.1): redis history rows now
+carry a load-shape stamp (`get-n100000`) in `method`, so `deviation()`
+compares only same-shape denominators — the cross-batch warning can no
+longer fire on the n=5000-era mix; the scored window itself is GET-only
+with an unscored write probe (fsync-bound writes are durability cost,
+not code quality).
 
 ## 3. Pareto reporting (the practitioner artifact)
 

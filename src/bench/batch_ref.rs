@@ -213,21 +213,6 @@ fn wait_http_ready(net: &str, host: &str, port: u16) -> bool {
     false
 }
 
-#[allow(dead_code)]
-fn wait_http_ready_hostnet(port: u16) -> bool {
-    use std::net::{SocketAddr, TcpStream};
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(20) {
-        if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
-            // TCP accept means nginx is up (stock image serves / immediately).
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    false
-}
-
 /// Drift tolerance for the batch bracket: flat 10% pre/post spread.
 /// Takes the task for future per-task bands; all live tasks share one band.
 pub fn drift_threshold(_task: &TaskType) -> f64 {

@@ -431,3 +431,24 @@ Suite 375/0, fmt, clippy clean. Existing q1-q6 rows keep their 2026-10-13
 stamp (no retroactive edits); the canary needs a re-run under the new
 stamp before any numbers are quoted. Engine/gui restart + re-run left to
 the operator (deploy gate).
+
+## S. Pre-campaign reset (2026-10-14) — fourth reset record
+
+Archive: `~/bench-archive/20261014-1149-pre-campaign/` (db 20/26/53 —
+verified AFTER a WAL checkpoint, caught because a plain `cp` of bench.db
+misses uncheckpointed rows; 54 run dirs, 22 result files). Includes the
+2026-10-14.1 canary baseline (see R2 + TODO_CAMPAIGNS).
+Wiped bench.db + runs/ + results/ to zero (migrate imported 0, parents 0,
+queue [], migrate-check clean, engine on the rebuilt binary).
+Difference from prior resets: `results/ref_history.jsonl` is KEPT — the
+cross-batch comparability ledger survives resets now (regime stamps make
+old rows inert rather than misleading).
+
+Same-pass housekeeping: dead `wait_http_ready_hostnet` removed; README
+scoring wording fixed (parent means aggregate **scored** trials;
+non-results excluded); stale root logs deleted (ui/extend_proxy/
+wave-launch*); stale stash `omp-review-fixes` + `backup/pre-purge` branch
++ `refs/original` dropped, reflog expired, `gc --prune=now` purged the
+leaked-key blobs (absent from the object DB, verified) — git pack 2.3 MiB.
+
+Next: campaign Slice A (TODO_CAMPAIGNS.md) on a clean slate.

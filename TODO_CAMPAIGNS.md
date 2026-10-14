@@ -169,8 +169,10 @@ cost-first thesis has signal.
 
 ## Hygiene backlog
 
-- [ ] Cleanup: `backup/pre-purge-20261014` branch + `refs/original`
-  after push verification (secret purge); stale stash review.
+- [x] Cleanup (2026-10-14): pre-purge recovery branch + `refs/original`
+  dropped, stale stash dropped, reflog expired, gc pruned the leaked-key
+  blobs (verified absent). Stale root logs removed; data archived + reset
+  (see TODO_EFFORT §S).
 - [ ] README: campaigns section once Slice A lands.
 - [ ] DECISIONS.md: one entry per resolved open decision.
 
