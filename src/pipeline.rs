@@ -404,6 +404,256 @@ fn run_tests_ci_blocking(
     }
 }
 
+/// Stage 13 runner: three-node HA (ticket 10, operator decision Q1).
+/// Owns the whole cluster lifecycle: start ha1 master + ha2/ha3 replicas,
+/// check replication + sync-ack, SIGKILL the master, require automatic
+/// failover to exactly one survivor within T=10s holding every acked
+/// write, re-point the old master at the new leader and require it to
+/// rejoin as a replica and converge, then re-run the accumulated RESP
+/// suite plus `./test.sh` against the current master.
+async fn run_ha_stage(
+    sandbox: &SandboxManager,
+    workdir: &Path,
+    ports: &[u16; 3],
+    seed: &str,
+    logger: &Arc<dyn PipelineLogger>,
+) -> crate::verifier::StageResult {
+    use crate::verifier::redis::RedisVerifier;
+    use std::time::{Duration, Instant};
+
+    let name = "Stage 13: 3-node HA (replication, failover, rejoin)";
+    let fail = |e: String| crate::verifier::StageResult {
+        stage: 13,
+        name: name.to_string(),
+        passed: false,
+        error: Some(e),
+    };
+    let pass = || crate::verifier::StageResult {
+        stage: 13,
+        name: name.to_string(),
+        passed: true,
+        error: None,
+    };
+    const FAILOVER_T: Duration = Duration::from_secs(10);
+    const REPL_VISIBLE: Duration = Duration::from_secs(3);
+
+    let _ = sandbox.stop_candidate();
+    if let Err(e) = sandbox.start_ha_nodes(workdir, ports, None) {
+        sandbox.stop_ha_nodes(3);
+        return fail(format!("cluster did not start: {e}"));
+    }
+    for p in ports {
+        if !sandbox.wait_for_port(*p, 25).await {
+            return fail(format!("HA node on port {p} did not open within 25s"));
+        }
+    }
+    logger.log("  [HA] cluster up (ha1 master, ha2/ha3 replicas)");
+
+    // Roles as launched.
+    match RedisVerifier::role_of(ports[0]).await {
+        Ok(r) if r == "master" => {}
+        Ok(r) => return fail(format!("ha1 reports role {r:?}, want master")),
+        Err(e) => return fail(format!("ROLE(ha1): {e}")),
+    }
+    for (i, p) in [(2usize, ports[1]), (3usize, ports[2])] {
+        match RedisVerifier::role_of(p).await {
+            Ok(r) if r == "replica" || r == "slave" => {}
+            Ok(r) => return fail(format!("ha{i} reports role {r:?}, want replica")),
+            Err(e) => return fail(format!("ROLE(ha{i}): {e}")),
+        }
+    }
+
+    // Sync-ack + replication: every acked write must be readable on at
+    // least one replica within 3s.
+    let pairs = match RedisVerifier::write_probe_batch(ports[0], "pre", 6).await {
+        Ok(p) => p,
+        Err(e) => return fail(format!("aced writes on the master failed: {e}")),
+    };
+    let t0 = Instant::now();
+    let mut visible;
+    loop {
+        let a = RedisVerifier::count_present(ports[1], &pairs)
+            .await
+            .unwrap_or(0);
+        let b = RedisVerifier::count_present(ports[2], &pairs)
+            .await
+            .unwrap_or(0);
+        visible = a.max(b);
+        if visible >= pairs.len() || t0.elapsed() >= REPL_VISIBLE {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if visible < pairs.len() {
+        return fail(format!(
+            "replication: {visible}/{} acked writes visible on a replica within 3s",
+            pairs.len()
+        ));
+    }
+    logger.log(&format!(
+        "  [HA] {} acked writes replicated within {:.1}s",
+        pairs.len(),
+        t0.elapsed().as_secs_f64()
+    ));
+
+    // Automatic failover: SIGKILL the master; within T exactly one
+    // survivor reports ROLE master and holds every acked write.
+    if let Err(e) = sandbox.kill_ha_node(1) {
+        return fail(format!("SIGKILL ha1: {e}"));
+    }
+    logger.log("  [HA] ha1 SIGKILLed; waiting for automatic failover (T=10s)...");
+    let t0 = Instant::now();
+    let mut leader: Option<(u8, u16)> = None;
+    while t0.elapsed() < FAILOVER_T {
+        for (i, p) in [(2u8, ports[1]), (3u8, ports[2])] {
+            if let Ok(r) = RedisVerifier::role_of(p).await {
+                if r == "master" {
+                    leader = Some((i, p));
+                    break;
+                }
+            }
+        }
+        if leader.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let Some((leader_idx, leader_port)) = leader else {
+        return fail(
+            "no survivor reported ROLE master within 10s (automatic failover missing)".to_string(),
+        );
+    };
+    logger.log(&format!(
+        "  [HA] ha{leader_idx} promoted in {:.1}s",
+        t0.elapsed().as_secs_f64()
+    ));
+    let other_port = if leader_idx == 2 { ports[2] } else { ports[1] };
+    match RedisVerifier::role_of(other_port).await {
+        Ok(r) if r != "master" => {}
+        Ok(r) => return fail(format!("two masters: the other survivor reports {r:?}")),
+        Err(e) => return fail(format!("ROLE(other survivor): {e}")),
+    }
+    let held = match RedisVerifier::count_present(leader_port, &pairs).await {
+        Ok(n) => n,
+        Err(e) => return fail(format!("reading acked writes on the survivor: {e}")),
+    };
+    if held < pairs.len() {
+        return fail(format!(
+            "failover lost data: {held}/{} acked writes on the new master",
+            pairs.len()
+        ));
+    }
+    // New writes reach the other node within 3s.
+    let newpairs = match RedisVerifier::write_probe_batch(leader_port, "post", 4).await {
+        Ok(p) => p,
+        Err(e) => return fail(format!("writes on the new master failed: {e}")),
+    };
+    let t0 = Instant::now();
+    let mut visible;
+    loop {
+        visible = RedisVerifier::count_present(other_port, &newpairs)
+            .await
+            .unwrap_or(0);
+        if visible >= newpairs.len() || t0.elapsed() >= REPL_VISIBLE {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if visible < newpairs.len() {
+        return fail(format!(
+            "post-failover replication: {visible}/{} new writes visible on the other node within 3s",
+            newpairs.len()
+        ));
+    }
+
+    // Rejoin: the old master comes back pointed at the new leader; it must
+    // return as a replica (never co-master) and converge.
+    let leader_alias = format!("ha{leader_idx}");
+    if let Err(e) = sandbox.respawn_ha_node(
+        workdir,
+        1,
+        ports[0],
+        Some((leader_alias.as_str(), leader_port)),
+    ) {
+        return fail(format!("old master rejoin launch failed: {e}"));
+    }
+    if !sandbox.wait_for_port(ports[0], 25).await {
+        return fail("rejoined node did not open its port".to_string());
+    }
+    let t0 = Instant::now();
+    let mut role_ok = false;
+    while t0.elapsed() < FAILOVER_T {
+        if let Ok(r) = RedisVerifier::role_of(ports[0]).await {
+            if r == "replica" || r == "slave" {
+                role_ok = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if !role_ok {
+        return fail("the restarted node did not return as a replica (co-master risk)".to_string());
+    }
+    let mut all: Vec<(String, String)> = pairs.clone();
+    all.extend(newpairs.clone());
+    let t0 = Instant::now();
+    let mut converged;
+    loop {
+        converged = RedisVerifier::count_present(ports[0], &all)
+            .await
+            .unwrap_or(0);
+        if converged >= all.len() || t0.elapsed() >= FAILOVER_T {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if converged < all.len() {
+        return fail(format!(
+            "rejoined node did not converge: {converged}/{} acked writes",
+            all.len()
+        ));
+    }
+    logger.log("  [HA] old master rejoined as a replica and converged");
+
+    // Regression: accumulated RESP suite + ./test.sh against the current
+    // master.
+    let v = RedisVerifier::new(leader_port, Some(seed));
+    let basic = v.run_all().await;
+    if basic.pass_rate < 100.0 {
+        let failed: Vec<String> = basic
+            .stages
+            .iter()
+            .filter(|s| !s.passed)
+            .map(|s| format!("{}: {}", s.stage, s.error.clone().unwrap_or_default()))
+            .collect();
+        return fail(format!(
+            "accumulated RESP suite against the current master: {:.0}% ({})",
+            basic.pass_rate,
+            failed.join("; ")
+        ));
+    }
+    if workdir.join("test.sh").is_file() {
+        for attempt in 1..=2u32 {
+            match sandbox.run_workspace_command(
+                workdir,
+                "if [ -x ./test.sh ]; then ./test.sh; else bash ./test.sh; fi",
+                TEST_RUN_TIMEOUT_SECS,
+            ) {
+                Ok((true, _)) => {}
+                Ok((false, out)) => {
+                    return fail(format!(
+                        "./test.sh exited non-zero against the cluster (run {attempt}/2): {}",
+                        output_tail(&out, 400)
+                    ))
+                }
+                Err(e) => return fail(format!("./test.sh could not run (run {attempt}/2): {e}")),
+            }
+        }
+    }
+    logger.log("  [HA] accumulated RESP suite + ./test.sh green against the current master");
+    pass()
+}
+
 #[derive(Clone)]
 pub struct BenchmarkConfig {
     pub model: String,
@@ -1217,6 +1467,45 @@ impl BenchmarkPipeline {
                                 st.error.as_deref().unwrap_or("")
                             ));
                             stages.push(st);
+                        }
+                        // Stage 13 (HA finale) is explicit-acceptance only:
+                        // the candidate is restarted as a three-node cluster
+                        // for the probes, then the single-node candidate is
+                        // restored for the advisory passes.
+                        if accepted.map(|a| a.contains(&13)).unwrap_or(false) {
+                            let name13 = "Stage 13: 3-node HA (replication, failover, rejoin)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 13,
+                                    name: name13.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                let ha_ports = [
+                                    crate::web::server::worker_port(7001, worker),
+                                    crate::web::server::worker_port(7002, worker),
+                                    crate::web::server::worker_port(7003, worker),
+                                ];
+                                run_ha_stage(sandbox, workdir, &ha_ports, verifier_seed, logger)
+                                    .await
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                            sandbox.stop_ha_nodes(3);
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
                         }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();

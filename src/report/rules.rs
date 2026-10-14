@@ -8,6 +8,20 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-14.12`: campaign ticket 10 (three-node HA finale, operator
+///   decision Q1). New pipeline-level stage 13: the candidate is restarted
+///   as a three-node cluster (`./start.sh --port/--data/--replicaof` on
+///   7001-7003 + worker offset), then checked for replication (acked
+///   writes visible on a replica within 3s), automatic failover (SIGKILL
+///   the master; exactly one survivor reports ROLE master within 10s
+///   holding every acked write; new writes reach the other node within
+///   3s), rejoin (old master restarted pointed at the new leader returns
+///   as a replica and converges), and regression (accumulated RESP suite
+///   plus ./test.sh against the current master). Partition safety is out
+///   of scope (deferred follow-up). Runs only when a ticket's acceptance
+///   explicitly includes id 13; single-shot totals unchanged; acceptance
+///   ids up to 13. Rows stamped `2026-10-14.11` or earlier are not
+///   comparable without `backfill --yes`.
 /// - `2026-10-14.11`: operator decisions (docs/OPEN-QUESTIONS.md).
 ///   (Q2) s3 durability pool 30 -> 36 turns (initial ~24 + 12 repair):
 ///   four consecutive cells showed refactors dying at the 30-turn wall.
@@ -312,7 +326,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.11";
+pub const RULES_VERSION: &str = "2026-10-14.12";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -225,6 +225,183 @@ impl SandboxManager {
         format!("subdollar-egress-{}", self.instance_id)
     }
 
+    /// HA node container name (three-node finale: aliases ha1/ha2/ha3).
+    pub fn ha_node_container_name(&self, idx: u8) -> String {
+        format!("subdollar-ha{}-{}", idx, self.instance_id)
+    }
+
+    /// Pure arg builder for one HA node container (unit-testable): docker
+    /// args and the node's launch command. `replicaof` points at the
+    /// leader's alias + port (`("ha1", port)` on cluster start; the new
+    /// leader's alias on rejoin).
+    #[allow(clippy::too_many_arguments)]
+    fn ha_node_args(
+        instance_id: &str,
+        name: &str,
+        net: &str,
+        canonical_workdir: &Path,
+        idx: u8,
+        port: u16,
+        replicaof: Option<(&str, u16)>,
+        dash_port: Option<u16>,
+    ) -> (Vec<String>, String) {
+        let mut launch = format!(
+            "cd /workspace && chmod +x start.sh 2>/dev/null; ./start.sh --port {port} --data /data{idx}"
+        );
+        if let Some((alias, master_port)) = replicaof {
+            launch.push_str(&format!(" --replicaof {alias}:{master_port}"));
+        }
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--label".into(),
+            format!("sdb.run={instance_id}"),
+            "--label".into(),
+            format!("sdb.role=ha{idx}"),
+            "--name".into(),
+            name.to_string(),
+            "--memory=2g".into(),
+            "--cpus=2.0".into(),
+            "--pids-limit=256".into(),
+            "--network".into(),
+            net.to_string(),
+            "--network-alias".into(),
+            format!("ha{idx}"),
+            "-p".into(),
+            format!("127.0.0.1:{port}:{port}"),
+        ];
+        if idx == 1 {
+            if let Some(dp) = dash_port {
+                args.push("-p".into());
+                args.push(format!("127.0.0.1:{dp}:{dp}"));
+            }
+        }
+        args.push("-v".into());
+        args.push(format!("{}:/workspace", canonical_workdir.display()));
+        args.push("subdollar-sandbox".into());
+        args.push("/bin/bash".into());
+        args.push("-lc".into());
+        args.push(launch.clone());
+        (args, launch)
+    }
+
+    fn canonical_workdir_for(workdir: &Path) -> std::path::PathBuf {
+        if workdir.is_absolute() {
+            workdir.to_path_buf()
+        } else {
+            workdir
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::temp_dir().join(workdir))
+        }
+    }
+
+    fn run_ha_container(&self, args: &[String], idx: u8) -> Result<()> {
+        let out = Command::new("docker").args(args).output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "HA node {idx} failed to start: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    /// Launch the three-node HA cluster. `ports` are the published RESP
+    /// ports (node order); node 1 also gets `dash_port`. The candidate's
+    /// `./start.sh` must accept `--port/--data/--replicaof` (ticket 10).
+    pub fn start_ha_nodes(
+        &self,
+        workdir: &Path,
+        ports: &[u16],
+        dash_port: Option<u16>,
+    ) -> Result<()> {
+        if ports.len() != 3 {
+            return Err(anyhow!("HA cluster needs exactly 3 node ports"));
+        }
+        self.ensure_network()?;
+        Self::relax_workspace_perms(workdir);
+        let canonical = Self::canonical_workdir_for(workdir);
+        let net = self.network_name();
+        for (i, port) in ports.iter().enumerate() {
+            let idx = (i + 1) as u8;
+            let name = self.ha_node_container_name(idx);
+            let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+            let replicaof = if idx == 1 {
+                None
+            } else {
+                Some(("ha1", ports[0]))
+            };
+            let (args, _launch) = Self::ha_node_args(
+                &self.instance_id,
+                &name,
+                &net,
+                &canonical,
+                idx,
+                *port,
+                replicaof,
+                dash_port,
+            );
+            self.run_ha_container(&args, idx)?;
+        }
+        Ok(())
+    }
+
+    /// Recreate one node with a fresh `--replicaof` target (the rejoin
+    /// path: the old master comes back pointed at the new leader).
+    pub fn respawn_ha_node(
+        &self,
+        workdir: &Path,
+        idx: u8,
+        port: u16,
+        replicaof: Option<(&str, u16)>,
+    ) -> Result<()> {
+        self.ensure_network()?;
+        let canonical = Self::canonical_workdir_for(workdir);
+        let net = self.network_name();
+        let name = self.ha_node_container_name(idx);
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let (args, _launch) = Self::ha_node_args(
+            &self.instance_id,
+            &name,
+            &net,
+            &canonical,
+            idx,
+            port,
+            replicaof,
+            None,
+        );
+        self.run_ha_container(&args, idx)
+    }
+
+    pub fn stop_ha_nodes(&self, count: u8) {
+        for idx in 1..=count {
+            let name = self.ha_node_container_name(idx);
+            let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        }
+    }
+
+    /// SIGKILL one node (crash simulation; container persists for restart).
+    pub fn kill_ha_node(&self, idx: u8) -> Result<()> {
+        let name = self.ha_node_container_name(idx);
+        let out = Command::new("docker")
+            .args(["kill", "-s", "KILL", &name])
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "HA node {idx} kill failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    /// HA nodes in the owned-container belt (label reaping covers them too).
+    fn ha_node_names(&self) -> Vec<String> {
+        (1..=3).map(|i| self.ha_node_container_name(i)).collect()
+    }
+
     /// Start the per-run egress allowlist proxy sidecar on the run network
     /// (alias `egress-proxy`, port 3128). Best-effort: failure only disables
     /// filtering (agent runs unfiltered, logged), never fails the run.
@@ -1584,6 +1761,7 @@ impl SandboxManager {
         for idx in 1..=8u8 {
             names.push(self.upstream_name(idx));
         }
+        names.extend(self.ha_node_names());
         names
     }
 
@@ -2009,6 +2187,52 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-p", "127.0.0.1:8090:8090"]));
         let none = CandidateRunExtras::default();
         assert!(SandboxManager::candidate_extras_args(&none).is_empty());
+    }
+
+    /// Ticket 10 launch contract: node args publish 1:1 on loopback, node 1
+    /// is the initial master and carries the dashboard port, nodes 2/3
+    /// point at ha1, and the rejoin form points wherever asked.
+    #[test]
+    fn test_ha_node_args_launch_contract() {
+        use super::SandboxManager;
+        let dir = std::path::Path::new("/tmp/ws");
+        let (args1, launch1) =
+            SandboxManager::ha_node_args("id", "ha1-id", "net", dir, 1, 7001, None, Some(8090));
+        assert!(launch1.contains("--port 7001 --data /data1"), "{launch1}");
+        assert!(!launch1.contains("--replicaof"), "{launch1}");
+        assert!(args1.windows(2).any(|w| w == ["-p", "127.0.0.1:7001:7001"]));
+        assert!(args1.windows(2).any(|w| w == ["-p", "127.0.0.1:8090:8090"]));
+        assert!(args1.windows(2).any(|w| w == ["--network-alias", "ha1"]));
+
+        let (args2, launch2) = SandboxManager::ha_node_args(
+            "id",
+            "ha2-id",
+            "net",
+            dir,
+            2,
+            7002,
+            Some(("ha1", 7001)),
+            None,
+        );
+        assert!(launch2.contains("--replicaof ha1:7001"), "{launch2}");
+        assert!(args2.windows(2).any(|w| w == ["-p", "127.0.0.1:7002:7002"]));
+        assert!(!args2.windows(2).any(|w| w == ["-p", "127.0.0.1:8090:8090"]));
+
+        // Rejoin form: node 1 pointed at the new leader alias/port.
+        let (_args, launch_rejoin) = SandboxManager::ha_node_args(
+            "id",
+            "ha1-id",
+            "net",
+            dir,
+            1,
+            7001,
+            Some(("ha3", 7003)),
+            None,
+        );
+        assert!(
+            launch_rejoin.contains("--replicaof ha3:7003"),
+            "{launch_rejoin}"
+        );
     }
 
     #[test]

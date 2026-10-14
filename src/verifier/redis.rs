@@ -1916,6 +1916,80 @@ impl RedisVerifier {
         }
     }
 
+    /// ROLE reply of a node, trimmed + lowercased ("master" / "replica").
+    /// Accepts the RESP array form (`*3\r\n$6\r\nmaster...`), a bulk reply
+    /// (`$6\r\nmaster`), or a simple string (`+master`). Used by the HA
+    /// stage to decide who leads and who follows.
+    pub async fn role_of(port: u16) -> Result<String> {
+        let v = RedisVerifier::new(port, None);
+        let mut stream = v.connect().await?;
+        match Self::send_resp_cmd(&mut stream, &["ROLE"]).await {
+            Ok(r) => {
+                let mut next_line_is_word = false;
+                for line in r.lines() {
+                    let line = line.trim_end_matches('\r').trim();
+                    if next_line_is_word {
+                        return Ok(line.to_lowercase());
+                    }
+                    if line.starts_with('$') {
+                        next_line_is_word = true;
+                    }
+                }
+                // Simple-string form: +master / -ERR ...
+                let first = r
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches('+')
+                    .trim_start_matches('-')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_lowercase();
+                Ok(first)
+            }
+            Err(e) => Err(anyhow!("ROLE on port {port}: {e}")),
+        }
+    }
+
+    /// `n` distinct acked writes on `port`; returns the acked pairs (the
+    /// caller later checks how many survive on a survivor node).
+    pub async fn write_probe_batch(
+        port: u16,
+        tag: &str,
+        n: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let v = RedisVerifier::new(port, None);
+        let mut stream = v.connect().await?;
+        let mut acked = Vec::with_capacity(n);
+        for i in 0..n {
+            let k = format!("ha_{tag}_{i}");
+            let val = format!("hv_{tag}_{i}");
+            match Self::send_resp_cmd(&mut stream, &["SET", &k, &val]).await {
+                Ok(r) if r.trim() == "+OK" => acked.push((k, val)),
+                Ok(r) => return Err(anyhow!("SET {k} on {port}: {r:?}")),
+                Err(e) => return Err(anyhow!("SET {k} on {port}: {e}")),
+            }
+        }
+        Ok(acked)
+    }
+
+    /// Count acked pairs that read back with the right value on `port`.
+    pub async fn count_present(port: u16, pairs: &[(String, String)]) -> Result<usize> {
+        let v = RedisVerifier::new(port, None);
+        let mut stream = v.connect().await?;
+        let mut found = 0usize;
+        for (k, val) in pairs {
+            match Self::send_resp_cmd(&mut stream, &["GET", k]).await {
+                Ok(r) if r.contains(val) => found += 1,
+                Ok(_) => {}
+                Err(e) => return Err(anyhow!("GET {k} on {port}: {e}")),
+            }
+        }
+        Ok(found)
+    }
+
     /// GET `{base}/api/stats` and flatten the JSON into lowercased
     /// key -> integer (numbers directly, numeric strings parsed). Nested
     /// objects are walked so a `{"stats": {...}}` shape still mirrors INFO.
@@ -3030,6 +3104,46 @@ mod tests {
             st.error.as_deref().unwrap_or("").contains("out of order"),
             "error should hint at reply order: {:?}",
             st.error
+        );
+    }
+
+    /// Ticket 10 helpers: ROLE parsing accepts the RESP array, bulk and
+    /// simple-string forms; write probes + presence counting work against a
+    /// real socket mock.
+    #[tokio::test]
+    async fn test_ha_helpers() {
+        use tokio::io::AsyncWriteExt;
+        // Simple string form.
+        let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let p1 = l1.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l1.accept().await {
+                let _ = s.write_all(b"+master\r\n").await;
+            }
+        });
+        assert_eq!(RedisVerifier::role_of(p1).await.unwrap(), "master");
+
+        // RESP array form (real redis): *3 [$6 replica, :0, *0].
+        let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let p2 = l2.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l2.accept().await {
+                let _ = s.write_all(b"*3\r\n$6\r\nreplica\r\n:0\r\n*0\r\n").await;
+            }
+        });
+        assert_eq!(RedisVerifier::role_of(p2).await.unwrap(), "replica");
+
+        // Write probes + presence counting against the KV mock.
+        let port = spawn_perf_mock(false).await;
+        let pairs = RedisVerifier::write_probe_batch(port, "t", 3)
+            .await
+            .unwrap();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(RedisVerifier::count_present(port, &pairs).await.unwrap(), 3);
+        let missing = vec![("nope".to_string(), "x".to_string())];
+        assert_eq!(
+            RedisVerifier::count_present(port, &missing).await.unwrap(),
+            0
         );
     }
 
