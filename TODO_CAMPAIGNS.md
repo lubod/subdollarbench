@@ -460,6 +460,26 @@ flakes, serialize live-docker tests with a shared test lock.
   (same as its sdb-kv cell, $0.0312) — the pricing path does not zero
   free-tier variants; open item (either zero it or label the rows as
   token-only).
+- **ling-3.1-flash** (sdb-edge run 2, 2026-10-15,
+  `campaign_sdb-edge_openrouter_inclusionai_ling-3.1-flash_20261015_121246`,
+  RULES `2026-10-15.2`, $0.80 cap, ~22 min): reached **none** — t0 **FAIL
+  0/1 both rounds** ($0.0518, 24 + 12 turns). Symptom: the verifier's
+  `GET /` connected but never received a framed response (8s exchange
+  deadline) in either round, while the candidate's own direct fetches to
+  all three upstreams returned 200s and its log shows a threaded proxy
+  listening on 8091 (401-line `proxy.py`: thread per connection,
+  read/parse/forward with re-framing). => a **client-request-path defect**
+  (connect-but-don't-answer for the verifier's plain `GET /` with
+  `Connection: close`), not transport or upstream access. Run-to-run
+  variance on the genesis ticket is now observed for this model: run 1
+  (same spec) passed t0 first try and reached 4 recorded.
+  Frontier-note for prompts (proposed, NOT applied — it is a spec change):
+  the candidate container carries an `http_proxy` env var pointing at an
+  egress proxy; the agent burned ~5 turns discovering `curl` was routed
+  through it (`--noproxy '*'` fixed it) although raw sockets were
+  unaffected. A prompt line ("tool curl may honor an egress-proxy env
+  var; your server must dial `upstreamN` with raw sockets") would remove
+  harness noise; applying it means a spec bump.
 - Harness bugs this cell found (all fixed, same day):
   (a) candidate restarts did not re-attach to the run network -> a
   restarted proxy could not resolve `upstreamN` (getaddrinfo stall; stage
