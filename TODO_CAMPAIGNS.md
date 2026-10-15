@@ -407,6 +407,12 @@ Wave log:
   **84.82% lines** (regions 85.69%, functions 89.09%). The eval-only
   reference-proxy run covers the proxy arm's stage-6..9 orchestration and
   the fixture (pipeline.rs 56.59 -> 59.12%); gate margin ~4.8pp.
+- Wave 9 (sdb-queue campaign + live proof, 2026-10-15): aggregate 84.82 ->
+  **84.76% lines** (regions 85.56%, functions 88.88%). The new
+  verifier/queue.rs lands at **85.77% lines** (mock broker + defect
+  matrix + both durability halves + the eval-only pipeline run);
+  pipeline.rs rises again with the queue arm and fixture. Gate margin
+  ~4.8pp.
 
 Remaining smaller residuals if a future wave wants more margin:
 web/server.rs (1,098 incl. test code), web/queue.rs (798),
