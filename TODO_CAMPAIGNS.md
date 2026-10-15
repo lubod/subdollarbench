@@ -286,13 +286,12 @@ Wave log:
   flows), opencode 95.4%, omp 95.8%, omp_updater 96.5%.
 - Wave 4b: main.rs 68.2->81.5%, main_campaign.rs 10.9->69.6%.
 - Aggregate after 4b: **84.65% lines** — target met.
-- Wave 6 (stage-2 wave, 2026-10-15): aggregate 84.65 -> **84.08% lines**
-  (regions 84.90%, functions 88.19%) — expected dip: the three new
-  pipeline stage blocks (14/15/16 orchestration) run only in live
-  containers, while the new verifier code is mock-covered
-  (binproto 93.78% lines including the admin stage; redis.rs 78.78%;
-  sandbox/docker.rs 85.39% with the live bind round-trip). Gate margin
-  stays ~4pp.
+- Wave 6 (stage-2 wave, 2026-10-15): aggregate 84.65 -> **84.71% lines**
+  (regions 85.55%, functions 88.79%). The eval-only live proof covers the
+  stage-14/15/16 orchestration and the disk/compaction verifiers
+  (verifier/redis.rs 78.78 -> 82.11% lines; binproto 93.78% incl. the
+  admin stage; sandbox/docker.rs 85.39% with the live bind round-trip).
+  Gate margin ~4.7pp.
 
 Remaining smaller residuals if a future wave wants more margin:
 web/server.rs (1,098 incl. test code), web/queue.rs (798),
