@@ -456,10 +456,22 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   archived specs. Remaining M4 tail (moves with M6): the harness-owned
   data dir + snapshot/restore (sdb-sql's `--data` lives outside the
   workspace) and disk guards.
-- [ ] M5. Verifier core (`src/verifier/sql/`): schema, generator
-  (profiles 0-3), oracle (discard table + error-class mapping), compare,
-  shrink, wire client; oracle-vs-oracle and mutant-engine self-tests;
-  per-stage check floors and profile-coverage assertions.
+- [~] M5. Verifier core (`src/verifier/sql/`): **part 1 landed** — `mod.rs`
+  (module + the self-test doctrine), `schema.rs` (seeded 3-5-table
+  2-6-column schemas, deterministic per seed, dialect DDL emitter, one
+  INT rowid-alias PK per table) and `oracle.rs` (in-process SQLite;
+  DDL translation appending STRICT + TEXT-PK NOT NULL; error-class table
+  with UNKNOWN messages loud, never guessed; discards for REAL/BLOB and
+  both integer-overflow manifestations; file-backed twin for the
+  oracle-vs-oracle gate). Nine tests including the oracle-vs-oracle corpus
+  (memory vs file) and pinned dialect semantics (division/modulo signs,
+  div-by-zero NULL, NULL ordering). The self-tests caught five real bugs
+  before any candidate ran. **Remaining**: `generator` (type-directed,
+  profiles 0-3 + lite subsets), `wire` (text-protocol client),
+  `compare` (ordered/multiset + headers + OK counts + error class),
+  `shrink` (delta-debugged repro for repair feedback), the
+  oracle-vs-oracle 100k-statement gate, mutant toy engines, per-stage
+  comparable-check floors and profile-coverage assertions.
 - [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->

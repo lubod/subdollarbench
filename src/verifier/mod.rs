@@ -6,6 +6,7 @@ pub mod proxy;
 pub mod pubsub;
 pub mod queue;
 pub mod redis;
+pub mod sql;
 pub mod wal;
 
 use serde::{Deserialize, Serialize};
