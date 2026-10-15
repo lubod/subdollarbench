@@ -455,33 +455,33 @@ impl QueueVerifier {
 
     async fn stage5_prepare_inner(&self, q: &str) -> Result<(), String> {
         let mut c = QueueConn::connect(self.target_port).await?;
+        // Order matters under FIFO: each LEASE below must be the queue's
+        // only *available* job, so earlier states settle first (a FIFO
+        // broker hands out the waiting job, not the one being prepared).
         // acked: lease + ack.
         let acked = parse_ok_id(&c.cmd(&format!("ENQ {q} acked")).await?)?;
         let job = parse_job(&c.cmd(&format!("LEASE {q} 60000")).await?)?.ok_or("no acked job")?;
-        if c.cmd(&format!("ACK {}", job.id)).await? != "+OK" {
-            return Err("prepare: ack failed".to_string());
+        if job.id != acked || c.cmd(&format!("ACK {}", job.id)).await? != "+OK" {
+            return Err(format!("prepare: acked job {job:?}"));
         }
-        // available: enqueue only.
-        let _available = parse_ok_id(&c.cmd(&format!("ENQ {q} waiting")).await?)?;
-        // in-flight: lease and leave it (long lease so it is still held at kill).
+        // dead: exhaust attempts (the only available job right now).
+        let dead = parse_ok_id(&c.cmd(&format!("ENQ {q} deadjob")).await?)?;
+        for _ in 0..MAX_ATTEMPTS {
+            let job =
+                parse_job(&c.cmd(&format!("LEASE {q} 60000")).await?)?.ok_or("no dead job")?;
+            if job.id != dead || c.cmd(&format!("NACK {}", job.id)).await? != "+OK" {
+                return Err(format!("prepare: dead job {job:?}"));
+            }
+        }
+        // in-flight: lease and leave it held (long lease; still held at kill).
         let inflight = parse_ok_id(&c.cmd(&format!("ENQ {q} inflight")).await?)?;
         let job =
             parse_job(&c.cmd(&format!("LEASE {q} 60000")).await?)?.ok_or("no inflight job")?;
         if job.id != inflight || job.attempts != 1 {
             return Err(format!("prepare: inflight lease {job:?}"));
         }
-        // dead: exhaust attempts.
-        let dead = parse_ok_id(&c.cmd(&format!("ENQ {q} deadjob")).await?)?;
-        for _ in 0..MAX_ATTEMPTS {
-            let job =
-                parse_job(&c.cmd(&format!("LEASE {q} 60000")).await?)?.ok_or("no dead job")?;
-            if c.cmd(&format!("NACK {}", job.id)).await? != "+OK" {
-                return Err("prepare: nack failed".to_string());
-            }
-        }
-        if dead == acked {
-            return Err("prepare: duplicate ids".to_string());
-        }
+        // available: enqueue only, after every lease above has settled.
+        let _available = parse_ok_id(&c.cmd(&format!("ENQ {q} waiting")).await?)?;
         Ok(())
     }
 
@@ -1201,6 +1201,44 @@ mod tests {
         for st in &checks {
             assert!(st.passed, "stage {} failed: {:?}", st.stage, st.error);
         }
+    }
+
+    /// The durability halves against a live mock: prepare must be FIFO-safe
+    /// (a correct broker hands out the waiting job, not the prepared one),
+    /// and verify must accept the post-restart shape (in-flight job back
+    /// with attempts preserved, dead-letter entry intact).
+    #[tokio::test]
+    async fn mock_queue_durability_halves() {
+        let port = spawn_queue_mock(QueueFail::None).await;
+        let v = QueueVerifier::new(port, Some("mockq"));
+        let prep = v.test_stage5_durability_prepare().await;
+        assert!(prep.passed, "prepare: {:?}", prep.error);
+
+        // Construct the post-restart state on a fresh mock: the in-flight
+        // job has expired back to available with attempts=1.
+        let port = spawn_queue_mock(QueueFail::None).await;
+        let v = QueueVerifier::new(port, Some("mockq"));
+        let q = "durable.mockq";
+        let mut c = QueueConn::connect(port).await.unwrap();
+        // Dead job first (FIFO: it must be the only available job while it
+        // is poisoned), then the in-flight job, then the waiting one.
+        let dead = parse_ok_id(&c.cmd(&format!("ENQ {q} deadjob")).await.unwrap()).unwrap();
+        for _ in 0..MAX_ATTEMPTS {
+            let job = parse_job(&c.cmd(&format!("LEASE {q} 60000")).await.unwrap())
+                .unwrap()
+                .expect("dead lease");
+            assert_eq!(job.id, dead);
+            c.cmd(&format!("NACK {dead}")).await.unwrap();
+        }
+        let inflight = parse_ok_id(&c.cmd(&format!("ENQ {q} inflight")).await.unwrap()).unwrap();
+        let job = parse_job(&c.cmd(&format!("LEASE {q} 400")).await.unwrap())
+            .unwrap()
+            .expect("lease");
+        assert_eq!(job.id, inflight);
+        tokio::time::sleep(Duration::from_millis(700)).await; // lease expires
+        c.cmd(&format!("ENQ {q} waiting")).await.unwrap();
+        let verify = v.test_stage5_durability_verify().await;
+        assert!(verify.passed, "verify: {:?}", verify.error);
     }
 
     #[tokio::test]

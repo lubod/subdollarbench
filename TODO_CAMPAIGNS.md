@@ -348,8 +348,25 @@ home. New task type `queue` (default port 6385), RULES `2026-10-15.3`.
 - [x] K5. Campaign spec + prompts: nine tickets (genesis -> leases ->
   nack -> DLQ -> durability -> concurrency -> stats -> delays/redrive ->
   hardening) with cumulative acceptances and a dedicated base prompt.
-- [ ] K6. Live proof (eval-only reference broker through the real
-  pipeline, incl. the restart halves), then model grid cells.
+- [x] K6a. LIVE proof (2026-10-15, no model): a stdlib-only reference
+  broker (`QUEUE_MOCK_SERVER_PY` in `src/pipeline.rs`: connection-owned
+  leases, nacks/delays, DLQ after 3 attempts with inspection reads,
+  redrive, per-queue STATS, delayed enqueue, append-only fsync log under
+  `./data` with torn-tail replay) driven through the real pipeline with
+  acceptance [1..9] — all 9 stages PASS
+  (`test_pipeline_eval_only_queue_full_ladder_live`, ~20s): FIFO round
+  trip, lease expiry + ownership, nack immediate/delayed, DLQ, **the
+  durability half (prepare -> SIGKILL -> restart -> verify: acked never
+  return, in-flight returns with attempts preserved, DLQ intact)**, the
+  6-consumer race (200 jobs, zero duplicates), STATS, delayed ENQ +
+  redrive, and hardening under the 128MB cap + the jobs/sec soak.
+  The live proof caught a real verifier bug: the durability prepare
+  leased assuming FIFO would hand it the *prepared* job, but a correct
+  FIFO broker returns the earlier *waiting* job — prepare now settles
+  each state before enqueueing the next, and a mock test
+  (`mock_queue_durability_halves`) covers both halves so it cannot
+  regress.
+- [ ] K6b. Model grid cells for sdb-queue.
 
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 

@@ -4603,6 +4603,304 @@ serve()
         }
     }
 
+    /// sdb-queue reference broker (live ladder proof): stdlib-only job
+    /// queue with connection-owned visibility leases, nacks/delays,
+    /// dead-lettering after 3 attempts (inspection reads do not count),
+    /// redrive, per-queue STATS, delayed enqueue, and an append-only
+    /// fsync-before-ack log under `./data` (torn tails dropped on
+    /// replay). Env override `SDB_QUEUE_DATA` points it elsewhere for
+    /// local development.
+    const QUEUE_MOCK_SERVER_PY: &str = r#"import json
+import os
+import re
+import socket
+import sys
+import threading
+import time
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6385
+DATA = os.environ.get("SDB_QUEUE_DATA") or os.path.join(os.getcwd(), "data")
+os.makedirs(DATA, exist_ok=True)
+LOGF = os.path.join(DATA, "queue.log")
+
+MAX_ATTEMPTS = 3
+MAX_PAYLOAD = 8 * 1024
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+lock = threading.RLock()
+jobs = {}          # id -> dict
+next_id = 1
+
+
+def log_append(rec):
+    """Append one JSON record and fsync before the caller acknowledges."""
+    with open(LOGF, "a", buffering=1) as f:
+        f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def now():
+    return time.time()
+
+
+def replay():
+    global next_id
+    if not os.path.exists(LOGF):
+        return
+    good = 0
+    with open(LOGF, "rb") as f:
+        for raw in f:
+            if not raw.endswith(b"\n"):
+                break  # torn tail
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                break
+            apply_record(rec)
+            good += len(raw)
+    size = os.path.getsize(LOGF)
+    if good < size:
+        # Discard the torn tail so future appends stay parseable.
+        with open(LOGF, "r+b") as f:
+            f.truncate(good)
+    if jobs:
+        next_id = max(jobs) + 1
+
+
+def apply_record(rec):
+    t = rec.get("t")
+    if t == "enq":
+        jobs[rec["id"]] = {
+            "id": rec["id"],
+            "origin": rec["q"],
+            "queue": rec["q"],
+            "payload": rec["p"],
+            "attempts": 0,
+            "nacks": 0,
+            "state": "avail",
+            "owner": 0,
+            "until": 0.0,
+            "not_before": rec.get("nb", 0.0),
+        }
+    elif t == "lease":
+        j = jobs.get(rec["id"])
+        if j:
+            j["attempts"] = rec["a"]
+    elif t == "ack":
+        j = jobs.get(rec["id"])
+        if j:
+            j["state"] = "acked"
+    elif t == "nack":
+        j = jobs.get(rec["id"])
+        if j:
+            j["nacks"] += 1
+            j["state"] = rec["st"]
+            j["queue"] = rec["q"]
+            j["not_before"] = rec.get("nb", 0.0)
+    elif t == "redrive":
+        j = jobs.get(rec["id"])
+        if j:
+            j["queue"] = rec["q"]
+            j["state"] = "avail"
+            j["attempts"] = 0
+            j["not_before"] = 0.0
+
+
+def expire(now_ts):
+    """Leased jobs past their visibility window return (attempts kept)."""
+    for j in jobs.values():
+        if j["state"] == "leased" and j["until"] <= now_ts:
+            j["owner"] = 0
+            if j["attempts"] >= MAX_ATTEMPTS and not j["queue"].endswith(".dead"):
+                j["queue"] = j["origin"] + ".dead"
+                j["state"] = "dead"
+            elif j["attempts"] >= MAX_ATTEMPTS:
+                j["state"] = "dead"
+            else:
+                j["state"] = "avail"
+                j["not_before"] = now_ts
+
+
+def stats(q):
+    mine = [j for j in jobs.values() if j["origin"] == q]
+    enq = len(mine)
+    acked = sum(1 for j in mine if j["state"] == "acked")
+    nacked = sum(j["nacks"] for j in mine)
+    inflight = sum(1 for j in mine if j["state"] == "leased")
+    available = sum(1 for j in mine if j["state"] == "avail")
+    dead = sum(1 for j in mine if j["state"] == "dead")
+    return (
+        f"+STATS enqueued={enq} acked={acked} nacked={nacked} "
+        f"inflight={inflight} available={available} dead={dead}"
+    )
+
+
+def handle(line, conn_id):
+    global next_id
+    parts = line.split(" ")
+    with lock:
+        t = now()
+        expire(t)
+        if parts[0] == "PING":
+            return "+PONG"
+        if parts[0] == "ENQ" and len(parts) in (3, 5) and NAME_RE.match(parts[1]):
+            payload = parts[2]
+            delay_ms = 0.0
+            if len(parts) == 5:
+                if parts[3] != "IN":
+                    return "-ERR syntax"
+                try:
+                    delay_ms = float(parts[4])
+                except ValueError:
+                    return "-ERR syntax"
+            if len(payload) > MAX_PAYLOAD:
+                return "-ERR payload too large"
+            jid = next_id
+            next_id += 1
+            log_append(
+                {"t": "enq", "id": jid, "q": parts[1], "p": payload, "nb": t + delay_ms / 1000.0}
+            )
+            apply_record({"t": "enq", "id": jid, "q": parts[1], "p": payload, "nb": t + delay_ms / 1000.0})
+            return f"+OK {jid}"
+        if parts[0] == "LEASE" and len(parts) == 3:
+            try:
+                lease_ms = float(parts[2])
+            except ValueError:
+                return "-ERR syntax"
+            pick = None
+            for j in sorted(jobs.values(), key=lambda x: x["id"]):
+                if (
+                    j["queue"] == parts[1]
+                    and j["not_before"] <= t
+                    and j["state"] in ("avail", "dead")
+                ):
+                    pick = j
+                    break
+            if pick is None:
+                return "+NONE"
+            if not pick["queue"].endswith(".dead"):
+                pick["attempts"] += 1
+            pick["owner"] = conn_id
+            pick["until"] = t + lease_ms / 1000.0
+            pick["state"] = "leased"
+            log_append({"t": "lease", "id": pick["id"], "a": pick["attempts"]})
+            return f"+JOB {pick['id']} {pick['attempts']} {pick['payload']}"
+        if parts[0] in ("ACK", "NACK") and len(parts) in (2, 3):
+            try:
+                jid = int(parts[1])
+            except ValueError:
+                return "-ERR syntax"
+            j = jobs.get(jid)
+            if j is None or j["state"] != "leased":
+                return "-ERR not-leased"
+            if j["owner"] != conn_id:
+                return "-ERR not-owner"
+            if parts[0] == "ACK":
+                j["state"] = "acked"
+                log_append({"t": "ack", "id": jid})
+                return "+OK"
+            delay_ms = 0.0
+            if len(parts) == 3:
+                try:
+                    delay_ms = float(parts[2])
+                except ValueError:
+                    return "-ERR syntax"
+            j["owner"] = 0
+            j["nacks"] += 1
+            if j["attempts"] >= MAX_ATTEMPTS and not j["queue"].endswith(".dead"):
+                j["queue"] = j["origin"] + ".dead"
+                j["state"] = "dead"
+            elif j["attempts"] >= MAX_ATTEMPTS:
+                j["state"] = "dead"
+            else:
+                j["state"] = "avail"
+                j["not_before"] = t + delay_ms / 1000.0
+            log_append(
+                {"t": "nack", "id": jid, "q": j["queue"], "st": j["state"], "nb": j["not_before"]}
+            )
+            return "+OK"
+        if parts[0] == "REDRIVE" and len(parts) == 3:
+            try:
+                jid = int(parts[2])
+            except ValueError:
+                return "-ERR syntax"
+            j = jobs.get(jid)
+            if j is None or j["state"] != "dead" or j["queue"] != parts[1] + ".dead":
+                return "-ERR unknown"
+            j["queue"] = parts[1]
+            j["state"] = "avail"
+            j["attempts"] = 0
+            j["not_before"] = 0.0
+            log_append({"t": "redrive", "id": jid, "q": parts[1]})
+            return "+OK"
+        if parts[0] == "STATS" and len(parts) == 2:
+            return stats(parts[1])
+        return "-ERR syntax"
+
+
+def serve_conn(conn, conn_id):
+    try:
+        conn.settimeout(3.0)  # slow-loris: reclaim stalled partial lines
+        buf = b""
+        while True:
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                return
+            if not chunk:
+                return
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                try:
+                    line = raw.decode("latin-1").rstrip("\r")
+                except Exception:
+                    line = ""
+                reply = handle(line, conn_id)
+                conn.sendall((reply + "\n").encode("latin-1"))
+            if len(buf) > MAX_PAYLOAD * 2:
+                conn.sendall(b"-ERR line too long\n")
+                return
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def main():
+    replay()
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", PORT))
+    srv.listen(128)
+    print(f"queue broker listening on {PORT} data={DATA}", flush=True)
+    conn_seq = 0
+    while True:
+        conn, _ = srv.accept()
+        conn_seq += 1
+        threading.Thread(target=serve_conn, args=(conn, conn_seq), daemon=True).start()
+
+
+main()
+"#;
+
+    /// Write the sdb-queue reference broker into `dir`, listening on `port`.
+    fn write_queue_mock(dir: &Path, port: u16) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("queue_broker.py"), QUEUE_MOCK_SERVER_PY).unwrap();
+        let start = format!("#!/bin/bash\nexec python3 -u /workspace/queue_broker.py {port}\n");
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
     /// Write the mock candidate into `dir`, listening on `port`.
     /// `boot_sleep_secs` delays the listener (used to keep a run inside
     /// verification while a test flips the cancel flag).
@@ -5539,6 +5837,59 @@ serve()
             (8, 8)
         );
         cleanup_covtest_network("edgefull");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-queue FULL-ladder live proof (eval-only, no model): the
+    /// reference broker driven through the real pipeline with acceptance
+    /// [1..9] — including the durability half (prepare -> SIGKILL ->
+    /// restart -> verify) and the 128MB-capped hardening restart.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_queue_full_ladder_live() {
+        let worker = 92u8;
+        let port = crate::web::server::worker_port(TaskType::Queue.default_port(), worker);
+        let dir = covtest_dir("queuelive");
+        let workdir = dir.join("workspace");
+        write_queue_mock(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-queue full ladder fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "queuelive");
+        config.task = TaskType::Queue;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-queue".to_string(),
+            stage: 8,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("sdb-queue full ladder must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        for needle in [
+            "Stage 1: ENQ/LEASE/ACK round trip (FIFO) -> PASS",
+            "Stage 2: Visibility leases (expiry + ownership) -> PASS",
+            "Stage 3: NACK and redelivery (delayed + attempts) -> PASS",
+            "Stage 4: Retries exhaust -> dead-letter queue -> PASS",
+            "Stage 5: Durability across kill -9 -> PASS",
+            "Stage 6: No duplicate delivery under contention -> PASS",
+            "Stage 7: Observability (STATS counters) -> PASS",
+            "Stage 8: Delayed delivery + DLQ redrive -> PASS",
+            "Stage 9: Limits and hostile input -> PASS",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (9, 9)
+        );
+        cleanup_covtest_network("queuelive");
         let _ = fs::remove_dir_all(&dir);
     }
 

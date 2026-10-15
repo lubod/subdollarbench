@@ -308,3 +308,11 @@ type `queue` (port 6385), nine tickets (0-8), 9-stage suite, RULES
   supposed to catch them does, with a naming error message. The live
   proof (a reference broker through the real pipeline, including the two
   restart halves) is the next step (TODO_CAMPAIGNS Slice K6).
+- Live proof (2026-10-15): the reference broker passed the full queue
+  ladder through the real pipeline (acceptance [1..9]; all 9 stages PASS,
+  ~20s), including the two restart halves. The proof immediately found a
+  verifier defect: the durability *prepare* leased jobs assuming FIFO
+  would hand it the job it had just enqueued, but a correct FIFO broker
+  returns the earlier waiting job — the prepare now settles each state
+  (ack -> dead -> in-flight -> waiting) before the next enqueue, and a
+  mock test exercises both halves.
