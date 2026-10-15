@@ -39,6 +39,9 @@ pub struct Acceptance {
     /// sdb-queue (job broker) acceptance.
     #[serde(default)]
     pub queue_stages: Vec<u32>,
+    /// sdb-http (file server) acceptance.
+    #[serde(default)]
+    pub http_stages: Vec<u32>,
 }
 
 impl Acceptance {
@@ -47,13 +50,14 @@ impl Acceptance {
         match task {
             "proxy" => &self.proxy_stages,
             "queue" => &self.queue_stages,
+            "http" => &self.http_stages,
             _ => &self.redis_stages,
         }
     }
 
     /// Task ids with a campaign stage adapter.
     pub fn supported_task(task: &str) -> bool {
-        matches!(task, "redis" | "proxy" | "queue")
+        matches!(task, "redis" | "proxy" | "queue" | "http")
     }
 
     /// Highest acceptance id a campaign of `task` may reference.
@@ -64,6 +68,9 @@ impl Acceptance {
             // (the campaign is its primary home).
             "proxy" => 9,
             "queue" => 9,
+            // http stages 6-10 (ranges, conditional GET, compression,
+            // upload limits, hardening) extend the single-shot 5.
+            "http" => 10,
             _ => 16,
         }
     }
@@ -167,7 +174,7 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
     }
     if !Acceptance::supported_task(&spec.task) {
         bail!(
-            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy, queue)",
+            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy, queue, http)",
             spec.name,
             spec.task
         );
@@ -671,6 +678,7 @@ mod tests {
                         redis_stages: vec![1, 2],
                         proxy_stages: Vec::new(),
                         queue_stages: Vec::new(),
+                        http_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -685,6 +693,7 @@ mod tests {
                         redis_stages: vec![1, 2, 3],
                         proxy_stages: Vec::new(),
                         queue_stages: Vec::new(),
+                        http_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -699,6 +708,7 @@ mod tests {
                         redis_stages: vec![1, 2, 3, 5],
                         proxy_stages: Vec::new(),
                         queue_stages: Vec::new(),
+                        http_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -781,6 +791,51 @@ mod tests {
             lc.spec.stages[8].acceptance.queue_stages,
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
+    }
+
+    #[test]
+    fn test_real_sdb_http_spec_validates() {
+        let lc = load_campaign("sdb-http").expect("bundled campaign must load");
+        assert_eq!(lc.spec.name, "sdb-http");
+        assert_eq!(lc.spec.task, "http");
+        assert_eq!(lc.spec.stages.len(), 8);
+        assert_eq!(lc.spec.stages[0].id, 0);
+        for stage in &lc.spec.stages {
+            assert!(
+                !stage.acceptance.http_stages.is_empty(),
+                "ticket {} has no http acceptance",
+                stage.id
+            );
+            assert!(
+                stage
+                    .acceptance
+                    .http_stages
+                    .iter()
+                    .all(|id| (1..=10).contains(id)),
+                "ticket {} acceptance out of the http suite",
+                stage.id
+            );
+        }
+        assert_eq!(lc.spec.stages[0].acceptance.http_stages, vec![1, 2]);
+        assert_eq!(
+            lc.spec.stages[7].acceptance.http_stages,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+    }
+
+    #[test]
+    fn test_http_acceptance_validation() {
+        let mut lc = fixture_campaign();
+        lc.spec.task = "http".into();
+        assert!(validate_spec(&lc.spec, &lc.root).is_err());
+        lc.spec.stages[0].acceptance.http_stages = vec![1, 2];
+        lc.spec.stages[1].acceptance.http_stages = vec![1, 2, 3, 4];
+        lc.spec.stages[2].acceptance.http_stages = vec![1, 2, 3, 4, 5, 6];
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+        // The http suite tops out at stage 10.
+        lc.spec.stages[2].acceptance.http_stages = vec![1, 11];
+        let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
+        assert!(err.contains("out of range 1..=10"), "{err}");
     }
 
     #[test]

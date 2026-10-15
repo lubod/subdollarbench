@@ -3,6 +3,10 @@ use std::time::Duration;
 
 use super::StageResult;
 
+/// Upload cap the campaign contract advertises (the hardening stage declares
+/// 128MiB, far above it).
+pub const UPLOAD_CAP_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpTestSummary {
     pub stages: Vec<StageResult>,
@@ -695,6 +699,740 @@ impl HttpVerifier {
             error: None,
         }
     }
+
+    /// Stage 6 (campaign sdb-http): byte ranges on stored files.
+    pub async fn test_stage6_range(&self) -> StageResult {
+        let name = "Stage 6: Range requests (206 + Content-Range)".to_string();
+        match self.stage6_inner().await {
+            Ok(()) => StageResult {
+                stage: 6,
+                name,
+                passed: true,
+                error: None,
+            },
+            Err(e) => StageResult {
+                stage: 6,
+                name,
+                passed: false,
+                error: Some(e),
+            },
+        }
+    }
+
+    async fn stage6_inner(&self) -> Result<(), String> {
+        let seed = self.get_seed_prefix("range");
+        let filename = format!("range_{seed}.txt");
+        // Deterministic, position-distinguishable content.
+        let content: String = (0..64).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        let url = format!("http://127.0.0.1:{}/files/{}", self.target_port, filename);
+        let post = self.client.post(&url).body(content.clone()).send().await;
+        match post {
+            Ok(r) if r.status() == reqwest::StatusCode::CREATED => {}
+            Ok(r) => return Err(format!("upload for range test: got {}", r.status())),
+            Err(e) => return Err(format!("upload for range test: {e}")),
+        }
+        let expect_range = |got: Option<&str>, want: &str| -> Result<(), String> {
+            match got {
+                Some(v) if v.trim().eq_ignore_ascii_case(want) => Ok(()),
+                Some(v) => Err(format!("Content-Range {v:?} (want {want:?})")),
+                None => Err(format!("missing Content-Range (want {want:?})")),
+            }
+        };
+        // 1. bytes=2-5
+        let resp = self
+            .client
+            .get(&url)
+            .header("Range", "bytes=2-5")
+            .send()
+            .await
+            .map_err(|e| format!("range 2-5: {e}"))?;
+        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "Range bytes=2-5 must be 206, got {}",
+                resp.status()
+            ));
+        }
+        expect_range(
+            resp.headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok()),
+            &format!("bytes 2-5/{len}", len = content.len()),
+        )?;
+        let body = resp.bytes().await.map_err(|e| format!("range body: {e}"))?;
+        if body != content.as_bytes()[2..6] {
+            return Err(format!(
+                "Range 2-5 body {:?}",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        // 2. Suffix range bytes=-4
+        let resp = self
+            .client
+            .get(&url)
+            .header("Range", "bytes=-4")
+            .send()
+            .await
+            .map_err(|e| format!("suffix range: {e}"))?;
+        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!("suffix Range must be 206, got {}", resp.status()));
+        }
+        expect_range(
+            resp.headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok()),
+            &format!(
+                "bytes {}-{}/{len}",
+                content.len() - 4,
+                content.len() - 1,
+                len = content.len()
+            ),
+        )?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("suffix body: {e}"))?;
+        if body != content.as_bytes()[content.len() - 4..] {
+            return Err("suffix range returned the wrong bytes".to_string());
+        }
+        // 3. Open-ended range bytes=60-
+        let resp = self
+            .client
+            .get(&url)
+            .header("Range", "bytes=60-")
+            .send()
+            .await
+            .map_err(|e| format!("open range: {e}"))?;
+        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "open-ended Range must be 206, got {}",
+                resp.status()
+            ));
+        }
+        let body = resp.bytes().await.map_err(|e| format!("open body: {e}"))?;
+        if body != content.as_bytes()[60..] {
+            return Err("open-ended range returned the wrong bytes".to_string());
+        }
+        // 4. Unsatisfiable range -> 416
+        let resp = self
+            .client
+            .get(&url)
+            .header("Range", "bytes=500-600")
+            .send()
+            .await
+            .map_err(|e| format!("unsatisfiable range: {e}"))?;
+        if resp.status() != reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            return Err(format!(
+                "unsatisfiable Range must be 416, got {}",
+                resp.status()
+            ));
+        }
+        // 5. A plain GET is still 200 + the full body.
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("plain get: {e}"))?;
+        if resp.status() != reqwest::StatusCode::OK {
+            return Err(format!("plain GET after ranges: got {}", resp.status()));
+        }
+        let body = resp.bytes().await.map_err(|e| format!("plain body: {e}"))?;
+        if body != content.as_bytes() {
+            return Err("plain GET body differs from the uploaded content".to_string());
+        }
+        Ok(())
+    }
+
+    /// Stage 7 (campaign sdb-http): validators and conditional GET.
+    pub async fn test_stage7_conditional(&self) -> StageResult {
+        let name = "Stage 7: Conditional GET (ETag / Last-Modified -> 304)".to_string();
+        match self.stage7_inner().await {
+            Ok(()) => StageResult {
+                stage: 7,
+                name,
+                passed: true,
+                error: None,
+            },
+            Err(e) => StageResult {
+                stage: 7,
+                name,
+                passed: false,
+                error: Some(e),
+            },
+        }
+    }
+
+    async fn stage7_inner(&self) -> Result<(), String> {
+        let seed = self.get_seed_prefix("cond");
+        let filename = format!("cond_{seed}.txt");
+        let url = format!("http://127.0.0.1:{}/files/{}", self.target_port, filename);
+        let first = format!("version-one {seed}");
+        match self.client.post(&url).body(first.clone()).send().await {
+            Ok(r) if r.status() == reqwest::StatusCode::CREATED => {}
+            Ok(r) => return Err(format!("upload v1: got {}", r.status())),
+            Err(e) => return Err(format!("upload v1: {e}")),
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("get v1: {e}"))?;
+        let etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string())
+            .ok_or("GET /files must carry an ETag validator")?;
+        let last_modified = resp
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string())
+            .ok_or("GET /files must carry a Last-Modified validator")?;
+        // Matching validator -> 304 with no body.
+        let resp = self
+            .client
+            .get(&url)
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .map_err(|e| format!("if-none-match: {e}"))?;
+        if resp.status() != reqwest::StatusCode::NOT_MODIFIED {
+            return Err(format!(
+                "If-None-Match (matching) must be 304, got {}",
+                resp.status()
+            ));
+        }
+        let body = resp.bytes().await.map_err(|e| format!("304 body: {e}"))?;
+        if !body.is_empty() {
+            return Err("a 304 response must not carry a body".to_string());
+        }
+        // Stale validator -> 200 with the body.
+        let resp = self
+            .client
+            .get(&url)
+            .header("If-None-Match", "\"stale-validator\"")
+            .send()
+            .await
+            .map_err(|e| format!("stale validator: {e}"))?;
+        if resp.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "a stale If-None-Match must be 200, got {}",
+                resp.status()
+            ));
+        }
+        // If-Modified-Since in the future -> 304.
+        let resp = self
+            .client
+            .get(&url)
+            .header("If-Modified-Since", "Wed, 01 Jan 2031 00:00:00 GMT")
+            .send()
+            .await
+            .map_err(|e| format!("if-modified-since: {e}"))?;
+        if resp.status() != reqwest::StatusCode::NOT_MODIFIED {
+            return Err(format!(
+                "If-Modified-Since (future) must be 304, got {} (Last-Modified was {last_modified:?})",
+                resp.status()
+            ));
+        }
+        // New content -> new body and a *different* ETag; the old validator
+        // must no longer 304.
+        tokio::time::sleep(Duration::from_millis(1100)).await; // mtime tick
+        let second = format!("version-two {seed} (changed)");
+        match self.client.post(&url).body(second.clone()).send().await {
+            Ok(r) if r.status() == reqwest::StatusCode::CREATED => {}
+            Ok(r) => return Err(format!("upload v2: got {}", r.status())),
+            Err(e) => return Err(format!("upload v2: {e}")),
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("get v2: {e}"))?;
+        let etag2 = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string())
+            .ok_or("GET after rewrite lost its ETag")?;
+        let body = resp.bytes().await.map_err(|e| format!("v2 body: {e}"))?;
+        if body != second.as_bytes() {
+            return Err("rewritten file served old bytes".to_string());
+        }
+        if etag2 == etag {
+            return Err("the ETag did not change when the content changed".to_string());
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .map_err(|e| format!("stale after write: {e}"))?;
+        if resp.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "the pre-rewrite validator must not 304 anymore, got {}",
+                resp.status()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stage 8 (campaign sdb-http): gzip content negotiation.
+    pub async fn test_stage8_compression(&self) -> StageResult {
+        let name = "Stage 8: gzip content negotiation".to_string();
+        match self.stage8_inner().await {
+            Ok(()) => StageResult {
+                stage: 8,
+                name,
+                passed: true,
+                error: None,
+            },
+            Err(e) => StageResult {
+                stage: 8,
+                name,
+                passed: false,
+                error: Some(e),
+            },
+        }
+    }
+
+    async fn stage8_inner(&self) -> Result<(), String> {
+        let seed = self.get_seed_prefix("gzip");
+        let filename = format!("gzip_{seed}.txt");
+        // Highly compressible and big enough that skipping gzip is a choice.
+        let content = "SubDollarBench compressible payload. ".repeat(160);
+        let url = format!("http://127.0.0.1:{}/files/{}", self.target_port, filename);
+        match self.client.post(&url).body(content.clone()).send().await {
+            Ok(r) if r.status() == reqwest::StatusCode::CREATED => {}
+            Ok(r) => return Err(format!("upload: got {}", r.status())),
+            Err(e) => return Err(format!("upload: {e}")),
+        }
+        // Accept-Encoding: gzip -> Content-Encoding gzip + decodable bytes.
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept-Encoding", "gzip")
+            .send()
+            .await
+            .map_err(|e| format!("gzip get: {e}"))?;
+        if resp.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "GET with Accept-Encoding: gzip got {}",
+                resp.status()
+            ));
+        }
+        let encoding = resp
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("identity")
+            .trim()
+            .to_ascii_lowercase();
+        if encoding != "gzip" {
+            return Err(format!(
+                "a compressible file with Accept-Encoding: gzip must answer Content-Encoding: gzip (got {encoding:?})"
+            ));
+        }
+        let raw = resp.bytes().await.map_err(|e| format!("gzip body: {e}"))?;
+        let mut decoded = Vec::new();
+        {
+            use std::io::Read;
+            let mut gz = flate2::read::GzDecoder::new(raw.as_ref());
+            gz.read_to_end(&mut decoded)
+                .map_err(|e| format!("gzip body does not decode: {e}"))?;
+        }
+        if decoded != content.as_bytes() {
+            return Err("the decompressed body differs from the stored file".to_string());
+        }
+        if raw.len() >= content.len() {
+            return Err(format!(
+                "gzip body ({} bytes) is not smaller than the payload ({} bytes)",
+                raw.len(),
+                content.len()
+            ));
+        }
+        // identity -> raw bytes, no content-encoding.
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept-Encoding", "identity")
+            .send()
+            .await
+            .map_err(|e| format!("identity get: {e}"))?;
+        let encoding = resp
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("identity")
+            .trim()
+            .to_ascii_lowercase();
+        if encoding != "identity" {
+            return Err(format!(
+                "Accept-Encoding: identity must not be answered with {encoding:?}"
+            ));
+        }
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("identity body: {e}"))?;
+        if body != content.as_bytes() {
+            return Err("identity body differs from the stored file".to_string());
+        }
+        Ok(())
+    }
+
+    /// Stage 9 (campaign sdb-http; the pipeline restarts the candidate under
+    /// a 128MB cap): chunked uploads, Expect: 100-continue, and a declared
+    /// body far above the cap.
+    pub async fn test_stage9_uploads(&self) -> StageResult {
+        let name = "Stage 9: Chunked uploads, 100-continue, size limits".to_string();
+        match self.stage9_inner().await {
+            Ok(()) => StageResult {
+                stage: 9,
+                name,
+                passed: true,
+                error: None,
+            },
+            Err(e) => StageResult {
+                stage: 9,
+                name,
+                passed: false,
+                error: Some(e),
+            },
+        }
+    }
+
+    async fn stage9_inner(&self) -> Result<(), String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let seed = self.get_seed_prefix("upload");
+        // (a) Chunked upload arrives byte-exact.
+        let filename = format!("chunked_{seed}.bin");
+        let req = format!(
+            "POST /files/{filename} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nABCD\r\n5\r\nEFGHI\r\n0\r\n\r\n"
+        );
+        let (buf, _closed) = self.raw_exchange(&req, Duration::from_secs(6)).await?;
+        let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
+        if status != 201 {
+            return Err(format!(
+                "chunked POST must answer 201, got {status} ({} bytes)",
+                buf.len()
+            ));
+        }
+        let url = format!("http://127.0.0.1:{}/files/{filename}", self.target_port);
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("get chunked: {e}"))?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("chunked body: {e}"))?;
+        if body.as_ref() != b"ABCDEFGHI" {
+            return Err(format!(
+                "chunked upload stored {:?} (want ABCDEFGHI)",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        // (b) Expect: 100-continue must not deadlock: within ~2s the server
+        // either sends an interim 100 or the final status. Then the upload
+        // completes byte-exact.
+        let filename2 = format!("expect_{seed}.bin");
+        let payload = "continue-payload";
+        let head = format!(
+            "POST /files/{filename2} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        let addr = format!("127.0.0.1:{}", self.target_port);
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("connect to {addr} timed out"))?
+        .map_err(|e| format!("connect to {addr}: {e}"))?;
+        stream
+            .write_all(head.as_bytes())
+            .await
+            .map_err(|e| format!("100-continue head write: {e}"))?;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let interim_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut interim = false;
+        while !interim && std::time::Instant::now() < interim_deadline {
+            match tokio::time::timeout(Duration::from_millis(400), stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some((status, _)) = Self::head_status(&buf) {
+                        if status == 100 {
+                            interim = true;
+                        } else if status >= 200 {
+                            // Final status without an interim reply: allowed.
+                            let text = String::from_utf8_lossy(&buf).to_string();
+                            if status != 201 {
+                                return Err(format!(
+                                    "POST with Expect answered {status} without an interim 100: {text}"
+                                ));
+                            }
+                            // Body was never sent; the server chose to answer
+                            // early, which is legal. Verify storage is empty
+                            // or skip to (c).
+                            return self.stage9_limits_only().await;
+                        }
+                    }
+                }
+                Ok(Err(e)) => return Err(format!("100-continue read: {e}")),
+                Err(_) => {}
+            }
+        }
+        if !interim {
+            return Err(
+                "Expect: 100-continue produced neither an interim 100 nor a final status within 3s (deadlock)"
+                    .to_string(),
+            );
+        }
+        // Send the body; the server must finish the upload.
+        stream
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| format!("body write: {e}"))?;
+        let mut final_buf = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut final_status = 0u16;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(400), stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    final_buf.extend_from_slice(&tmp[..n]);
+                    if let Some((status, len)) = Self::head_status(&final_buf) {
+                        if status >= 200 && final_buf.len() >= len {
+                            final_status = status;
+                            break;
+                        }
+                    }
+                }
+                Ok(Err(e)) => return Err(format!("final read: {e}")),
+                Err(_) => {}
+            }
+        }
+        if final_status != 201 {
+            return Err(format!(
+                "upload after 100-continue must end 201, got {final_status}"
+            ));
+        }
+        let url2 = format!("http://127.0.0.1:{}/files/{filename2}", self.target_port);
+        let resp = self
+            .client
+            .get(&url2)
+            .send()
+            .await
+            .map_err(|e| format!("get expect: {e}"))?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("expect body: {e}"))?;
+        if body != payload.as_bytes() {
+            return Err("the 100-continue upload was not stored byte-exact".to_string());
+        }
+        self.stage9_limits_only().await
+    }
+
+    async fn stage9_limits_only(&self) -> Result<(), String> {
+        // (c) A declared 128MiB body must be refused without reading it.
+        let req = "POST /files/huge.bin HTTP/1.1\r\nHost: x\r\nContent-Length: 134217728\r\nConnection: close\r\n\r\n";
+        let (buf, closed) = self.raw_exchange(req, Duration::from_secs(5)).await?;
+        let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
+        let ok = matches!(status, 400 | 411 | 413) || (status == 0 && closed);
+        if !ok {
+            return Err(format!(
+                "a declared 128MiB body (cap is {} bytes) must be refused before the bytes arrive, got status {status} (closed={closed})",
+                UPLOAD_CAP_BYTES
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stage 10 (campaign sdb-http; runs under the same 128MB cap): path
+    /// traversal, oversized heads, malformed lines and slow-loris, with
+    /// normal traffic flowing.
+    pub async fn test_stage10_hardening(&self) -> StageResult {
+        let name = "Stage 10: Hardening (traversal, limits, slow-loris)".to_string();
+        match self.stage10_inner().await {
+            Ok(()) => StageResult {
+                stage: 10,
+                name,
+                passed: true,
+                error: None,
+            },
+            Err(e) => StageResult {
+                stage: 10,
+                name,
+                passed: false,
+                error: Some(e),
+            },
+        }
+    }
+
+    async fn stage10_inner(&self) -> Result<(), String> {
+        // (a) Path traversal must never serve outside the store.
+        for target in [
+            "/files/../../etc/passwd",
+            "/files/..%2f..%2fetc%2fpasswd",
+            "/files/%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        ] {
+            let req = format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            let (buf, _closed) = self.raw_exchange(&req, Duration::from_secs(5)).await?;
+            let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
+            if status == 200 {
+                let text = String::from_utf8_lossy(&buf);
+                if text.contains("root:") {
+                    return Err(format!("path traversal {target:?} leaked /etc/passwd"));
+                }
+                return Err(format!(
+                    "path traversal {target:?} answered 200; expect 400/404/403"
+                ));
+            }
+            if !matches!(status, 400 | 403 | 404) {
+                return Err(format!(
+                    "path traversal {target:?} must answer 400/403/404 (or close), got {status}"
+                ));
+            }
+        }
+        // (b) Oversized header block: 4xx or a clean close, server survives.
+        let big = format!(
+            "GET / HTTP/1.1\r\nHost: x\r\nX-Big: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(32 * 1024)
+        );
+        let (buf, closed) = self.raw_exchange(&big, Duration::from_secs(5)).await?;
+        let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
+        let ok = matches!(status, 400 | 413 | 431) || (status == 0 && closed);
+        if !ok {
+            return Err(format!(
+                "32KiB of headers must be refused (431/400/close), got {status} (closed={closed})"
+            ));
+        }
+        // (c) Malformed request line: 400 or close.
+        let (buf, closed) = self
+            .raw_exchange(
+                "GARBAGE / HTTP/1.1\r\nHost: x\r\n\r\n",
+                Duration::from_secs(4),
+            )
+            .await?;
+        let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
+        if !(matches!(status, 400 | 505) || (status == 0 && closed)) {
+            return Err(format!(
+                "a malformed request line must answer 400 (or close), got {status}"
+            ));
+        }
+        // (d) Slow-loris: reclaimed within ~12s while normal traffic flows.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = format!("127.0.0.1:{}", self.target_port);
+        let mut stall = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("stall connect to {addr} timed out"))?
+        .map_err(|e| format!("stall connect: {e}"))?;
+        stall
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .map_err(|e| format!("stall write: {e}"))?;
+        // Normal traffic must still work.
+        let probe = self
+            .client
+            .get(format!("http://127.0.0.1:{}/", self.target_port))
+            .send()
+            .await
+            .map_err(|e| format!("GET / while a slow client idled: {e}"))?;
+        if probe.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "GET / while a slow client idled returned {}",
+                probe.status()
+            ));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        let mut reclaimed = false;
+        let mut buf = [0u8; 512];
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), stall.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => {
+                    reclaimed = true;
+                    break;
+                }
+                Ok(Ok(_)) => {
+                    // An error status (408/400) is also a reclaim.
+                    reclaimed = true;
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        if !reclaimed {
+            return Err(
+                "a stalled partial request stayed open for 12s: enforce an idle/header timeout"
+                    .to_string(),
+            );
+        }
+        // (e) Still healthy.
+        let resp = self
+            .client
+            .get(format!("http://127.0.0.1:{}/", self.target_port))
+            .send()
+            .await
+            .map_err(|e| format!("final GET: {e}"))?;
+        if resp.status() != reqwest::StatusCode::OK {
+            return Err(format!("final GET / returned {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    /// Raw-socket exchange used by the upload/hardening stages; returns the
+    /// bytes read and whether the peer closed.
+    async fn raw_exchange(&self, req: &str, wait: Duration) -> Result<(Vec<u8>, bool), String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = format!("127.0.0.1:{}", self.target_port);
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("connect to {addr} timed out"))?
+        .map_err(|e| format!("connect to {addr}: {e}"))?;
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        let deadline = std::time::Instant::now() + wait;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let mut closed = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(400), stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => {
+                    closed = true;
+                    break;
+                }
+                Ok(Ok(n)) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > 256 * 1024 {
+                        break;
+                    }
+                }
+                Ok(Err(_)) => {
+                    closed = true;
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        Ok((buf, closed))
+    }
 }
 
 #[cfg(test)]
@@ -872,5 +1610,429 @@ mod tests {
         );
         assert_eq!(summary_seeded.total_stages, 5);
         assert_eq!(summary_seeded.pass_rate, 100.0);
+    }
+}
+
+#[cfg(test)]
+mod campaign_stage_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Defect switches for the full mock server.
+    #[derive(Clone, Copy, PartialEq)]
+    enum HttpFail {
+        None,
+        /// Range headers are ignored (200 + whole file).
+        NoRange,
+        /// Validators are missing.
+        NoValidators,
+        /// ETag never changes when content changes.
+        EtagStable,
+        /// gzip is never applied.
+        NoGzip,
+        /// Advertises gzip but sends raw bytes.
+        BadGzip,
+        /// Never sends the interim 100.
+        NoContinue,
+        /// Declared-oversized uploads are accepted.
+        OversizedOk,
+        /// Path traversal is served.
+        NoTraversalGuard,
+        /// Oversized heads are accepted.
+        BigHeadOk,
+        /// Stalled partial requests are never reclaimed.
+        NeverReclaim,
+    }
+
+    struct State {
+        files: HashMap<String, Vec<u8>>,
+        /// Monotonic content version (drives ETag + Last-Modified).
+        versions: HashMap<String, u64>,
+        version_seq: u64,
+        fail: HttpFail,
+    }
+
+    fn last_modified_for(v: u64) -> String {
+        // Fixed base date + v seconds; always in the past for our clock.
+        let secs = 1_600_000_000 + v;
+        let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
+        dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+    }
+
+    fn etag_for(name: &str, body: &[u8], v: u64, fail: HttpFail) -> String {
+        if fail == HttpFail::EtagStable {
+            return "\"constant\"".to_string();
+        }
+        let mut h: u64 = 1469598103934665603;
+        for b in body {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        format!("\"{}-{h:x}-{v}\"", name.len())
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    async fn spawn_full_http_mock(fail: HttpFail) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(Mutex::new(State {
+            files: HashMap::new(),
+            versions: HashMap::new(),
+            version_seq: 0,
+            fail,
+        }));
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    serve_full_conn(sock, state).await;
+                });
+            }
+        });
+        port
+    }
+
+    async fn serve_full_conn(mut sock: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let fail = state.lock().unwrap().fail;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 4096];
+        // Read the head (bounded read timeout models slow-loris handling).
+        loop {
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+            let read = if fail == HttpFail::NeverReclaim {
+                sock.read(&mut tmp).await
+            } else {
+                match tokio::time::timeout(Duration::from_secs(3), sock.read(&mut tmp)).await {
+                    Ok(r) => r,
+                    Err(_) => return,
+                }
+            };
+            match read {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+            if buf.len() > 8 * 1024 && fail != HttpFail::BigHeadOk {
+                let _ = sock
+                    .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+                return;
+            }
+            if buf.len() > 256 * 1024 {
+                break;
+            }
+        }
+        let head_end = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(p) => p + 4,
+            None => return,
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let mut lines = head.lines();
+        let request_line = lines.next().unwrap_or("").trim().to_string();
+        let mut parts = request_line.split(' ');
+        let method = parts.next().unwrap_or("").to_string();
+        let target = parts.next().unwrap_or("/").to_string();
+        let mut headers: HashMap<String, String> = HashMap::new();
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+            }
+        }
+        if method.is_empty() || method == "GARBAGE" || !target.starts_with('/') {
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            return;
+        }
+        // Path traversal guard (decoded forms included).
+        let decoded = target
+            .replace("%2e", ".")
+            .replace("%2E", ".")
+            .replace("%2f", "/")
+            .replace("%2F", "/");
+        if decoded.contains("..") && fail != HttpFail::NoTraversalGuard {
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            return;
+        }
+        if decoded.contains("..") {
+            let body = b"root:x:0:0:root:/root:/bin/bash\n";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+            return;
+        }
+        if target == "/" && method == "GET" {
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n")
+                .await;
+            return;
+        }
+        if let Some(name) = target.strip_prefix("/files/") {
+            if method == "GET" {
+                let found = {
+                    let st = state.lock().unwrap();
+                    st.files
+                        .get(name)
+                        .map(|b| (b.clone(), *st.versions.get(name).unwrap_or(&0)))
+                };
+                let (body, version) = match found {
+                    Some(v) => v,
+                    None => {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                };
+                let etag = etag_for(name, &body, version, fail);
+                let lm = last_modified_for(version);
+                // Conditional GET.
+                let inm = headers.get("if-none-match").cloned().unwrap_or_default();
+                let ims = headers
+                    .get("if-modified-since")
+                    .cloned()
+                    .unwrap_or_default();
+                // If-Modified-Since semantics: 304 when the resource has
+                // not been modified since the given (later) date.
+                let parse_http_date = |v: &str| -> Option<i64> {
+                    if let Ok(d) = chrono::DateTime::parse_from_rfc2822(v) {
+                        return Some(d.timestamp());
+                    }
+                    chrono::NaiveDateTime::parse_from_str(v, "%a, %d %b %Y %H:%M:%S GMT")
+                        .ok()
+                        .map(|d| d.and_utc().timestamp())
+                };
+                let ims_fresh = parse_http_date(&ims)
+                    .zip(parse_http_date(&lm))
+                    .map(|(i, l)| i >= l)
+                    .unwrap_or(false);
+                let not_modified =
+                    (fail != HttpFail::NoValidators && !inm.is_empty() && inm == etag)
+                        || (fail != HttpFail::NoValidators && !ims.is_empty() && ims_fresh);
+                if not_modified {
+                    let head = if fail == HttpFail::NoValidators {
+                        "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_string()
+                    } else {
+                        format!(
+                            "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nLast-Modified: {lm}\r\nConnection: close\r\n\r\n"
+                        )
+                    };
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    return;
+                }
+                // Range handling.
+                let range = headers.get("range").cloned().unwrap_or_default();
+                let mut status = 200u16;
+                let mut extra = String::new();
+                let mut slice = body.clone();
+                if fail != HttpFail::NoRange && !range.is_empty() {
+                    let spec = range.trim_start_matches("bytes=");
+                    let (a, b) = spec.split_once('-').unwrap_or(("", ""));
+                    let len = body.len();
+                    let (start, end) = if a.is_empty() {
+                        // suffix
+                        let n = b.parse::<usize>().unwrap_or(0);
+                        (len.saturating_sub(n), len - 1)
+                    } else {
+                        let s = a.parse::<usize>().unwrap_or(0);
+                        let e = if b.is_empty() {
+                            len - 1
+                        } else {
+                            b.parse::<usize>().unwrap_or(0)
+                        };
+                        (s, e.min(len - 1))
+                    };
+                    if start >= len || start > end {
+                        let head = format!(
+                            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        return;
+                    }
+                    status = 206;
+                    slice = body[start..=end].to_vec();
+                    extra.push_str(&format!("Content-Range: bytes {start}-{end}/{len}\r\n"));
+                }
+                // gzip negotiation (only for compressible files).
+                let ae = headers.get("accept-encoding").cloned().unwrap_or_default();
+                let wants_gzip = ae.to_ascii_lowercase().contains("gzip");
+                let mut encoded = slice.clone();
+                let mut ce = String::new();
+                if wants_gzip && status == 200 && slice.len() > 1024 && fail != HttpFail::NoGzip {
+                    encoded = gzip(&slice);
+                    ce = "Content-Encoding: gzip\r\n".to_string();
+                }
+                if fail == HttpFail::BadGzip && wants_gzip && slice.len() > 1024 {
+                    encoded = slice.clone();
+                    ce = "Content-Encoding: gzip\r\n".to_string();
+                }
+                let validators = if fail == HttpFail::NoValidators {
+                    String::new()
+                } else {
+                    format!("ETag: {etag}\r\nLast-Modified: {lm}\r\n")
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} {reason}\r\n{validators}{extra}{ce}Content-Length: {len}\r\nConnection: close\r\n\r\n",
+                    reason = if status == 206 { "Partial Content" } else { "OK" },
+                    len = encoded.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&encoded).await;
+                return;
+            }
+            if method == "POST" {
+                // Expect: 100-continue.
+                if headers
+                    .get("expect")
+                    .map(|v| v.to_ascii_lowercase().contains("100-continue"))
+                    .unwrap_or(false)
+                    && fail != HttpFail::NoContinue
+                {
+                    let _ = sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+                }
+                let cl = headers
+                    .get("content-length")
+                    .and_then(|v| v.parse::<usize>().ok());
+                if let Some(n) = cl {
+                    if n > UPLOAD_CAP_BYTES && fail != HttpFail::OversizedOk {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                }
+                // Read the body: chunked or content-length.
+                let mut body = Vec::new();
+                let chunked = headers
+                    .get("transfer-encoding")
+                    .map(|v| v.to_ascii_lowercase().contains("chunked"))
+                    .unwrap_or(false);
+                if chunked {
+                    // Parse chunks from buf + socket.
+                    let mut data = buf[head_end..].to_vec();
+                    loop {
+                        // Need a size line.
+                        if !data.windows(2).any(|w| w == b"\r\n") {
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => data.extend_from_slice(&tmp[..n]),
+                            }
+                            continue;
+                        }
+                        let p = data.windows(2).position(|w| w == b"\r\n").unwrap();
+                        let size_line = String::from_utf8_lossy(&data[..p]).to_string();
+                        let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+                        if size == 0 {
+                            break;
+                        }
+                        let start = p + 2;
+                        if data.len() < start + size + 2 {
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => data.extend_from_slice(&tmp[..n]),
+                            }
+                            continue;
+                        }
+                        body.extend_from_slice(&data[start..start + size]);
+                        data.drain(..start + size + 2);
+                    }
+                } else if let Some(n) = cl {
+                    let mut have = buf[head_end..].to_vec();
+                    while have.len() < n {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(m) => have.extend_from_slice(&tmp[..m]),
+                        }
+                    }
+                    have.truncate(n);
+                    body = have;
+                }
+                {
+                    let mut st = state.lock().unwrap();
+                    st.version_seq += 1;
+                    let version = st.version_seq;
+                    st.files.insert(name.to_string(), body);
+                    st.versions.insert(name.to_string(), version);
+                }
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                return;
+            }
+        }
+        let _ = sock
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn full_mock_passes_campaign_stages() {
+        let port = spawn_full_http_mock(HttpFail::None).await;
+        let v = HttpVerifier::new(port, Some("mockh"));
+        for st in [
+            v.test_stage6_range().await,
+            v.test_stage7_conditional().await,
+            v.test_stage8_compression().await,
+            v.test_stage9_uploads().await,
+            v.test_stage10_hardening().await,
+        ] {
+            assert!(st.passed, "stage {} failed: {:?}", st.stage, st.error);
+        }
+    }
+
+    #[tokio::test]
+    async fn campaign_stage_defects_are_caught() {
+        for (fail, stage, needle) in [
+            (HttpFail::NoRange, 6u32, "206"),
+            (HttpFail::NoValidators, 7, "ETag"),
+            (HttpFail::EtagStable, 7, "did not change"),
+            (HttpFail::NoGzip, 8, "gzip"),
+            (HttpFail::BadGzip, 8, "decode"),
+            (HttpFail::NoContinue, 9, "deadlock"),
+            (HttpFail::OversizedOk, 9, "refused"),
+            (HttpFail::NoTraversalGuard, 10, "traversal"),
+            (HttpFail::BigHeadOk, 10, "32KiB"),
+            (HttpFail::NeverReclaim, 10, "stayed open"),
+        ] {
+            let port = spawn_full_http_mock(fail).await;
+            let v = HttpVerifier::new(port, Some("mockh"));
+            let st = match stage {
+                6 => v.test_stage6_range().await,
+                7 => v.test_stage7_conditional().await,
+                8 => v.test_stage8_compression().await,
+                9 => v.test_stage9_uploads().await,
+                _ => v.test_stage10_hardening().await,
+            };
+            assert!(
+                !st.passed,
+                "stage {stage} must fail for the injected defect"
+            );
+            let err = st.error.unwrap_or_default();
+            assert!(
+                err.to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase()),
+                "stage {stage} error {err:?} lacks {needle:?}"
+            );
+        }
     }
 }

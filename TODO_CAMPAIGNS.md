@@ -370,6 +370,36 @@ home. New task type `queue` (default port 6385), RULES `2026-10-15.3`.
   ladder — reached 8, 9/9 tickets, zero regressions, $0.2412** (see the
   sdb-queue grid log). More models next.
 
+## Slice L — sdb-http (the last portfolio app: ranges / validators / compression / limits)
+
+Fourth portfolio entry and the final app in the DECISIONS #11 order.
+RULES `2026-10-15.4`. Task `http` (port 8080); the single-shot 5-stage
+board (root/404/echo/user-agent/files) is unchanged.
+
+- [x] L1. Verifier depth in `src/verifier/http.rs`: stage 6 byte ranges
+  (206 + `Content-Range`, suffix/open, 416, plain-GET unchanged), stage 7
+  conditional GET (`ETag` + `Last-Modified`, 304 semantics, stale
+  validators, rewritten content changes the ETag), stage 8 gzip
+  negotiation (decodable + smaller body via flate2; identity passthrough),
+  stage 9 chunked uploads + `Expect: 100-continue` (no deadlock) +
+  declared-128MiB refused at the head under a 128MB cap, stage 10
+  hardening (three traversal spellings, 32KiB heads, malformed lines,
+  slow-loris <=12s, liveness).
+- [x] L2. Pipeline arm: acceptance-scoped stages 1-5 (single-shot path
+  unchanged), campaign-only stages 6-10; 9/10 run after a 128MB-cap
+  restart with the run-network re-attach; robustness probes stay advisory.
+- [x] L3. Campaign: 8 tickets (t0 root+404 -> t1 echo/user-agent -> t2
+  files -> t3 ranges -> t4 validators -> t5 gzip -> t6 chunked uploads +
+  limits -> t7 hardening) with `http_stages` acceptance (1..=10) and
+  prompts; validator range per task; spec loads and dry-runs.
+- [x] L4. Mock rigor: a full mock file server (range slices, validators
+  with real date comparisons, gzip via flate2, chunked/continue upload
+  paths, traversal guard, head cap, stalled-socket reclaim) with **10
+  injected defects**, each asserted caught by the intended stage with a
+  naming error, plus a faithful-pass run over stages 6-10.
+- [ ] L5. Live proof (eval-only reference file server through the real
+  pipeline, incl. the capped restart), then model grid cells.
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the

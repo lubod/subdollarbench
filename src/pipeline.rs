@@ -1799,29 +1799,220 @@ impl BenchmarkPipeline {
                         (pr, ps, ts, stages)
                     }
                     TaskType::Http => {
+                        // Single-shot http keeps its 5-stage board; the
+                        // sdb-http campaign adds stages 6-10 (ranges,
+                        // validators, compression, upload limits, hardening)
+                        // which run only when a ticket explicitly accepts
+                        // them.
+                        let allowed = |n: u32| accepted.map(|a| a.contains(&n)).unwrap_or(true);
+                        let campaign_only =
+                            |n: u32| accepted.map(|a| a.contains(&n)).unwrap_or(false);
+                        let log_stage =
+                            |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> {} {}",
+                                    s.stage,
+                                    crate::config::stage_label(s.stage, &s.name),
+                                    if s.passed { "PASS" } else { "FAIL" },
+                                    s.error.as_deref().unwrap_or("")
+                                ));
+                            };
+                        let fail_stage =
+                            |stage: u32, name: &str, err: String| crate::verifier::StageResult {
+                                stage,
+                                name: name.to_string(),
+                                passed: false,
+                                error: Some(err),
+                            };
                         let verifier = HttpVerifier::new(port, Some(verifier_seed));
-                        let summary = verifier.run_all().await;
-                        for s in &summary.stages {
-                            let status_str = if s.passed { "PASS" } else { "FAIL" };
-                            let err_str = s.error.as_deref().unwrap_or("");
-                            logger.log(&format!(
-                                "  Stage {}: {} -> {} {}",
-                                s.stage,
-                                crate::config::stage_label(s.stage, &s.name),
-                                status_str,
-                                err_str
-                            ));
+                        let mut stages: Vec<crate::verifier::StageResult> = Vec::new();
+                        let mut prior_failed = false;
+                        let mut base_ran = false;
+                        if allowed(1) {
+                            base_ran = true;
+                            let st = verifier.test_stage1_root().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
                         }
-                        for s in verifier.run_robustness().await {
-                            log_robust(logger, std::slice::from_ref(&s));
-                            extra_robustness.push(s);
+                        if allowed(2) {
+                            base_ran = true;
+                            let st = verifier.test_stage2_not_found().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
                         }
-                        (
-                            summary.pass_rate,
-                            summary.passed_count,
-                            summary.total_stages,
-                            summary.stages,
-                        )
+                        if allowed(3) {
+                            base_ran = true;
+                            let st = verifier.test_stage3_echo().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(4) {
+                            base_ran = true;
+                            let st = verifier.test_stage4_user_agent().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(5) {
+                            base_ran = true;
+                            let st = verifier.test_stage5_file_storage().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if base_ran {
+                            for s in verifier.run_robustness().await {
+                                log_robust(logger, std::slice::from_ref(&s));
+                                extra_robustness.push(s);
+                            }
+                        }
+                        if campaign_only(6) {
+                            let st = if prior_failed {
+                                fail_stage(
+                                    6,
+                                    "Stage 6: Range requests (206 + Content-Range)",
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                verifier.test_stage6_range().await
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if campaign_only(7) {
+                            let st = if prior_failed {
+                                fail_stage(
+                                    7,
+                                    "Stage 7: Conditional GET (ETag / Last-Modified -> 304)",
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                verifier.test_stage7_conditional().await
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if campaign_only(8) {
+                            let st = if prior_failed {
+                                fail_stage(
+                                    8,
+                                    "Stage 8: gzip content negotiation",
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                verifier.test_stage8_compression().await
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if campaign_only(9) || campaign_only(10) {
+                            // Upload limits and hardening run under a 128MB
+                            // cap: restart the candidate, then restore it.
+                            if prior_failed {
+                                if campaign_only(9) {
+                                    let st = fail_stage(
+                                        9,
+                                        "Stage 9: Chunked uploads, 100-continue, size limits",
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    );
+                                    log_stage(logger, &st);
+                                    stages.push(st);
+                                }
+                                if campaign_only(10) {
+                                    let st = fail_stage(
+                                        10,
+                                        "Stage 10: Hardening (traversal, limits, slow-loris)",
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    );
+                                    log_stage(logger, &st);
+                                    stages.push(st);
+                                }
+                            } else {
+                                let limits_extras = crate::sandbox::docker::CandidateRunExtras {
+                                    memory: Some("128m".to_string()),
+                                    ..Default::default()
+                                };
+                                let restarted = sandbox.stop_candidate().and_then(|_| {
+                                    sandbox.start_candidate_in_docker_with(
+                                        workdir,
+                                        port,
+                                        &limits_extras,
+                                    )
+                                });
+                                match restarted {
+                                    Err(e) => {
+                                        let msg =
+                                            format!("memory-capped candidate start failed: {e}");
+                                        for (stage, stage_name) in [
+                                            (9u32, "Stage 9: Chunked uploads, 100-continue, size limits"),
+                                            (10, "Stage 10: Hardening (traversal, limits, slow-loris)"),
+                                        ] {
+                                            if campaign_only(stage) {
+                                                let st = fail_stage(stage, stage_name, msg.clone());
+                                                log_stage(logger, &st);
+                                                stages.push(st);
+                                            }
+                                        }
+                                    }
+                                    Ok(()) => {
+                                        let _ = sandbox.connect_candidate_to_network();
+                                        if !sandbox.wait_for_port(port, 25).await {
+                                            let msg = "candidate did not reopen its port under the memory cap".to_string();
+                                            for (stage, stage_name) in [
+                                                (9u32, "Stage 9: Chunked uploads, 100-continue, size limits"),
+                                                (10, "Stage 10: Hardening (traversal, limits, slow-loris)"),
+                                            ] {
+                                                if campaign_only(stage) {
+                                                    let st =
+                                                        fail_stage(stage, stage_name, msg.clone());
+                                                    log_stage(logger, &st);
+                                                    stages.push(st);
+                                                }
+                                            }
+                                        } else {
+                                            if campaign_only(9) {
+                                                let st = verifier.test_stage9_uploads().await;
+                                                prior_failed |= !st.passed;
+                                                log_stage(logger, &st);
+                                                stages.push(st);
+                                            }
+                                            if campaign_only(10) {
+                                                let st = if prior_failed {
+                                                    fail_stage(
+                                                        10,
+                                                        "Stage 10: Hardening (traversal, limits, slow-loris)",
+                                                        "skipped due to failure in earlier stages"
+                                                            .to_string(),
+                                                    )
+                                                } else {
+                                                    verifier.test_stage10_hardening().await
+                                                };
+                                                log_stage(logger, &st);
+                                                stages.push(st);
+                                            }
+                                        }
+                                    }
+                                }
+                                let _ = sandbox.stop_candidate();
+                                let _ =
+                                    sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                                let _ = sandbox.wait_for_port(port, 25).await;
+                            }
+                        }
+                        let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                        let ts = stages.len() as u32;
+                        let pr = if ts == 0 {
+                            0.0
+                        } else {
+                            ps as f64 / ts as f64 * 100.0
+                        };
+                        (pr, ps, ts, stages)
                     }
                     TaskType::Wal => {
                         let log_stage =

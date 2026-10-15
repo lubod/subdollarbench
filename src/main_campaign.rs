@@ -734,6 +734,7 @@ mod tests {
                 redis_stages: vec![1],
                 proxy_stages: Vec::new(),
                 queue_stages: Vec::new(),
+                http_stages: Vec::new(),
             },
             budget_usd: 0.1,
             max_turns: 3,

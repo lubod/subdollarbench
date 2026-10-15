@@ -323,3 +323,33 @@ type `queue` (port 6385), nine tickets (0-8), 9-stage suite, RULES
   queue ladder is materially easier for this model than redis/proxy
   (where it walls at t4), which is the per-app spread the portfolio
   exists to measure.
+
+## 17. sdb-http: the file-server campaign (2026-10-15.4)
+
+The final portfolio app (DECISIONS #11 order), ported the same way as
+sdb-edge: task `http`, eight tickets (0-7), stages 1-10, RULES
+`2026-10-15.4`. Design choices:
+
+- **The single-shot board is frozen**: the existing 5-stage http suite is
+  the base board; stages 6-10 (ranges, validators, compression, upload
+  limits, hardening) run **only** when a campaign ticket accepts them, so
+  no existing http history moves.
+- **Depth is the HTTP semantics a production file server must have**:
+  `Range`/`Content-Range` incl. suffix/open/416, `ETag` +
+  `Last-Modified` with strict conditional semantics (stale validators
+  never 304, rewritten content changes the ETag), gzip negotiation with
+  real decoding (flate2) and a size check, chunked uploads and
+  `Expect: 100-continue` without deadlock.
+- **Limits run under a real cap**: the suite declares a 128MiB body and
+  the pipeline restarts the candidate under a 128MB container cap for
+  stages 9-10, so "reject at the head" is enforced by physics, not by a
+  timeout. The contract advertises a 16MiB cap.
+- **Hardening mirrors the neighbouring ladders**: traversal in raw,
+  URL-encoded and double-encoded spellings (must never leak), 32KiB heads
+  refused, malformed request lines 400, slow-loris reclaimed <=12s, all
+  with normal traffic flowing.
+- **Mock rigor**: the tests' mock file server implements ranges,
+  validators with real date comparisons, gzip, chunked/continue uploads
+  and the guards; ten injected defects each prove the intended stage
+  catches them. The live proof (reference file server through the real
+  pipeline) is the next step (Slice L5).

@@ -8,6 +8,21 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-15.4`: campaign sdb-http (task `http`, tickets 0-7). The
+///   single-shot http suite (stages 1-5: root/404/echo/user-agent/files)
+///   is unchanged; five campaign-only stages extend it: (6) byte ranges
+///   (206 + `Content-Range`, suffix/open ranges, 416 unsatisfiable,
+///   plain GET unchanged), (7) conditional GET (`ETag` +
+///   `Last-Modified` validators, `If-None-Match`/`If-Modified-Since` ->
+///   304 with no body, stale validators never 304, rewritten content
+///   changes the ETag), (8) gzip negotiation (`Accept-Encoding: gzip` ->
+///   `Content-Encoding: gzip` with a decodable, smaller body; identity ->
+///   raw bytes), (9) chunked uploads + `Expect: 100-continue` (no
+///   deadlock) + a declared 128MiB body refused (`413`) under a **128MB
+///   cap** restart, (10) hardening (path traversal in three spellings
+///   never leaks; 32KiB heads refused; malformed request lines 400;
+///   slow-loris reclaimed <=12s) under the same cap. Campaign acceptance
+///   for task `http` validates ids 1..=10 (`http_stages`).
 /// - `2026-10-15.3`: campaign sdb-queue (task `queue`, tickets 0-8) — a new
 ///   task type (default port 6385) with a 9-stage suite: (1) ENQ/LEASE/ACK
 ///   FIFO round trip, (2) visibility leases + expiry + connection ownership,
@@ -375,7 +390,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-15.3";
+pub const RULES_VERSION: &str = "2026-10-15.4";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
