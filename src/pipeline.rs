@@ -5092,6 +5092,315 @@ main()
         }
     }
 
+    /// sdb-http reference file server (live ladder proof): stdlib-only
+    /// HTTP/1.1 server with keep-alive, echo/user-agent endpoints, a
+    /// file store under `./data/files`, byte ranges (incl. suffix/open
+    /// and 416), ETag/Last-Modified validators with strict conditional
+    /// semantics, gzip negotiation, chunked + `Expect: 100-continue`
+    /// uploads with a 16MiB declared-body cap, a 8KiB head cap, path
+    /// traversal rejection and a ~3s stalled-head reclaim. Env override
+    /// `SDB_HTTP_BASE` points the store elsewhere for local development.
+    const HTTP_MOCK_SERVER_PY: &str = r#"import email.utils
+import gzip
+import os
+import re
+import socket
+import sys
+import threading
+import time
+from urllib.parse import unquote
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+BASE = os.environ.get("SDB_HTTP_BASE") or os.path.join(os.getcwd(), "data")
+FILES = os.path.join(BASE, "files")
+os.makedirs(FILES, exist_ok=True)
+
+HEAD_CAP = 8 * 1024
+UPLOAD_CAP = 16 * 1024 * 1024
+READ_TIMEOUT = 3.0
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+GZIP_MIN = 1024
+
+STATUS_REASON = {
+    200: "OK",
+    201: "Created",
+    206: "Partial Content",
+    304: "Not Modified",
+    400: "Bad Request",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    413: "Payload Too Large",
+    416: "Range Not Satisfiable",
+    431: "Request Header Fields Too Large",
+}
+
+
+def http_date(ts):
+    return email.utils.formatdate(ts, usegmt=True)
+
+
+def parse_http_date(value):
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+        if dt is None:
+            return None
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def file_info(name):
+    path = os.path.join(FILES, name)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return path, st.st_size, int(st.st_mtime)
+
+
+def etag_for(name, size, mtime):
+    return f"\"{name}-{size}-{mtime}\""
+
+
+def response(status, body=b"", extra=(), close=False, reason=None):
+    head = [f"HTTP/1.1 {status} {reason or STATUS_REASON.get(status, 'OK')}"]
+    for k, v in extra:
+        head.append(f"{k}: {v}")
+    if status != 304:
+        head.append(f"Content-Length: {len(body)}")
+    head.append("Connection: close" if close else "Connection: keep-alive")
+    return ("\r\n".join(head) + "\r\n\r\n").encode("latin-1") + (b"" if status == 304 else body)
+
+
+def read_head(sock):
+    sock.settimeout(READ_TIMEOUT)
+    buf = b""
+    try:
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(1024)
+            if not chunk:
+                return None
+            buf += chunk
+            if len(buf) > HEAD_CAP:
+                return b"TOO_BIG"
+    except socket.timeout:
+        return None
+    except OSError:
+        return None
+    return buf
+
+
+def read_exact(sock, n):
+    sock.settimeout(10.0)
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(min(65536, n - len(buf)))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def read_chunked(sock, initial=b""):
+    sock.settimeout(10.0)
+    data = initial
+    body = b""
+    while True:
+        while b"\r\n" not in data:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return body
+            data += chunk
+        idx = data.index(b"\r\n")
+        try:
+            size = int(data[:idx].split(b";")[0], 16)
+        except ValueError:
+            return body
+        data = data[idx + 2 :]
+        if size == 0:
+            return body
+        while len(data) < size + 2:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return body
+            data += chunk
+        body += data[:size]
+        data = data[size + 2 :]
+
+
+def serve_files(conn, method, raw_path, headers, data_after_head):
+    """GET /files/{name}."""
+    name = raw_path[len("/files/") :]
+    if not name or not NAME_RE.match(name):
+        return response(404, b"not found", close=True), True
+    info = file_info(name)
+    if info is None:
+        return response(404, b"not found", close=True), True
+    path, size, mtime = info
+    etag = etag_for(name, size, mtime)
+    last_modified = http_date(mtime)
+    # Conditional.
+    inm = headers.get("if-none-match", "")
+    ims = parse_http_date(headers.get("if-modified-since", ""))
+    if inm and inm.strip() == etag:
+        return response(304, extra=[("ETag", etag), ("Last-Modified", last_modified)]), False
+    if ims is not None and mtime <= ims and not inm:
+        return response(304, extra=[("ETag", etag), ("Last-Modified", last_modified)]), False
+    # Range.
+    status = 200
+    extra = [("ETag", etag), ("Last-Modified", last_modified), ("Accept-Ranges", "bytes")]
+    start, end = 0, size - 1
+    range_hdr = headers.get("range", "")
+    if range_hdr.startswith("bytes="):
+        spec = range_hdr[len("bytes=") :]
+        a, _, b = spec.partition("-")
+        if a == "":
+            try:
+                n = int(b)
+            except ValueError:
+                n = 0
+            if n <= 0:
+                return response(416, extra=[("Content-Range", f"bytes */{size}")]), False
+            start, end = max(0, size - n), size - 1
+        else:
+            try:
+                start = int(a)
+                end = int(b) if b else size - 1
+            except ValueError:
+                return response(400, b"bad range", close=True), True
+            end = min(end, size - 1)
+        if start >= size or start > end:
+            return response(416, extra=[("Content-Range", f"bytes */{size}")]), False
+        status = 206
+        extra.append(("Content-Range", f"bytes {start}-{end}/{size}"))
+    with open(path, "rb") as f:
+        f.seek(start)
+        body = f.read(end - start + 1)
+    # gzip negotiation (identity for ranges).
+    if status == 200 and len(body) > GZIP_MIN and "gzip" in headers.get("accept-encoding", "").lower():
+        body = gzip.compress(body)
+        extra.append(("Content-Encoding", "gzip"))
+    return response(status, body, extra=extra), False
+
+
+def handle_request(conn, head_bytes, data_after_head):
+    text = head_bytes.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+    lines = text.split("\r\n")
+    parts = lines[0].split(" ")
+    if len(parts) != 3 or not parts[2].startswith("HTTP/1."):
+        return response(400, b"bad request", close=True), True, True
+    method, target, _version = parts[0], parts[1], parts[2]
+    headers = {}
+    for line in lines[1:]:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            headers[k.strip().lower()] = v.strip()
+    close_after = headers.get("connection", "").lower() == "close"
+    # Path traversal: reject anything that leaves the store.
+    decoded = unquote(target)
+    if ".." in decoded or decoded.startswith("//"):
+        return response(404, b"not found", close=True), True, True
+    path = decoded.split("?", 1)[0]
+    text_plain = [("Content-Type", "text/plain")]
+    if method == "GET" and path == "/":
+        return response(200, b"sdb-http ok\n", extra=text_plain, close=close_after), close_after, False
+    if method == "GET" and path.startswith("/echo/"):
+        token = unquote(path[len("/echo/") :])
+        return response(
+            200, token.encode("latin-1", "replace"), extra=text_plain, close=close_after
+        ), close_after, False
+    if method == "GET" and path == "/user-agent":
+        ua = headers.get("user-agent", "")
+        return response(
+            200, ua.encode("latin-1", "replace"), extra=text_plain, close=close_after
+        ), close_after, False
+    if method == "GET" and path.startswith("/files/"):
+        resp, close2 = serve_files(conn, method, path, headers, data_after_head)
+        return resp, close_after or close2, False
+    if method == "POST" and path.startswith("/files/"):
+        name = path[len("/files/") :]
+        if not name or not NAME_RE.match(name):
+            return response(400, b"bad name", close=True), True, True
+        cl = headers.get("content-length")
+        cl_n = int(cl) if cl and cl.isdigit() else None
+        if cl_n is not None and cl_n > UPLOAD_CAP:
+            return response(413, b"too large", close=True), True, True
+        if headers.get("expect", "").lower() == "100-continue":
+            try:
+                conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+            except OSError:
+                return b"", True, True
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            body = read_chunked(conn, data_after_head)
+        elif cl_n is not None:
+            body = data_after_head[:cl_n]
+            if len(body) < cl_n:
+                body += read_exact(conn, cl_n - len(body))
+        else:
+            body = data_after_head
+        with open(os.path.join(FILES, name), "wb") as f:
+            f.write(body)
+        return response(201, b"", close=close_after), close_after, False
+    if method == "GET" and path == "/status":
+        return response(200, b"ok\n", close=close_after), close_after, False
+    if method not in ("GET", "POST", "HEAD"):
+        return response(400, b"unsupported method", close=True), True, True
+    return response(404, b"not found", close=close_after), close_after, False
+
+
+def handle_client(conn):
+    try:
+        while True:
+            head = read_head(conn)
+            if head is None:
+                return
+            if head == b"TOO_BIG":
+                conn.sendall(response(431, b"too large", close=True))
+                return
+            head_end = head.index(b"\r\n\r\n") + 4
+            data_after_head = head[head_end:]
+            resp, close_after, fatal = handle_request(conn, head, data_after_head)
+            if resp:
+                conn.sendall(resp)
+            if close_after or fatal:
+                return
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def main():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", PORT))
+    srv.listen(128)
+    print(f"sdb-http listening on {PORT} store={FILES}", flush=True)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+
+
+main()
+"#;
+
+    /// Write the sdb-http reference server into `dir`, listening on `port`.
+    fn write_http_mock(dir: &Path, port: u16) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("http_server.py"), HTTP_MOCK_SERVER_PY).unwrap();
+        let start = format!("#!/bin/bash\nexec python3 -u /workspace/http_server.py {port}\n");
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
     /// Write the mock candidate into `dir`, listening on `port`.
     /// `boot_sleep_secs` delays the listener (used to keep a run inside
     /// verification while a test flips the cancel flag).
@@ -6081,6 +6390,60 @@ main()
             (9, 9)
         );
         cleanup_covtest_network("queuelive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-http FULL-ladder live proof (eval-only, no model): the
+    /// reference file server driven through the real pipeline with
+    /// acceptance [1..10] — including the 128MB-capped restart that runs
+    /// stages 9/10 (uploads + hardening).
+    #[tokio::test]
+    async fn test_pipeline_eval_only_http_full_ladder_live() {
+        let worker = 91u8;
+        let port = crate::web::server::worker_port(TaskType::Http.default_port(), worker);
+        let dir = covtest_dir("httplive");
+        let workdir = dir.join("workspace");
+        write_http_mock(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-http full ladder fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "httplive");
+        config.task = TaskType::Http;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-http".to_string(),
+            stage: 7,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("sdb-http full ladder must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        for needle in [
+            "Stage 1: GET / (Root 200 OK + keep-alive) -> PASS",
+            "Stage 2: 404 Not Found Handling -> PASS",
+            "Stage 3: GET /echo/{str} -> PASS",
+            "Stage 4: GET /user-agent Header Echo -> PASS",
+            "Stage 5: POST & GET /files/{filename} -> PASS",
+            "Stage 6: Range requests (206 + Content-Range) -> PASS",
+            "Stage 7: Conditional GET (ETag / Last-Modified -> 304) -> PASS",
+            "Stage 8: gzip content negotiation -> PASS",
+            "Stage 9: Chunked uploads, 100-continue, size limits -> PASS",
+            "Stage 10: Hardening (traversal, limits, slow-loris) -> PASS",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (10, 10)
+        );
+        cleanup_covtest_network("httplive");
         let _ = fs::remove_dir_all(&dir);
     }
 

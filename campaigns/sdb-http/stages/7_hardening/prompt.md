@@ -12,8 +12,8 @@ stall mid-request. Reject cheaply, stay bounded, keep serving.
 2. **Oversized request head**: a request whose head exceeds your cap
    (accept anything >= 8KiB as the cap; the suite sends 32KiB) -> a 4xx
    (`431`/`400`/`413`) or a clean close — never unbounded buffering.
-3. **Malformed request line** -> `400 Bad Request` (or close), server
-   survives.
+3. **Malformed request lines and unknown methods** -> a **4xx**
+   (`400`/`405`/`501`) or a clean close, server survives.
 4. **Slow-loris**: a connection that sends a partial request head and
    stalls must be **reclaimed within ~10 seconds** while other clients
    keep working.

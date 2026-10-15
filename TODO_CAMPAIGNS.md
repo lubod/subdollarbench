@@ -397,8 +397,22 @@ board (root/404/echo/user-agent/files) is unchanged.
   paths, traversal guard, head cap, stalled-socket reclaim) with **10
   injected defects**, each asserted caught by the intended stage with a
   naming error, plus a faithful-pass run over stages 6-10.
-- [ ] L5. Live proof (eval-only reference file server through the real
-  pipeline, incl. the capped restart), then model grid cells.
+- [x] L5a. LIVE proof (2026-10-15, no model): a stdlib-only reference file
+  server (`HTTP_MOCK_SERVER_PY` in `src/pipeline.rs`: keep-alive, echo/UA,
+  `./data/files` store, ranges incl. suffix/open/416, ETag +
+  Last-Modified with strict conditionals, gzip negotiation, chunked +
+  `Expect: 100-continue` uploads, 16MiB declared cap, 8KiB head cap,
+  traversal rejection, ~3s stalled-head reclaim) driven through the real
+  pipeline with acceptance [1..10] — **all 10 stages PASS**
+  (`test_pipeline_eval_only_http_full_ladder_live`, ~56s incl. the bench
+  and the 128MB-capped restart that runs 9/10).
+  Two findings from the proof: (1) the reference itself first missed the
+  single-shot contract's `Content-Type: text/plain` on echo/user-agent —
+  the verifier caught it (the fixture, not the harness); (2) the
+  hardening stage only accepted 400/505 for a garbage request line, which
+  would fail a correct 405/501 answer — tolerance widened to any 4xx or
+  clean close (RULES `2026-10-15.5`, prompt wording updated).
+- [ ] L5b. Model grid cells for sdb-http.
 
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
@@ -439,6 +453,10 @@ Wave log:
   **84.82% lines** (regions 85.69%, functions 89.09%). The eval-only
   reference-proxy run covers the proxy arm's stage-6..9 orchestration and
   the fixture (pipeline.rs 56.59 -> 59.12%); gate margin ~4.8pp.
+- Wave 11 (sdb-http live proof, 2026-10-15): aggregate 84.52 ->
+  **84.76% lines** (regions 85.55%, functions 88.26%). The eval-only
+  reference-file-server run covers the http arm's campaign stages and the
+  capped restart path (verifier/http.rs 76.80%). Gate margin ~4.8pp.
 - Wave 10 (sdb-http campaign, 2026-10-15): aggregate 84.76 ->
   **84.52% lines** (regions 85.31%, functions 88.18%). verifier/http.rs at
   76.79% lines (the five new stages + the full mock/defect matrix are

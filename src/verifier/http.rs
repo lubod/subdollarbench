@@ -1316,7 +1316,9 @@ impl HttpVerifier {
                 "32KiB of headers must be refused (431/400/close), got {status} (closed={closed})"
             ));
         }
-        // (c) Malformed request line: 400 or close.
+        // (c) Garbage request line: any 4xx (an unknown method is a method
+        // error, not necessarily a syntax error) or a clean close is
+        // acceptable; a 2xx or a hang is not.
         let (buf, closed) = self
             .raw_exchange(
                 "GARBAGE / HTTP/1.1\r\nHost: x\r\n\r\n",
@@ -1324,9 +1326,10 @@ impl HttpVerifier {
             )
             .await?;
         let status = Self::head_status(&buf).map(|(s, _)| s).unwrap_or(0);
-        if !(matches!(status, 400 | 505) || (status == 0 && closed)) {
+        let rejected = (400..500).contains(&status) || (status == 0 && closed);
+        if !rejected {
             return Err(format!(
-                "a malformed request line must answer 400 (or close), got {status}"
+                "a garbage request line must be rejected with a 4xx (or close), got {status}"
             ));
         }
         // (d) Slow-loris: reclaimed within ~12s while normal traffic flows.

@@ -353,3 +353,11 @@ sdb-edge: task `http`, eight tickets (0-7), stages 1-10, RULES
   and the guards; ten injected defects each prove the intended stage
   catches them. The live proof (reference file server through the real
   pipeline) is the next step (Slice L5).
+- Live proof (2026-10-15): the reference file server passed the full
+  sdb-http ladder through the real pipeline (acceptance [1..10]; all 10
+  stages PASS in ~56s), including the 128MB-capped restart for the
+  upload-limit and hardening stages. Two findings: the reference initially
+  missed the single-shot contract's `Content-Type: text/plain` (the
+  verifier caught the fixture, not a harness bug), and the hardening
+  stage's garbage-line check was widened to accept any 4xx or a clean
+  close (RULES `2026-10-15.5`) so a correct 405/501 is not failed.

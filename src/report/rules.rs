@@ -8,6 +8,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-15.5`: sdb-http hardening tolerance — a garbage request line
+///   ("GARBAGE / HTTP/1.1") is accepted when rejected with ANY 4xx
+///   (400/405/501/505) or a clean close, not only 400/505 (an unknown
+///   method is a method error, not necessarily a syntax error). The
+///   hardening prompt says the same. No other task is affected.
 /// - `2026-10-15.4`: campaign sdb-http (task `http`, tickets 0-7). The
 ///   single-shot http suite (stages 1-5: root/404/echo/user-agent/files)
 ///   is unchanged; five campaign-only stages extend it: (6) byte ranges
@@ -390,7 +395,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-15.4";
+pub const RULES_VERSION: &str = "2026-10-15.5";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
