@@ -388,6 +388,20 @@ flakes, serialize live-docker tests with a shared test lock.
   timeout (slow-loris)" — the oversized-header/body rejections passed).
   Honest capability gaps: active health checks (t4), slow-loris timeout
   (t6); caching is correct. Rejections passed: nothing on t0-t3.
+- **nemotron-3-super-120b-a12b:free** (spec tickets 0-6, 2026-10-15 run
+  1, `campaign_sdb-edge_openrouter_nvidia_nemotron-3-super-120b-a12b_free_20261015_111858`,
+  RULES `2026-10-15.2`, $0.50 cap, ~20 min): reached **none** — t0 **FAIL
+  0/1** (recorded $0.0329, 24 initial + 12 repair turns; ~74k
+  prompt tokens). Its agent tooling worked this time (`write`/`bash` OK,
+  unlike the sdb-kv cell) and it produced a 234-line `proxy.py` with
+  round-robin + X-Forwarded-For, but the verifier cannot parse its
+  response in either round ("Failed to parse HTTP response from
+  127.0.0.1:8091"): the hand-rolled forwarder echoes upstream bytes yet
+  emits a malformed/partial reply (response-layer failure, not routing).
+  Cost nit: the `:free` variant still lands a ~$0.03 cost in the record
+  (same as its sdb-kv cell, $0.0312) — the pricing path does not zero
+  free-tier variants; open item (either zero it or label the rows as
+  token-only).
 - Harness bugs this cell found (all fixed, same day):
   (a) candidate restarts did not re-attach to the run network -> a
   restarted proxy could not resolve `upstreamN` (getaddrinfo stall; stage
