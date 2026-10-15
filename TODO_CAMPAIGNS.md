@@ -600,6 +600,22 @@ flakes, serialize live-docker tests with a shared test lock.
   inkling-small's [2,3] and ling-edge run 1's spoiled t5). None of the
   replayed-under-current-rules outcome can rescue the final state; the
   pre-repair snapshot was squashed into the per-ticket commit.
+- **ling-3.1-flash** (sdb-http run 2, 2026-10-15,
+  `campaign_sdb-http_openrouter_inclusionai_ling-3.1-flash_20261015_163332`,
+  RULES `2026-10-15.5`, $0.80 cap, ~40 min): reached **4** (5
+  regression-free), $0.1183, tickets/$ 42.3. t0-t4 PASS first try
+  (19/16/18/12/12 turns, $0.0120-$0.0216); t5 gzip **FAIL 5/8** (24 turns,
+  $0.0335) with **regressions [6, 7]** — adding compression broke
+  **suffix-range support** (`Range: bytes=-4` -> `200` instead of `206`)
+  on a stage that had passed at ticket 3. The single repair round (12
+  steps) failed to fix it: the model could not reproduce the failure
+  locally ("my local file test works..."), and its repair reasoning even
+  guessed the wrong endpoint. Third model-caused regression in the grid.
+- **Variance read (same model/app/spec)**: ling on sdb-http = **reached 6
+  (run 1) vs 4 (run 2)** — a two-ticket spread with different failure
+  modes (run 1: a repair broke the 8KiB head cap at t7; run 2: an edit
+  broke suffix ranges at t5, and the repair failed). Reinforces the
+  "sample more than once per (model, app)" rule for the paper's curves.
 - **Launch hygiene (learned twice)**: rebuild `target/release/subdollarbench`
   after ANY grading/harness change before launching cells — a stale binary
   spoiled ling's sdb-edge-run-1 t5 verdict and this cell's t7 initial
