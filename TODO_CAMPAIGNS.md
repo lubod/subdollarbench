@@ -576,6 +576,35 @@ flakes, serialize live-docker tests with a shared test lock.
   depends on the host mirrors any more (candidates dial the network
   aliases; fixture markers have in-process fallbacks).
 
+## Grid log (sdb-http, omp, high effort)
+
+- **ling-3.1-flash** (spec tickets 0-7, 2026-10-15 run 1,
+  `campaign_sdb-http_openrouter_inclusionai_ling-3.1-flash_20261015_155225`,
+  RULES `2026-10-15.4` semantics in a **stale binary** (see below), $0.80
+  cap, ~30 min): **reached 6 — seven tickets first try, one stage short of
+  the full ladder**, $0.1560, tickets/$ 44.9, 7 regression-free. Per
+  ticket: s0 root+404 PASS 8t ($0.0133) · s1 echo/UA PASS 9t ($0.0079) ·
+  s2 files PASS 16t ($0.0204) · s3 ranges PASS 12t ($0.0155) · s4
+  validators PASS 12t ($0.0144) · s5 gzip PASS 12t ($0.0157) · s6 chunked
+  uploads + limits PASS 18t ($0.0273, under the 128MB cap) · s7 hardening
+  **FAIL 9/10** 30t ($0.0415).
+  The t7 story has two layers: the INITIAL failure was the *stale binary's*
+  strict garbage-line rule ("a malformed request line must answer 400 (or
+  close), got 405" — RULES `2026-10-15.4` wording; the candidate's 405 is
+  accepted under `2026-10-15.5`, which was committed but not rebuilt into
+  the release binary before the cell launched). The model then spent its
+  repair round on that report and **broke the 8KiB head cap** — the final
+  state answers **200 to a 32KiB header block** ("32KiB of headers must be
+  refused (431/400/close), got 200"), so the recorded verdict is a genuine
+  stage-10 failure (the third repair-induced regression in the grid, after
+  inkling-small's [2,3] and ling-edge run 1's spoiled t5). None of the
+  replayed-under-current-rules outcome can rescue the final state; the
+  pre-repair snapshot was squashed into the per-ticket commit.
+- **Launch hygiene (learned twice)**: rebuild `target/release/subdollarbench`
+  after ANY grading/harness change before launching cells — a stale binary
+  spoiled ling's sdb-edge-run-1 t5 verdict and this cell's t7 initial
+  attempt. (Add to the run checklist.)
+
 ## Grid log (sdb-queue, omp, high effort)
 
 - **ling-3.1-flash** (spec tickets 0-8, 2026-10-15 run 1,

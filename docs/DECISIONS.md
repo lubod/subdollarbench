@@ -361,3 +361,10 @@ sdb-edge: task `http`, eight tickets (0-7), stages 1-10, RULES
   verifier caught the fixture, not a harness bug), and the hardening
   stage's garbage-line check was widened to accept any 4xx or a clean
   close (RULES `2026-10-15.5`) so a correct 405/501 is not failed.
+- First model cell (2026-10-15): ling-3.1-flash reached 6 on sdb-http
+  (seven tickets first try, $0.1560, tickets/$ 44.9); the hardening ticket
+  failed by one stage — the initial 405-for-garbage failure was a stale
+  binary (RULES 2026-10-15.5 accepts any 4xx), and the model's repair then
+  broke the 8KiB head cap (200 for a 32KiB header block). Launch hygiene
+  note: rebuild the release binary after any grading change before
+  launching cells (two cells have now lost verdicts to a stale binary).
