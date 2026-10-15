@@ -3060,6 +3060,9 @@ impl BenchmarkPipeline {
         // 6 & 7. Verification & Interactive Repair
         let _ = fs::remove_file(config.workdir.join("READY"));
         let port = crate::web::server::worker_port(config.task.default_port(), config.worker);
+        // References are only for the agent and the bench: detach them
+        // while verifying so a candidate cannot proxy to `ref-*`.
+        sandbox.detach_references();
         let mut v_outcome = Self::run_verification(
             config.task,
             &config.workdir,
@@ -3075,6 +3078,9 @@ impl BenchmarkPipeline {
                 .map(|c| c.accepted_stages.as_slice()),
         )
         .await;
+        // The repair agent needs the references again (it probes exact
+        // output formats while fixing); the next verification detaches.
+        sandbox.reattach_references();
 
         let mut was_repaired = false;
         let mut feedback_rounds_used = 0u32;
@@ -3227,6 +3233,7 @@ impl BenchmarkPipeline {
 
                     // 4. Re-verify the updated candidate
                     let _ = fs::remove_file(config.workdir.join("READY"));
+                    sandbox.detach_references();
                     let next_outcome = Self::run_verification(
                         config.task,
                         &config.workdir,
@@ -3255,6 +3262,7 @@ impl BenchmarkPipeline {
                         best_pass_rate = next_outcome.pass_rate;
                     }
 
+                    sandbox.reattach_references();
                     if next_outcome.pass_rate >= 100.0 {
                         logger.log(&format!(
                         "[FEEDBACK] SUCCESS! Candidate surgically repaired to 100.0% stage pass in round {}!",

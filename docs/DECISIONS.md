@@ -395,3 +395,28 @@ Both changes are grading/spec semantics, hence a RULES bump (`2026-10-15.6`):
   throughput ticket (baseline gate) are their own waves; CI re-enable
   needs the GitHub-side Actions toggle (the workflow + 80% gate are in the
   repo); a coverage-margin wave is available on the biggest residuals.
+
+## 19. sdb-sql accepted; reference isolation becomes repo-wide (2026-10-15)
+
+The operator drafted `docs/PROPOSAL-sdb-sql.md` (one SQL-database
+campaign, 21 tickets in 7 tiers, differential oracle against bundled
+SQLite, lite variants, data-migration upgrade checks) and directed
+"fix issues, document, build". This supersedes DECISIONS #11's four-app
+portfolio and the single-shot boards once sdb-sql lands; the old specs,
+grids and boards stay as archived history (retirement is phased, Q6).
+
+Pre-build review resolutions are folded into the proposal (section
+"Review resolutions (2026-10-15, pre-build)"): coverage gating only where
+the harness computes it, pinned STATS semantics, a deterministic 5s-cancel
+query, an explicit oracle discard table + per-stage comparable-check
+floors + generator profile-coverage assertions, a pinned error-class
+mapping, `reached` defined as highest stage passed, wall/disk guards, a
+pinned `psql` client container, the rollup/portal shape, rollback-aware
+prompts, and full rollback scope.
+
+**Shipped with this entry (repo-wide fix)**: reference containers are now
+detached from the run network for every verification window
+(`detach_references`/`reattach_references`, wired around all
+`run_verification` calls, including repair rounds) so no candidate can
+proxy to `ref-*` and fake stages; the agent and the bench keep them. A
+live docker test pins resolve → unreachable → resolve.

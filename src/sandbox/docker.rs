@@ -511,6 +511,39 @@ impl SandboxManager {
         format!("subdollar-ref-pdf-{}", self.instance_id)
     }
 
+    /// Verification-time isolation: reference implementations are the
+    /// harness's oracle, never the candidate's tool. Candidates run on the
+    /// run network, so while verifying, every reference is detached from it
+    /// — a candidate must not be able to proxy to `ref-*` and fake its way
+    /// through stages. The agent keeps them during development and the
+    /// bench re-attaches them (it measures by alias).
+    pub fn detach_references(&self) {
+        let net = self.network_name();
+        for name in [
+            self.ref_redis_name(),
+            self.ref_http_name(),
+            self.ref_pdf_name(),
+        ] {
+            let _ = Command::new("docker")
+                .args(["network", "disconnect", &net, &name])
+                .output();
+        }
+    }
+
+    /// Re-attach references under their stable aliases (idempotent).
+    pub fn reattach_references(&self) {
+        let net = self.network_name();
+        for (name, alias) in [
+            (self.ref_redis_name(), "ref-redis"),
+            (self.ref_http_name(), "ref-http"),
+            (self.ref_pdf_name(), "ref-pdf"),
+        ] {
+            let _ = Command::new("docker")
+                .args(["network", "connect", "--alias", alias, &net, &name])
+                .output();
+        }
+    }
+
     pub fn network_name(&self) -> String {
         format!("subdollar-net-{}", self.instance_id)
     }
@@ -3017,6 +3050,66 @@ mod live_docker_cov_tests {
         let _ = docker(&["network", "rm", holder.as_str()]);
         sm.cleanup();
         SandboxManager::remove_network_retrying(&net);
+    }
+
+    /// References are the harness's oracle: on the run network while the
+    /// agent works, off it while verification runs (a candidate must not be
+    /// able to proxy to `ref-*` and fake stages).
+    #[test]
+    fn live_test_references_detached_for_verification() {
+        let id = id_for("refdetach");
+        let _cleanup = InstanceCleanup::new_guard(&id);
+        let sm = SandboxManager::with_id(&id);
+        sm.cleanup();
+        assert!(sm.ensure_network().is_ok());
+        assert!(sm.start_reference_redis(free_port()).is_ok());
+
+        // A probe container on the run network resolves the alias…
+        let ws = std::env::temp_dir().join(format!("covtest-refdetach-ws-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).expect("workspace");
+        let port = free_port();
+        fs::write(
+            ws.join("start.sh"),
+            format!("#!/bin/bash\nexec python3 -m http.server {port} --bind 0.0.0.0\n"),
+        )
+        .expect("start.sh");
+        let extras = CandidateRunExtras {
+            tmpfs: Vec::new(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            memory: None,
+            binds: Vec::new(),
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&ws, port, &extras)
+            .is_ok());
+        assert!(sm.connect_candidate_to_network().is_ok());
+        let candidate = sm.candidate_container_name();
+        let probe = |sm: &SandboxManager| -> bool {
+            let out = docker(&[
+                "exec",
+                sm.candidate_container_name().as_str(),
+                "python3",
+                "-c",
+                "import socket; socket.create_connection(('ref-redis', 6379), 2)",
+            ]);
+            out.status.success()
+        };
+        let _ = &candidate;
+        assert!(probe(&sm), "ref-redis must resolve while the agent works");
+
+        sm.detach_references();
+        assert!(
+            !probe(&sm),
+            "ref-redis must be unreachable during verification"
+        );
+
+        sm.reattach_references();
+        assert!(probe(&sm), "ref-redis must come back for the bench");
+
+        sm.cleanup();
+        let _ = fs::remove_dir_all(&ws);
     }
 
     /// Candidate launch knobs (tmpfs/env/ports/memory) land on the
