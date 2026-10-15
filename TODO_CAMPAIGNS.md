@@ -251,6 +251,22 @@ flakes, serialize live-docker tests with a shared test lock.
 
 ## Grid log (sdb-kv, omp, high effort)
 
+- **nemotron-3-super-120b-a12b:free** (spec 0-10, 2026-10-15 run 1,
+  `..._043542`, RULES `2026-10-14.13`): reached **none** — s0 **FAIL
+  2/3** ($0.0312, 28 initial + 12 repair = 40 turns), 0 regression-free.
+  Two failure layers: (1) its C server's `ht_get` returns `kv_t*` but
+  every caller treats it as `char*` -> segfault under the verifier
+  (stages 1-2 pass, 3-4 time out after the crash, no pubsub; advisory
+  102/103 die on connection drops); (2) **it could not operate the
+  agent's bash tool** — after one successful call, every later `bash`
+  invocation was rejected ("Service mode does not accept async or
+  timeout; use ready.timeout for readiness") and it burned most turns
+  guessing argument shapes instead of testing its code. Genuine model
+  failure: harness-tool operation is part of the measured skill; the
+  tool behaved per spec (early calls worked). Scheduled-cell mishap
+  before this run: the 00:05 timer shell was GC'd overnight; relaunched
+  manually at 04:35. **The 3-model grid now has cells for all three
+  models** (ling best: reached 4).
 - **ling-3.1-flash** (spec 0-10, 2026-10-14 run 12, `..._181711`, RULES
   `2026-10-14.13`): reached **0**. s0 PASS 3/3 ($0.0539, 28t, C). s1
   **FAIL 0/4** ($0.0607, 13+12, regressions [1,2,4] sev 3): the model
