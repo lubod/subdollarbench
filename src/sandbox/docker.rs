@@ -809,6 +809,22 @@ impl SandboxManager {
         Ok(())
     }
 
+    /// Is upstream container `idx` present and running? The pool's host
+    /// publishes are a harness convenience (verifier fixture markers have
+    /// byte-identical in-process fallbacks); the containers themselves are
+    /// what candidates dial, so pool health is a container-state question.
+    pub fn upstream_container_running(&self, idx: u8) -> bool {
+        let out = Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{.State.Running}}",
+                &self.upstream_name(idx),
+            ])
+            .output();
+        matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+    }
+
     pub fn upstream_name(&self, idx: u8) -> String {
         format!("subdollar-upstream{}-{}", idx, self.instance_id)
     }

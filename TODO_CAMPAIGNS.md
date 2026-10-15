@@ -365,6 +365,51 @@ Scheduling note: live-docker tests can flake under heavy host load
 (parallel agent builds); the suite is green on a quiet host. If CI shows
 flakes, serialize live-docker tests with a shared test lock.
 
+## Grid log (sdb-edge, omp, high effort)
+
+- **ling-3.1-flash** (spec tickets 0-6, 2026-10-15 run 1,
+  `campaign_sdb-edge_openrouter_inclusionai_ling-3.1-flash_20261015_101524`,
+  RULES `2026-10-15.2`, $0.80 cap, 29 min): **reached 4 as recorded
+  (reached 3 under the fixed harness — see below)**, $0.1907, 6 tickets
+  attempted. t0 genesis PASS first try (stage 1; 4482 req/s candidate
+  bench). t1 balance PASS (stages 1,2,3). t2 failover **FAIL -> repaired
+  in round 1** (stage 4 read timeout against a frozen upstream; the repair
+  added upstream timeouts + retry). t3 quick-failover PASS first try
+  (stage 6) — the t2 repair generalized. t4 health PASS in-run (stage 7)
+  but **luck**: the verify-time pool churn (harness bug (b) below) had the
+  candidate's prober already in unhealthy-recheck mode, which masked that
+  it never probes *healthy* upstreams. t5 caching FAIL x2 in-run (stage 8
+  read timeout = harness bug (a)), not a candidate failure.
+  Clean-harness replays (eval-only, no API cost, fixed binary):
+  t4 state -> t0-t3 PASS, **t4 FAIL stage 7 honestly** ("upstream2 was
+  down for 5s of idle but /status still says up — probe upstreams
+  actively"); final state -> **stage 8 (caching) PASS**, **stage 9 FAIL**
+  ("a half-sent request stayed open for 12s: enforce a header/read
+  timeout (slow-loris)" — the oversized-header/body rejections passed).
+  Honest capability gaps: active health checks (t4), slow-loris timeout
+  (t6); caching is correct. Rejections passed: nothing on t0-t3.
+- Harness bugs this cell found (all fixed, same day):
+  (a) candidate restarts did not re-attach to the run network -> a
+  restarted proxy could not resolve `upstreamN` (getaddrinfo stall; stage
+  8 read timeout). Restart blocks now call
+  `connect_candidate_to_network()`.
+  (b) the verify-time pool check used **host-published ports** (a harness
+  convenience with byte-identical in-process fallbacks) and rebuilt the
+  pool before *every* verification — killing the candidate's pooled
+  connections and health state right before routing stages. In eval-only
+  replays this produced spurious stage-2 `[0,20,10]` / stage-6/7 failures.
+  Pool health is now a container-state check (`upstream_container_running`)
+  and the pool is rebuilt only when missing/stopped; the misleading
+  "unreachable at verify; recreating fresh" churn is gone.
+  (c) the proxy bench tried the live-nginx calibration (`ref-http`) even
+  though the denominator is always discarded for proxy tasks (misleading
+  "[BENCH] live Nginx reference FAILED"); the calibration is now skipped.
+  Open question (hygiene): in this environment the upstream containers'
+  host publishes (8101-8103) are configured but sometimes have no
+  listener (manual `docker run -p` works). Nothing in the graded path
+  depends on the host mirrors any more (candidates dial the network
+  aliases; fixture markers have in-process fallbacks).
+
 ## Grid log (sdb-kv, omp, high effort)
 
 - **nemotron-3-super-120b-a12b:free** (spec 0-10, 2026-10-15 run 1,

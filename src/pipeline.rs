@@ -24,6 +24,7 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
         crate::web::server::worker_port(PROXY_UPSTREAM_PORTS[2], worker),
     ]
 }
+
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::sandbox::opencode::{OpenCodeRunner, OPENCODE_VERSION};
 use crate::sandbox::AgentRunner;
@@ -1966,22 +1967,31 @@ impl BenchmarkPipeline {
                                 )
                             })
                             .collect();
-                        let pool_ok = crate::config::upstreams_reachable(
-                            &ups.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
-                        );
+                        // Pool health is a container-state question: the host
+                        // publishes exist only for harness-side fixture reads
+                        // (which fall back to byte-identical in-process stubs),
+                        // and rebuilding the pool here would kill the
+                        // candidate's pooled connections and health state right
+                        // before routing stages (observed as spurious
+                        // round-robin/failover flakes). Only a missing or
+                        // stopped pool is rebuilt.
+                        let pool_ok = (1u8..=3u8).all(|i| sandbox.upstream_container_running(i));
                         if !pool_ok {
                             logger.log(
-                                "[SETUP] Upstream pool unreachable at verify; recreating fresh...",
+                                "[SETUP] Upstream pool missing/stopped at verify; rebuilding...",
                             );
-                            match sandbox
-                            .start_upstream_pool(&worker_upstream_ports(worker))
-                        {
-                            Ok(()) => logger.log("[SETUP] Upstream pool recreated."),
-                            Err(e) => logger.log(&format!(
-                                "[SETUP] Warning: upstream pool recreate failed: {}. Proxy stages will fail.",
-                                e
-                            )),
-                        }
+                            match sandbox.start_upstream_pool(&worker_upstream_ports(worker)) {
+                                Ok(()) if (1u8..=3u8).all(|i| sandbox.upstream_container_running(i)) => {
+                                    logger.log("[SETUP] Upstream pool rebuilt.");
+                                }
+                                Ok(()) => logger.log(
+                                    "[SETUP] Warning: rebuilt upstream pool not all running; proxy stages may flap.",
+                                ),
+                                Err(e) => logger.log(&format!(
+                                    "[SETUP] Warning: upstream pool rebuild failed: {}. Proxy stages will fail.",
+                                    e
+                                )),
+                            }
                         }
                         let verifier = ProxyVerifier::new(port, Some(verifier_seed), ups);
                         // Single-shot proxy runs stages 1-5; the sdb-edge
@@ -2469,7 +2479,15 @@ impl BenchmarkPipeline {
             }
             TaskType::Proxy => {
                 match sandbox.start_upstream_pool(&worker_upstream_ports(config.worker)) {
-                    Ok(()) => logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready."),
+                    Ok(()) => {
+                        if (1u8..=3u8).all(|i| sandbox.upstream_container_running(i)) {
+                            logger.log("[SETUP] Upstream nginx pool on :8101/:8102/:8103 ready.");
+                        } else {
+                            logger.log(
+                                "[SETUP] Warning: upstream pool not all running; proxy stages may flap.",
+                            );
+                        }
+                    }
                     Err(e) => logger.log(&format!(
                         "[SETUP] Warning: upstream pool unavailable: {}. Proxy stages will fail.",
                         e
@@ -2991,32 +3009,14 @@ impl BenchmarkPipeline {
                         ));
                         throughput = Some(tp);
                     }
-                    if config.batch_reference.is_none() {
-                        // Same nginx denominator as http: a proxy cannot
-                        // beat direct. Live per-trial when no batch ref.
-                        logger.log("[BENCH] Calibrating live official Nginx baseline (nginx:alpine on port 8081)...");
-                        match BenchmarkRunner::run_wrk_benchmark_async(
-                            &sandbox.network_name(),
-                            "ref-http",
-                            80,
-                        )
-                        .await
-                        {
-                            Ok(ref_tp) => {
-                                logger.log(&format!(
-                                    "  Official Reference Nginx: {:.0} req/sec",
-                                    ref_tp
-                                ));
-                                reference_throughput = Some(ref_tp);
-                            }
-                            // See the Redis arm: a swallowed failure here
-                            // is indistinguishable from having no reference.
-                            Err(e) => logger.log(&format!(
-                                "  [BENCH] live Nginx reference FAILED: {e:#}. \
-                                 Throughput will be reported but NOT ranked."
-                            )),
-                        }
-                    }
+                    // No proxy denominator: the direct nginx baseline
+                    // (ref-http) is not an apples-to-apples reference for a
+                    // proxy and the value is discarded below, so skip the
+                    // calibration attempt entirely (it logged a misleading
+                    // "nginx reference FAILED" for every proxy run).
+                    logger.log(
+                        "[BENCH] No proxy denominator (direct nginx is not an apples-to-apples reference); rate reported, not ranked.",
+                    );
                 }
                 TaskType::Pdf => {
                     let verifier = PdfVerifier::new(port, Some(&verifier_seed));
