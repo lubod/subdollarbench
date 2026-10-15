@@ -219,3 +219,9 @@ RULES `2026-10-15.1`; acceptance ids up to 16). Design choices and why:
   STATS-field fail), sparse-log compaction pass + no-shrink fail,
   live-docker bind round-trip. Live execution of 14-16 awaits a model
   that reaches ticket 11.
+- Live proof (same day): `test_pipeline_eval_only_stage2_disk_and_admin_live`
+  drives a reference mock candidate (offset index + append log + idle
+  compaction + SDB1 v2) through the real pipeline for stages 14-16; all
+  three pass, including the SIGKILL re-reads and the footprint gate. Real
+  campaigns on worker 0 publish 6395 1:1 as documented; eval-only workers
+  hand the offset admin port to the candidate via argv.

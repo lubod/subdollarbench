@@ -3505,6 +3505,374 @@ def main():
 main()
 "#;
 
+    /// Stage-2 live fixture: RESP on `argv[1]` + SDB1 v2 admin on 6395,
+    /// one shared store whose values live in an append log under
+    /// SDB_DATA_DIR (offset index in memory), idle-gated compaction to
+    /// <= 3x live bytes, SIGKILL-safe (flush per write, partial tail
+    /// dropped on replay). Implements exactly what stages 14-16 grade.
+    const STAGE2_MOCK_SERVER_PY: &str = r#"import os
+import socket
+import struct
+import sys
+import threading
+import time
+import zlib
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6379
+# Real campaigns run on worker 0 where the published admin port is 6395;
+# eval-only runs on other workers pass the offset host port the harness
+# publishes 1:1.
+ADMIN_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 6395
+DATA = os.environ.get("SDB_DATA_DIR", "/tmp/sdbmock")
+os.makedirs(DATA, exist_ok=True)
+LOGF = os.path.join(DATA, "store.log")
+TMPF = os.path.join(DATA, "store.tmp")
+
+U32 = struct.Struct(">I")
+
+
+class Store(object):
+    """Offset index in memory, values on disk in an append log."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.index = {}
+        self.live = 0
+        self.last_write = time.time()
+        self.f = open(LOGF, "a+b", buffering=0)
+        self.end = 0
+        self.conns = 0
+        self.cmds = 0
+        self.hits = 0
+        self.misses = 0
+        self.started = time.time()
+        self.replay()
+
+    def _set_rec(self, key, value):
+        return b"S" + U32.pack(len(key)) + key + U32.pack(len(value)) + value
+
+    def _del_rec(self, key):
+        return b"D" + U32.pack(len(key)) + key
+
+    def replay(self):
+        self.f.close()
+        try:
+            f = open(LOGF, "rb")
+        except IOError:
+            self.end = 0
+            self.f = open(LOGF, "a+b", buffering=0)
+            return
+        good = 0
+        while True:
+            tag = f.read(1)
+            if not tag:
+                break
+            if tag == b"S":
+                hdr = f.read(4)
+                if len(hdr) < 4:
+                    break
+                klen = U32.unpack(hdr)[0]
+                key = f.read(klen)
+                if len(key) < klen:
+                    break
+                hdr = f.read(4)
+                if len(hdr) < 4:
+                    break
+                vlen = U32.unpack(hdr)[0]
+                voff = f.tell()
+                f.seek(vlen, 1)
+                if f.tell() - voff < vlen:
+                    break
+                old = self.index.get(key)
+                if old:
+                    self.live -= old[1]
+                self.index[key] = (voff, vlen)
+                self.live += vlen
+                good = f.tell()
+            elif tag == b"D":
+                hdr = f.read(4)
+                if len(hdr) < 4:
+                    break
+                klen = U32.unpack(hdr)[0]
+                key = f.read(klen)
+                if len(key) < klen:
+                    break
+                old = self.index.pop(key, None)
+                if old:
+                    self.live -= old[1]
+                good = f.tell()
+            else:
+                break
+        f.close()
+        # Drop a partial tail left by a SIGKILL mid-append.
+        os.truncate(LOGF, good)
+        self.end = good
+        self.f = open(LOGF, "a+b", buffering=0)
+
+    def set(self, key, value):
+        with self.lock:
+            self.cmds += 1
+            old = self.index.get(key)
+            if old:
+                self.live -= old[1]
+            off = self.end
+            rec = self._set_rec(key, value)
+            self.f.write(rec)
+            os.fsync(self.f.fileno())
+            self.end = off + len(rec)
+            self.index[key] = (off + 1 + 4 + len(key) + 4, len(value))
+            self.live += len(value)
+            self.last_write = time.time()
+
+    def get(self, key):
+        with self.lock:
+            self.cmds += 1
+            ent = self.index.get(key)
+            if not ent:
+                self.misses += 1
+                return None
+            self.hits += 1
+            return os.pread(self.f.fileno(), ent[1], ent[0])
+
+    def delete(self, keys):
+        n = 0
+        with self.lock:
+            for k in keys:
+                self.cmds += 1
+                old = self.index.pop(k, None)
+                rec = self._del_rec(k)
+                self.f.write(rec)
+                self.end += len(rec)
+                if old:
+                    self.live -= old[1]
+                    n += 1
+            os.fsync(self.f.fileno())
+            self.last_write = time.time()
+        return n
+
+    def exists(self, key):
+        with self.lock:
+            self.cmds += 1
+            return key in self.index
+
+    def stats(self):
+        with self.lock:
+            return (
+                "total_connections_received:%d\n"
+                "total_commands_processed:%d\n"
+                "keyspace_hits:%d\n"
+                "keyspace_misses:%d\n"
+                "expired_keys:0\nrejected_connections:0\n"
+                "connected_clients:1\nuptime_in_seconds:%d\n"
+                % (
+                    self.conns,
+                    self.cmds,
+                    self.hits,
+                    self.misses,
+                    int(time.time() - self.started),
+                )
+            )
+
+    def compact(self):
+        """Rewrite the log with live records only (idle + garbage gated)."""
+        with self.lock:
+            if time.time() - self.last_write < 0.8:
+                return
+            try:
+                size = os.path.getsize(LOGF)
+            except OSError:
+                return
+            if size <= max(3 * self.live, 4 * 1024 * 1024):
+                return
+            fd = self.f.fileno()
+            new = {}
+            tmp = open(TMPF, "wb", buffering=0)
+            for key, (voff, vlen) in self.index.items():
+                val = os.pread(fd, vlen, voff)
+                pos = tmp.tell()
+                tmp.write(self._set_rec(key, val))
+                new[key] = (pos + 1 + 4 + len(key) + 4, vlen)
+            tmp.close()
+            self.f.close()
+            os.replace(TMPF, LOGF)
+            self.end = os.path.getsize(LOGF)
+            self.f = open(LOGF, "a+b", buffering=0)
+            self.index = new
+
+
+def compactor(store):
+    while True:
+        time.sleep(0.5)
+        try:
+            store.compact()
+        except Exception:
+            pass
+
+
+def read_line(f):
+    raw = f.readline()
+    if not raw:
+        raise EOFError("eof")
+    return raw.rstrip(b"\r\n")
+
+
+def read_resp(f):
+    first = f.read(1)
+    if not first:
+        return None
+    if first != b"*":
+        raise ValueError("bad frame")
+    n = int(read_line(f))
+    args = []
+    for _ in range(n):
+        kind = f.read(1)
+        if kind != b"$":
+            raise ValueError("bad bulk")
+        ln = int(read_line(f))
+        data = f.read(ln)
+        if len(data) < ln:
+            raise EOFError("eof mid bulk")
+        f.read(2)
+        args.append(data)
+    return args
+
+
+def resp_conn(conn, store):
+    store.conns += 1
+    f = conn.makefile("rb")
+    out = conn.makefile("wb")
+    try:
+        while True:
+            args = read_resp(f)
+            if not args:
+                break
+            cmd = args[0].upper()
+            if cmd == b"PING":
+                out.write(b"+PONG\r\n")
+            elif cmd == b"SET" and len(args) == 3:
+                store.set(args[1], args[2])
+                out.write(b"+OK\r\n")
+            elif cmd == b"GET" and len(args) == 2:
+                v = store.get(args[1])
+                if v is None:
+                    out.write(b"$-1\r\n")
+                else:
+                    out.write(b"$%d\r\n" % len(v) + v + b"\r\n")
+            elif cmd == b"DEL" and len(args) >= 2:
+                out.write(b":%d\r\n" % store.delete(args[1:]))
+            elif cmd == b"EXISTS" and len(args) == 2:
+                out.write(b":%d\r\n" % (1 if store.exists(args[1]) else 0))
+            else:
+                out.write(b"-ERR unknown\r\n")
+            out.flush()
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def sdb1_conn(conn, store):
+    store.conns += 1
+
+    def reply(seq, op, status, payload=b""):
+        return (
+            b"SDB1"
+            + struct.pack(
+                ">HBBII", seq, op, status, len(payload), zlib.crc32(payload) & 0xFFFFFFFF
+            )
+            + payload
+        )
+
+    buf = b""
+    try:
+        while True:
+            while len(buf) < 16:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            if buf[:4] != b"SDB1":
+                return
+            seq, op, _status, ln, crc = struct.unpack(">HBBII", buf[4:16])
+            if ln > 1024 * 1024:
+                return
+            while len(buf) < 16 + ln:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            payload = buf[16 : 16 + ln]
+            buf = buf[16 + ln :]
+            if (zlib.crc32(payload) & 0xFFFFFFFF) != crc:
+                conn.sendall(reply(seq, op, 1))
+                continue
+            if op == 1:
+                conn.sendall(reply(seq, op, 0))
+            elif op == 2:
+                conn.sendall(reply(seq, op, 0, payload))
+            elif op == 3:
+                i = payload.find(b"\x00")
+                if i < 0:
+                    conn.sendall(reply(seq, op, 2))
+                else:
+                    store.set(payload[:i], payload[i + 1 :])
+                    conn.sendall(reply(seq, op, 0))
+            elif op == 4:
+                v = store.get(payload)
+                if v is None:
+                    conn.sendall(reply(seq, op, 2))
+                else:
+                    conn.sendall(reply(seq, op, 0, v))
+            elif op == 6:
+                conn.sendall(reply(seq, 6, 0, store.stats().encode()))
+            else:
+                conn.sendall(reply(seq, op, 2))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def serve(port, handler, store):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", port))
+    srv.listen(128)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=handler, args=(conn, store), daemon=True).start()
+
+
+def main():
+    store = Store()
+    threading.Thread(target=compactor, args=(store,), daemon=True).start()
+    threading.Thread(target=serve, args=(ADMIN_PORT, sdb1_conn, store), daemon=True).start()
+    serve(PORT, resp_conn, store)
+
+
+main()
+"#;
+
+    /// Write the stage-2 mock candidate into `dir`, RESP on `port`.
+    fn write_stage2_mock(dir: &Path, port: u16, admin_port: u16) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("server.py"), STAGE2_MOCK_SERVER_PY).unwrap();
+        let start =
+            format!("#!/bin/bash\nexec python3 -u /workspace/server.py {port} {admin_port}\n");
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
     /// Write the mock candidate into `dir`, listening on `port`.
     /// `boot_sleep_secs` delays the listener (used to keep a run inside
     /// verification while a test flips the cancel flag).
@@ -4289,6 +4657,61 @@ main()
         assert!(logger.contains("skipping the destructive kill"));
         cleanup_covtest_network("campaign");
         let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// Stage-2 wave live proof (eval-only, no model): a disk-resident mock
+    /// candidate driven through the REAL pipeline for stages 14-16 —
+    /// host-bind restart under the 192MB cap, SIGKILL re-reads, the
+    /// footprint gate, and the SDB1 v2 admin channel end to end.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_stage2_disk_and_admin_live() {
+        let worker = 97u8;
+        let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
+        let dir = covtest_dir("s2live");
+        let workdir = dir.join("workspace");
+        write_stage2_mock(
+            &workdir,
+            port,
+            crate::web::server::worker_port(6395, worker),
+        );
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(
+            &prompt_path,
+            "stage-2 ticket: disk resident, compact, admin",
+        )
+        .unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "s2live");
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-kv".to_string(),
+            stage: 11,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![14, 15, 16],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("stage-2 live flow must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        assert!(
+            logger.contains("Stage 14: disk-resident store under a memory cap -> PASS"),
+            "stage 14 must pass"
+        );
+        assert!(
+            logger.contains("Stage 15: compaction reclaims disk -> PASS"),
+            "stage 15 must pass"
+        );
+        assert!(
+            logger.contains("Stage 16: admin binary protocol (SDB1 v2) -> PASS"),
+            "stage 16 must pass"
+        );
+        cleanup_covtest_network("s2live");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// No-runnable branches of `run_verification`, including the

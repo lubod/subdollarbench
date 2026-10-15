@@ -251,8 +251,17 @@ interface.
   mocks (pass, split-store fail, missing-STATS-field fail); compaction
   gate pass (sparse log shrinks) and loud no-shrink fail; helper/dir-bytes
   unit tests; extras args bind assertion.
-- [ ] I6. Live execution of stages 14-16 (pending a model that reaches
-  ticket 11; the grid currently tops out at ticket 4).
+- [x] I6a. Eval-only LIVE proof (2026-10-15, no model): a reference mock
+  candidate (offset index + append log + idle compaction + SDB1 v2)
+  driven through the real pipeline for stages 14-16 — all three PASS
+  (`test_pipeline_eval_only_stage2_disk_and_admin_live`, ~110s incl. the
+  100%-pass bench): host-bind restart under the 192MB cap, ~480MB
+  written/re-read byte-exact across SIGKILL, ~860MB churn reclaimed to
+  <=3x live, admin channel with shared keyspace + STATS. The admin port
+  for eval-only workers is passed via argv (real worker-0 campaigns use
+  6395, matching the published 1:1 port).
+- [ ] I6b. Model-driven live execution of stages 14-16 (pending a model
+  that reaches ticket 11; the grid currently tops out at ticket 4).
 
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
