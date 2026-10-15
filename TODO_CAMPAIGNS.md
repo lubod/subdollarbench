@@ -624,6 +624,18 @@ flakes, serialize live-docker tests with a shared test lock.
   sdb-kv (both ladders wall earlier), so the queue ladder is materially
   easier for it — small line protocol, no RESP/HTTP semantics — which is
   exactly the per-app difficulty spread the portfolio exists to measure.
+- **inkling-small:free** (sdb-queue run 1, 2026-10-15,
+  `campaign_sdb-queue_openrouter_thinkingmachines_inkling-small_free_20261015_162803`,
+  RULES `2026-10-15.5`, $0.50 cap, ~4 min): reached **none** — t0 **FAIL
+  0/1 both rounds** ($0.0102, 36 turns). Pure tool-hygiene failure: its
+  300-line `server.py` does not parse (`IndentationError: unexpected
+  indent` at line 182, unchanged through the repair round) so nothing
+  ever listened on 6385 and both rounds died with **connection refused**.
+  A single `python3 server.py` (or `py_compile`) check would have caught
+  it; the model spent all 36 turns writing/editing without executing its
+  artifact. Failure-taxonomy gold: the ladder's stages never even ran.
+  Also the spread data point for the queue ladder: a second model does
+  NOT get anywhere near ling's full-ladder run.
 - Next for this campaign: more models (free tier) for spread, and the
   deferred depth tickets once a second model saturates (the ladder is
   complete for ling, so cost/survival comparisons need other samples).
