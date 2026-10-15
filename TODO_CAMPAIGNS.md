@@ -440,9 +440,22 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   tiers/needs/lite invariants; `LadderOutcome` + `stage_points` +
   `max_points` + `score_ladder` (tier x 1.0 full | weight lite | 0) with
   unit tests, and back-compat for the four existing specs.
-- [ ] M4. Orchestrator execution semantics: rollback (git + data dir +
-  SPEC.md), lite attempt after a failed full, continue past failures,
-  `needs` skipping, points in the rollup, campaign wall cap, disk guards.
+- [x] M4. Orchestrator execution semantics (ladder modes): `LadderMode`
+  (pass_stop for the archived app campaigns, continue for sdb-sql);
+  `StageAttempt` (full|lite) carrying prompt/budget/turns/weight and a
+  `rollback_first` flag; lite attempts after a failed full (rollback to the
+  last green commit first, recorded as separate full/lite rows); `needs`
+  skipping (blocked stages recorded `skipped`, zero cost); continue past
+  failures; weighted points in the rollup (`points`/`max_points`,
+  tier x 1.0 full | x weight lite); `reached` = highest stage passed (full
+  or lite); optional campaign wall cap (`--wall-min`, `over_wall`). The
+  CLI executor now performs the rollback (`git reset --hard` + `clean -fd`
+  to the last green commit) and runs lite sessions with their own
+  prompt/budget/turns. Unit tests: attempt order + rollback flags, lite
+  scoring, needs-skipping, points/ceiling, back-compat for the four
+  archived specs. Remaining M4 tail (moves with M6): the harness-owned
+  data dir + snapshot/restore (sdb-sql's `--data` lives outside the
+  workspace) and disk guards.
 - [ ] M5. Verifier core (`src/verifier/sql/`): schema, generator
   (profiles 0-3), oracle (discard table + error-class mapping), compare,
   shrink, wire client; oracle-vs-oracle and mutant-engine self-tests;

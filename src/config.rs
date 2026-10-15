@@ -36,6 +36,10 @@ pub enum CampaignAction {
     },
     /// Run a campaign end-to-end from the CLI (foreground, no engine needed)
     Run {
+        /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour;
+        /// the ladder stops with over_wall when reached).
+        #[arg(long)]
+        wall_min: Option<u64>,
         /// Campaign name (directory under ./campaigns)
         #[arg(long)]
         name: String,

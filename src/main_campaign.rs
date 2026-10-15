@@ -158,6 +158,7 @@ pub async fn run(
     effort: String,
     harness: Harness,
     budget_usd: f64,
+    wall_min: Option<u64>,
     timeout_min: u64,
     api_key: Option<String>,
     eval_only: bool,
@@ -217,6 +218,7 @@ pub async fn run(
         harness: harness.to_string(),
         effort: effort.clone(),
         budget_usd,
+        wall_min,
     };
 
     write_status(&cdir, "running", Some(0), None);
@@ -249,11 +251,20 @@ pub async fn run(
             cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         });
     }
+    let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let rollup = campaign::run_campaign(
         &lc,
         &opts,
-        |stage| {
-            let stage = stage.clone();
+        |attempt| {
+            let job = StageJob {
+                stage: attempt.stage.clone(),
+                variant: attempt.variant,
+                prompt_path: attempt.prompt_path.clone(),
+                budget_usd: attempt.budget_usd,
+                max_turns: attempt.max_turns,
+                rollback_first: attempt.rollback_first,
+            };
+            let stage = job.stage.clone();
             let lc = lc.clone();
             let model = model.clone();
             let effort = effort.clone();
@@ -262,6 +273,7 @@ pub async fn run(
             let workdir = workdir.clone();
             let campaign_id = campaign_id.clone();
             let cancel = cancel.clone();
+            let last_green = last_green.clone();
             async move {
                 run_one_stage(
                     &lc,
@@ -276,6 +288,8 @@ pub async fn run(
                     &workdir,
                     eval_only,
                     Some(cancel),
+                    &job,
+                    &last_green,
                 )
                 .await
             }
@@ -293,6 +307,36 @@ pub async fn run(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One attempt handed from the orchestrator to this executor: the ticket
+/// (full or lite), its prompt/budget/turns, and whether the workspace must
+/// roll back to the last green commit first.
+struct StageJob {
+    stage: StageSpec,
+    variant: campaign::StageVariant,
+    prompt_path: std::path::PathBuf,
+    budget_usd: f64,
+    max_turns: u32,
+    rollback_first: bool,
+}
+
+async fn rollback_workspace(workdir: &Path, commit: &str) -> Result<()> {
+    for args in [vec!["reset", "--hard", commit], vec!["clean", "-fd"]] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(workdir)
+            .output()
+            .with_context(|| format!("git {args:?} in {}", workdir.display()))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_one_stage(
     lc: &LoadedCampaign,
     stage: &StageSpec,
@@ -306,9 +350,31 @@ async fn run_one_stage(
     workdir: &Path,
     eval_only: bool,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    job: &StageJob,
+    last_green: &Arc<Mutex<Option<String>>>,
 ) -> Result<StageOutcome> {
-    let run_id = format!("{campaign_id}_s{}", stage.id);
-    let stage_dir = cdir.join(format!("s{}", stage.id));
+    let variant_tag = match job.variant {
+        campaign::StageVariant::Full => "full",
+        campaign::StageVariant::Lite => "lite",
+    };
+    if job.rollback_first {
+        let anchor = { last_green.lock().unwrap().clone() };
+        if let Some(commit) = anchor {
+            println!(
+                "{}",
+                format!(
+                    "  [ROLLBACK] stage {} {}: resetting workspace to the last green commit {}",
+                    stage.id,
+                    variant_tag,
+                    &commit[..commit.len().min(8)]
+                )
+                .yellow()
+            );
+            rollback_workspace(workdir, &commit).await?;
+        }
+    }
+    let run_id = format!("{campaign_id}_s{}_{variant_tag}", stage.id);
+    let stage_dir = cdir.join(format!("s{}_{variant_tag}", stage.id));
     std::fs::create_dir_all(&stage_dir)?;
     bump_current_stage(cdir, stage.id);
 
@@ -332,8 +398,8 @@ async fn run_one_stage(
         task: TaskType::parse(&lc.spec.task)?,
         effort: effort.to_string(),
         harness,
-        max_turns: stage.max_turns,
-        budget_usd: stage.budget_usd,
+        max_turns: job.max_turns,
+        budget_usd: job.budget_usd,
         timeout_min,
         api_key,
         workdir: workdir.to_path_buf(),
@@ -348,7 +414,7 @@ async fn run_one_stage(
         campaign_stage: Some(CampaignStageConfig {
             campaign: lc.spec.name.clone(),
             stage: stage.id,
-            prompt_path: lc.prompt_path(stage),
+            prompt_path: job.prompt_path.clone(),
             continuity: stage.id > 0,
             accepted_stages: stage.acceptance.stages_for(&lc.spec.task).to_vec(),
         }),
@@ -391,11 +457,20 @@ async fn run_one_stage(
     } else {
         "fail"
     };
+    let verdict_tag = if job.variant == campaign::StageVariant::Lite {
+        format!("{verdict} (lite)")
+    } else {
+        verdict.to_string()
+    };
     let (git_commit, git_stat) =
-        match campaign::git_commit_stage(workdir, stage.id, &stage.title, verdict) {
+        match campaign::git_commit_stage(workdir, stage.id, &stage.title, &verdict_tag) {
             Ok((h, s)) => {
                 if let Ok(patch) = campaign::git_head_patch(workdir) {
                     let _ = std::fs::write(stage_dir.join("stage.diff"), patch);
+                }
+                if passed {
+                    // Rollback anchor: the last state that fully passed.
+                    *last_green.lock().unwrap() = Some(h.clone());
                 }
                 (Some(h), Some(s))
             }
@@ -532,6 +607,9 @@ mod tests {
             turns: None,
             duration_seconds: None,
             status: status.to_string(),
+            variant: "full".to_string(),
+            tier: 1,
+            points: if passed { 1.0 } else { 0.0 },
             run_id: format!("campaign_fixture_s{id}"),
             git_commit: None,
             git_stat: None,
@@ -545,6 +623,9 @@ mod tests {
         total_cost_usd: f64,
     ) -> CampaignRollup {
         CampaignRollup {
+            over_wall: false,
+            points: 0.0,
+            max_points: 0.0,
             campaign_id: "campaign_fixture".to_string(),
             name: "fixture".to_string(),
             model: "m".to_string(),
@@ -719,6 +800,7 @@ mod tests {
                 name: "fixture".to_string(),
                 version: 1,
                 task: "dns".to_string(),
+                ladder: campaign::LadderMode::PassStop,
                 title: "Fixture".to_string(),
                 description: String::new(),
                 stages: Vec::new(),
@@ -744,6 +826,15 @@ mod tests {
             needs: Vec::new(),
             lite: None,
         };
+        let job = StageJob {
+            stage: stage.clone(),
+            variant: campaign::StageVariant::Full,
+            prompt_path: lc.prompt_path(&stage),
+            budget_usd: stage.budget_usd,
+            max_turns: stage.max_turns,
+            rollback_first: false,
+        };
+        let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let err = run_one_stage(
             &lc,
             &stage,
@@ -757,6 +848,8 @@ mod tests {
             &workdir,
             true,
             None,
+            &job,
+            &last_green,
         )
         .await
         .unwrap_err();
@@ -779,6 +872,7 @@ mod tests {
             "low".to_string(),
             Harness::Omp,
             1.0,
+            None,
             5,
             None,
             true,

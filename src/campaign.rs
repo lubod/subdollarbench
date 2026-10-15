@@ -133,11 +133,26 @@ fn default_lite_weight() -> f64 {
     0.4
 }
 
+/// How the ladder treats a failed ticket. `pass_stop` is the historical
+/// single-ladder behavior (the four retired app campaigns); `continue` is
+/// sdb-sql's semantics: lite variants, `needs` skipping, and later tickets
+/// still run after a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LadderMode {
+    #[default]
+    PassStop,
+    Continue,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CampaignSpec {
     pub name: String,
     pub version: u32,
     pub task: String,
+    /// Ladder semantics (default: pass_stop, the archived app campaigns).
+    #[serde(default)]
+    pub ladder: LadderMode,
     pub title: String,
     #[serde(default)]
     pub description: String,
@@ -394,6 +409,32 @@ pub fn detect_regressions(
     (ids, severity)
 }
 
+/// Which variant of a ticket is being attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageVariant {
+    Full,
+    Lite,
+}
+
+/// One attempt the orchestrator asks the executor to perform. The executor
+/// owns prompt paths, budgets and the workspace; the orchestrator owns the
+/// ladder decisions (including when a rollback is required first).
+#[derive(Debug, Clone)]
+pub struct StageAttempt<'a> {
+    pub stage: &'a StageSpec,
+    pub variant: StageVariant,
+    /// Prompt file for this variant (lite prompts differ).
+    pub prompt_path: std::path::PathBuf,
+    pub budget_usd: f64,
+    pub max_turns: u32,
+    /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
+    pub weight: f64,
+    /// True when the workspace/data must be rolled back to the last green
+    /// state before this attempt (a predecessor failed; lite attempts after
+    /// a failed full always roll back).
+    pub rollback_first: bool,
+}
+
 /// One stage's raw outcome, mapped from `PipelineOutput` by the executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageOutcome {
@@ -430,7 +471,16 @@ pub struct StageRecord {
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
     /// passed | failed | fault (harness/provider fault, not a model verdict)
+    /// | skipped (a `needs` prerequisite failed)
     pub status: String,
+    /// full | lite (which variant produced this record).
+    #[serde(default)]
+    pub variant: String,
+    #[serde(default)]
+    pub tier: u32,
+    /// Weighted points this stage scored (tier x weight when passed).
+    #[serde(default)]
+    pub points: f64,
     pub run_id: String,
     pub git_commit: Option<String>,
     pub git_stat: Option<String>,
@@ -447,13 +497,24 @@ pub struct CampaignRollup {
     pub started_at: String,
     pub finished_at: String,
     pub stages: Vec<StageRecord>,
-    /// Highest stage id whose ticket passed; None when ticket 0 failed.
+    /// Highest stage id whose ticket passed (full or lite); with the
+    /// continue ladder this is the maximum passed id, not a contiguous
+    /// point.
     pub reached: Option<u32>,
     /// Tickets passed without any regression in their acceptance suite.
     pub regression_free_tickets: u32,
     pub total_cost_usd: f64,
     /// Budget cap reached before the ladder finished (never a model failure).
     pub over_budget: bool,
+    /// Optional wall-clock cap reached before the ladder finished.
+    #[serde(default)]
+    pub over_wall: bool,
+    /// Difficulty-weighted points actually scored (tier x weight per pass).
+    #[serde(default)]
+    pub points: f64,
+    /// Ceiling: every stage full (sum of tiers).
+    #[serde(default)]
+    pub max_points: f64,
 }
 
 impl CampaignRollup {
@@ -497,6 +558,9 @@ pub struct CampaignRunOptions {
     /// Campaign-wide cap: the ladder stops (over_budget) once cumulative
     /// effective cost reaches it.
     pub budget_usd: f64,
+    /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour);
+    /// the ladder stops with `over_wall` when reached.
+    pub wall_min: Option<u64>,
 }
 
 /// Run the ladder. `exec` performs one ticket (agent + verification) and
@@ -511,13 +575,18 @@ pub async fn run_campaign<F, Fut>(
     on_stage: Option<&dyn Fn(&CampaignRollup)>,
 ) -> Result<CampaignRollup>
 where
-    F: FnMut(&StageSpec) -> Fut,
+    F: FnMut(&StageAttempt<'_>) -> Fut,
     Fut: std::future::Future<Output = Result<StageOutcome>>,
 {
     let started_at = chrono::Utc::now().to_rfc3339();
+    let wall_start = std::time::Instant::now();
     let mut best: HashMap<u32, bool> = HashMap::new();
     let mut reached: Option<u32> = None;
     let mut total_cost = 0.0f64;
+    // Ladder bookkeeping (continue mode): per-stage outcome + whether the
+    // last attempt left the workspace dirty (needs a rollback first).
+    let mut outcomes: HashMap<u32, LadderOutcome> = HashMap::new();
+    let mut dirty = false;
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
         name: lc.spec.name.clone(),
@@ -532,6 +601,9 @@ where
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
         over_budget: false,
+        over_wall: false,
+        points: 0.0,
+        max_points: max_points(&lc.spec.stages),
     };
 
     for stage in &lc.spec.stages {
@@ -542,7 +614,47 @@ where
             }
             break;
         }
-        let out = exec(stage)
+        if let Some(cap_min) = opts.wall_min {
+            if cap_min > 0 && wall_start.elapsed() >= std::time::Duration::from_secs(cap_min * 60) {
+                rollup.over_wall = true;
+                if let Some(cb) = on_stage {
+                    cb(&rollup);
+                }
+                break;
+            }
+        }
+        // `needs` gate (both modes; archived specs simply have no needs).
+        // A need that failed, was skipped, or never recorded blocks the
+        // stage: it is recorded as skipped and costs nothing.
+        let needs_blocked = stage.needs.iter().any(|n| {
+            !matches!(
+                outcomes.get(n),
+                Some(LadderOutcome::Full) | Some(LadderOutcome::Lite)
+            )
+        });
+        if needs_blocked {
+            outcomes.insert(stage.id, LadderOutcome::Skipped);
+            rollup.stages.push(skipped_record(stage));
+            rollup.reached = reached;
+            rollup.total_cost_usd = total_cost;
+            rollup.points = rollup.stages.iter().map(|r| r.points).sum();
+            if let Some(cb) = on_stage {
+                cb(&rollup);
+            }
+            continue;
+        }
+
+        // Full attempt.
+        let attempt_full = StageAttempt {
+            stage,
+            variant: StageVariant::Full,
+            prompt_path: lc.prompt_path(stage),
+            budget_usd: stage.budget_usd,
+            max_turns: stage.max_turns,
+            weight: 1.0,
+            rollback_first: dirty,
+        };
+        let out = exec(&attempt_full)
             .await
             .with_context(|| format!("stage {} ({})", stage.id, stage.title))?;
         let (regressed, regression_severity) = detect_regressions(&best, &out.stage_results);
@@ -551,40 +663,88 @@ where
             *e = *e || r.passed;
         }
         total_cost += out.effective_cost_usd;
+        let fault = out.agent_failed || out.infra_error;
         let status = if out.passed {
             "passed"
-        } else if out.agent_failed || out.infra_error {
-            // A fault measured nothing: recorded, never scored as a model
-            // failure (same doctrine as the single-shot boards).
+        } else if fault {
             "fault"
         } else {
             "failed"
         };
-        rollup.stages.push(StageRecord {
-            id: stage.id,
-            title: stage.title.clone(),
-            kind: stage.kind.clone(),
-            passed: out.passed,
-            pass_rate: out.pass_rate,
-            passed_stages: out.passed_stages,
-            total_stages: out.total_stages,
+        push_attempt_record(
+            &mut rollup,
+            stage,
+            StageVariant::Full,
+            &out,
             regressed,
             regression_severity,
-            effective_cost_usd: out.effective_cost_usd,
-            turns: out.turns,
-            duration_seconds: out.duration_seconds,
-            status: status.to_string(),
-            run_id: out.run_id,
-            git_commit: out.git_commit,
-            git_stat: out.git_stat,
-        });
+            status,
+        );
         if out.passed {
+            outcomes.insert(stage.id, LadderOutcome::Full);
             reached = Some(stage.id);
+            dirty = false;
+        } else if fault {
+            // A fault measured nothing: recorded, never a model failure,
+            // but it cannot satisfy `needs`.
+            outcomes.insert(stage.id, LadderOutcome::Failed);
+            dirty = true;
+        } else if let Some(lite) = &stage.lite {
+            // Lite attempt: the workspace rolls back to the last green
+            // commit (and the data dir) before the fresh session.
+            let attempt_lite = StageAttempt {
+                stage,
+                variant: StageVariant::Lite,
+                prompt_path: lc.root.join(&lite.prompt),
+                budget_usd: lite.budget_usd,
+                max_turns: lite.max_turns,
+                weight: lite.weight,
+                rollback_first: true,
+            };
+            let out2 = exec(&attempt_lite)
+                .await
+                .with_context(|| format!("stage {} lite", stage.id))?;
+            let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
+            for r in &out2.stage_results {
+                let e = best.entry(r.stage).or_insert(false);
+                *e = *e || r.passed;
+            }
+            total_cost += out2.effective_cost_usd;
+            let fault2 = out2.agent_failed || out2.infra_error;
+            let status2 = if out2.passed {
+                "passed"
+            } else if fault2 {
+                "fault"
+            } else {
+                "failed"
+            };
+            push_attempt_record(
+                &mut rollup,
+                stage,
+                StageVariant::Lite,
+                &out2,
+                regressed2,
+                severity2,
+                status2,
+            );
+            if out2.passed {
+                outcomes.insert(stage.id, LadderOutcome::Lite);
+                if reached.map(|r| stage.id > r).unwrap_or(true) {
+                    reached = Some(stage.id);
+                }
+                dirty = false;
+            } else {
+                outcomes.insert(stage.id, LadderOutcome::Failed);
+                dirty = true;
+            }
+        } else {
+            outcomes.insert(stage.id, LadderOutcome::Failed);
+            dirty = true;
         }
-        // Progressive view for the GUI: the rollup-so-far is published
-        // after every ticket (status.json writer in main_campaign).
+
         rollup.reached = reached;
         rollup.total_cost_usd = total_cost;
+        rollup.points = rollup.stages.iter().map(|r| r.points).sum();
         rollup.regression_free_tickets = rollup
             .stages
             .iter()
@@ -593,13 +753,92 @@ where
         if let Some(cb) = on_stage {
             cb(&rollup);
         }
-        if !out.passed {
+        // Historical pass-stop behavior for the archived app campaigns; the
+        // continue ladder (sdb-sql) keeps going with rollbacks and lites.
+        if lc.spec.ladder == LadderMode::PassStop
+            && !matches!(
+                outcomes.get(&stage.id),
+                Some(LadderOutcome::Full) | Some(LadderOutcome::Lite)
+            )
+        {
             break;
         }
     }
 
     rollup.finished_at = chrono::Utc::now().to_rfc3339();
     Ok(rollup)
+}
+
+/// A stage recorded as skipped (`needs` blocked): no attempt, no cost.
+fn skipped_record(stage: &StageSpec) -> StageRecord {
+    StageRecord {
+        id: stage.id,
+        title: stage.title.clone(),
+        kind: stage.kind.clone(),
+        passed: false,
+        pass_rate: 0.0,
+        passed_stages: 0,
+        total_stages: 0,
+        regressed: Vec::new(),
+        regression_severity: 0,
+        effective_cost_usd: 0.0,
+        turns: None,
+        duration_seconds: None,
+        status: "skipped".to_string(),
+        variant: match stage.lite {
+            Some(_) => "full".to_string(),
+            None => "full".to_string(),
+        },
+        tier: stage.tier,
+        points: 0.0,
+        run_id: format!("{}_skipped", stage.id),
+        git_commit: None,
+        git_stat: None,
+    }
+}
+
+/// Record one attempt (full or lite) into the rollup.
+#[allow(clippy::too_many_arguments)]
+fn push_attempt_record(
+    rollup: &mut CampaignRollup,
+    stage: &StageSpec,
+    variant: StageVariant,
+    out: &StageOutcome,
+    regressed: Vec<u32>,
+    regression_severity: u32,
+    status: &str,
+) {
+    let points = match (status, variant) {
+        ("passed", StageVariant::Full) => stage.tier as f64,
+        ("passed", StageVariant::Lite) => {
+            stage.tier as f64 * stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.4)
+        }
+        _ => 0.0,
+    };
+    rollup.stages.push(StageRecord {
+        id: stage.id,
+        title: stage.title.clone(),
+        kind: stage.kind.clone(),
+        passed: out.passed,
+        pass_rate: out.pass_rate,
+        passed_stages: out.passed_stages,
+        total_stages: out.total_stages,
+        regressed,
+        regression_severity,
+        effective_cost_usd: out.effective_cost_usd,
+        turns: out.turns,
+        duration_seconds: out.duration_seconds,
+        status: status.to_string(),
+        variant: match variant {
+            StageVariant::Full => "full".to_string(),
+            StageVariant::Lite => "lite".to_string(),
+        },
+        tier: stage.tier,
+        points,
+        run_id: out.run_id.clone(),
+        git_commit: out.git_commit.clone(),
+        git_stat: out.git_stat.clone(),
+    });
 }
 
 /// Host-side git commit of the current workspace state as one stage.
@@ -818,6 +1057,7 @@ mod tests {
             name: "t".into(),
             version: 1,
             task: "redis".into(),
+            ladder: LadderMode::PassStop,
             title: "t".into(),
             description: String::new(),
             stages: vec![
@@ -1203,6 +1443,7 @@ mod tests {
             harness: "omp".into(),
             effort: "high".into(),
             budget_usd: 10.0,
+            wall_min: None,
         };
         let mut calls = 0;
         let snaps = std::cell::RefCell::new(Vec::new());
@@ -1210,8 +1451,9 @@ mod tests {
         let rollup = run_campaign(
             &lc,
             &opts,
-            |stage| {
+            |attempt| {
                 calls += 1;
+                let stage = attempt.stage;
                 let out = if stage.id < 2 {
                     outcome(true, &[(1, true), (2, true), (3, stage.id >= 1)])
                 } else {
@@ -1239,6 +1481,144 @@ mod tests {
         assert!(rollup.tickets_per_dollar().unwrap() > 0.0);
     }
 
+    /// A 5-stage continue-ladder fixture: stage 1 has a lite (weight 0.4),
+    /// stage 2 has no lite, stage 3 needs stage 2, stage 4 is independent.
+    fn ladder_fixture() -> LoadedCampaign {
+        let dir = tmp_dir("ladder");
+        let stages_dir = dir.join("stages");
+        std::fs::create_dir_all(&stages_dir).unwrap();
+        for i in 0..6 {
+            std::fs::write(stages_dir.join(format!("{i}.md")), "# ticket").unwrap();
+        }
+        let st = |id: u32, tier: u32, needs: Vec<u32>, lite: Option<LiteSpec>| StageSpec {
+            id,
+            kind: "feature".into(),
+            title: format!("Stage {id}"),
+            prompt: format!("stages/{id}.md"),
+            acceptance: Acceptance {
+                redis_stages: vec![1],
+                ..Default::default()
+            },
+            budget_usd: 0.1,
+            max_turns: 5,
+            feedback_rounds: 1,
+            tier,
+            needs,
+            lite,
+        };
+        let spec = CampaignSpec {
+            name: "ladder".into(),
+            version: 1,
+            task: "redis".into(),
+            ladder: LadderMode::Continue,
+            title: "ladder".into(),
+            description: String::new(),
+            stages: vec![
+                st(0, 1, vec![], None),
+                st(
+                    1,
+                    2,
+                    vec![0],
+                    Some(LiteSpec {
+                        prompt: "stages/5.md".into(),
+                        profile: vec!["inner_join".into()],
+                        budget_usd: 0.05,
+                        max_turns: 3,
+                        weight: 0.4,
+                    }),
+                ),
+                st(2, 3, vec![0], None),
+                st(3, 1, vec![2], None),
+                st(4, 1, vec![], None),
+            ],
+        };
+        std::fs::write(
+            dir.join("campaign.json"),
+            serde_json::to_string_pretty(&spec).unwrap(),
+        )
+        .unwrap();
+        LoadedCampaign { spec, root: dir }
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_continue_ladder_lite_needs_and_points() {
+        let lc = ladder_fixture();
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+        let opts = CampaignRunOptions {
+            campaign_id: "ladder1".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 10.0,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::<(u32, StageVariant, bool)>::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let id = attempt.stage.id;
+                let variant = attempt.variant;
+                seen.borrow_mut()
+                    .push((id, variant, attempt.rollback_first));
+                let passed = match (id, variant) {
+                    (0, StageVariant::Full) => true,
+                    (1, StageVariant::Full) => false,
+                    (1, StageVariant::Lite) => true,
+                    (2, StageVariant::Full) => false,
+                    (4, StageVariant::Full) => true,
+                    other => panic!("unexpected attempt {other:?}"),
+                };
+                let out = outcome(passed, &[(1, passed)]);
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Attempt order: full 0, full 1, lite 1 (rollback), full 2, full 4
+        // (rollback); stage 3 is skipped by `needs`.
+        let seen = seen.into_inner();
+        assert_eq!(
+            seen,
+            vec![
+                (0, StageVariant::Full, false),
+                (1, StageVariant::Full, false),
+                (1, StageVariant::Lite, true),
+                (2, StageVariant::Full, false),
+                (4, StageVariant::Full, true),
+            ],
+            "attempt order/rollback flags"
+        );
+        // Records: 0 full pass, 1 full fail + 1 lite pass, 2 failed,
+        // 3 skipped, 4 full pass.
+        let by_id: Vec<(u32, &str, bool, f64)> = rollup
+            .stages
+            .iter()
+            .map(|r| (r.id, r.variant.as_str(), r.passed, r.points))
+            .collect();
+        assert_eq!(
+            by_id,
+            vec![
+                (0, "full", true, 1.0),
+                (1, "full", false, 0.0),
+                (1, "lite", true, 0.8),
+                (2, "full", false, 0.0),
+                (3, "full", false, 0.0), // skipped record
+                (4, "full", true, 1.0),
+            ]
+        );
+        assert_eq!(rollup.stages[4].status, "skipped");
+        assert_eq!(rollup.reached, Some(4));
+        assert!((rollup.points - 2.8).abs() < 1e-9, "{}", rollup.points);
+        assert!((rollup.max_points - 8.0).abs() < 1e-9);
+        // The lite pass satisfies `needs` (stage 2 ran) and the lite's
+        // points are tier x weight.
+        assert_eq!(rollup.regression_free_tickets, 3);
+        assert!(!rollup.over_budget && !rollup.over_wall);
+    }
+
     #[tokio::test]
     async fn test_orchestrator_budget_stop_is_not_a_failure() {
         let lc = fixture_campaign();
@@ -1248,6 +1628,7 @@ mod tests {
             harness: "omp".into(),
             effort: "high".into(),
             budget_usd: 0.005, // one stage costs 0.01; the second never starts
+            wall_min: None,
         };
         let rollup = run_campaign(
             &lc,
@@ -1271,12 +1652,14 @@ mod tests {
             harness: "omp".into(),
             effort: "high".into(),
             budget_usd: 10.0,
+            wall_min: None,
         };
         // Stage 0 green; stage 1 regresses stage 1 (was green, now red).
         let rollup = run_campaign(
             &lc,
             &opts,
-            |stage| {
+            |attempt| {
+                let stage = attempt.stage;
                 let out = if stage.id == 0 {
                     outcome(true, &[(1, true), (2, true)])
                 } else {

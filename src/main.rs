@@ -1970,6 +1970,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 effort,
                 harness,
                 budget_usd,
+                wall_min,
                 timeout_min,
                 api_key,
                 eval_only,
@@ -1981,6 +1982,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     effort,
                     harness,
                     budget_usd,
+                    wall_min,
                     timeout_min,
                     api_key,
                     eval_only,
@@ -4804,6 +4806,7 @@ mod tests {
         assert!(run_cli(Cli {
             command: Commands::Campaign {
                 action: subdollarbench::config::CampaignAction::Run {
+                    wall_min: None,
                     name: "no-such-campaign".to_string(),
                     model: "test-model".to_string(),
                     effort: "low".to_string(),
