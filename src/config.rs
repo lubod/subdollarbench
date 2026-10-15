@@ -1124,6 +1124,9 @@ pub enum TaskType {
     Proxy,
     Pubsub,
     Binproto,
+    /// Job queue broker (leases / ack / nack / retries / DLQ). The campaign
+    /// is its primary home; the single-shot suite is the same 9 stages.
+    Queue,
 }
 
 impl TaskType {
@@ -1136,6 +1139,7 @@ impl TaskType {
             TaskType::Proxy => 5,
             TaskType::Pubsub => 4,
             TaskType::Binproto => 5,
+            TaskType::Queue => 9,
         }
     }
 
@@ -1148,6 +1152,7 @@ impl TaskType {
             TaskType::Proxy => 8091,
             TaskType::Pubsub => 8092,
             TaskType::Binproto => 6395,
+            TaskType::Queue => 6385,
         }
     }
 
@@ -1162,6 +1167,7 @@ impl TaskType {
             "proxy" => Self::Proxy,
             "pubsub" => Self::Pubsub,
             "binproto" => Self::Binproto,
+            "queue" => Self::Queue,
             _ => return None,
         })
     }
@@ -1187,6 +1193,7 @@ impl std::fmt::Display for TaskType {
             TaskType::Proxy => write!(f, "proxy"),
             TaskType::Pubsub => write!(f, "pubsub"),
             TaskType::Binproto => write!(f, "binproto"),
+            TaskType::Queue => write!(f, "queue"),
         }
     }
 }
@@ -1440,6 +1447,7 @@ mod tests {
             TaskType::Pubsub,
             TaskType::Wal,
             TaskType::Binproto,
+            TaskType::Queue,
         ] {
             let path = get_repo_root()
                 .join("tasks")

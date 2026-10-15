@@ -16,8 +16,8 @@ use subdollarbench::report::{
 };
 use subdollarbench::sandbox::docker::{RunGuard, SandboxManager, PROXY_UPSTREAM_PORTS};
 use subdollarbench::verifier::{
-    BinprotoVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, RedisVerifier,
-    WalVerifier,
+    BinprotoVerifier, HttpVerifier, PdfVerifier, ProxyVerifier, PubsubVerifier, QueueVerifier,
+    RedisVerifier, WalVerifier,
 };
 use subdollarbench::web;
 use subdollarbench::web::server::compute_pass_at_k;
@@ -710,6 +710,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Proxy => 8091,
                 TaskType::Pubsub => 8092,
                 TaskType::Binproto => 6395,
+                TaskType::Queue => 6385,
             });
             println!("Evaluating {} on port {}...", task, p);
             match task {
@@ -740,6 +741,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Wal => {
                     let v = WalVerifier::new(p, Some(&eval_seed));
                     let res = v.run_basic().await;
+                    println!(
+                        "Pass rate: {:.1}% ({}/{})",
+                        res.pass_rate, res.passed_count, res.total_stages
+                    );
+                }
+                TaskType::Queue => {
+                    let v = QueueVerifier::new(p, Some(&eval_seed));
+                    let res = v.run_all().await;
                     println!(
                         "Pass rate: {:.1}% ({}/{})",
                         res.pass_rate, res.passed_count, res.total_stages
@@ -1312,6 +1321,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Proxy => 8091,
                 TaskType::Pubsub => 8092,
                 TaskType::Binproto => 6395,
+                TaskType::Queue => 6385,
             });
             // Port safety: never fight a live engine over task ports.
             // Best-effort check — an unreachable engine means idle-or-down,
@@ -1423,6 +1433,20 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Wal => {
                     let v = WalVerifier::new(p, Some(&replay_seed));
                     let r = v.run_basic().await;
+                    (r.pass_rate, r.passed_count, r.total_stages)
+                }
+                TaskType::Queue => {
+                    let v = QueueVerifier::new(p, Some(&replay_seed));
+                    let r = v.run_all().await;
+                    for s in &r.stages {
+                        println!(
+                            "  Stage {}: {} -> {} {}",
+                            s.stage,
+                            s.name,
+                            if s.passed { "PASS" } else { "FAIL" },
+                            s.error.as_deref().unwrap_or("")
+                        );
+                    }
                     (r.pass_rate, r.passed_count, r.total_stages)
                 }
                 TaskType::Proxy => {

@@ -8,6 +8,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-15.3`: campaign sdb-queue (task `queue`, tickets 0-8) — a new
+///   task type (default port 6385) with a 9-stage suite: (1) ENQ/LEASE/ACK
+///   FIFO round trip, (2) visibility leases + expiry + connection ownership,
+///   (3) NACK immediate/delayed + attempt accounting, (4) dead-lettering
+///   after 3 failed attempts into `<queue>.dead` (inspections do not
+///   increment attempts), (5) durability across kill -9 (acked never
+///   return; in-flight jobs return with attempts preserved), (6) no
+///   duplicate delivery under 6 racing consumers, (7) per-queue STATS
+///   counters, (8) delayed ENQ + DLQ REDRIVE, (9) hardening (32KiB payload
+///   rejected, malformed lines error, slow-loris reclaimed, 128MB cap).
+///   Campaign acceptance for task `queue` validates ids 1..=9
+///   (`queue_stages`); other tasks are unaffected.
 /// - `2026-10-15.2`: campaign sdb-edge (task `proxy`, tickets 0-6). The
 ///   single-shot proxy suite (stages 1-5) is unchanged; four campaign-only
 ///   stages extend it: (6) fast failover under a hung upstream (frozen
@@ -363,7 +375,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-15.2";
+pub const RULES_VERSION: &str = "2026-10-15.3";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

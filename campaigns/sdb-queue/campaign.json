@@ -1,0 +1,162 @@
+{
+  "name": "sdb-queue",
+  "version": 1,
+  "task": "queue",
+  "title": "sdb-queue: a job broker from leases to dead letters",
+  "description": "Nine tickets on one living workspace: enqueue/lease/ack, visibility leases, nack/retries, dead-letter queues, kill -9 durability, concurrency, observability, delayed delivery + redrive, and hardening. The queue suite (stages 1-9) is the acceptance.",
+  "stages": [
+    {
+      "id": 0,
+      "type": "genesis",
+      "title": "Front door: enqueue, lease, ack",
+      "prompt": "stages/0_genesis/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1
+        ]
+      },
+      "budget_usd": 0.2,
+      "max_turns": 36
+    },
+    {
+      "id": 1,
+      "type": "feature",
+      "title": "Visibility leases and ownership",
+      "prompt": "stages/1_leases/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 2,
+      "type": "feature",
+      "title": "NACK: retries with delays",
+      "prompt": "stages/2_nack/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 3,
+      "type": "resilience",
+      "title": "Dead letters after max attempts",
+      "prompt": "stages/3_dlq/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 4,
+      "type": "durability",
+      "title": "Survive kill -9",
+      "prompt": "stages/4_durability/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 5,
+      "type": "scale",
+      "title": "Many consumers, no duplicates",
+      "prompt": "stages/5_concurrency/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ]
+      },
+      "budget_usd": 0.12,
+      "max_turns": 24
+    },
+    {
+      "id": 6,
+      "type": "observability",
+      "title": "Counters that add up",
+      "prompt": "stages/6_stats/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ]
+      },
+      "budget_usd": 0.12,
+      "max_turns": 24
+    },
+    {
+      "id": 7,
+      "type": "feature",
+      "title": "Delays and redrive",
+      "prompt": "stages/7_admin/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      "budget_usd": 0.12,
+      "max_turns": 24
+    },
+    {
+      "id": 8,
+      "type": "security",
+      "title": "Limits and hostile input",
+      "prompt": "stages/8_hardening/prompt.md",
+      "acceptance": {
+        "queue_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    }
+  ]
+}

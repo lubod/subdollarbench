@@ -316,6 +316,41 @@ Second campaign portfolio entry (DECISIONS #11 porting order), task
   and a throughput ticket (stage 5 + baseline gate) once proxy baselines
   are recorded.
 
+## Slice K — sdb-queue (the new app: leases / ack / nack / retries / DLQ)
+
+Third portfolio entry (DECISIONS #11 order) and the one genuinely NEW
+application — no single-shot task existed, so the campaign is its primary
+home. New task type `queue` (default port 6385), RULES `2026-10-15.3`.
+
+- [x] K1. Task type + plumbing: `TaskType::Queue` (9 single-shot stages,
+  port 6385), omp task guidance (protocol + anti-cheat), batch-ref None,
+  CLI verify/replay arms, `tasks/queue/prompt.md`, and the config
+  prompt-validation list.
+- [x] K2. Verifier `src/verifier/queue.rs`: line protocol
+  ENQ/LEASE/ACK/NACK/REDRIVE/STATS/PING with a contract header; stages
+  1-9 (FIFO round trip; visibility + expiry + connection ownership; nack
+  immediate/delayed + attempts; DLQ at 3 attempts with inspection-only
+  reads; durability prepare/verify split for the pipeline kill; 6-consumer
+  no-duplicate race; per-queue STATS; delayed ENQ + redrive; hardening
+  with a 32KiB payload, malformed lines and slow-loris), plus a
+  `measure_throughput` soak.
+- [x] K3. Mock broker in the tests (~250 lines: leases, expiry, DLQ moves,
+  redrive, per-queue counters, payload fidelity) with 8 injected defects
+  (no-expiry, no-ownership, no-DLQ, duplicate delivery, frozen stats,
+  void delays, oversized-ok, never-reclaim) each asserted to fail the
+  intended stage with a naming error; plus a faithful-pass test over all
+  self-contained stages.
+- [x] K4. Pipeline arm: acceptance-scoped stages 1-9; stage 5 is the
+  destructive durability half (prepare -> SIGKILL -> restart -> verify,
+  skipped for tickets whose acceptance excludes it); stage 9 restarts the
+  broker under a 128MB cap; setup/bench arms treat the task as
+  verifier-timed (no reference container, jobs/sec soak).
+- [x] K5. Campaign spec + prompts: nine tickets (genesis -> leases ->
+  nack -> DLQ -> durability -> concurrency -> stats -> delays/redrive ->
+  hardening) with cumulative acceptances and a dedicated base prompt.
+- [ ] K6. Live proof (eval-only reference broker through the real
+  pipeline, incl. the restart halves), then model grid cells.
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the

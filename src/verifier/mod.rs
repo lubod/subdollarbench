@@ -4,6 +4,7 @@ pub mod http;
 pub mod pdf;
 pub mod proxy;
 pub mod pubsub;
+pub mod queue;
 pub mod redis;
 pub mod wal;
 
@@ -23,6 +24,7 @@ pub use http::HttpVerifier;
 pub use pdf::PdfVerifier;
 pub use proxy::ProxyVerifier;
 pub use pubsub::PubsubVerifier;
+pub use queue::QueueVerifier;
 pub use redis::RedisVerifier;
 pub use wal::WalVerifier;
 

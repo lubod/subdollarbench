@@ -36,6 +36,9 @@ pub struct Acceptance {
     /// task, so one of the two lists stays empty.
     #[serde(default)]
     pub proxy_stages: Vec<u32>,
+    /// sdb-queue (job broker) acceptance.
+    #[serde(default)]
+    pub queue_stages: Vec<u32>,
 }
 
 impl Acceptance {
@@ -43,21 +46,24 @@ impl Acceptance {
     pub fn stages_for(&self, task: &str) -> &[u32] {
         match task {
             "proxy" => &self.proxy_stages,
+            "queue" => &self.queue_stages,
             _ => &self.redis_stages,
         }
     }
 
     /// Task ids with a campaign stage adapter.
     pub fn supported_task(task: &str) -> bool {
-        matches!(task, "redis" | "proxy")
+        matches!(task, "redis" | "proxy" | "queue")
     }
 
     /// Highest acceptance id a campaign of `task` may reference.
     pub fn max_stage(task: &str) -> u32 {
         match task {
             // Proxy stages 6-9 (quick failover, health surface, caching,
-            // limits) extend the single-shot 5.
+            // limits) extend the single-shot 5. The queue suite is 9 stages
+            // (the campaign is its primary home).
             "proxy" => 9,
+            "queue" => 9,
             _ => 16,
         }
     }
@@ -161,7 +167,7 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
     }
     if !Acceptance::supported_task(&spec.task) {
         bail!(
-            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy)",
+            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy, queue)",
             spec.name,
             spec.task
         );
@@ -664,6 +670,7 @@ mod tests {
                     acceptance: Acceptance {
                         redis_stages: vec![1, 2],
                         proxy_stages: Vec::new(),
+                        queue_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -677,6 +684,7 @@ mod tests {
                     acceptance: Acceptance {
                         redis_stages: vec![1, 2, 3],
                         proxy_stages: Vec::new(),
+                        queue_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -690,6 +698,7 @@ mod tests {
                     acceptance: Acceptance {
                         redis_stages: vec![1, 2, 3, 5],
                         proxy_stages: Vec::new(),
+                        queue_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -742,6 +751,52 @@ mod tests {
             lc.spec.stages[6].acceptance.proxy_stages,
             vec![1, 2, 3, 4, 6, 7, 8, 9]
         );
+    }
+
+    #[test]
+    fn test_real_sdb_queue_spec_validates() {
+        let lc = load_campaign("sdb-queue").expect("bundled campaign must load");
+        assert_eq!(lc.spec.name, "sdb-queue");
+        assert_eq!(lc.spec.task, "queue");
+        assert_eq!(lc.spec.stages.len(), 9);
+        assert_eq!(lc.spec.stages[0].id, 0);
+        for stage in &lc.spec.stages {
+            assert!(
+                !stage.acceptance.queue_stages.is_empty(),
+                "ticket {} has no queue acceptance",
+                stage.id
+            );
+            assert!(
+                stage
+                    .acceptance
+                    .queue_stages
+                    .iter()
+                    .all(|id| (1..=9).contains(id)),
+                "ticket {} acceptance out of the queue suite",
+                stage.id
+            );
+        }
+        assert_eq!(lc.spec.stages[0].acceptance.queue_stages, vec![1]);
+        assert_eq!(
+            lc.spec.stages[8].acceptance.queue_stages,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn test_queue_acceptance_validation() {
+        let mut lc = fixture_campaign();
+        lc.spec.task = "queue".into();
+        // Empty queue acceptance fails closed.
+        assert!(validate_spec(&lc.spec, &lc.root).is_err());
+        lc.spec.stages[0].acceptance.queue_stages = vec![1];
+        lc.spec.stages[1].acceptance.queue_stages = vec![1, 2];
+        lc.spec.stages[2].acceptance.queue_stages = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+        // The queue suite tops out at stage 9.
+        lc.spec.stages[2].acceptance.queue_stages = vec![1, 10];
+        let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
+        assert!(err.contains("out of range 1..=9"), "{err}");
     }
 
     #[test]

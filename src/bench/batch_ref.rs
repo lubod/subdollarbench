@@ -34,7 +34,7 @@ pub fn batch_port(task: &TaskType) -> Option<u16> {
         // 6389/8089 by a non-multiple of 100, so no cross-worker overlap
         // is possible. `batch_ports_are_disjoint` below proves the whole map.
         TaskType::Pdf => Some(8409),
-        TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => None,
+        TaskType::Wal | TaskType::Pubsub | TaskType::Binproto | TaskType::Queue => None,
     }
 }
 

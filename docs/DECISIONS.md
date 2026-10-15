@@ -272,3 +272,39 @@ RULES `2026-10-15.2`. Design choices:
   against the host resolver). Restart blocks now call
   `connect_candidate_to_network()` (proxy stages 8/9 and the two redis
   disk stages).
+
+## 16. sdb-queue: the job-broker campaign (2026-10-15.3)
+
+The portfolio's one genuinely new application (DECISIONS #11). New task
+type `queue` (port 6385), nine tickets (0-8), 9-stage suite, RULES
+`2026-10-15.3`. Design choices:
+
+- **Lease ownership by connection**: a lease belongs to the connection
+  that took it; ACK/NACK from elsewhere is `-ERR not-owner`. This makes
+  duplicate-ack and stolen-lease bugs observable without a separate
+  receipt-handle concept, and it is what the concurrency stage leans on.
+- **In-flight recovery is explicit**: on restart, leased-but-unacked jobs
+  return to the queue with attempts preserved (the next lease reports
+  attempts+1), acked jobs never return. This is the queue analogue of the
+  redis AOF contract and the sharpest part of the durability ticket.
+- **Dead letters are a queue, reads are inspections**: after 3 failed
+  attempts a job moves to `<queue>.dead`; leasing from `.dead` does not
+  increment attempts (the reported count is the failed-delivery count).
+  Redrive (`REDRIVE <queue> <id>`) is the operator's resurrection path and
+  resets attempts.
+- **STATS is per queue and reads are side-effect free**: the counters must
+  add up under a known workload (`enqueued/acked/nacked/inflight/
+  available/dead`), which catches bookkeeping drift that behavioral stages
+  would miss.
+- **The hardening ticket mirrors the neighbours**: 32KiB payloads rejected
+  against an 8KiB cap, malformed lines error without crashing, a stalled
+  partial line is reclaimed within ~12s, all under a 128MB cap.
+- **Campaign-first**: unlike redis/proxy/http there was no single-shot
+  task to preserve, so the 9-stage suite is both the single-shot board and
+  the campaign acceptance; `queue_stages` is the acceptance list and the
+  validator range is 1..=9.
+- **Mock-first rigor**: the tests' mock broker implements the full lease
+  state machine, and eight injected defects each prove the stage that is
+  supposed to catch them does, with a naming error message. The live
+  proof (a reference broker through the real pipeline, including the two
+  restart halves) is the next step (TODO_CAMPAIGNS Slice K6).

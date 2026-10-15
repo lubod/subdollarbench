@@ -34,6 +34,7 @@ use crate::verifier::http::HttpVerifier;
 use crate::verifier::pdf::PdfVerifier;
 use crate::verifier::proxy::ProxyVerifier;
 use crate::verifier::pubsub::PubsubVerifier;
+use crate::verifier::queue::QueueVerifier;
 use crate::verifier::redis::RedisVerifier;
 use crate::verifier::wal::WalVerifier;
 
@@ -2263,6 +2264,197 @@ impl BenchmarkPipeline {
                             summary.stages,
                         )
                     }
+                    TaskType::Queue => {
+                        let allowed = |n: u32| accepted.map(|a| a.contains(&n)).unwrap_or(true);
+                        let log_stage =
+                            |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> {} {}",
+                                    s.stage,
+                                    crate::config::stage_label(s.stage, &s.name),
+                                    if s.passed { "PASS" } else { "FAIL" },
+                                    s.error.as_deref().unwrap_or("")
+                                ));
+                            };
+                        let fail_stage =
+                            |stage: u32, name: &str, err: String| crate::verifier::StageResult {
+                                stage,
+                                name: name.to_string(),
+                                passed: false,
+                                error: Some(err),
+                            };
+                        let verifier = QueueVerifier::new(port, Some(verifier_seed));
+                        let mut stages: Vec<crate::verifier::StageResult> = Vec::new();
+                        let mut prior_failed = false;
+                        if allowed(1) {
+                            let st = verifier.test_stage1_basic().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(2) {
+                            let st = verifier.test_stage2_leases().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(3) {
+                            let st = verifier.test_stage3_nack().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(4) {
+                            let st = verifier.test_stage4_dlq().await;
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(5) {
+                            // Durability is destructive: prepare durable
+                            // state, SIGKILL, restart, verify.
+                            let name5 = "Stage 5: Durability across kill -9";
+                            let st = if prior_failed {
+                                fail_stage(
+                                    5,
+                                    name5,
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                let prep = verifier.test_stage5_durability_prepare().await;
+                                if !prep.passed {
+                                    prep
+                                } else {
+                                    logger.log("  [QUEUE] durability: SIGKILL + restart...");
+                                    let crash = sandbox.kill_candidate().and_then(|_| {
+                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                        sandbox.restart_candidate()
+                                    });
+                                    match crash {
+                                        Err(e) => fail_stage(
+                                            5,
+                                            name5,
+                                            format!("SIGKILL/restart failed: {e}"),
+                                        ),
+                                        Ok(()) => {
+                                            let _ = sandbox.connect_candidate_to_network();
+                                            if !sandbox.wait_for_port(port, 25).await {
+                                                fail_stage(
+                                                    5,
+                                                    name5,
+                                                    "broker did not reopen its port after restart"
+                                                        .to_string(),
+                                                )
+                                            } else {
+                                                verifier.test_stage5_durability_verify().await
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(6) {
+                            let st = if prior_failed {
+                                fail_stage(
+                                    6,
+                                    "Stage 6: No duplicate delivery under contention",
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                verifier.test_stage6_concurrency().await
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(7) {
+                            let st = if prior_failed {
+                                fail_stage(
+                                    7,
+                                    "Stage 7: Observability (STATS counters)",
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                verifier.test_stage7_stats().await
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(8) {
+                            let st = if prior_failed {
+                                fail_stage(
+                                    8,
+                                    "Stage 8: Delayed delivery + DLQ redrive",
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                verifier.test_stage8_delay_redrive().await
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        if allowed(9) {
+                            let name9 = "Stage 9: Limits and hostile input";
+                            let st = if prior_failed {
+                                fail_stage(
+                                    9,
+                                    name9,
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                let limits_extras = crate::sandbox::docker::CandidateRunExtras {
+                                    memory: Some("128m".to_string()),
+                                    ports: extras.ports.clone(),
+                                    ..Default::default()
+                                };
+                                let restarted = sandbox.stop_candidate().and_then(|_| {
+                                    sandbox.start_candidate_in_docker_with(
+                                        workdir,
+                                        port,
+                                        &limits_extras,
+                                    )
+                                });
+                                match restarted {
+                                    Err(e) => fail_stage(
+                                        9,
+                                        name9,
+                                        format!("memory-capped candidate start failed: {e}"),
+                                    ),
+                                    Ok(()) => {
+                                        let _ = sandbox.connect_candidate_to_network();
+                                        if !sandbox.wait_for_port(port, 25).await {
+                                            fail_stage(
+                                                9,
+                                                name9,
+                                                "candidate did not reopen its port under the memory cap"
+                                                    .to_string(),
+                                            )
+                                        } else {
+                                            verifier.test_stage9_hardening().await
+                                        }
+                                    }
+                                }
+                            };
+                            log_stage(logger, &st);
+                            stages.push(st);
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                        let ts = stages.len() as u32;
+                        let pr = if ts == 0 {
+                            0.0
+                        } else {
+                            ps as f64 / ts as f64 * 100.0
+                        };
+                        (pr, ps, ts, stages)
+                    }
                 }
             };
 
@@ -2494,7 +2686,7 @@ impl BenchmarkPipeline {
                     )),
                 }
             }
-            TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
+            TaskType::Wal | TaskType::Pubsub | TaskType::Binproto | TaskType::Queue => {
                 logger.log("[SETUP] No reference container for this task (verifier-timed).");
             }
         }
@@ -2975,10 +3167,11 @@ impl BenchmarkPipeline {
                         }
                     }
                 }
-                TaskType::Wal | TaskType::Pubsub | TaskType::Binproto => {
+                TaskType::Wal | TaskType::Pubsub | TaskType::Binproto | TaskType::Queue => {
                     if let Some(tp) = extra_throughput {
                         let unit = match config.task {
                             TaskType::Wal => "msgs/sec",
+                            TaskType::Queue => "jobs/sec",
                             TaskType::Pubsub => "deliveries/sec",
                             _ => "ops/sec",
                         };

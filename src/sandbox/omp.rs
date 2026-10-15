@@ -1964,6 +1964,13 @@ Content-Length: 0
 - WebSocket libraries (ws, gorilla, tungstenite) are FORBIDDEN; raw TCP sockets only.
 - Build an RFC 6455 broker on 8092: SHA-1 handshake, masked TEXT frames SUB <channel> / PUB <channel> <msg>, broadcast fan-out, ping/pong."#,
             ),
+            Some(crate::config::TaskType::Queue) => (
+                6385,
+                "printf 'ENQ q hello\nLEASE q 5000\n' | nc 127.0.0.1 6385",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Pre-built queue systems and job libraries (RabbitMQ, Redis, Kafka, NATS, nsq, celery, bullmq, sidekiq, RQ, etc.) are FORBIDDEN.
+- Build a job queue broker on TCP 6385 with LF-terminated commands: ENQ <queue> <payload> -> +OK <id> (fsync before ack), LEASE <queue> <lease_ms> -> +JOB <id> <attempts> <payload>|+NONE (visibility lease owned by the connection), ACK <id>/NACK <id> [delay_ms] -> +OK, 3 failed attempts -> <queue>.dead, REDRIVE <queue> <id>, +STATS counters, PING -> +PONG. Persist under ./data and recover after kill -9."#,
+            ),
             Some(crate::config::TaskType::Binproto) => (
                 6395,
                 "python3 -c \"import struct,zlib;print(zlib.crc32(b'x'))\"",
