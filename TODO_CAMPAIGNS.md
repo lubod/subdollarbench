@@ -296,8 +296,22 @@ Second campaign portfolio entry (DECISIONS #11 porting order), task
   acceptance [1] — the proxy campaign path works end to end (task
   adapter, pool startup, acceptance-scoped verdict 1/1, stage-log
   contract); bench runs against the candidate.
-- [ ] J5b. Full-ladder live proof (a reference proxy implementing stages
-  1-9) and the first model-driven grid cells.
+- [x] J5b. Full-ladder LIVE proof (2026-10-15, no model): the reference
+  proxy (`EDGE_MOCK_SERVER_PY` in `src/pipeline.rs`: round-robin,
+  upstream timeout+retry, active health probes + `/status`, TTL cache,
+  request limits) driven through the real pipeline with acceptance
+  [1,2,3,4,6,7,8,9] — all 8 stages PASS
+  (`test_pipeline_eval_only_proxy_full_ladder_live`, ~84s incl. the bench):
+  docker-pause failover, quick failover under a hung upstream, the health
+  surface flipping while idle, the cache restart (`SDB_PROXY_CACHE_TTL`),
+  and the 128MB-capped limits stage.
+  Harness bug found + fixed by this test: candidate restarts (stage 8/9,
+  and the redis disk stages for consistency) did not re-attach to the run
+  network (`connect_candidate_to_network`), so a restarted candidate could
+  not resolve the upstream aliases (observed as an unbounded getaddrinfo
+  stall against the host resolver). The initial start path already
+  attached; restarts now do too.
+- [ ] J5c. Model-driven grid cells for sdb-edge.
 - [ ] J6. Later tickets: TLS termination with a harness-provided cert,
   and a throughput ticket (stage 5 + baseline gate) once proxy baselines
   are recorded.
@@ -337,6 +351,10 @@ Wave log:
   stages 6/7; verifier/proxy.rs sits at 79.65% lines (cache/limits/status
   logic is mock-covered, pause-based stages need live upstreams),
   campaign.rs 91.73%, pipeline.rs 56.59%. Gate margin ~4.4pp.
+- Wave 8 (sdb-edge full-ladder live proof, 2026-10-15): aggregate 84.43 ->
+  **84.82% lines** (regions 85.69%, functions 89.09%). The eval-only
+  reference-proxy run covers the proxy arm's stage-6..9 orchestration and
+  the fixture (pipeline.rs 56.59 -> 59.12%); gate margin ~4.8pp.
 
 Remaining smaller residuals if a future wave wants more margin:
 web/server.rs (1,098 incl. test code), web/queue.rs (798),

@@ -1579,6 +1579,7 @@ impl BenchmarkPipeline {
                                                 ),
                                             ),
                                             Ok(()) => {
+                                                let _ = sandbox.connect_candidate_to_network();
                                                 if !sandbox.wait_for_port(port, 30).await {
                                                     staged_fail(
                                                         14,
@@ -1675,6 +1676,7 @@ impl BenchmarkPipeline {
                                                 format!("candidate start failed: {e}"),
                                             ),
                                             Ok(()) => {
+                                                let _ = sandbox.connect_candidate_to_network();
                                                 if !sandbox.wait_for_port(port, 30).await {
                                                     staged_fail(
                                                         15,
@@ -2112,6 +2114,15 @@ impl BenchmarkPipeline {
                                                 ),
                                             }
                                         } else {
+                                            // Restarts land on the default
+                                            // bridge: re-attach so upstream
+                                            // aliases resolve.
+                                            if let Err(e) = sandbox.connect_candidate_to_network() {
+                                                logger.log(&format!(
+                                                    "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
+                                                    e
+                                                ));
+                                            }
                                             verifier.test_stage8_caching().await
                                         }
                                     }
@@ -2159,6 +2170,12 @@ impl BenchmarkPipeline {
                                         )),
                                     },
                                     Ok(()) => {
+                                        if let Err(e) = sandbox.connect_candidate_to_network() {
+                                            logger.log(&format!(
+                                                "[SETUP] Warning: candidate network attach failed: {}. Upstream dials may fail.",
+                                                e
+                                            ));
+                                        }
                                         if !sandbox.wait_for_port(port, 25).await {
                                             crate::verifier::StageResult {
                                                 stage: 9,
@@ -4134,6 +4151,265 @@ serve()
         }
     }
 
+    /// sdb-edge reference candidate (live ladder proof): a stdlib-only
+    /// reverse proxy with round-robin over the three upstream aliases,
+    /// upstream timeouts + retry (hung-upstream failover), active health
+    /// probes and `GET /status`, a TTL cache (`SDB_PROXY_CACHE_TTL`,
+    /// `X-Cache`/`Age`), and request limits (8KiB head -> 431, >1MiB
+    /// declared body -> 413, slow-loris reclaimed in ~3s). Env override
+    /// `SDB_EDGE_UPSTREAMS` points it at local stubs for development.
+    const EDGE_MOCK_SERVER_PY: &str = r#"import os
+import socket
+import sys
+import threading
+import time
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
+
+# Real campaigns: the three run-network upstreams by alias. The env override
+# exists so the reference can be exercised against local stubs.
+_env = os.environ.get("SDB_EDGE_UPSTREAMS")
+if _env:
+    UPSTREAMS = []
+    for part in _env.split(","):
+        h, p = part.rsplit(":", 1)
+        UPSTREAMS.append((h, int(p)))
+else:
+    UPSTREAMS = [("upstream1", 80), ("upstream2", 80), ("upstream3", 80)]
+
+CACHE_TTL = int(os.environ.get("SDB_PROXY_CACHE_TTL", "0") or "0")
+HEAD_CAP = 8 * 1024          # oversized request head -> 431
+MAX_BODY = 1024 * 1024       # declared body above this -> 413 before reading
+CLIENT_READ_TIMEOUT = 3.0    # slow-loris: partial head reclaimed in ~3s
+UPSTREAM_TIMEOUT = 1.0       # hung upstream: per-attempt budget
+ATTEMPT_BUDGET = 2.2         # total per-request upstream budget (< 2.5s gate)
+PROBE_INTERVAL = 1.0
+
+health = [True] * len(UPSTREAMS)
+health_lock = threading.Lock()
+_rr = 0
+_rr_lock = threading.Lock()
+cache = {}
+_cache_lock = threading.Lock()
+
+
+def _send(sock, data):
+    try:
+        sock.sendall(data)
+    except Exception:
+        pass
+
+
+def http_response(status, reason, body, keep_alive, extra=""):
+    conn = "keep-alive" if keep_alive else "close"
+    head = (
+        f"HTTP/1.1 {status} {reason}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"Connection: {conn}\r\n"
+        f"{extra}\r\n"
+    )
+    return head.encode("latin-1") + body
+
+
+def parse_upstream(data):
+    head, _, body = data.partition(b"\r\n\r\n")
+    line = head.split(b"\r\n", 1)[0]
+    parts = line.split(b" ")
+    status = int(parts[1]) if len(parts) > 1 else 502
+    headers = {}
+    for raw in head.split(b"\r\n")[1:]:
+        if b":" in raw:
+            k, v = raw.split(b":", 1)
+            headers[k.strip().lower().decode("latin-1")] = v.strip().decode("latin-1")
+    return status, body, headers
+
+
+def fetch_upstream(idx, path, client_ip):
+    host, port = UPSTREAMS[idx]
+    sock = socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT)
+    try:
+        sock.settimeout(UPSTREAM_TIMEOUT)
+        req = (
+            f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
+            f"X-Forwarded-For: {client_ip}\r\nConnection: close\r\n\r\n"
+        )
+        sock.sendall(req.encode("latin-1"))
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > 8 * 1024 * 1024:
+                break
+    finally:
+        sock.close()
+    if not data:
+        raise ValueError("empty upstream response")
+    return parse_upstream(data)
+
+
+def healthy_order():
+    global _rr
+    with _rr_lock:
+        start = _rr
+        _rr += 1
+    n = len(UPSTREAMS)
+    with health_lock:
+        hs = list(health)
+    order = [(start + k) % n for k in range(n)]
+    healthy = [i for i in order if hs[i]]
+    return healthy if healthy else order
+
+
+def proxy_get(path, client_ip):
+    global cache
+    if CACHE_TTL > 0:
+        with _cache_lock:
+            entry = cache.get(path)
+        if entry and (time.time() - entry[1]) < CACHE_TTL:
+            age = int(time.time() - entry[1])
+            return 200, entry[0], f"X-Cache: HIT\r\nAge: {age}\r\n"
+    status, body, up_headers = 502, b"no upstream", {}
+    chosen = None
+    deadline = time.time() + ATTEMPT_BUDGET
+    order = healthy_order()
+    for idx in order:
+        if time.time() >= deadline:
+            break
+        try:
+            status, body, up_headers = fetch_upstream(idx, path, client_ip)
+            chosen = idx
+            break
+        except Exception:
+            continue
+    if (
+        CACHE_TTL > 0
+        and chosen is not None
+        and status == 200
+        and "no-store" not in up_headers.get("cache-control", "")
+    ):
+        with _cache_lock:
+            cache[path] = (body, time.time())
+    extra = "X-Cache: MISS\r\n" if CACHE_TTL > 0 else ""
+    return status, body, extra
+
+
+def status_body():
+    with health_lock:
+        hs = list(health)
+    return "".join(
+        f"upstream{i + 1}: {'up' if hs[i] else 'down'}\n" for i in range(len(UPSTREAMS))
+    ).encode()
+
+
+def read_head(sock):
+    """Return the request head bytes, b'TOO_BIG', or None on close/timeout."""
+    sock.settimeout(CLIENT_READ_TIMEOUT)
+    buf = b""
+    try:
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(1024)
+            if not chunk:
+                return None
+            buf += chunk
+            if len(buf) > HEAD_CAP:
+                return b"TOO_BIG"
+    except socket.timeout:
+        return None
+    except OSError:
+        return None
+    return buf
+
+
+def handle_client(conn, addr):
+    client_ip = addr[0]
+    try:
+        while True:
+            head = read_head(conn)
+            if head is None:
+                return
+            if head == b"TOO_BIG":
+                _send(conn, http_response(431, "Request Header Fields Too Large", b"", False))
+                return
+            text = head.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+            lines = text.split("\r\n")
+            parts = lines[0].split(" ")
+            method = parts[0] if parts else ""
+            path = parts[1] if len(parts) > 1 else "/"
+            headers = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+            cl = 0
+            if headers.get("content-length"):
+                try:
+                    cl = int(headers["content-length"])
+                except ValueError:
+                    cl = 0
+            if cl > MAX_BODY:
+                _send(conn, http_response(413, "Payload Too Large", b"", False))
+                return
+            keep = headers.get("connection", "keep-alive").lower() != "close"
+            if path == "/status":
+                _send(conn, http_response(200, "OK", status_body(), keep))
+                continue
+            if method != "GET":
+                _send(conn, http_response(405, "Method Not Allowed", b"", False))
+                return
+            status, body, extra = proxy_get(path, client_ip)
+            _send(conn, http_response(status, "OK" if status == 200 else "Bad Gateway", body, keep, extra))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def prober():
+    while True:
+        for idx in range(len(UPSTREAMS)):
+            try:
+                status, _, _ = fetch_upstream(idx, "/", "127.0.0.1")
+                ok = status == 200
+            except Exception:
+                ok = False
+            with health_lock:
+                health[idx] = ok
+        time.sleep(PROBE_INTERVAL)
+
+
+def serve():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", PORT))
+    srv.listen(128)
+    print(f"edge proxy listening on {PORT} cache_ttl={CACHE_TTL}", flush=True)
+    threading.Thread(target=prober, daemon=True).start()
+    while True:
+        conn, addr = srv.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+
+serve()
+"#;
+
+    /// Write the sdb-edge reference proxy into `dir`, listening on `port`.
+    fn write_edge_mock(dir: &Path, port: u16) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("proxy.py"), EDGE_MOCK_SERVER_PY).unwrap();
+        let start = format!("#!/bin/bash\nexec python3 -u /workspace/proxy.py {port}\n");
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
     /// Write the mock candidate into `dir`, listening on `port`.
     /// `boot_sleep_secs` delays the listener (used to keep a run inside
     /// verification while a test flips the cancel flag).
@@ -5017,6 +5293,59 @@ serve()
             (1, 1)
         );
         cleanup_covtest_network("edge");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-edge FULL-ladder live proof (eval-only, no model): the
+    /// reference proxy (routing, retry, health surface, cache, limits)
+    /// driven through the real pipeline with acceptance [1,2,3,4,6,7,8,9]
+    /// — includes the docker-pause failover stages, the cache restart with
+    /// SDB_PROXY_CACHE_TTL, and the 128MB-capped limits stage.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_proxy_full_ladder_live() {
+        let worker = 99u8;
+        let port = crate::web::server::worker_port(TaskType::Proxy.default_port(), worker);
+        let dir = covtest_dir("edgefull");
+        let workdir = dir.join("workspace");
+        write_edge_mock(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-edge full ladder fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "edgefull");
+        config.task = TaskType::Proxy;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-edge".to_string(),
+            stage: 6,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![1, 2, 3, 4, 6, 7, 8, 9],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("sdb-edge full ladder must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        for needle in [
+            "Stage 1: Basic routing (200 + marker) -> PASS",
+            "Stage 2: Round-robin across all 3 upstreams -> PASS",
+            "Stage 3: Valid HTTP/1.1 framing + keep-alive -> PASS",
+            "Stage 4: Failover (one upstream down) -> PASS",
+            "Stage 6: Fast failover under a hung upstream -> PASS",
+            "Stage 7: Active health checks + /status -> PASS",
+            "Stage 8: Response caching (TTL + X-Cache) -> PASS",
+            "Stage 9: Limits and hostile input -> PASS",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (8, 8)
+        );
+        cleanup_covtest_network("edgefull");
         let _ = fs::remove_dir_all(&dir);
     }
 

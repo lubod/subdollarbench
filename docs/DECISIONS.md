@@ -264,3 +264,11 @@ RULES `2026-10-15.2`. Design choices:
   recorded (a perf ticket with the 1.3x gate is a later ticket, J6), and
   **TLS termination is deferred** to J6 (a verifier TLS client is needed;
   stdlib-only Rust candidates would otherwise be disadvantaged).
+- Live proof (2026-10-15): the reference proxy passed the full ladder
+  through the real pipeline (acceptance [1,2,3,4,6,7,8,9]; all 8 stages
+  PASS). The run exposed one harness defect and fixed it: candidate
+  restarts did not re-attach to the run network, so a restarted candidate
+  could not resolve `upstreamN` aliases (symptom: getaddrinfo stalling
+  against the host resolver). Restart blocks now call
+  `connect_candidate_to_network()` (proxy stages 8/9 and the two redis
+  disk stages).
