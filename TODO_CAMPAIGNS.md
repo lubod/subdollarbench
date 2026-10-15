@@ -439,6 +439,15 @@ Wave log:
   **84.82% lines** (regions 85.69%, functions 89.09%). The eval-only
   reference-proxy run covers the proxy arm's stage-6..9 orchestration and
   the fixture (pipeline.rs 56.59 -> 59.12%); gate margin ~4.8pp.
+- Wave 10 (sdb-http campaign, 2026-10-15): aggregate 84.76 ->
+  **84.52% lines** (regions 85.31%, functions 88.18%). verifier/http.rs at
+  76.79% lines (the five new stages + the full mock/defect matrix are
+  covered; the arm's live-only restart paths and pre-existing gaps
+  remain), campaign.rs 91.82%, queue 85.77%. The recurring
+  `test_bench_lock_released_on_drop` flake under full-suite load is fixed
+  structurally: the test now probes a private lock path (the shared bench
+  lock is legitimately held by live pipeline tests running in parallel).
+  Gate margin ~4.5pp.
 - Wave 9 (sdb-queue campaign + live proof, 2026-10-15): aggregate 84.82 ->
   **84.76% lines** (regions 85.56%, functions 88.88%). The new
   verifier/queue.rs lands at **85.77% lines** (mock broker + defect

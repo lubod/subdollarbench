@@ -141,13 +141,25 @@ pub fn acquire_bench_lock() -> BenchLock {
     acquire_bench_lock_sync(Duration::from_secs(90))
 }
 
+/// Stable bench-lock path (holder serialization across processes).
+fn bench_lock_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("subdollar-bench.lock")
+}
+
 fn acquire_bench_lock_sync(limit: Duration) -> BenchLock {
-    let path = std::env::temp_dir().join("subdollar-bench.lock");
+    acquire_bench_lock_sync_at(&bench_lock_path(), limit)
+}
+
+/// Same semantics on an explicit path. Tests use a private path so a
+/// release/re-acquire property check cannot race a concurrent bench window
+/// from another test (that race made `test_bench_lock_released_on_drop`
+/// flake under full-suite load).
+pub(crate) fn acquire_bench_lock_sync_at(path: &std::path::Path, limit: Duration) -> BenchLock {
     let file = match std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)
+        .open(path)
     {
         Ok(f) => f,
         Err(e) => {
@@ -218,12 +230,16 @@ fn flock_try_lock(_f: &std::fs::File) -> bool {
 /// Single non-blocking attempt: true when the lock was free. Test hook and
 /// the primitive a blocking-with-deadline caller would loop on.
 pub fn acquire_bench_lock_failfast() -> bool {
-    let path = std::env::temp_dir().join("subdollar-bench.lock");
+    flock_probe_at(&bench_lock_path())
+}
+
+/// Single non-blocking probe on an explicit path (tests).
+pub(crate) fn flock_probe_at(path: &std::path::Path) -> bool {
     let file = match std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)
+        .open(path)
     {
         Ok(f) => f,
         Err(_) => return false,
@@ -628,13 +644,18 @@ mod tests {
     #[test]
     fn test_bench_lock_released_on_drop() {
         let _g = LOCK_SERIAL.lock();
+        // Private lock path: the shared bench lock is legitimately held by
+        // live pipeline tests running in parallel; the property under test
+        // is release mechanics, not global freeness.
+        let path = std::env::temp_dir().join(format!("sdb-lock-test-{}.lock", std::process::id()));
         {
-            let _g = acquire_bench_lock();
+            let _g = super::acquire_bench_lock_sync_at(&path, Duration::from_secs(2));
             assert!(_g.owned);
         }
         // fd close releases LOCK_EX: re-acquire must own immediately.
-        let g2 = acquire_bench_lock_failfast();
+        let g2 = super::flock_probe_at(&path);
         assert!(g2, "released lock must be re-acquirable");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
