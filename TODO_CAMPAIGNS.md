@@ -460,6 +460,21 @@ flakes, serialize live-docker tests with a shared test lock.
   (same as its sdb-kv cell, $0.0312) — the pricing path does not zero
   free-tier variants; open item (either zero it or label the rows as
   token-only).
+- **inkling-small:free** (sdb-edge run 1, 2026-10-15,
+  `campaign_sdb-edge_openrouter_thinkingmachines_inkling-small_free_20261015_122552`,
+  RULES `2026-10-15.2`, $0.50 cap, ~7 min wall): reached **1**
+  (2 regression-free tickets), recorded $0.0263 (the free-tier pricing
+  nit again). t0 genesis PASS first try (21 turns, $0.0081; left
+  `proxy_temp.py`/`proxy_temp2.py` copies in the workspace). t1 balance
+  PASS (18 turns, $0.0070; rewrote `proxy.py`). t2 failover **FAIL 1/4**
+  (30 turns, $0.0112) with **regressions [2, 3] (sev 3)** — the cell's
+  headline finding: the initial attempt had no upstream timeout/retry
+  (stage 4: "GET 2 during failover: Read timed out"), and the **repair
+  round broke round-robin (stage 2: unparseable response) and keep-alive
+  (stage 3: read timeout)**. First repair-induced regression on routing
+  stages in the sdb-edge grid; exactly what cumulative acceptance exists
+  to catch (the model's own `proxy.py.bak` was 307 lines vs the 272-line
+  rewrite).
 - **ling-3.1-flash** (sdb-edge run 2, 2026-10-15,
   `campaign_sdb-edge_openrouter_inclusionai_ling-3.1-flash_20261015_121246`,
   RULES `2026-10-15.2`, $0.80 cap, ~22 min): reached **none** — t0 **FAIL
