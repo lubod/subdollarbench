@@ -1982,30 +1982,205 @@ impl BenchmarkPipeline {
                         }
                         }
                         let verifier = ProxyVerifier::new(port, Some(verifier_seed), ups);
-                        let routing = verifier.run_routing().await;
-                        let mut stages = routing.stages.clone();
-                        for s in &routing.stages {
-                            log_stage(logger, s);
+                        // Single-shot proxy runs stages 1-5; the sdb-edge
+                        // campaign ticket scope comes from the acceptance.
+                        // Stages 6-9 are campaign-only (explicit acceptance).
+                        let allowed =
+                            |stage: u32| accepted.map(|a| a.contains(&stage)).unwrap_or(true);
+                        let campaign_only =
+                            |stage: u32| accepted.map(|a| a.contains(&stage)).unwrap_or(false);
+                        let mut stages: Vec<crate::verifier::StageResult> = Vec::new();
+                        if allowed(1) || allowed(2) || allowed(3) {
+                            let routing = verifier.run_routing().await;
+                            for s in routing.stages.iter().filter(|s| allowed(s.stage)) {
+                                log_stage(logger, s);
+                                stages.push(s.clone());
+                            }
                         }
-                        let fo = verifier.run_failover().await;
-                        log_stage(logger, &fo);
-                        stages.push(fo);
-                        let tp = verifier.measure_throughput().await;
-                        extra_throughput = tp;
-                        let tp_stage = crate::verifier::StageResult {
-                            stage: 5,
-                            name: "Stage 5: Concurrent GET throughput".to_string(),
-                            passed: tp.is_some(),
-                            error: match tp {
-                                Some(v) => {
-                                    logger.log(&format!("  Candidate load: {:.0} req/sec", v));
-                                    None
+                        if allowed(4) {
+                            let fo = verifier.run_failover().await;
+                            log_stage(logger, &fo);
+                            stages.push(fo);
+                        }
+                        if allowed(5) {
+                            let tp = verifier.measure_throughput().await;
+                            extra_throughput = tp;
+                            let tp_stage = crate::verifier::StageResult {
+                                stage: 5,
+                                name: "Stage 5: Concurrent GET throughput".to_string(),
+                                passed: tp.is_some(),
+                                error: match tp {
+                                    Some(v) => {
+                                        logger.log(&format!("  Candidate load: {:.0} req/sec", v));
+                                        None
+                                    }
+                                    None => Some("no throughput measurement".to_string()),
+                                },
+                            };
+                            log_stage(logger, &tp_stage);
+                            stages.push(tp_stage);
+                        }
+                        // Stages 6/7 run against the plain candidate; 8 and
+                        // 9 restart it with the cache env / the 128MB cap and
+                        // restore it afterwards.
+                        if campaign_only(6) || campaign_only(7) {
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            if campaign_only(6) {
+                                let st = if !prior_ok {
+                                    crate::verifier::StageResult {
+                                        stage: 6,
+                                        name: "Stage 6: Fast failover under a hung upstream"
+                                            .to_string(),
+                                        passed: false,
+                                        error: Some(
+                                            "skipped due to failure in earlier stages".to_string(),
+                                        ),
+                                    }
+                                } else {
+                                    verifier.test_stage6_quick_failover().await
+                                };
+                                log_stage(logger, &st);
+                                stages.push(st);
+                            }
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            if campaign_only(7) {
+                                let st = if !prior_ok {
+                                    crate::verifier::StageResult {
+                                        stage: 7,
+                                        name: "Stage 7: Active health checks + /status".to_string(),
+                                        passed: false,
+                                        error: Some(
+                                            "skipped due to failure in earlier stages".to_string(),
+                                        ),
+                                    }
+                                } else {
+                                    verifier.test_stage7_health_status().await
+                                };
+                                log_stage(logger, &st);
+                                stages.push(st);
+                            }
+                        }
+                        if campaign_only(8) {
+                            let name8 = "Stage 8: Response caching (TTL + X-Cache)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 8,
+                                    name: name8.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
                                 }
-                                None => Some("no throughput measurement".to_string()),
-                            },
-                        };
-                        log_stage(logger, &tp_stage);
-                        stages.push(tp_stage);
+                            } else {
+                                let cache_extras = crate::sandbox::docker::CandidateRunExtras {
+                                    env: vec![(
+                                        "SDB_PROXY_CACHE_TTL".to_string(),
+                                        crate::verifier::proxy::CACHE_TTL_SECS.to_string(),
+                                    )],
+                                    ports: extras.ports.clone(),
+                                    ..Default::default()
+                                };
+                                let restarted = sandbox.stop_candidate().and_then(|_| {
+                                    sandbox.start_candidate_in_docker_with(
+                                        workdir,
+                                        port,
+                                        &cache_extras,
+                                    )
+                                });
+                                match restarted {
+                                    Err(e) => crate::verifier::StageResult {
+                                        stage: 8,
+                                        name: name8.to_string(),
+                                        passed: false,
+                                        error: Some(format!(
+                                            "cache-enabled candidate start failed: {e}"
+                                        )),
+                                    },
+                                    Ok(()) => {
+                                        if !sandbox.wait_for_port(port, 25).await {
+                                            crate::verifier::StageResult {
+                                                stage: 8,
+                                                name: name8.to_string(),
+                                                passed: false,
+                                                error: Some(
+                                                    "candidate did not reopen its port with the cache env"
+                                                        .to_string(),
+                                                ),
+                                            }
+                                        } else {
+                                            verifier.test_stage8_caching().await
+                                        }
+                                    }
+                                }
+                            };
+                            log_stage(logger, &st);
+                            stages.push(st);
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        if campaign_only(9) {
+                            let name9 = "Stage 9: Limits and hostile input";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                crate::verifier::StageResult {
+                                    stage: 9,
+                                    name: name9.to_string(),
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                }
+                            } else {
+                                let limits_extras = crate::sandbox::docker::CandidateRunExtras {
+                                    memory: Some("128m".to_string()),
+                                    ports: extras.ports.clone(),
+                                    ..Default::default()
+                                };
+                                let restarted = sandbox.stop_candidate().and_then(|_| {
+                                    sandbox.start_candidate_in_docker_with(
+                                        workdir,
+                                        port,
+                                        &limits_extras,
+                                    )
+                                });
+                                match restarted {
+                                    Err(e) => crate::verifier::StageResult {
+                                        stage: 9,
+                                        name: name9.to_string(),
+                                        passed: false,
+                                        error: Some(format!(
+                                            "memory-capped candidate start failed: {e}"
+                                        )),
+                                    },
+                                    Ok(()) => {
+                                        if !sandbox.wait_for_port(port, 25).await {
+                                            crate::verifier::StageResult {
+                                                stage: 9,
+                                                name: name9.to_string(),
+                                                passed: false,
+                                                error: Some(
+                                                    "candidate did not reopen its port under the memory cap"
+                                                        .to_string(),
+                                                ),
+                                            }
+                                        } else {
+                                            verifier.test_stage9_limits().await
+                                        }
+                                    }
+                                }
+                            };
+                            log_stage(logger, &st);
+                            stages.push(st);
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
+                        }
                         let ps = stages.iter().filter(|s| s.passed).count() as u32;
                         let ts = stages.len() as u32;
                         let pr = ps as f64 / ts as f64 * 100.0;
@@ -3873,6 +4048,92 @@ main()
         }
     }
 
+    /// Proxy-campaign live fixture: a minimal reverse proxy that forwards
+    /// `GET /` to `upstream1:80` (the run-network nginx pool) with valid
+    /// HTTP/1.1 framing. Clears stage 1 and exercises the sdb-edge path.
+    const PROXY_MOCK_SERVER_PY: &str = r#"import socket
+import sys
+import threading
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
+UPSTREAM = ("upstream1", 80)
+
+
+def fetch_upstream():
+    up = socket.create_connection(UPSTREAM, timeout=5)
+    try:
+        up.sendall(
+            b"GET / HTTP/1.1\r\nHost: upstream1\r\nX-Forwarded-For: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        data = b""
+        while True:
+            chunk = up.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        up.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    status_line = head.split(b"\r\n")[0] if head else b"HTTP/1.1 502 Bad Gateway"
+    if not status_line.startswith(b"HTTP/1.1 200"):
+        return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 4\r\nConnection: close\r\n\r\nboom"
+    out = bytearray()
+    out += status_line + b"\r\n"
+    out += b"Content-Length: %d\r\n" % len(body)
+    out += b"Connection: close\r\n\r\n"
+    out += body
+    return bytes(out)
+
+
+def handle(conn):
+    try:
+        conn.settimeout(5)
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return
+            buf += chunk
+        request_line = buf.split(b"\r\n")[0]
+        if request_line.startswith(b"GET "):
+            conn.sendall(fetch_upstream())
+        else:
+            conn.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def serve():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", PORT))
+    srv.listen(128)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+
+serve()
+"#;
+
+    /// Write the proxy mock into `dir`, listening on `port`.
+    fn write_proxy_mock(dir: &Path, port: u16) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("proxy.py"), PROXY_MOCK_SERVER_PY).unwrap();
+        let start = format!("#!/bin/bash\nexec python3 -u /workspace/proxy.py {port}\n");
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
     /// Write the mock candidate into `dir`, listening on `port`.
     /// `boot_sleep_secs` delays the listener (used to keep a run inside
     /// verification while a test flips the cancel flag).
@@ -4711,6 +4972,51 @@ main()
             "stage 16 must pass"
         );
         cleanup_covtest_network("s2live");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-edge live smoke (eval-only, no model): a minimal forwarding
+    /// proxy + the run-network nginx pool, driven through the real pipeline
+    /// with acceptance [1]. Validates the proxy campaign path: task
+    /// adapter, upstream pool startup, acceptance-scoped verdict and the
+    /// stage-log contract.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_proxy_campaign_stage1_live() {
+        let worker = 98u8;
+        let port = crate::web::server::worker_port(TaskType::Proxy.default_port(), worker);
+        let dir = covtest_dir("edge");
+        let workdir = dir.join("workspace");
+        write_proxy_mock(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-edge ticket 0: route GET /").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "edge");
+        config.task = TaskType::Proxy;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-edge".to_string(),
+            stage: 0,
+            prompt_path,
+            continuity: false,
+            accepted_stages: vec![1],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("proxy campaign flow must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        assert!(
+            logger.contains("Stage 1: Basic routing (200 + marker) -> PASS"),
+            "stage 1 must pass through the proxy campaign path"
+        );
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (1, 1)
+        );
+        cleanup_covtest_network("edge");
         let _ = fs::remove_dir_all(&dir);
     }
 

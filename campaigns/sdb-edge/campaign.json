@@ -1,0 +1,127 @@
+{
+  "name": "sdb-edge",
+  "version": 1,
+  "task": "proxy",
+  "title": "sdb-edge: reverse proxy from routing to hardening",
+  "description": "A seven-ticket campaign on one living workspace: route, balance, survive upstream loss, fail fast under hangs, expose health, cache, and harden against hostile input. Acceptance is the cumulative proxy suite (stages 1-4, 6-9; throughput stage 5 stays single-shot).",
+  "stages": [
+    {
+      "id": 0,
+      "type": "genesis",
+      "title": "Front door: a reverse proxy that routes",
+      "prompt": "stages/0_genesis/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1
+        ]
+      },
+      "budget_usd": 0.2,
+      "max_turns": 36
+    },
+    {
+      "id": 1,
+      "type": "feature",
+      "title": "Balance and persist",
+      "prompt": "stages/1_balancing/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1,
+          2,
+          3
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 2,
+      "type": "resilience",
+      "title": "Survive upstream loss",
+      "prompt": "stages/2_failover/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 3,
+      "type": "resilience",
+      "title": "Fail fast under hangs",
+      "prompt": "stages/3_quickfail/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1,
+          2,
+          3,
+          4,
+          6
+        ]
+      },
+      "budget_usd": 0.12,
+      "max_turns": 24
+    },
+    {
+      "id": 4,
+      "type": "observability",
+      "title": "Know your upstreams: health + /status",
+      "prompt": "stages/4_health/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1,
+          2,
+          3,
+          4,
+          6,
+          7
+        ]
+      },
+      "budget_usd": 0.12,
+      "max_turns": 24
+    },
+    {
+      "id": 5,
+      "type": "feature",
+      "title": "Cache with a TTL",
+      "prompt": "stages/5_cache/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1,
+          2,
+          3,
+          4,
+          6,
+          7,
+          8
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 6,
+      "type": "security",
+      "title": "Limits and hostile input",
+      "prompt": "stages/6_limits/prompt.md",
+      "acceptance": {
+        "proxy_stages": [
+          1,
+          2,
+          3,
+          4,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    }
+  ]
+}

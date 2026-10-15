@@ -28,9 +28,39 @@ pub fn default_feedback_rounds() -> u32 {
 /// Verifier stage ids a ticket must pass (redis: 1 handshake, 2 key-value,
 /// 3 expiry, 4 counters, 5 pub/sub, 6 AOF). The union over stages 0..i is
 /// the cumulative suite at ticket i.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Acceptance {
+    #[serde(default)]
     pub redis_stages: Vec<u32>,
+    /// sdb-edge (reverse-proxy) acceptance. A campaign gates exactly one
+    /// task, so one of the two lists stays empty.
+    #[serde(default)]
+    pub proxy_stages: Vec<u32>,
+}
+
+impl Acceptance {
+    /// The stage ids this acceptance gates for `task` (`redis` default).
+    pub fn stages_for(&self, task: &str) -> &[u32] {
+        match task {
+            "proxy" => &self.proxy_stages,
+            _ => &self.redis_stages,
+        }
+    }
+
+    /// Task ids with a campaign stage adapter.
+    pub fn supported_task(task: &str) -> bool {
+        matches!(task, "redis" | "proxy")
+    }
+
+    /// Highest acceptance id a campaign of `task` may reference.
+    pub fn max_stage(task: &str) -> u32 {
+        match task {
+            // Proxy stages 6-9 (quick failover, health surface, caching,
+            // limits) extend the single-shot 5.
+            "proxy" => 9,
+            _ => 16,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,13 +159,14 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
     if spec.stages.is_empty() {
         bail!("campaign '{}' has no stages", spec.name);
     }
-    if spec.task != "redis" {
+    if !Acceptance::supported_task(&spec.task) {
         bail!(
-            "campaign '{}': task '{}' is not supported yet (redis only until stage adapters land)",
+            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy)",
             spec.name,
             spec.task
         );
     }
+    let max_stage = Acceptance::max_stage(&spec.task);
     if spec.stages[0].id != 0 {
         bail!(
             "campaign '{}': first stage id must be 0 (got {})",
@@ -177,22 +208,25 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
                 s.id
             );
         }
-        let a = &s.acceptance.redis_stages;
+        let a = s.acceptance.stages_for(&spec.task);
         if a.is_empty() {
             bail!(
-                "campaign '{}': stage {} has empty acceptance",
+                "campaign '{}': stage {} has empty acceptance (task '{}' list)",
                 spec.name,
-                s.id
+                s.id,
+                spec.task
             );
         }
         let mut seen = HashSet::new();
         for id in a {
-            if !(1..=16).contains(id) {
+            if !(1..=max_stage).contains(id) {
                 bail!(
-                    "campaign '{}': stage {} acceptance id {} out of range 1..=16",
+                    "campaign '{}': stage {} acceptance id {} out of range 1..={} (task '{}')",
                     spec.name,
                     s.id,
-                    id
+                    id,
+                    max_stage,
+                    spec.task
                 );
             }
             if !seen.insert(*id) {
@@ -629,6 +663,7 @@ mod tests {
                     prompt: "stages/0.md".into(),
                     acceptance: Acceptance {
                         redis_stages: vec![1, 2],
+                        proxy_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -641,6 +676,7 @@ mod tests {
                     prompt: "stages/1.md".into(),
                     acceptance: Acceptance {
                         redis_stages: vec![1, 2, 3],
+                        proxy_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -653,6 +689,7 @@ mod tests {
                     prompt: "stages/2.md".into(),
                     acceptance: Acceptance {
                         redis_stages: vec![1, 2, 3, 5],
+                        proxy_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
@@ -674,6 +711,58 @@ mod tests {
         assert_eq!(lc.spec.name, "sdb-kv");
         assert!(lc.spec.stages.len() >= 4);
         assert_eq!(lc.spec.stages[0].id, 0);
+    }
+
+    #[test]
+    fn test_real_sdb_edge_spec_validates() {
+        let lc = load_campaign("sdb-edge").expect("bundled campaign must load");
+        assert_eq!(lc.spec.name, "sdb-edge");
+        assert_eq!(lc.spec.task, "proxy");
+        assert_eq!(lc.spec.stages.len(), 7);
+        assert_eq!(lc.spec.stages[0].id, 0);
+        for stage in &lc.spec.stages {
+            assert!(
+                !stage.acceptance.proxy_stages.is_empty(),
+                "ticket {} has no proxy acceptance",
+                stage.id
+            );
+            assert!(
+                stage
+                    .acceptance
+                    .proxy_stages
+                    .iter()
+                    .all(|id| (1..=9).contains(id)),
+                "ticket {} acceptance out of the proxy suite",
+                stage.id
+            );
+        }
+        // Acceptance scopes grow with the ladder.
+        assert_eq!(lc.spec.stages[0].acceptance.proxy_stages, vec![1]);
+        assert_eq!(
+            lc.spec.stages[6].acceptance.proxy_stages,
+            vec![1, 2, 3, 4, 6, 7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn test_proxy_acceptance_validation() {
+        let mut lc = fixture_campaign();
+        lc.spec.task = "proxy".into();
+        // A proxy campaign whose proxy acceptance is empty fails closed
+        // (the redis list is ignored for task 'proxy').
+        assert!(validate_spec(&lc.spec, &lc.root).is_err());
+
+        lc.spec.stages[0].acceptance.proxy_stages = vec![1];
+        lc.spec.stages[1].acceptance.proxy_stages = vec![1, 2, 3];
+        lc.spec.stages[2].acceptance.proxy_stages = vec![1, 2, 3, 4, 6, 7, 8, 9];
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+
+        // The proxy suite tops out at stage 9: id 10 is out of range.
+        lc.spec.stages[2].acceptance.proxy_stages = vec![1, 10];
+        let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
+        assert!(err.contains("out of range 1..=9"), "{err}");
+        lc.spec.stages[2].acceptance.proxy_stages = vec![1, 2, 3, 4, 6, 7, 8, 9];
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
     }
 
     #[test]

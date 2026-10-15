@@ -137,7 +137,7 @@ pub fn dry_run(name: &str, model: &str) -> Result<()> {
             format!("s{}", s.id).bold(),
             s.kind,
             s.title,
-            s.acceptance.redis_stages,
+            s.acceptance.stages_for(&lc.spec.task),
             s.budget_usd,
             s.max_turns,
             s.feedback_rounds
@@ -319,7 +319,11 @@ async fn run_one_stage(
     });
     logger.log(&format!(
         "─── ticket {} [{}] {} (acceptance {:?}, budget ${:.2}) ───",
-        stage.id, stage.kind, stage.title, stage.acceptance.redis_stages, stage.budget_usd
+        stage.id,
+        stage.kind,
+        stage.title,
+        stage.acceptance.stages_for(&lc.spec.task),
+        stage.budget_usd
     ));
 
     let baseline_rps = read_baseline_rps(cdir);
@@ -346,7 +350,7 @@ async fn run_one_stage(
             stage: stage.id,
             prompt_path: lc.prompt_path(stage),
             continuity: stage.id > 0,
-            accepted_stages: stage.acceptance.redis_stages.clone(),
+            accepted_stages: stage.acceptance.stages_for(&lc.spec.task).to_vec(),
         }),
         baseline_rps,
     };
@@ -728,6 +732,7 @@ mod tests {
             prompt: "p0.md".to_string(),
             acceptance: Acceptance {
                 redis_stages: vec![1],
+                proxy_stages: Vec::new(),
             },
             budget_usd: 0.1,
             max_turns: 3,

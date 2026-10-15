@@ -225,3 +225,42 @@ RULES `2026-10-15.1`; acceptance ids up to 16). Design choices and why:
   three pass, including the SIGKILL re-reads and the footprint gate. Real
   campaigns on worker 0 publish 6395 1:1 as documented; eval-only workers
   hand the offset admin port to the candidate via argv.
+
+## 15. sdb-edge: the proxy campaign (2026-10-15.2)
+
+Second portfolio app (DECISIONS #11 order) and the first non-redis
+campaign. Task `proxy`, seven tickets (0-6) on one living workspace,
+RULES `2026-10-15.2`. Design choices:
+
+- **Task adapter, not a fork**: `Acceptance` gained `proxy_stages`
+  alongside `redis_stages`; validation ranges are per task (redis 1..=16,
+  proxy 1..=9); the CLI and rollout resolve the list for the campaign's
+  task. Adding an app is now a task adapter, not a new code path.
+- **Single-shot boards are frozen**: stages 6-9 run only when a campaign
+  acceptance includes them (`campaign_only`), so the existing 5-stage
+  proxy task and its history are untouched; new grading lives in new
+  stamps only.
+- **The render score extends the asset we already had**: routing,
+  round-robin, framing/keep-alive, failover and throughput came from the
+  single-shot verifier (88% covered); the four new stages reuse its
+  marker fixtures, `docker pause` failover pattern and mock harness.
+- **Stage 6 vs stage 4**: stage 4 (pause + zero failures) accepts slow
+  clients that eventually succeed through a client deadline; stage 6
+  makes the *per-request* budget explicit (2500ms worst case) so a proxy
+  without upstream timeouts/retry fails even though every request
+  "eventually" returns 200.
+- **Stage 7 grades a health surface, not just behavior**: `/status` with
+  `upstreamN: up|down` lines, flipped by active probing **while the proxy
+  is idle** (passive inference cannot fake it), and recovery <=5s.
+- **Stage 8 is default-off** (`SDB_PROXY_CACHE_TTL=0`/unset = no
+  caching): earlier tickets run without cache semantics, and the stage
+  restarts the candidate with the TTL env, so caching can never mask
+  round-robin or failover (a path-keyed cache would otherwise serve one
+  upstream forever). `X-Cache`/`Age` make cache behavior observable, and
+  byte-identical HIT bodies block header-only cheating.
+- **Stage 9 mirrors the sdb-kv hardening ticket**: cheap rejection
+  (431/413), slow-loris reclamation under a 128MB cap, liveness after.
+- **Throughput (stage 5) stays single-shot** until proxy baselines are
+  recorded (a perf ticket with the 1.3x gate is a later ticket, J6), and
+  **TLS termination is deferred** to J6 (a verifier TLS client is needed;
+  stdlib-only Rust candidates would otherwise be disadvantaged).

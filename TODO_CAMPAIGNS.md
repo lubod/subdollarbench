@@ -263,6 +263,45 @@ interface.
 - [ ] I6b. Model-driven live execution of stages 14-16 (pending a model
   that reaches ticket 11; the grid currently tops out at ticket 4).
 
+## Slice J — sdb-edge (proxy campaign: routing / resilience / health / cache / limits)
+
+Second campaign portfolio entry (DECISIONS #11 porting order), task
+`proxy`, RULES `2026-10-15.2`.
+
+- [x] J1. Task adapter: `campaign.rs` acceptance is per-task now
+  (`redis_stages` / `proxy_stages`), the validator range is per task
+  (redis 1..=16, proxy 1..=9), and the CLI resolves
+  `stage.acceptance.stages_for(task)`.
+- [x] J2. Ladder: 7 tickets on one living workspace — t0 genesis (route
+  `GET /`, body/status fidelity, framing, X-Forwarded-For), t1 balance +
+  keep-alive ([1,2,3]), t2 survive upstream loss ([1-4]), t3 fail fast
+  under hangs ([1-4,6]), t4 active health + `/status` ([1-4,6,7]),
+  t5 caching ([1-4,6,7,8]), t6 limits under a 128MB cap
+  ([1-4,6,7,8,9]). Throughput (stage 5) stays single-shot for now.
+- [x] J3. New stages 6-9 in `verifier/proxy.rs` (campaign-only: never run
+  for single-shot proxy rows, so that board is unchanged): quick failover
+  under a frozen upstream (2500ms per-request budget + retry + rejoin),
+  `/status` health surface driven by active probes (flip while idle,
+  recovery <=5s), TTL cache (`SDB_PROXY_CACHE_TTL`,
+  `X-Cache: MISS|HIT`, `Age`, byte-identical bodies, expiry; the pipeline
+  restarts the candidate with the env, then restores), limits
+  (32KiB headers -> 4xx/close, declared 100MB body -> 413/close, stalled
+  half-request reclaimed <=12s with normal traffic flowing, all under a
+  128MB cap via a pipeline restart).
+- [x] J4. Mock validation: `/status` parsing + snapshot failures, cache
+  gate pass + never-hits / no-Age / body-mismatch / never-expires fails,
+  limits pass + careless-proxy fail, helper tests (35 proxy tests green).
+- [x] J5a. Live smoke (2026-10-15, no model): a minimal forwarding proxy
+  + the run-network nginx pool driven through the real pipeline with
+  acceptance [1] — the proxy campaign path works end to end (task
+  adapter, pool startup, acceptance-scoped verdict 1/1, stage-log
+  contract); bench runs against the candidate.
+- [ ] J5b. Full-ladder live proof (a reference proxy implementing stages
+  1-9) and the first model-driven grid cells.
+- [ ] J6. Later tickets: TLS termination with a harness-provided cert,
+  and a throughput ticket (stage 5 + baseline gate) once proxy baselines
+  are recorded.
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the
@@ -292,6 +331,12 @@ Wave log:
   (verifier/redis.rs 78.78 -> 82.11% lines; binproto 93.78% incl. the
   admin stage; sandbox/docker.rs 85.39% with the live bind round-trip).
   Gate margin ~4.7pp.
+- Wave 7 (sdb-edge proxy campaign, 2026-10-15): aggregate 84.71 ->
+  **84.43% lines** (regions 85.27%, functions 88.74%). The dip is the new
+  proxy stage-6..9 orchestration blocks (live-only) and the docker-gated
+  stages 6/7; verifier/proxy.rs sits at 79.65% lines (cache/limits/status
+  logic is mock-covered, pause-based stages need live upstreams),
+  campaign.rs 91.73%, pipeline.rs 56.59%. Gate margin ~4.4pp.
 
 Remaining smaller residuals if a future wave wants more margin:
 web/server.rs (1,098 incl. test code), web/queue.rs (798),

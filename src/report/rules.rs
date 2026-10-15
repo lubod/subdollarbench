@@ -8,6 +8,20 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-15.2`: campaign sdb-edge (task `proxy`, tickets 0-6). The
+///   single-shot proxy suite (stages 1-5) is unchanged; four campaign-only
+///   stages extend it: (6) fast failover under a hung upstream (frozen
+///   process, TCP still accepting — every request 200 inside 2500ms,
+///   rejoin <=10s), (7) active health checks + `GET /status`
+///   (`upstreamN: up|down` lines, flips while idle, recovery <=5s),
+///   (8) caching with `SDB_PROXY_CACHE_TTL` (X-Cache MISS/HIT + Age,
+///   byte-identical bodies, expiry; the pipeline restarts the candidate
+///   with the env for this stage), (9) limits under a 128MB cap (32KiB of
+///   headers -> 4xx/close, declared 100MB body -> 413/close before the
+///   bytes, slow-loris reclaimed <=12s, liveness after). Campaign
+///   acceptance for task `proxy` validates ids 1..=9; campaign.rs gained
+///   per-task acceptance lists (`proxy_stages`). Single-shot proxy rows
+///   are unaffected; campaign rows are new-stamp only.
 /// - `2026-10-15.1`: campaign sdb-kv stage-2 wave (tickets 11-13). New
 ///   pipeline-level stages 14-16: (14) disk-resident store under a 192MB
 ///   memory cap on a host-bind data dir (~480MB written, SIGKILL +
@@ -349,7 +363,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-15.1";
+pub const RULES_VERSION: &str = "2026-10-15.2";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

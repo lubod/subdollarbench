@@ -1,5 +1,12 @@
-//! Reverse-proxy verifier: routing (stages 1-3), failover (4), throughput (5).
+//! Reverse-proxy verifier: routing (stages 1-3), failover (4), throughput (5)
+//! plus the sdb-edge campaign stages (6 fast failover under a hung upstream,
+//! 7 active health checks + /status, 8 caching, 9 limits/hardening), which
+//! run only when a ticket's acceptance includes them.
 //! SUT: candidate HTTP/1.1 proxy on target_port; three nginx upstreams as (name, port).
+
+/// Cache window used by the caching stage and the env the pipeline sets
+/// (`SDB_PROXY_CACHE_TTL`); the candidate and the verifier must agree.
+pub const CACHE_TTL_SECS: u64 = 3;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -156,6 +163,41 @@ fn parse_http_response(buf: &[u8]) -> Option<HttpResponse> {
     })
 }
 
+/// `upstreamN: up|down` lines from a /status body -> 1-based index -> up.
+fn parse_status_lines(body: &str) -> HashMap<usize, bool> {
+    let mut out = HashMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some((key, value)) = line.split_once(':') {
+            let value = value.trim().to_ascii_lowercase();
+            if let Some(n) = key.trim().strip_prefix("upstream") {
+                if let Ok(idx) = n.parse::<usize>() {
+                    if value == "up" {
+                        out.insert(idx, true);
+                    } else if value == "down" {
+                        out.insert(idx, false);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `X-Cache` value, upper-cased (`HIT`/`MISS`).
+fn x_cache_of(resp: &HttpResponse) -> Option<String> {
+    resp.headers
+        .get("x-cache")
+        .map(|v| v.trim().to_ascii_uppercase())
+}
+
+/// First `HTTP/x.y NNN` status code in a raw buffer.
+fn status_code_of(buf: &[u8]) -> Option<u16> {
+    let text = String::from_utf8_lossy(buf);
+    let line = text.lines().next()?;
+    line.split_whitespace().nth(1)?.parse::<u16>().ok()
+}
+
 fn stage_fail(stage: u32, name: &str, err: String) -> StageResult {
     StageResult {
         stage,
@@ -190,13 +232,20 @@ impl ProxyVerifier {
 
     /// Raw `GET /` against a local port; reads to EOF (Connection: close).
     async fn fetch(port: u16) -> Result<(Vec<u8>, HttpResponse), String> {
+        Self::fetch_path(port, "/").await
+    }
+
+    /// Same contract as `fetch`, for an arbitrary request target (the
+    /// `/status` health surface, hardening probes).
+    async fn fetch_path(port: u16, path: &str) -> Result<(Vec<u8>, HttpResponse), String> {
         let addr = format!("127.0.0.1:{}", port);
         let conn = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
             .await
             .map_err(|_| format!("Connection timed out to {}", addr))?;
         let mut stream = conn.map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+        let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .write_all(request.as_bytes())
             .await
             .map_err(|e| format!("Write to {} failed: {}", addr, e))?;
         // One absolute exchange deadline: per-read timeouts restart every
@@ -627,6 +676,547 @@ impl ProxyVerifier {
         }
         Some(ok as f64 / secs)
     }
+
+    /// docker pause/unpause a fixture upstream (stage 4 pattern; frozen
+    /// process, TCP still accepting = the hung-upstream case).
+    fn upstream_pause(name: &str, pause: bool) -> Result<(), String> {
+        let verb = if pause { "pause" } else { "unpause" };
+        match std::process::Command::new("docker")
+            .arg(verb)
+            .arg(name)
+            .output()
+        {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(format!(
+                "docker {} {}: {}",
+                verb,
+                name,
+                String::from_utf8_lossy(&o.stderr)
+            )),
+            Err(e) => Err(format!("docker {} {}: {}", verb, name, e)),
+        }
+    }
+
+    /// GET /status and parse the per-upstream health lines.
+    async fn status_snapshot(port: u16) -> Result<HashMap<usize, bool>, String> {
+        let (_, resp) = Self::fetch_path(port, "/status").await?;
+        if resp.status != 200 {
+            return Err(format!("/status returned {}", resp.status));
+        }
+        let map = parse_status_lines(&resp.body_text());
+        if !map.contains_key(&1) {
+            let preview: String = resp.body_text().chars().take(120).collect();
+            return Err(format!(
+                "/status has no `upstreamN: up|down` lines (body: {:?})",
+                preview
+            ));
+        }
+        Ok(map)
+    }
+
+    /// Write `req`, then read until close or `wait` elapses; returns the
+    /// bytes received and whether the peer closed.
+    async fn raw_exchange(
+        port: u16,
+        req: &[u8],
+        wait: Duration,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let addr = format!("127.0.0.1:{}", port);
+        let mut stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+            .await
+            .map_err(|_| format!("connect to {} timed out", addr))?
+            .map_err(|e| format!("connect to {}: {}", addr, e))?;
+        stream
+            .write_all(req)
+            .await
+            .map_err(|e| format!("write to {}: {}", addr, e))?;
+        let deadline = Instant::now() + wait;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let mut closed = false;
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => {
+                    closed = true;
+                    break;
+                }
+                Ok(Ok(n)) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > 512 * 1024 {
+                        break;
+                    }
+                }
+                Ok(Err(_)) => {
+                    closed = true;
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        Ok((buf, closed))
+    }
+
+    /// Stage 6 (campaign sdb-edge): a hung upstream (process frozen, TCP
+    /// still accepting) must not hold clients — every request during the
+    /// pause returns 200 inside the per-request budget (timeout + retry),
+    /// and the upstream rejoins after it thaws.
+    pub async fn test_stage6_quick_failover(&self) -> StageResult {
+        let name = "Stage 6: Fast failover under a hung upstream";
+        if self.upstreams.len() < 3 {
+            let n = self.upstreams.len();
+            return stage_fail(6, name, format!("Need 3 upstreams, have {}", n));
+        }
+        const REQUESTS: usize = 10;
+        const BUDGET_MS: u128 = 2500;
+        let mid_name = self.upstreams[1].0.clone();
+        if !Self::upstream_running(&mid_name) {
+            return stage_fail(
+                6,
+                name,
+                format!("harness fixture fault: {} not running pre-pause", mid_name),
+            );
+        }
+        let markers = match Self::learn_markers_local().await {
+            Ok(m) => m,
+            Err(e) => return stage_fail(6, name, format!("fixture markers: {}", e)),
+        };
+        if let Err(e) = Self::upstream_pause(&mid_name, true) {
+            return stage_fail(6, name, e);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut worst_ms: u128 = 0;
+        let mut failure: Option<String> = None;
+        for i in 0..REQUESTS {
+            let started = Instant::now();
+            match Self::fetch(self.target_port).await {
+                Ok((_, resp)) if resp.status == 200 => {
+                    worst_ms = worst_ms.max(started.elapsed().as_millis());
+                }
+                Ok((_, resp)) => {
+                    failure = Some(format!("GET {} during the pause: got {}", i, resp.status));
+                    break;
+                }
+                Err(e) => {
+                    failure = Some(format!("GET {} during the pause: {}", i, e));
+                    break;
+                }
+            }
+        }
+        let _ = Self::upstream_pause(&mid_name, false);
+        if let Some(e) = failure {
+            return stage_fail(6, name, format!("Proxy must fail over, {}", e));
+        }
+        if worst_ms > BUDGET_MS {
+            return stage_fail(
+                6,
+                name,
+                format!(
+                    "worst request took {}ms during the hang (budget {}ms): time out the hung upstream and retry, do not wait for the client deadline",
+                    worst_ms, BUDGET_MS
+                ),
+            );
+        }
+        // Rejoin proven through the proxy after the thaw.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rejoined = match Self::fetch(self.target_port).await {
+                Ok((_, resp)) => {
+                    resp.status == 200 && Self::body_marker(&resp.body_text(), &markers) == Some(1)
+                }
+                Err(_) => false,
+            };
+            if rejoined {
+                return stage_ok(6, name);
+            }
+            if Instant::now() >= deadline {
+                return stage_fail(
+                    6,
+                    name,
+                    format!("{} did not rejoin rotation in 10s", mid_name),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// Stage 7 (campaign sdb-edge): the proxy actively probes its upstreams
+    /// and exposes per-upstream health at `GET /status` (`upstreamN:
+    /// up|down`). Health must flip DOWN while the proxy is idle (probes,
+    /// not passive client-traffic inference) and back UP after recovery.
+    pub async fn test_stage7_health_status(&self) -> StageResult {
+        let name = "Stage 7: Active health checks + /status";
+        if self.upstreams.len() < 3 {
+            let n = self.upstreams.len();
+            return stage_fail(7, name, format!("Need 3 upstreams, have {}", n));
+        }
+        let mid_name = self.upstreams[1].0.clone();
+        if !Self::upstream_running(&mid_name) {
+            return stage_fail(
+                7,
+                name,
+                format!("harness fixture fault: {} not running pre-pause", mid_name),
+            );
+        }
+        let markers = match Self::learn_markers_local().await {
+            Ok(m) => m,
+            Err(e) => return stage_fail(7, name, format!("fixture markers: {}", e)),
+        };
+        // 1. All three healthy within 6s (initial probe cycle).
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            match Self::status_snapshot(self.target_port).await {
+                Ok(map) if (1..=3).all(|i| map.get(&i) == Some(&true)) => break,
+                Ok(map) => {
+                    if Instant::now() >= deadline {
+                        return stage_fail(
+                            7,
+                            name,
+                            format!("/status never reported all upstreams up: {:?}", map),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return stage_fail(7, name, format!("GET /status: {}", e));
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        // 2. Pause the middle upstream; stay idle (health must come from
+        //    active probes, not from client requests failing).
+        if let Err(e) = Self::upstream_pause(&mid_name, true) {
+            return stage_fail(7, name, e);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            match Self::status_snapshot(self.target_port).await {
+                Ok(map) if map.get(&2) == Some(&false) => break,
+                Ok(map) => {
+                    if Instant::now() >= deadline {
+                        return stage_fail(
+                            7,
+                            name,
+                            format!(
+                                "{} was down for 5s of idle but /status still says {:?} — probe upstreams actively",
+                                mid_name, map
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return stage_fail(7, name, format!("GET /status: {}", e));
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        // 3. Recovery: unpause, /status flips back up, traffic rejoins.
+        if let Err(e) = Self::upstream_pause(&mid_name, false) {
+            return stage_fail(7, name, e);
+        }
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            match Self::status_snapshot(self.target_port).await {
+                Ok(map) if map.get(&2) == Some(&true) => break,
+                Ok(map) => {
+                    if Instant::now() >= deadline {
+                        return stage_fail(
+                            7,
+                            name,
+                            format!(
+                                "/status still reports {} down after recovery: {:?}",
+                                mid_name, map
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return stage_fail(7, name, format!("GET /status: {}", e));
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rejoined = match Self::fetch(self.target_port).await {
+                Ok((_, resp)) => {
+                    resp.status == 200 && Self::body_marker(&resp.body_text(), &markers) == Some(1)
+                }
+                Err(_) => false,
+            };
+            if rejoined {
+                return stage_ok(7, name);
+            }
+            if Instant::now() >= deadline {
+                return stage_fail(
+                    7,
+                    name,
+                    format!("{} did not rejoin rotation in 10s after recovery", mid_name),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// Stage 8 (campaign sdb-edge; the pipeline restarts the candidate with
+    /// `SDB_PROXY_CACHE_TTL` set): repeated GETs inside the TTL are served
+    /// from cache — `X-Cache: MISS` on fetch, `HIT` + `Age` on hit, bodies
+    /// byte-identical to their MISS twin — and entries expire after ~TTL.
+    pub async fn test_stage8_caching(&self) -> StageResult {
+        self.test_stage8_caching_with(CACHE_TTL_SECS).await
+    }
+
+    /// Same stage with an explicit TTL (tests scale the window down).
+    pub(crate) async fn test_stage8_caching_with(&self, ttl_secs: u64) -> StageResult {
+        let name = "Stage 8: Response caching (TTL + X-Cache)";
+        let markers = match Self::learn_markers_local().await {
+            Ok(m) => m,
+            Err(e) => return stage_fail(8, name, format!("fixture markers: {}", e)),
+        };
+        let mut miss_bodies: HashMap<usize, Vec<u8>> = HashMap::new();
+        let mut hit_with_age = false;
+        for _ in 0..24 {
+            let (_, resp) = match Self::fetch(self.target_port).await {
+                Ok(r) => r,
+                Err(e) => return stage_fail(8, name, format!("GET via proxy: {}", e)),
+            };
+            if resp.status != 200 {
+                return stage_fail(8, name, format!("GET via proxy returned {}", resp.status));
+            }
+            let marker = match Self::body_marker(&resp.body_text(), &markers) {
+                Some(m) => m,
+                None => return stage_fail(8, name, "body matched no upstream marker".to_string()),
+            };
+            let xc = match x_cache_of(&resp) {
+                Some(v) => v,
+                None => {
+                    return stage_fail(
+                        8,
+                        name,
+                        "response carries no X-Cache header (MISS on fetch, HIT on cache hits)"
+                            .to_string(),
+                    )
+                }
+            };
+            match xc.as_str() {
+                "MISS" => {
+                    miss_bodies
+                        .entry(marker)
+                        .or_insert_with(|| resp.body.clone());
+                }
+                "HIT" => {
+                    if let Some(miss_body) = miss_bodies.get(&marker) {
+                        if miss_body != &resp.body {
+                            return stage_fail(
+                                8,
+                                name,
+                                format!(
+                                    "cache HIT body for upstream {} differs from its MISS body",
+                                    marker + 1
+                                ),
+                            );
+                        }
+                        match resp
+                            .headers
+                            .get("age")
+                            .and_then(|v| v.trim().parse::<u64>().ok())
+                        {
+                            Some(_) => hit_with_age = true,
+                            None => {
+                                return stage_fail(
+                                    8,
+                                    name,
+                                    "cache HIT carries no numeric Age header".to_string(),
+                                )
+                            }
+                        }
+                    }
+                }
+                other => {
+                    return stage_fail(
+                        8,
+                        name,
+                        format!("X-Cache must be MISS or HIT, got {:?}", other),
+                    )
+                }
+            }
+            if hit_with_age {
+                break;
+            }
+        }
+        if !hit_with_age {
+            return stage_fail(
+                8,
+                name,
+                format!(
+                    "no repeat request inside the {}s TTL was served from cache (need X-Cache: HIT + Age)",
+                    ttl_secs
+                ),
+            );
+        }
+        // Entries must expire: after the window a request refetches (MISS).
+        tokio::time::sleep(Duration::from_millis(ttl_secs * 1000 + 1500)).await;
+        for _ in 0..4 {
+            match Self::fetch(self.target_port).await {
+                Ok((_, resp)) if resp.status == 200 => {
+                    if x_cache_of(&resp).as_deref() == Some("MISS") {
+                        return stage_ok(8, name);
+                    }
+                }
+                Ok((_, resp)) => {
+                    return stage_fail(8, name, format!("post-TTL GET returned {}", resp.status))
+                }
+                Err(e) => return stage_fail(8, name, format!("post-TTL GET: {}", e)),
+            }
+        }
+        stage_fail(
+            8,
+            name,
+            format!(
+                "entries never expired: no MISS within {}s+ of the {}s TTL",
+                ttl_secs, ttl_secs
+            ),
+        )
+    }
+
+    /// Stage 9 (campaign sdb-edge; the pipeline restarts the candidate
+    /// under a 128MB cap): hostile input must be rejected cheaply — an
+    /// oversized header block answers 4xx (or closes), an oversized
+    /// declared body answers 413/close before the bytes arrive, a stalled
+    /// half-request is reclaimed (slow-loris), and normal traffic keeps
+    /// working throughout.
+    pub async fn test_stage9_limits(&self) -> StageResult {
+        let name = "Stage 9: Limits and hostile input";
+        // (a) Oversized header block: 4xx or a clean close, within 5s.
+        let big_header = format!(
+            "GET / HTTP/1.1\r\nHost: x\r\nX-Big: {}\r\n\r\n",
+            "a".repeat(32 * 1024)
+        );
+        match Self::raw_exchange(
+            self.target_port,
+            big_header.as_bytes(),
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            Ok((buf, closed)) => {
+                let code = status_code_of(&buf);
+                let ok =
+                    matches!(code, Some(400) | Some(413) | Some(431)) || (closed && buf.is_empty());
+                if !ok {
+                    return stage_fail(
+                        9,
+                        name,
+                        format!(
+                            "32KiB of headers got {:?} (closed={}): answer 4xx (431) or close without buffering",
+                            code, closed
+                        ),
+                    );
+                }
+            }
+            Err(e) => return stage_fail(9, name, format!("oversized-header probe: {}", e)),
+        }
+        // (b) Oversized declared body: reject before the bytes arrive.
+        let big_body = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100000000\r\n\r\n";
+        match Self::raw_exchange(
+            self.target_port,
+            big_body.as_bytes(),
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            Ok((buf, closed)) => {
+                let code = status_code_of(&buf);
+                let ok = matches!(code, Some(400) | Some(411) | Some(413) | Some(417))
+                    || (closed && buf.is_empty());
+                if !ok {
+                    return stage_fail(
+                        9,
+                        name,
+                        format!(
+                            "a declared 100MB body got {:?} (closed={}): answer 413 before reading the body",
+                            code, closed
+                        ),
+                    );
+                }
+            }
+            Err(e) => return stage_fail(9, name, format!("oversized-body probe: {}", e)),
+        }
+        // (c) Slow-loris: hold a half-request open; the proxy must keep
+        // serving normal clients and reclaim the stalled socket.
+        let addr = format!("127.0.0.1:{}", self.target_port);
+        let mut stall =
+            match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+                Err(_) => return stage_fail(9, name, format!("connect to {} timed out", addr)),
+                Ok(Err(e)) => return stage_fail(9, name, format!("connect to {}: {}", addr, e)),
+                Ok(Ok(s)) => s,
+            };
+        if let Err(e) = stall.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").await {
+            return stage_fail(9, name, format!("stall write: {}", e));
+        }
+        // Normal traffic must keep flowing while the stalled socket idles.
+        match Self::fetch(self.target_port).await {
+            Ok((_, resp)) if resp.status == 200 => {}
+            Ok((_, resp)) => {
+                return stage_fail(
+                    9,
+                    name,
+                    format!(
+                        "normal GET while a slow client idled returned {}",
+                        resp.status
+                    ),
+                )
+            }
+            Err(e) => {
+                return stage_fail(
+                    9,
+                    name,
+                    format!("normal GET while a slow client idled: {}", e),
+                )
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut reclaimed = false;
+        let mut tmp = [0u8; 1024];
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), stall.read(&mut tmp)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => {
+                    reclaimed = true;
+                    break;
+                }
+                Ok(Ok(n)) => {
+                    if matches!(status_code_of(&tmp[..n]), Some(400) | Some(408)) {
+                        reclaimed = true;
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if !reclaimed {
+            return stage_fail(
+                9,
+                name,
+                "a half-sent request stayed open for 12s: enforce a header/read timeout (slow-loris)"
+                    .to_string(),
+            );
+        }
+        // (d) Still healthy after all of it.
+        match Self::fetch(self.target_port).await {
+            Ok((_, resp)) if resp.status == 200 => stage_ok(9, name),
+            Ok((_, resp)) => stage_fail(
+                9,
+                name,
+                format!("GET after the hostile probes returned {}", resp.status),
+            ),
+            Err(e) => stage_fail(9, name, format!("GET after the hostile probes: {}", e)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1016,6 +1606,267 @@ mod tests {
     }
 
     /// Reserved-then-dropped port nothing listens on.
+    /// Raw-socket mock proxy: the handler builds the full response bytes
+    /// from the request head; `stall_close_ms > 0` closes sockets whose
+    /// head never completes (0 = never close, the slow-loris defect).
+    async fn spawn_raw_proxy<F>(handler: F, stall_close_ms: u64) -> u16
+    where
+        F: Fn(String) -> Vec<u8> + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handler = std::sync::Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                        let read = if stall_close_ms > 0 {
+                            match tokio::time::timeout(
+                                Duration::from_millis(stall_close_ms),
+                                sock.read(&mut tmp),
+                            )
+                            .await
+                            {
+                                Ok(r) => r,
+                                Err(_) => return,
+                            }
+                        } else {
+                            sock.read(&mut tmp).await
+                        };
+                        match read {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                        if buf.len() > 256 * 1024 {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).to_string();
+                    let reply = handler(head);
+                    let _ = sock.write_all(&reply).await;
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                });
+            }
+        });
+        port
+    }
+
+    fn raw_http(status: u16, reason: &str, body: &str, extra: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
+            body.len(),
+            extra,
+            body
+        )
+        .into_bytes()
+    }
+
+    fn fixture_marker_body(idx: u8) -> String {
+        crate::sandbox::docker::SandboxManager::upstream_marker_body(idx)
+    }
+
+    #[test]
+    fn test_status_and_cache_helpers() {
+        let map = parse_status_lines("upstream1: up\nupstream2: down\nupstream3: up\nextra: 1\n");
+        assert_eq!(map.get(&1), Some(&true));
+        assert_eq!(map.get(&2), Some(&false));
+        assert_eq!(map.get(&3), Some(&true));
+        assert_eq!(map.get(&4), None);
+        assert!(parse_status_lines("garbage").is_empty());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-cache".to_string(), " hit ".to_string());
+        let resp = HttpResponse {
+            version: "HTTP/1.1".into(),
+            status: 200,
+            headers,
+            body: Vec::new(),
+        };
+        assert_eq!(x_cache_of(&resp).as_deref(), Some("HIT"));
+        assert_eq!(status_code_of(b"HTTP/1.1 431 Too Long\r\n\r\n"), Some(431));
+        assert_eq!(status_code_of(b"nope"), None);
+    }
+
+    #[tokio::test]
+    async fn test_status_snapshot_mock_and_failures() {
+        let port = spawn_raw_proxy(
+            |_| {
+                raw_http(
+                    200,
+                    "OK",
+                    "upstream1: up\nupstream2: down\nupstream3: up\n",
+                    "",
+                )
+            },
+            300,
+        )
+        .await;
+        let map = ProxyVerifier::status_snapshot(port).await.unwrap();
+        assert_eq!(map.get(&2), Some(&false));
+
+        let port = spawn_raw_proxy(|_| raw_http(200, "OK", "no health here", ""), 300).await;
+        let err = ProxyVerifier::status_snapshot(port).await.unwrap_err();
+        assert!(err.contains("no `upstreamN: up|down` lines"), "{err}");
+
+        let port = spawn_raw_proxy(|_| raw_http(500, "Server Error", "boom", ""), 300).await;
+        let err = ProxyVerifier::status_snapshot(port).await.unwrap_err();
+        assert!(err.contains("returned 500"), "{err}");
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum CacheMode {
+        Honest,
+        NeverHits,
+        HitWithoutAge,
+        HitBodyMismatch,
+        NeverExpires,
+    }
+
+    /// Mock proxy with a one-entry TTL cache over marker 1's body.
+    async fn spawn_cache_mock(mode: CacheMode, ttl_secs: u64) -> u16 {
+        use std::sync::{Arc, Mutex};
+        let cache: Arc<Mutex<Option<(String, Instant)>>> = Arc::new(Mutex::new(None));
+        spawn_raw_proxy(
+            move |_head: String| {
+                let body = fixture_marker_body(1);
+                let mut guard = cache.lock().unwrap();
+                let now = Instant::now();
+                let fresh = match &*guard {
+                    None => true,
+                    Some((_, at)) => {
+                        mode != CacheMode::NeverExpires
+                            && now.duration_since(*at).as_secs() >= ttl_secs
+                    }
+                };
+                if fresh {
+                    *guard = Some((body.clone(), now));
+                    return raw_http(200, "OK", &body, "X-Cache: MISS\r\n");
+                }
+                let age = now.duration_since(guard.as_ref().unwrap().1).as_secs();
+                match mode {
+                    CacheMode::NeverHits => {
+                        *guard = Some((body.clone(), now));
+                        raw_http(200, "OK", &body, "X-Cache: MISS\r\n")
+                    }
+                    CacheMode::HitWithoutAge => raw_http(200, "OK", &body, "X-Cache: HIT\r\n"),
+                    CacheMode::HitBodyMismatch => {
+                        raw_http(200, "OK", &format!("{body}X"), "X-Cache: HIT\r\nAge: 0\r\n")
+                    }
+                    _ => raw_http(200, "OK", &body, &format!("X-Cache: HIT\r\nAge: {age}\r\n")),
+                }
+            },
+            300,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_stage8_caching_mock_pass_and_failures() {
+        let port = spawn_cache_mock(CacheMode::Honest, 1).await;
+        let v = ProxyVerifier::new(port, Some("cm"), Vec::new());
+        let st = v.test_stage8_caching_with(1).await;
+        assert!(st.passed, "honest TTL cache must pass: {:?}", st.error);
+
+        let port = spawn_cache_mock(CacheMode::NeverHits, 1).await;
+        let v = ProxyVerifier::new(port, Some("cm"), Vec::new());
+        let st = v.test_stage8_caching_with(1).await;
+        assert!(!st.passed, "a cache that never hits must fail");
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("no repeat request"),
+            "{:?}",
+            st.error
+        );
+
+        let port = spawn_cache_mock(CacheMode::HitWithoutAge, 1).await;
+        let v = ProxyVerifier::new(port, Some("cm"), Vec::new());
+        let st = v.test_stage8_caching_with(1).await;
+        assert!(!st.passed, "a HIT without Age must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("Age"),
+            "{:?}",
+            st.error
+        );
+
+        let port = spawn_cache_mock(CacheMode::HitBodyMismatch, 1).await;
+        let v = ProxyVerifier::new(port, Some("cm"), Vec::new());
+        let st = v.test_stage8_caching_with(1).await;
+        assert!(
+            !st.passed,
+            "a HIT whose body is not the MISS body must fail"
+        );
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("differs"),
+            "{:?}",
+            st.error
+        );
+
+        let port = spawn_cache_mock(CacheMode::NeverExpires, 1).await;
+        let v = ProxyVerifier::new(port, Some("cm"), Vec::new());
+        let st = v.test_stage8_caching_with(1).await;
+        assert!(!st.passed, "entries that never expire must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("never expired"),
+            "{:?}",
+            st.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage9_limits_mock_pass_and_oversized_head_fail() {
+        // A proxy with sane limits: 431 on an oversized head, 413 on an
+        // oversized declared body, stalled sockets reclaimed.
+        let strict = |head: String| {
+            let lower = head.to_ascii_lowercase();
+            if head.len() > 8 * 1024 {
+                return raw_http(431, "Request Header Fields Too Large", "", "");
+            }
+            if let Some(pos) = lower.find("content-length:") {
+                let digits: String = lower[pos + "content-length:".len()..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if digits
+                    .parse::<u64>()
+                    .map(|v| v > 1_048_576)
+                    .unwrap_or(false)
+                {
+                    return raw_http(413, "Payload Too Large", "", "");
+                }
+            }
+            raw_http(200, "OK", &fixture_marker_body(1), "")
+        };
+        let port = spawn_raw_proxy(strict, 700).await;
+        let v = ProxyVerifier::new(port, Some("lm"), Vec::new());
+        let st = v.test_stage9_limits().await;
+        assert!(st.passed, "well-behaved limits must pass: {:?}", st.error);
+
+        // A proxy that answers 200 to an oversized head and never reclaims
+        // stalled sockets fails loudly.
+        let careless = |_head: String| raw_http(200, "OK", &fixture_marker_body(1), "");
+        let port = spawn_raw_proxy(careless, 0).await;
+        let v = ProxyVerifier::new(port, Some("lm"), Vec::new());
+        let st = v.test_stage9_limits().await;
+        assert!(!st.passed, "an oversized head answered 200 must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("32KiB"),
+            "{:?}",
+            st.error
+        );
+    }
+
     async fn dead_port() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
