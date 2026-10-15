@@ -316,3 +316,10 @@ type `queue` (port 6385), nine tickets (0-8), 9-stage suite, RULES
   returns the earlier waiting job — the prepare now settles each state
   (ack -> dead -> in-flight -> waiting) before the next enqueue, and a
   mock test exercises both halves.
+- First model cell (2026-10-15): ling-3.1-flash solved the complete queue
+  ladder — reached 8, 9/9 tickets, zero regressions, zero repairs,
+  $0.2412 (tickets/$ 37.3), including the destructive durability ticket on
+  the first attempt. The benchmark's first complete survival curve; the
+  queue ladder is materially easier for this model than redis/proxy
+  (where it walls at t4), which is the per-app spread the portfolio
+  exists to measure.

@@ -366,7 +366,9 @@ home. New task type `queue` (default port 6385), RULES `2026-10-15.3`.
   each state before enqueueing the next, and a mock test
   (`mock_queue_durability_halves`) covers both halves so it cannot
   regress.
-- [ ] K6b. Model grid cells for sdb-queue.
+- [x] K6b. First model cell (2026-10-15, ling-3.1-flash): **the full
+  ladder — reached 8, 9/9 tickets, zero regressions, $0.2412** (see the
+  sdb-queue grid log). More models next.
 
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
@@ -516,6 +518,29 @@ flakes, serialize live-docker tests with a shared test lock.
   listener (manual `docker run -p` works). Nothing in the graded path
   depends on the host mirrors any more (candidates dial the network
   aliases; fixture markers have in-process fallbacks).
+
+## Grid log (sdb-queue, omp, high effort)
+
+- **ling-3.1-flash** (spec tickets 0-8, 2026-10-15 run 1,
+  `campaign_sdb-queue_openrouter_inclusionai_ling-3.1-flash_20261015_124730`,
+  RULES `2026-10-15.3`, $0.80 cap, ~30 min): **reached 8 — the FULL ladder
+  (9/9 tickets, 9/9 stages, zero regressions, zero repair rounds)**,
+  $0.2412, tickets/$ 37.3. Every ticket passed on the first attempt:
+  s0 genesis 24t ($0.0300) · s1 leases+ownership 18t ($0.0241) · s2
+  nack/delays 18t ($0.0442) · s3 DLQ 18t ($0.0189) · **s4 durability
+  (prepare -> SIGKILL -> restart -> verify) 18t ($0.0345)** · s5
+  concurrency (6 consumers / 200 jobs) 12t ($0.0296) · s6 STATS 12t
+  ($0.0205) · s7 delays+redrive 12t ($0.0160) · s8 hardening under the
+  128MB cap 18t ($0.0234). This is the benchmark's **first complete
+  survival curve** and the first time the destructive durability stage
+  ever ran against a model candidate — and the first sdb-queue cell ever.
+  Cross-app read: the same model reached 4/3-honest on sdb-edge and 4 on
+  sdb-kv (both ladders wall earlier), so the queue ladder is materially
+  easier for it — small line protocol, no RESP/HTTP semantics — which is
+  exactly the per-app difficulty spread the portfolio exists to measure.
+- Next for this campaign: more models (free tier) for spread, and the
+  deferred depth tickets once a second model saturates (the ladder is
+  complete for ling, so cost/survival comparisons need other samples).
 
 ## Grid log (sdb-kv, omp, high effort)
 
