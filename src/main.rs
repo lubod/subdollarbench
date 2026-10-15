@@ -4714,7 +4714,7 @@ mod tests {
 
         let croot = env.root.join("campaigns");
         write_campaign_fixture(&croot, "good", &campaign_spec_json("good", |_| {}), true);
-        // Invalid: acceptance id outside 1..=13.
+        // Invalid: acceptance id outside 1..=16.
         write_campaign_fixture(
             &croot,
             "bad_stage_id",

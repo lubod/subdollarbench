@@ -181,3 +181,41 @@ Six open questions answered by the operator (full detail:
   the gate is inert until CI is re-enabled; the bench measured ~70% lines
   and needs coverage work on docker-gated paths first (TODO_CAMPAIGNS
   hygiene).
+
+## 14. Stage-2 wave: disk residency, compaction, SDB1 v2 admin protocol (2026-10-15.1)
+
+The sdb-kv ladder grows three tickets (11-13; pipeline stages 14-16;
+RULES `2026-10-15.1`; acceptance ids up to 16). Design choices and why:
+
+- **Disk residency is enforced by the container memory cap, not by
+  inspecting the implementation.** Stage 14 restarts the candidate with
+  `SDB_DATA_DIR=/data` on a host bind mount under a 192MB limit, writes
+  ~480MB of 240KiB values, reads back byte-exact, deletes, then SIGKILLs
+  and restarts. A value-per-key RAM map OOMs; an offset-index +
+  append-log passes. We grade the observable property (serve data far
+  larger than the process limit, survive a crash), not a design.
+- **The compaction gate measures the host bind mount, not self-reported
+  numbers** (<= 3x live bytes within 30s after ~860MB of churn; 48MiB
+  live => <= 144MiB). 3x tolerates rewrite/AOF amplification while still
+  proving real reclamation. Values are hex-of-PRNG: poorly compressible,
+  so zipping values cannot fake the footprint; the bound is generous
+  enough that legitimate per-value compression plus compaction still
+  passes.
+- **Admin protocol v2 = the existing SDB1 asset, extended in place**
+  (proposal: "admin binary protocol v1 -> v2"). Framing is unchanged
+  (magic/seq/opcode/status/len/CRC32); v2 adds STATS (0x06, a
+  `field:value` payload mirroring the INFO counters) and requires one
+  store behind both protocols (SDB1 PUT <-> RESP GET in both directions).
+  Cross-protocol coherence is cheap to check and expensive to fake; the
+  verifier reuses the binproto framing crate asset (98% covered).
+- **Port 6395 is published only when a ticket's acceptance includes
+  stage 16** (worker offset), same discipline as the dashboard port: an
+  unused published port is a collision failure mode.
+- **Ticket evolution, not a new campaign**: the stage-2 wave appends
+  tickets to the living sdb-kv workspace so the ladder story stays one
+  siteline; older cells are stamped earlier rules and remain
+  non-comparable without `backfill --yes` (loose-comparability policy).
+- Offline validation: mock SDB1+RESP servers (pass, split-store fail,
+  STATS-field fail), sparse-log compaction pass + no-shrink fail,
+  live-docker bind round-trip. Live execution of 14-16 awaits a model
+  that reaches ticket 11.

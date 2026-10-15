@@ -22,6 +22,9 @@ pub const OP_ECHO: u8 = 0x02;
 pub const OP_PUT: u8 = 0x03;
 pub const OP_GET: u8 = 0x04;
 pub const OP_STREAM: u8 = 0x05;
+/// SDB1 v2 admin extension: STATS mirrors the INFO counters as a UTF-8
+/// `field:value`-per-line payload.
+pub const OP_STATS: u8 = 0x06;
 pub const ST_OK: u8 = 0x00;
 pub const ST_BAD_CHECKSUM: u8 = 0x01;
 pub const ST_UNKNOWN_OP: u8 = 0x02;
@@ -142,7 +145,10 @@ impl Conn {
     async fn read_frames(&mut self, want: usize, deadline: Duration) -> Result<Vec<Frame>> {
         let start = Instant::now();
         let mut out = Vec::new();
-        let mut tmp = [0u8; 65536];
+        // Heap-allocated: a 64KiB stack array inside this future multiplies
+        // through every nested await and overflows 2MiB test-thread stacks
+        // in debug builds (the admin stage's await nesting showed this).
+        let mut tmp = vec![0u8; 65536];
         while out.len() < want {
             if start.elapsed() > deadline {
                 return Err(anyhow!(
@@ -192,6 +198,276 @@ fn corrupt_crc(frame: &[u8]) -> Vec<u8> {
         bad[15] ^= 0xFF;
     }
     bad
+}
+
+/// Minimal RESP client used by the admin stage's cross-protocol checks.
+struct RespMini {
+    stream: TcpStream,
+}
+
+impl RespMini {
+    async fn connect(port: u16) -> Result<Self> {
+        let addr = format!("127.0.0.1:{port}");
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
+            .await
+            .map_err(|_| anyhow!("Connection timed out to {addr}"))?
+            .map_err(|e| anyhow!("Failed to connect to {addr}: {e}"))?;
+        Ok(Self { stream })
+    }
+
+    /// Send one RESP command; return the first complete reply frame as text.
+    async fn cmd(&mut self, args: &[&str]) -> Result<String> {
+        let mut out = format!("*{}\r\n", args.len());
+        for a in args {
+            out.push_str(&format!("${}\r\n{}\r\n", a.len(), a));
+        }
+        self.stream
+            .write_all(out.as_bytes())
+            .await
+            .map_err(|e| anyhow!("resp send: {e}"))?;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            if let Some(need) = resp_frame_len(&buf)? {
+                if buf.len() >= need {
+                    return Ok(String::from_utf8_lossy(&buf[..need]).to_string());
+                }
+            }
+            let n = tokio::time::timeout(READ_TIMEOUT, self.stream.read(&mut tmp))
+                .await
+                .map_err(|_| anyhow!("resp read timed out"))?
+                .map_err(|e| anyhow!("resp read: {e}"))?;
+            if n == 0 {
+                return Err(anyhow!("resp connection closed mid-reply"));
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+    }
+}
+
+/// Byte length of the first complete RESP reply in `buf`, if known.
+fn resp_frame_len(buf: &[u8]) -> Result<Option<usize>> {
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let head_end = match buf.windows(2).position(|w| w == b"\r\n") {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let total = match buf[0] {
+        b'+' | b'-' | b':' => head_end + 2,
+        b'$' => {
+            let hd =
+                std::str::from_utf8(&buf[1..head_end]).map_err(|_| anyhow!("bad bulk header"))?;
+            let len: i64 = hd.parse().map_err(|_| anyhow!("bad bulk length {hd:?}"))?;
+            if len < 0 {
+                head_end + 2
+            } else {
+                head_end + 2 + len as usize + 2
+            }
+        }
+        other => return Err(anyhow!("unexpected RESP type byte {other:02x}")),
+    };
+    Ok(Some(total))
+}
+
+/// Campaign stage 16 (admin binary protocol, SDB1 v2; explicit acceptance
+/// only): the admin channel is served beside RESP on its own port. Checks
+/// framing fidelity (bad magic closes, PING/ECHO byte fidelity, corrupt
+/// CRC -> ERR_BAD_CHECKSUM with the connection kept open, unknown opcode
+/// -> ERR_UNKNOWN_OP, 50-frame pipeline with matched sequence ids) plus
+/// the v2 additions: the SAME keyspace as RESP in both directions
+/// (SDB1 PUT -> RESP GET, RESP SET -> SDB1 GET) and STATS mirroring the
+/// INFO counter fields in a `field:value` payload.
+pub async fn admin_stage(admin_port: u16, resp_port: u16, seed: Option<&str>) -> StageResult {
+    let name = "Stage 16: admin binary protocol (SDB1 v2)".to_string();
+    let fail = |e: String| StageResult {
+        stage: 16,
+        name: name.clone(),
+        passed: false,
+        error: Some(e),
+    };
+    let tag = super::get_seed_prefix(seed, "adm").to_string();
+    match admin_stage_inner(admin_port, resp_port, &tag).await {
+        Ok(()) => StageResult {
+            stage: 16,
+            name,
+            passed: true,
+            error: None,
+        },
+        Err(e) => fail(e.to_string()),
+    }
+}
+
+/// Sectioned body of the admin stage; split so each async state machine
+/// stays small (a single ~9-step async fn overflowed 2MB test-thread
+/// stacks in debug builds).
+async fn admin_stage_inner(admin_port: u16, resp_port: u16, tag: &str) -> Result<()> {
+    admin_framing(admin_port).await?;
+    admin_shared_keyspace(admin_port, resp_port, tag).await?;
+    admin_stats(admin_port).await?;
+    admin_pipeline(admin_port).await
+}
+
+async fn admin_framing(admin_port: u16) -> Result<()> {
+    // 1. Wrong magic must close silently (service survives).
+    let mut c = Conn::connect(admin_port).await?;
+    let mut bad = encode_frame(1, OP_PING, b"");
+    bad[0] = b'X';
+    c.send(&bad).await?;
+    if c.read_frames(1, Duration::from_secs(2)).await.is_ok() {
+        return Err(anyhow!(
+            "a bad-magic frame was answered; contract says close"
+        ));
+    }
+
+    // 2-3. PING / ECHO fidelity (incl. binary bytes and 64 KiB).
+    let mut c = Conn::connect(admin_port).await?;
+    let r = c.roundtrip(7, OP_PING, b"").await?;
+    if r.opcode != OP_PING || r.status != ST_OK || r.seq != 7 || !r.payload.is_empty() {
+        return Err(anyhow!("PING reply wrong: {r:?}"));
+    }
+    let small: &[u8] = b"hello-\x00\xff-binary";
+    let r = c.roundtrip(8, OP_ECHO, small).await?;
+    if r.opcode != OP_ECHO || r.status != ST_OK || r.seq != 8 || r.payload != small {
+        return Err(anyhow!("ECHO small payload mismatch"));
+    }
+    let big = vec![0xA5u8; 64 * 1024];
+    let r = c.roundtrip(9, OP_ECHO, &big).await?;
+    if r.status != ST_OK || r.payload != big {
+        return Err(anyhow!("ECHO 64 KiB payload mismatch"));
+    }
+
+    // 4. Corrupt CRC -> ERR_BAD_CHECKSUM, connection stays open.
+    let bad = corrupt_crc(&encode_frame(10, OP_ECHO, b"x"));
+    c.send(&bad).await?;
+    let frames = c.read_frames(1, READ_TIMEOUT).await?;
+    if frames[0].status != ST_BAD_CHECKSUM || frames[0].seq != 10 {
+        return Err(anyhow!("corrupt CRC reply wrong: {:?}", frames[0]));
+    }
+    let r = c.roundtrip(11, OP_PING, b"").await?;
+    if r.status != ST_OK {
+        return Err(anyhow!("connection not usable after a checksum error"));
+    }
+
+    // 5. Unknown opcode -> ERR_UNKNOWN_OP.
+    let r = c.roundtrip(12, 0x7F, b"").await?;
+    if r.status != ST_UNKNOWN_OP {
+        return Err(anyhow!("unknown opcode reply wrong: {:?}", r));
+    }
+    Ok(())
+}
+
+async fn admin_shared_keyspace(admin_port: u16, resp_port: u16, tag: &str) -> Result<()> {
+    let mut c = Conn::connect(admin_port).await?;
+    // 6. PUT/GET over SDB1 (shared keyspace, binary-safe values).
+    let k = format!("adm_{tag}_k1");
+    let v: &[u8] = b"adm-value-\x01\x02\xfe";
+    let mut put = k.as_bytes().to_vec();
+    put.push(0x00);
+    put.extend_from_slice(v);
+    let r = c.roundtrip(13, OP_PUT, &put).await?;
+    if r.opcode != OP_PUT || r.status != ST_OK || !r.payload.is_empty() {
+        return Err(anyhow!("SDB1 PUT reply wrong: {r:?}"));
+    }
+    let r = c.roundtrip(14, OP_GET, k.as_bytes()).await?;
+    if r.status != ST_OK || r.payload != v {
+        return Err(anyhow!("SDB1 GET mismatch (status {:02x})", r.status));
+    }
+    let r = c
+        .roundtrip(15, OP_GET, format!("adm_{tag}_absent").as_bytes())
+        .await?;
+    if r.status != ST_UNKNOWN_OP {
+        return Err(anyhow!("SDB1 GET missing key reply wrong: {r:?}"));
+    }
+
+    // 7. Cross-protocol coherence: one store behind both protocols.
+    let mut resp = RespMini::connect(resp_port).await?;
+    let k2 = format!("adm_{tag}_k2");
+    let mut put2 = k2.as_bytes().to_vec();
+    put2.push(0x00);
+    put2.extend_from_slice(b"xval");
+    let r = c.roundtrip(16, OP_PUT, &put2).await?;
+    if r.status != ST_OK {
+        return Err(anyhow!("SDB1 PUT (cross) failed: {r:?}"));
+    }
+    let got = resp.cmd(&["GET", &k2]).await?;
+    if !got.contains("xval") {
+        return Err(anyhow!(
+            "RESP GET of an SDB1-written key returned {got:?} (protocols share one store?)"
+        ));
+    }
+    let k3 = format!("adm_{tag}_k3");
+    let set = resp.cmd(&["SET", &k3, "rval"]).await?;
+    if !set.starts_with("+OK") {
+        return Err(anyhow!("RESP SET failed: {set:?}"));
+    }
+    let r = c.roundtrip(17, OP_GET, k3.as_bytes()).await?;
+    if r.status != ST_OK || r.payload != b"rval" {
+        return Err(anyhow!(
+            "SDB1 GET of an RESP-written key mismatch (status {:02x})",
+            r.status
+        ));
+    }
+    Ok(())
+}
+
+async fn admin_stats(admin_port: u16) -> Result<()> {
+    const REQUIRED: &[&str] = &[
+        "total_connections_received",
+        "total_commands_processed",
+        "keyspace_hits",
+        "keyspace_misses",
+        "expired_keys",
+        "rejected_connections",
+        "connected_clients",
+        "uptime_in_seconds",
+    ];
+    // 8. STATS mirrors the INFO counters.
+    let mut c = Conn::connect(admin_port).await?;
+    let r = c.roundtrip(18, OP_STATS, b"").await?;
+    if r.opcode != OP_STATS || r.status != ST_OK {
+        return Err(anyhow!("STATS reply wrong: {r:?}"));
+    }
+    let text = String::from_utf8_lossy(&r.payload).to_lowercase();
+    for f in REQUIRED {
+        if !text.contains(&format!("{f}:")) {
+            return Err(anyhow!(
+                "STATS payload is missing '{f}' (mirror the INFO counters)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn admin_pipeline(admin_port: u16) -> Result<()> {
+    // 9. 50-frame pipeline with matched sequence ids and payloads.
+    let mut c = Conn::connect(admin_port).await?;
+    let mut burst = Vec::new();
+    for i in 0..50u16 {
+        let payload = format!("pipe{i}");
+        burst.extend_from_slice(&encode_frame(100 + i, OP_ECHO, payload.as_bytes()));
+    }
+    c.send(&burst).await?;
+    let frames = c.read_frames(50, PIPELINE_DEADLINE).await?;
+    let mut seqs = std::collections::HashSet::new();
+    for f in &frames {
+        if f.opcode != OP_ECHO || f.status != ST_OK {
+            return Err(anyhow!("pipelined reply wrong: {:?}", f));
+        }
+        let want = format!("pipe{}", f.seq.saturating_sub(100));
+        if f.payload != want.as_bytes() {
+            return Err(anyhow!("pipeline frame {} corrupt: {:?}", f.seq, f));
+        }
+        seqs.insert(f.seq);
+    }
+    if seqs.len() != 50 {
+        return Err(anyhow!(
+            "pipelined replies not matched: {} unique seq ids of 50",
+            seqs.len()
+        ));
+    }
+    Ok(())
 }
 
 impl BinprotoVerifier {
@@ -672,6 +948,224 @@ mod tests {
                 Ok(n) => buf.extend_from_slice(&tmp[..n]),
             }
         }
+    }
+
+    /// Minimal RESP array parser for the admin-stage RESP mock.
+    fn parse_resp_array(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
+        let line = |buf: &[u8], pos: usize| -> Option<(Vec<u8>, usize)> {
+            let end = buf.get(pos..)?.windows(2).position(|w| w == b"\r\n")? + pos;
+            Some((buf[pos..end].to_vec(), end + 2))
+        };
+        let (head, mut pos) = line(buf, 0)?;
+        if head.first() != Some(&b'*') {
+            return None;
+        }
+        let n: usize = std::str::from_utf8(&head[1..]).ok()?.parse().ok()?;
+        let mut args = Vec::new();
+        for _ in 0..n {
+            let (h, p) = line(buf, pos)?;
+            if h.first() != Some(&b'$') {
+                return None;
+            }
+            let l: usize = std::str::from_utf8(&h[1..]).ok()?.parse().ok()?;
+            if buf.len() < p + l + 2 {
+                return None;
+            }
+            args.push(buf[p..p + l].to_vec());
+            pos = p + l + 2;
+        }
+        Some((args, pos))
+    }
+
+    /// SDB1 + RESP mocks sharing one byte keyspace (admin stage 16).
+    /// `stats_no_fields` drops the counter lines from STATS; `split_stores`
+    /// gives the two protocols independent maps (cross-protocol failure).
+    async fn spawn_admin_mocks(stats_no_fields: bool, split_stores: bool) -> (u16, u16) {
+        use std::sync::{Arc, Mutex};
+        type Store = Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>;
+        let store: Store = Arc::new(Mutex::new(HashMap::new()));
+
+        let sdb1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin_port = sdb1.local_addr().unwrap().port();
+        {
+            let store = store.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = sdb1.accept().await {
+                    let store = store.clone();
+                    tokio::spawn(async move {
+                        let mut buf: Vec<u8> = Vec::new();
+                        let mut tmp = [0u8; 65536];
+                        loop {
+                            loop {
+                                match decode_frame(&buf) {
+                                    Ok(None) => break,
+                                    Ok(Some((f, used))) => {
+                                        buf.drain(..used);
+                                        let reply = match f.opcode {
+                                            OP_PING => response(f.seq, f.opcode, ST_OK, &[]),
+                                            OP_ECHO => response(f.seq, f.opcode, ST_OK, &f.payload),
+                                            OP_PUT => {
+                                                if let Some(i) =
+                                                    f.payload.iter().position(|b| *b == 0)
+                                                {
+                                                    store.lock().unwrap().insert(
+                                                        f.payload[..i].to_vec(),
+                                                        f.payload[i + 1..].to_vec(),
+                                                    );
+                                                    response(f.seq, f.opcode, ST_OK, &[])
+                                                } else {
+                                                    response(f.seq, f.opcode, ST_UNKNOWN_OP, &[])
+                                                }
+                                            }
+                                            OP_GET => {
+                                                match store.lock().unwrap().get(&f.payload).cloned()
+                                                {
+                                                    Some(v) => response(f.seq, f.opcode, ST_OK, &v),
+                                                    None => response(
+                                                        f.seq,
+                                                        f.opcode,
+                                                        ST_UNKNOWN_OP,
+                                                        &[],
+                                                    ),
+                                                }
+                                            }
+                                            OP_STATS => {
+                                                let body: &str = if stats_no_fields {
+                                                    "uptime:1\n"
+                                                } else {
+                                                    "total_connections_received:1\ntotal_commands_processed:2\nkeyspace_hits:0\nkeyspace_misses:0\nexpired_keys:0\nrejected_connections:0\nconnected_clients:1\nuptime_in_seconds:1\n"
+                                                };
+                                                response(f.seq, OP_STATS, ST_OK, body.as_bytes())
+                                            }
+                                            _ => response(f.seq, f.opcode, ST_UNKNOWN_OP, &[]),
+                                        };
+                                        if sock.write_all(&reply).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if buf.len() >= 16 && &buf[0..4] != MAGIC {
+                                            return; // wrong magic closes
+                                        }
+                                        if buf.len() >= 16 {
+                                            let seq = u16::from_be_bytes([buf[4], buf[5]]);
+                                            let op = buf[6];
+                                            let len = u32::from_be_bytes([
+                                                buf[8], buf[9], buf[10], buf[11],
+                                            ])
+                                                as usize;
+                                            let _ = sock
+                                                .write_all(&response(seq, op, ST_BAD_CHECKSUM, &[]))
+                                                .await;
+                                            if len <= MAX_PAYLOAD {
+                                                buf.drain(..16 + len);
+                                            } else {
+                                                buf.clear();
+                                            }
+                                            continue;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        let resp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resp_port = resp.local_addr().unwrap().port();
+        let resp_store: Store = if split_stores {
+            Arc::new(Mutex::new(HashMap::new()))
+        } else {
+            store.clone()
+        };
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = resp.accept().await {
+                let store = resp_store.clone();
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        while let Some((args, used)) = parse_resp_array(&buf) {
+                            buf.drain(..used);
+                            if args.is_empty() {
+                                continue;
+                            }
+                            let cmd = String::from_utf8_lossy(&args[0]).to_uppercase();
+                            let reply = match cmd.as_str() {
+                                "PING" => b"+PONG\r\n".to_vec(),
+                                "SET" if args.len() == 3 => {
+                                    store
+                                        .lock()
+                                        .unwrap()
+                                        .insert(args[1].clone(), args[2].clone());
+                                    b"+OK\r\n".to_vec()
+                                }
+                                "GET" if args.len() == 2 => {
+                                    match store.lock().unwrap().get(&args[1]) {
+                                        Some(v) => {
+                                            let mut r = format!("${}\r\n", v.len()).into_bytes();
+                                            r.extend_from_slice(v);
+                                            r.extend_from_slice(b"\r\n");
+                                            r
+                                        }
+                                        None => b"$-1\r\n".to_vec(),
+                                    }
+                                }
+                                _ => b"-ERR unknown\r\n".to_vec(),
+                            };
+                            if sock.write_all(&reply).await.is_err() {
+                                return;
+                            }
+                        }
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                });
+            }
+        });
+        (admin_port, resp_port)
+    }
+
+    /// Stage 16 must pass against faithful SDB1 v2 + RESP mocks and reject
+    /// a STATS payload without the counter fields and split stores.
+    #[tokio::test]
+    async fn mock_admin_stage_pass_and_failure_modes() {
+        let (a, r) = spawn_admin_mocks(false, false).await;
+        let st = admin_stage(a, r, Some("adm")).await;
+        assert!(st.passed, "faithful SDB1 v2 must pass: {:?}", st.error);
+
+        let (a, r) = spawn_admin_mocks(true, false).await;
+        let st = admin_stage(a, r, Some("adm")).await;
+        assert!(!st.passed, "STATS without the counter fields must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("missing"),
+            "error should name the missing field: {:?}",
+            st.error
+        );
+
+        let (a, r) = spawn_admin_mocks(false, true).await;
+        let st = admin_stage(a, r, Some("adm")).await;
+        assert!(
+            !st.passed,
+            "split stores must fail the cross-protocol check"
+        );
+        assert!(
+            st.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("share one store"),
+            "error should name the store split: {:?}",
+            st.error
+        );
     }
 
     #[tokio::test]

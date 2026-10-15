@@ -15,6 +15,26 @@ pub struct RedisTestSummary {
     pub pass_rate: f64,
 }
 
+/// Compaction-stage sizes; production defaults, tests scale down.
+#[derive(Clone, Copy)]
+pub(crate) struct CompactionSizes {
+    pub live: usize,
+    pub churn: usize,
+    pub survivors: usize,
+    pub value_len: usize,
+}
+
+impl Default for CompactionSizes {
+    fn default() -> Self {
+        Self {
+            live: 600,
+            churn: 6,
+            survivors: 200,
+            value_len: 240 * 1024,
+        }
+    }
+}
+
 pub struct RedisVerifier {
     pub target_port: u16,
     pub run_seed: Option<String>,
@@ -1990,6 +2010,333 @@ impl RedisVerifier {
         Ok(found)
     }
 
+    /// Deterministic hex value of `len` bytes for key index `i` (the
+    /// disk-residency and compaction stages). Hex-of-PRNG keeps it valid
+    /// UTF-8 for the RESP builders while staying poorly compressible, so a
+    /// compression-only design cannot fake the compaction footprint gate.
+    fn big_value_hex(i: usize, len: usize) -> String {
+        const DIGITS: &[u8] = b"0123456789abcdef";
+        let mut x: u32 = (i as u32).wrapping_mul(2_654_435_761) | 1;
+        let mut s = String::with_capacity(len);
+        while s.len() < len {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            for b in x.to_be_bytes() {
+                s.push(DIGITS[(b >> 4) as usize] as char);
+                s.push(DIGITS[(b & 0x0f) as usize] as char);
+            }
+        }
+        s.truncate(len);
+        s
+    }
+
+    /// The production big-value size (240KiB).
+    const BIG_VALUE_LEN: usize = 240 * 1024;
+
+    fn diskresid_key(&self, i: usize) -> String {
+        format!("dr_{}_{}", self.get_seed_prefix("dr"), i)
+    }
+
+    fn compaction_key(&self, i: usize) -> String {
+        format!("cp_{}_{}", self.get_seed_prefix("cp"), i)
+    }
+
+    /// Total bytes of regular files under `dir` (recursive). The compaction
+    /// stage measures the candidate's actual on-disk footprint through the
+    /// host bind mount — not its self-reported numbers.
+    fn dir_bytes(dir: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let entries = match std::fs::read_dir(&d) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(p),
+                    Ok(_) => {
+                        if let Ok(md) = entry.metadata() {
+                            total += md.len();
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        total
+    }
+
+    /// Stage 14 (campaign disk-residency ticket; explicit acceptance only):
+    /// the pipeline restarts the candidate with `SDB_DATA_DIR` on a host
+    /// bind mount under a 192MB memory cap, then this stage writes ~480MB
+    /// of 240KiB values through RESP. A map-in-RAM implementation is
+    /// OOM-killed; a disk-resident store acknowledges every write and
+    /// reads every value back byte-exact (spot-checked).
+    pub async fn test_stage_diskresid(&self) -> StageResult {
+        const N: usize = 2000;
+        const SPOT: usize = 40;
+        let name = "Stage 14: disk-resident store under a memory cap".to_string();
+        let fail = |e: String| StageResult {
+            stage: 14,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect: {e}")),
+        };
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("PING: {r:?}")),
+            Err(e) => return fail(format!("PING failed: {e}")),
+        }
+        for i in 0..N {
+            let k = self.diskresid_key(i);
+            let v = Self::big_value_hex(i, Self::BIG_VALUE_LEN);
+            match Self::send_resp_cmd(&mut stream, &["SET", &k, &v]).await {
+                Ok(r) if r.trim() == "+OK" => {}
+                Ok(r) => return fail(format!("SET {i}: {r:?}")),
+                Err(e) => return fail(format!("SET {i} failed (server died under the cap?): {e}")),
+            }
+        }
+        let step = N / SPOT;
+        for i in (0..N).step_by(step) {
+            let k = self.diskresid_key(i);
+            let want = Self::big_value_hex(i, Self::BIG_VALUE_LEN);
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.contains(&want) => {}
+                Ok(r) => {
+                    return fail(format!(
+                        "GET {i}: value mismatch ({} bytes)",
+                        r.len().min(64)
+                    ))
+                }
+                Err(e) => return fail(format!("GET {i} failed: {e}")),
+            }
+        }
+        // Deletes stay correct at scale.
+        for i in N - 5..N {
+            let k = self.diskresid_key(i);
+            match Self::send_resp_cmd(&mut stream, &["DEL", &k]).await {
+                Ok(r) if r.trim() == ":1" => {}
+                Ok(r) => return fail(format!("DEL {i}: {r:?}")),
+                Err(e) => return fail(format!("DEL {i} failed: {e}")),
+            }
+            match Self::send_resp_cmd(&mut stream, &["EXISTS", &k]).await {
+                Ok(r) if r.trim() == ":0" => {}
+                Ok(r) => return fail(format!("EXISTS after DEL {i}: {r:?}")),
+                Err(e) => return fail(format!("EXISTS {i} failed: {e}")),
+            }
+        }
+        StageResult {
+            stage: 14,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
+    /// Stage 14b: after the pipeline SIGKILLs and restarts the candidate,
+    /// the same seeded spot keys must still read back (the dataset was on
+    /// disk, not only in RAM).
+    pub async fn check_diskresid_restart(&self) -> StageResult {
+        const N: usize = 2000;
+        const SPOT: usize = 40;
+        let name = "Stage 14: disk-resident store under a memory cap".to_string();
+        let fail = |e: String| StageResult {
+            stage: 14,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("reconnect after restart: {e}")),
+        };
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("PING after restart: {r:?}")),
+            Err(e) => return fail(format!("PING after restart failed: {e}")),
+        }
+        let step = N / SPOT;
+        for i in (0..N - 5).step_by(step) {
+            let k = self.diskresid_key(i);
+            let want = Self::big_value_hex(i, Self::BIG_VALUE_LEN);
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.contains(&want) => {}
+                Ok(r) => {
+                    return fail(format!(
+                        "GET {i} after restart: lost or corrupt ({} bytes)",
+                        r.len().min(64)
+                    ))
+                }
+                Err(e) => return fail(format!("GET {i} after restart failed: {e}")),
+            }
+        }
+        for i in N - 5..N {
+            let k = self.diskresid_key(i);
+            match Self::send_resp_cmd(&mut stream, &["EXISTS", &k]).await {
+                Ok(r) if r.trim() == ":0" => {}
+                Ok(r) => return fail(format!("deleted key {i} resurrected after restart: {r:?}")),
+                Err(e) => return fail(format!("EXISTS {i} after restart failed: {e}")),
+            }
+        }
+        StageResult {
+            stage: 14,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
+    /// Stage 15 (campaign compaction ticket; explicit acceptance only):
+    /// heavy overwrite/delete churn (~860MB written, 48MiB live) must not
+    /// leave ~860MB on disk: the harness measures the host bind mount and
+    /// requires the footprint to fall to <= 3x live bytes within 30s
+    /// (automatic compaction or an idle-triggered rewrite — the candidate's
+    /// choice), with every surviving key still byte-exact.
+    pub async fn test_stage_compaction(&self, host_data_dir: &std::path::Path) -> StageResult {
+        self.test_stage_compaction_with(host_data_dir, CompactionSizes::default(), 30)
+            .await
+    }
+
+    /// Same stage with explicit sizes and wait budget (tests scale down).
+    pub(crate) async fn test_stage_compaction_with(
+        &self,
+        host_data_dir: &std::path::Path,
+        sizes: CompactionSizes,
+        wait_secs: u64,
+    ) -> StageResult {
+        let (live, churn, survivors, value_len) =
+            (sizes.live, sizes.churn, sizes.survivors, sizes.value_len);
+        let spot = 40.min(survivors);
+        let name = "Stage 15: compaction reclaims disk".to_string();
+        let fail = |e: String| StageResult {
+            stage: 15,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("connect: {e}")),
+        };
+        match Self::send_resp_cmd(&mut stream, &["PING"]).await {
+            Ok(r) if r.trim() == "+PONG" => {}
+            Ok(r) => return fail(format!("PING: {r:?}")),
+            Err(e) => return fail(format!("PING failed: {e}")),
+        }
+        for _round in 0..churn {
+            for i in 0..live {
+                let k = self.compaction_key(i);
+                let v = Self::big_value_hex(i, value_len);
+                match Self::send_resp_cmd(&mut stream, &["SET", &k, &v]).await {
+                    Ok(r) if r.trim() == "+OK" => {}
+                    Ok(r) => return fail(format!("SET {i}: {r:?}")),
+                    Err(e) => return fail(format!("SET {i} failed: {e}")),
+                }
+            }
+        }
+        for i in survivors..live {
+            let k = self.compaction_key(i);
+            match Self::send_resp_cmd(&mut stream, &["DEL", &k]).await {
+                Ok(r) if r.trim() == ":1" => {}
+                Ok(r) => return fail(format!("DEL {i}: {r:?}")),
+                Err(e) => return fail(format!("DEL {i} failed: {e}")),
+            }
+        }
+        let live_bytes = (survivors * value_len) as u64;
+        let bound = live_bytes * 3;
+        let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
+        let mut bytes = Self::dir_bytes(host_data_dir);
+        while bytes > bound && std::time::Instant::now() < deadline {
+            sleep(Duration::from_millis(500)).await;
+            bytes = Self::dir_bytes(host_data_dir);
+        }
+        if bytes > bound {
+            return fail(format!(
+                "on-disk footprint {:.0}MB stayed above the {:.0}MB bound for {}s after churn — no compaction (live data is {:.0}MB)",
+                bytes as f64 / 1e6,
+                bound as f64 / 1e6,
+                wait_secs,
+                live_bytes as f64 / 1e6
+            ));
+        }
+        let step = (survivors / spot).max(1);
+        for i in (0..survivors).step_by(step) {
+            let k = self.compaction_key(i);
+            let want = Self::big_value_hex(i, value_len);
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.contains(&want) => {}
+                Ok(r) => {
+                    return fail(format!(
+                        "survivor {i} corrupt after compaction ({} bytes)",
+                        r.len().min(64)
+                    ))
+                }
+                Err(e) => return fail(format!("GET survivor {i} failed: {e}")),
+            }
+        }
+        StageResult {
+            stage: 15,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
+    /// Stage 15b: after a SIGKILL + restart of the compacted store, the
+    /// survivors (and only the survivors) must still read back.
+    pub async fn check_compaction_restart(&self) -> StageResult {
+        const LIVE: usize = 600;
+        const SURVIVORS: usize = 200;
+        const SPOT: usize = 40;
+        let name = "Stage 15: compaction reclaims disk".to_string();
+        let fail = |e: String| StageResult {
+            stage: 15,
+            name: name.clone(),
+            passed: false,
+            error: Some(e),
+        };
+        let mut stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return fail(format!("reconnect after restart: {e}")),
+        };
+        let step = SURVIVORS / SPOT;
+        for i in (0..SURVIVORS).step_by(step) {
+            let k = self.compaction_key(i);
+            let want = Self::big_value_hex(i, Self::BIG_VALUE_LEN);
+            match Self::send_resp_cmd(&mut stream, &["GET", &k]).await {
+                Ok(r) if r.contains(&want) => {}
+                Ok(r) => {
+                    return fail(format!(
+                        "survivor {i} lost after restart ({} bytes)",
+                        r.len()
+                    ))
+                }
+                Err(e) => return fail(format!("GET survivor {i} after restart failed: {e}")),
+            }
+        }
+        for i in SURVIVORS..LIVE {
+            let k = self.compaction_key(i);
+            match Self::send_resp_cmd(&mut stream, &["EXISTS", &k]).await {
+                Ok(r) if r.trim() == ":0" => {}
+                Ok(r) => return fail(format!("deleted key {i} resurrected after restart: {r:?}")),
+                Err(e) => return fail(format!("EXISTS {i} after restart failed: {e}")),
+            }
+        }
+        StageResult {
+            stage: 15,
+            name,
+            passed: true,
+            error: None,
+        }
+    }
+
     /// GET `{base}/api/stats` and flatten the JSON into lowercased
     /// key -> integer (numbers directly, numeric strings parsed). Nested
     /// objects are walked so a `{"stats": {...}}` shape still mirrors INFO.
@@ -3058,6 +3405,7 @@ mod tests {
                             let reply = {
                                 let mut db = db.lock().unwrap();
                                 match args[0].to_uppercase().as_str() {
+                                    "PING" => "+PONG\r\n".to_string(),
                                     "SET" if args.len() == 3 => {
                                         db.insert(args[1].clone(), args[2].clone());
                                         "+OK\r\n".to_string()
@@ -3072,6 +3420,14 @@ mod tests {
                                                 None => "$-1\r\n".to_string(),
                                             }
                                         }
+                                    }
+                                    "DEL" => {
+                                        // Needed by the compaction-stage tests.
+                                        let n = args[1..]
+                                            .iter()
+                                            .filter(|k| db.remove(*k).is_some())
+                                            .count();
+                                        format!(":{n}\r\n")
                                     }
                                     _ => "-ERR unknown\r\n".to_string(),
                                 }
@@ -3105,6 +3461,78 @@ mod tests {
             "error should hint at reply order: {:?}",
             st.error
         );
+    }
+
+    /// Sparse file with `bytes` metadata length (no real disk use).
+    fn sparse_len_file(path: &std::path::Path, bytes: u64) {
+        let f = std::fs::File::create(path).unwrap();
+        f.set_len(bytes).unwrap();
+    }
+
+    /// Stage 15 at tiny scale (same polling/bound/survivor logic): a KV mock
+    /// plus a sparse host log that either reclaims space mid-stage (pass) or
+    /// never shrinks (loud fail naming the missing compaction).
+    #[tokio::test]
+    async fn test_stage_compaction_mock_pass_and_no_shrink_fail() {
+        let sizes = CompactionSizes {
+            live: 8,
+            churn: 3,
+            survivors: 4,
+            value_len: 4096,
+        };
+
+        let dir = std::env::temp_dir().join(format!("cov-compact-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("appendonly.log");
+        sparse_len_file(&log, 100 * 1024 * 1024);
+        {
+            let log = log.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&log) {
+                    let _ = f.set_len(1024);
+                }
+            });
+        }
+        let port = spawn_perf_mock(false).await;
+        let v = RedisVerifier::new(port, Some("cmock"));
+        let st = v.test_stage_compaction_with(&dir, sizes, 5).await;
+        assert!(st.passed, "reclaimed footprint must pass: {:?}", st.error);
+
+        let dir2 = std::env::temp_dir().join(format!("cov-compact-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir2).unwrap();
+        sparse_len_file(&dir2.join("appendonly.log"), 100 * 1024 * 1024);
+        let port = spawn_perf_mock(false).await;
+        let v = RedisVerifier::new(port, Some("cmock"));
+        let st = v.test_stage_compaction_with(&dir2, sizes, 1).await;
+        assert!(!st.passed, "a log that never shrinks must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("no compaction"),
+            "error should name the missing compaction: {:?}",
+            st.error
+        );
+    }
+
+    /// Disk-residency helpers: seeded values are deterministic, hex-only,
+    /// and the footprint walk sums file lengths recursively.
+    #[test]
+    fn test_diskresid_helpers_and_dir_bytes() {
+        let a = RedisVerifier::big_value_hex(7, 4096);
+        let b = RedisVerifier::big_value_hex(7, 4096);
+        let c = RedisVerifier::big_value_hex(8, 4096);
+        assert_eq!(a.len(), 4096);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a.bytes().all(|x| x.is_ascii_hexdigit()));
+
+        let dir = std::env::temp_dir().join(format!("cov-dirbytes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        sparse_len_file(&dir.join("sub/x"), 1_000_000);
+        std::fs::write(dir.join("y"), b"abc").unwrap();
+        assert_eq!(RedisVerifier::dir_bytes(&dir), 1_000_003);
     }
 
     /// Ticket 10 helpers: ROLE parsing accepts the RESP array, bulk and

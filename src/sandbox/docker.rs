@@ -121,6 +121,11 @@ pub struct CandidateRunExtras {
     /// The security stage runs the candidate under 64MB so an oversized
     /// protocol frame must be rejected *before* allocating it.
     pub memory: Option<String>,
+    /// Host bind mounts `(host_path, container_path)`. The disk-resident /
+    /// compaction stages bind a host scratch dir to `/data` (with
+    /// SDB_DATA_DIR=/data) so the harness can measure the on-disk footprint
+    /// directly and keep it across candidate restarts.
+    pub binds: Vec<(String, String)>,
 }
 
 impl Default for SandboxManager {
@@ -1292,6 +1297,7 @@ impl SandboxManager {
                 env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
                 ports: Vec::new(),
                 memory: None,
+                binds: Vec::new(),
             },
         )
     }
@@ -1309,6 +1315,10 @@ impl SandboxManager {
         for p in &extras.ports {
             out.push("-p".to_string());
             out.push(format!("127.0.0.1:{p}:{p}"));
+        }
+        for (host, container) in &extras.binds {
+            out.push("-v".to_string());
+            out.push(format!("{host}:{container}"));
         }
         out
     }
@@ -2195,11 +2205,14 @@ mod tests {
             env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
             ports: vec![8090],
             memory: Some("64m".to_string()),
+            binds: vec![("/tmp/host-data".to_string(), "/data".to_string())],
         };
         let args = SandboxManager::candidate_extras_args(&extras);
         assert!(args.windows(2).any(|w| w == ["--tmpfs", "/data:size=8m"]));
         assert!(args.windows(2).any(|w| w == ["-e", "SDB_DATA_DIR=/data"]));
         assert!(args.windows(2).any(|w| w == ["-p", "127.0.0.1:8090:8090"]));
+        // Disk-residency/compaction stages bind a host dir for footprint reads.
+        assert!(args.windows(2).any(|w| w == ["-v", "/tmp/host-data:/data"]));
         let none = CandidateRunExtras::default();
         assert!(SandboxManager::candidate_extras_args(&none).is_empty());
     }
@@ -3003,12 +3016,24 @@ mod live_docker_cov_tests {
         let ws = std::env::temp_dir().join(format!("covtest-cand-ws-{}", std::process::id()));
         let _ = fs::remove_dir_all(&ws);
         fs::create_dir_all(&ws).expect("create workspace");
+        // Host bind mount: the disk-residency/compaction stages read the
+        // on-disk footprint through a `-v host:/bound` mount, so the
+        // container must be able to write into it.
+        let bind_host =
+            std::env::temp_dir().join(format!("covtest-cand-bind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&bind_host);
+        fs::create_dir_all(&bind_host).expect("create bind dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&bind_host, fs::Permissions::from_mode(0o777));
+        }
         let port = free_port();
         let extra_port = free_port();
         fs::write(
             ws.join("start.sh"),
             format!(
-                "#!/bin/bash\necho COVTEST_CANDIDATE_UP\nexec python3 -m http.server {port} --bind 0.0.0.0\n"
+                "#!/bin/bash\necho COVTEST_CANDIDATE_UP\nmkdir -p /bound && echo hello-from-container > /bound/from-container.txt\nexec python3 -m http.server {port} --bind 0.0.0.0\n"
             ),
         )
         .expect("write start.sh");
@@ -3021,6 +3046,10 @@ mod live_docker_cov_tests {
             ],
             ports: vec![extra_port],
             memory: Some("128m".to_string()),
+            binds: vec![(
+                bind_host.to_string_lossy().to_string(),
+                "/bound".to_string(),
+            )],
         };
         assert!(sm
             .start_candidate_in_docker_with(&ws, port, &extras)
@@ -3048,8 +3077,27 @@ mod live_docker_cov_tests {
             "dashboard port must be published 1:1: {ports}"
         );
 
+        let binds = docker(&["inspect", "--format", "{{json .HostConfig.Binds}}", &name]);
+        let binds = String::from_utf8_lossy(&binds.stdout);
+        assert!(
+            binds.contains("/bound"),
+            "bind mount must reach the container: {binds}"
+        );
         let logs = sm.get_candidate_logs_tail(50);
         assert!(logs.contains("COVTEST_CANDIDATE_UP"), "{logs}");
+        // Round-trip: a file the container writes under the bind appears on
+        // the host (the footprint measurement path).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(got) = fs::read_to_string(bind_host.join("from-container.txt")) {
+                assert!(got.contains("hello-from-container"), "{got}");
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("container never wrote into the host bind mount");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
 
         // Candidate accepts on its published loopback port (docker-proxy
         // handshake + backend liveness heuristic).

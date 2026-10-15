@@ -8,6 +8,20 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-15.1`: campaign sdb-kv stage-2 wave (tickets 11-13). New
+///   pipeline-level stages 14-16: (14) disk-resident store under a 192MB
+///   memory cap on a host-bind data dir (~480MB written, SIGKILL +
+///   restart re-read), (15) compaction (churn ~860MB, 48MiB live; the
+///   harness measures the host bind mount and requires <= 3x live bytes
+///   within 30s, survivors byte-exact through a restart), (16) admin
+///   binary protocol SDB1 v2 on the worker's 6395 port (framing fidelity
+///   incl. checksum/unknown-opcode/pipeline, shared keyspace with RESP in
+///   both directions, STATS mirroring INFO fields). The candidate
+///   container publishes 6395 only when a ticket's acceptance includes 16;
+///   CandidateRunExtras gained host bind mounts. Runs only when a
+///   ticket's acceptance explicitly includes 14/15/16; acceptance ids up
+///   to 16. Rows stamped `2026-10-14.13` or earlier are not comparable
+///   without `backfill --yes`.
 /// - `2026-10-14.13`: anti-cheat proxy rule refined. The scanner flagged
 ///   `nc`/`socat` in ANY mode, so a candidate that piped a RESP payload
 ///   into `nc -q1 127.0.0.1 6379` inside its own TEST script was
@@ -335,7 +349,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-14.13";
+pub const RULES_VERSION: &str = "2026-10-15.1";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

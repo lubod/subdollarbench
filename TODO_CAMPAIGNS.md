@@ -216,6 +216,44 @@ non-redis acceptance adapters.
 - [ ] H4. Paper inputs: survival curves, $/ticket, harness deltas,
   regression-free rates.
 
+## Slice I — stage-2 wave: disk residency, compaction, admin protocol
+
+Ladder extended beyond the 11-stage v1 (tickets 11-13; stages 14-16;
+RULES `2026-10-15.1`). The store's story continues: the dataset outgrew
+RAM, disk filled with append-only history, ops tooling needs a machine
+interface.
+
+- [x] I1. Ticket 11 — disk-resident store (stage 14): pipeline restarts
+  the candidate with `SDB_DATA_DIR` on a host bind mount under a 192MB
+  memory cap; the verifier writes ~2000 x 240KiB values (~480MB) through
+  RESP, spot-checks 40 full values byte-for-byte, deletes five keys, then
+  the pipeline SIGKILLs + restarts and re-checks. A map-in-RAM candidate
+  is OOM-killed. Prompt: `stages/11_diskresid/prompt.md`.
+- [x] I2. Ticket 12 — compaction (stage 15): churn of 600 x 240KiB x 6
+  (~860MB of records) then 400 deletes (48MiB live); the harness measures
+  the host bind mount and requires the footprint <= 3x live bytes (144MiB)
+  within 30s, survivors byte-exact, then SIGKILL + restart keeps survivors
+  and deletions. Values are hex-of-PRNG (poorly compressible) so a
+  compression-only design cannot fake the gate.
+- [x] I3. Ticket 13 — admin binary protocol (stage 16): SDB1 v2 on port
+  6395 (worker offset), published only when a ticket's acceptance includes
+  stage 16. Framing fidelity (bad magic closes, PING/ECHO byte fidelity,
+  corrupt CRC -> ERR_BAD_CHECKSUM with the connection kept open, unknown
+  opcode -> ERR_UNKNOWN_OP, 50-frame pipeline with matched ids+payloads)
+  plus v2 additions: the SAME keyspace as RESP in both directions and
+  STATS (opcode 0x06) mirroring the INFO counters.
+- [x] I4. Harness: `CandidateRunExtras.binds` (host bind mounts),
+  `disk_bytes` footprint walk, seeded big-value helpers, sectioned admin
+  stage (a monolithic async fn overflowed 2MiB test stacks in debug; the
+  64KiB read buffer in `Conn::read_frames` is heap-allocated now), live
+  docker bind round-trip covered in `live_docker_cov_tests`.
+- [x] I5. Mock/offline validation: admin stage against faithful SDB1+RESP
+  mocks (pass, split-store fail, missing-STATS-field fail); compaction
+  gate pass (sparse log shrinks) and loud no-shrink fail; helper/dir-bytes
+  unit tests; extras args bind assertion.
+- [ ] I6. Live execution of stages 14-16 (pending a model that reaches
+  ticket 11; the grid currently tops out at ticket 4).
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the
@@ -239,6 +277,13 @@ Wave log:
   flows), opencode 95.4%, omp 95.8%, omp_updater 96.5%.
 - Wave 4b: main.rs 68.2->81.5%, main_campaign.rs 10.9->69.6%.
 - Aggregate after 4b: **84.65% lines** — target met.
+- Wave 6 (stage-2 wave, 2026-10-15): aggregate 84.65 -> **84.08% lines**
+  (regions 84.90%, functions 88.19%) — expected dip: the three new
+  pipeline stage blocks (14/15/16 orchestration) run only in live
+  containers, while the new verifier code is mock-covered
+  (binproto 93.78% lines including the admin stage; redis.rs 78.78%;
+  sandbox/docker.rs 85.39% with the live bind round-trip). Gate margin
+  stays ~4pp.
 
 Remaining smaller residuals if a future wave wants more margin:
 web/server.rs (1,098 incl. test code), web/queue.rs (798),

@@ -224,6 +224,87 @@
       },
       "budget_usd": 0.2,
       "max_turns": 40
+    },
+    {
+      "id": 11,
+      "type": "scale",
+      "title": "Disk-resident store",
+      "prompt": "stages/11_diskresid/prompt.md",
+      "acceptance": {
+        "redis_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "budget_usd": 0.2,
+      "max_turns": 40
+    },
+    {
+      "id": 12,
+      "type": "scale",
+      "title": "Compaction",
+      "prompt": "stages/12_compaction/prompt.md",
+      "acceptance": {
+        "redis_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
+    },
+    {
+      "id": 13,
+      "type": "platform",
+      "title": "Admin binary protocol",
+      "prompt": "stages/13_admin/prompt.md",
+      "acceptance": {
+        "redis_stages": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30
     }
   ]
 }

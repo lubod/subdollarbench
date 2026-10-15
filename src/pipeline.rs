@@ -996,18 +996,21 @@ impl BenchmarkPipeline {
                 }
                 (0.0, 0, accepted_total, Vec::new())
             } else {
-                // Dashboard ticket: the worker's HTTP port must be reachable
-                // from the harness, so publish it on the candidate container.
-                // Only when the acceptance asks for stage 10 — publishing an
-                // unneeded port would add a collision failure mode.
+                // Extra published ports, gated on the ticket's acceptance:
+                // 8090 for the dashboard stage (10), 6395 for the admin
+                // binary-protocol stage (16). Publishing an unneeded port
+                // would add a collision failure mode.
+                let mut extra_ports: Vec<u16> = Vec::new();
+                if matches!(task, TaskType::Redis) {
+                    if accepted.map(|a| a.contains(&10)).unwrap_or(false) {
+                        extra_ports.push(crate::web::server::worker_port(8090, worker));
+                    }
+                    if accepted.map(|a| a.contains(&16)).unwrap_or(false) {
+                        extra_ports.push(crate::web::server::worker_port(6395, worker));
+                    }
+                }
                 let extras = crate::sandbox::docker::CandidateRunExtras {
-                    ports: if matches!(task, TaskType::Redis)
-                        && accepted.map(|a| a.contains(&10)).unwrap_or(false)
-                    {
-                        vec![crate::web::server::worker_port(8090, worker)]
-                    } else {
-                        Vec::new()
-                    },
+                    ports: extra_ports,
                     ..Default::default()
                 };
                 if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
@@ -1506,6 +1509,270 @@ impl BenchmarkPipeline {
                             sandbox.stop_ha_nodes(3);
                             let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
                             let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        // Stages 14-16 (disk residency, compaction, admin
+                        // binary protocol) are explicit-acceptance only.
+                        // 14/15 restart the candidate onto a host-bind data
+                        // dir under a 192MB cap and restore it afterwards;
+                        // 16 runs against the restored candidate (6395 was
+                        // published by the extras gating above).
+                        let staged_fail =
+                            |stage: u32, name: &str, err: String| crate::verifier::StageResult {
+                                stage,
+                                name: name.to_string(),
+                                passed: false,
+                                error: Some(err),
+                            };
+                        let prep_datadir = |workdir: &Path| -> Result<std::path::PathBuf> {
+                            let datadir = workdir
+                                .parent()
+                                .ok_or_else(|| anyhow!("workspace has no parent dir"))?
+                                .join("datadir");
+                            let _ = std::fs::remove_dir_all(&datadir);
+                            std::fs::create_dir_all(&datadir)?;
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &datadir,
+                                    std::fs::Permissions::from_mode(0o777),
+                                );
+                            }
+                            Ok(datadir)
+                        };
+                        let disk_extras =
+                            |datadir: &Path| crate::sandbox::docker::CandidateRunExtras {
+                                memory: Some("192m".to_string()),
+                                binds: vec![(
+                                    datadir.to_string_lossy().to_string(),
+                                    "/data".to_string(),
+                                )],
+                                env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
+                                ports: extras.ports.clone(),
+                                ..Default::default()
+                            };
+                        if accepted.map(|a| a.contains(&14)).unwrap_or(false) {
+                            let name14 = "Stage 14: disk-resident store under a memory cap";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                staged_fail(
+                                    14,
+                                    name14,
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                match prep_datadir(workdir) {
+                                    Err(e) => staged_fail(14, name14, format!("datadir: {e}")),
+                                    Ok(datadir) => {
+                                        let de = disk_extras(&datadir);
+                                        let started = sandbox.stop_candidate().and_then(|_| {
+                                            sandbox
+                                                .start_candidate_in_docker_with(workdir, port, &de)
+                                        });
+                                        match started {
+                                            Err(e) => staged_fail(
+                                                14,
+                                                name14,
+                                                format!(
+                                                    "disk-resident candidate start failed: {e}"
+                                                ),
+                                            ),
+                                            Ok(()) => {
+                                                if !sandbox.wait_for_port(port, 30).await {
+                                                    staged_fail(
+                                                        14,
+                                                        name14,
+                                                        "disk-resident candidate did not open its port"
+                                                            .to_string(),
+                                                    )
+                                                } else {
+                                                    let fill =
+                                                        verifier.test_stage_diskresid().await;
+                                                    if !fill.passed {
+                                                        fill
+                                                    } else {
+                                                        logger.log("  [DISKRESID] ~480MB written under a 192MB cap; SIGKILL + restart...");
+                                                        let crash = sandbox
+                                                            .kill_candidate()
+                                                            .and_then(|_| {
+                                                                std::thread::sleep(
+                                                                    std::time::Duration::from_secs(
+                                                                        2,
+                                                                    ),
+                                                                );
+                                                                sandbox.restart_candidate()
+                                                            });
+                                                        match crash {
+                                                            Err(e) => staged_fail(
+                                                                14,
+                                                                name14,
+                                                                format!(
+                                                                    "SIGKILL/restart failed: {e}"
+                                                                ),
+                                                            ),
+                                                            Ok(()) => {
+                                                                if !sandbox
+                                                                    .wait_for_port(port, 25)
+                                                                    .await
+                                                                {
+                                                                    staged_fail(
+                                                                        14,
+                                                                        name14,
+                                                                        "candidate did not reopen its port after restart"
+                                                                            .to_string(),
+                                                                    )
+                                                                } else {
+                                                                    verifier
+                                                                        .check_diskresid_restart()
+                                                                        .await
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        if accepted.map(|a| a.contains(&15)).unwrap_or(false) {
+                            let name15 = "Stage 15: compaction reclaims disk";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                staged_fail(
+                                    15,
+                                    name15,
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                match prep_datadir(workdir) {
+                                    Err(e) => staged_fail(15, name15, format!("datadir: {e}")),
+                                    Ok(datadir) => {
+                                        let de = disk_extras(&datadir);
+                                        let started = sandbox.stop_candidate().and_then(|_| {
+                                            sandbox
+                                                .start_candidate_in_docker_with(workdir, port, &de)
+                                        });
+                                        match started {
+                                            Err(e) => staged_fail(
+                                                15,
+                                                name15,
+                                                format!("candidate start failed: {e}"),
+                                            ),
+                                            Ok(()) => {
+                                                if !sandbox.wait_for_port(port, 30).await {
+                                                    staged_fail(
+                                                        15,
+                                                        name15,
+                                                        "candidate did not open its port"
+                                                            .to_string(),
+                                                    )
+                                                } else {
+                                                    let compact = verifier
+                                                        .test_stage_compaction(&datadir)
+                                                        .await;
+                                                    if !compact.passed {
+                                                        compact
+                                                    } else {
+                                                        logger.log("  [COMPACT] footprint reclaimed; SIGKILL + restart to check survivors...");
+                                                        let crash = sandbox
+                                                            .kill_candidate()
+                                                            .and_then(|_| {
+                                                                std::thread::sleep(
+                                                                    std::time::Duration::from_secs(
+                                                                        2,
+                                                                    ),
+                                                                );
+                                                                sandbox.restart_candidate()
+                                                            });
+                                                        match crash {
+                                                            Err(e) => staged_fail(
+                                                                15,
+                                                                name15,
+                                                                format!(
+                                                                    "SIGKILL/restart failed: {e}"
+                                                                ),
+                                                            ),
+                                                            Ok(()) => {
+                                                                if !sandbox
+                                                                    .wait_for_port(port, 25)
+                                                                    .await
+                                                                {
+                                                                    staged_fail(
+                                                                        15,
+                                                                        name15,
+                                                                        "candidate did not reopen its port after restart"
+                                                                            .to_string(),
+                                                                    )
+                                                                } else {
+                                                                    verifier
+                                                                        .check_compaction_restart()
+                                                                        .await
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
+                            let _ = sandbox.stop_candidate();
+                            let _ = sandbox.start_candidate_in_docker_with(workdir, port, &extras);
+                            let _ = sandbox.wait_for_port(port, 25).await;
+                        }
+                        if accepted.map(|a| a.contains(&16)).unwrap_or(false) {
+                            let name16 = "Stage 16: admin binary protocol (SDB1 v2)";
+                            let prior_ok =
+                                stages.iter().filter(|s| allowed(s.stage)).all(|s| s.passed);
+                            let st = if !prior_ok {
+                                staged_fail(
+                                    16,
+                                    name16,
+                                    "skipped due to failure in earlier stages".to_string(),
+                                )
+                            } else {
+                                crate::verifier::binproto::admin_stage(
+                                    crate::web::server::worker_port(6395, worker),
+                                    port,
+                                    Some(verifier_seed),
+                                )
+                                .await
+                            };
+                            let status_str = if st.passed { "PASS" } else { "FAIL" };
+                            logger.log(&format!(
+                                "  Stage {}: {} -> {} {}",
+                                st.stage,
+                                crate::config::stage_label(st.stage, &st.name),
+                                status_str,
+                                st.error.as_deref().unwrap_or("")
+                            ));
+                            stages.push(st);
                         }
                         let verdict: Vec<&crate::verifier::StageResult> =
                             stages.iter().filter(|s| allowed(s.stage)).collect();
