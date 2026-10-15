@@ -39,3 +39,8 @@ matching one of the upstreams' markers, and that framing is
 - Raw sockets; no HTTP frameworks or prebuilt proxies.
 - Do not consult nginx/haproxy/envoy sources — original code only.
 - Self-test with `curl` against `upstream1/2/3` and your own port.
+- **Tool noise**: this container sets `http_proxy`/`https_proxy` (an egress
+  proxy). `curl` and similar tools may route through it and fail on
+  internal hostnames — pass `--noproxy '*'` when probing `upstreamN`.
+  Your server must dial upstreams with **raw sockets** and must not read
+  those env vars.

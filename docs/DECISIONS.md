@@ -368,3 +368,30 @@ sdb-edge: task `http`, eight tickets (0-7), stages 1-10, RULES
   broke the 8KiB head cap (200 for a 32KiB header block). Launch hygiene
   note: rebuild the release binary after any grading change before
   launching cells (two cells have now lost verdicts to a stale binary).
+
+## 18. Operator decisions on bench noise: proxy prompt clarity + readiness grace (2026-10-15.6)
+
+Both changes are grading/spec semantics, hence a RULES bump (`2026-10-15.6`):
+
+- **Egress-proxy prompt clarification** (proxy task prompt + sdb-edge
+  genesis prompt): the candidate container sets
+  `http_proxy`/`https_proxy`, so `curl` and similar tools may route
+  through an egress proxy and fail on internal hostnames (`upstreamN`).
+  The prompts now say to pass `--noproxy '*'` when probing and that the
+  server must dial upstreams with raw sockets and ignore those env vars.
+  Rationale: one model burned ~5 turns on this, which measures tool
+  environment archaeology, not proxy-building skill.
+- **Readiness grace** (proxy + http tasks): the pipeline's port gate is a
+  TCP accept, so a candidate that binds early but serves late (slow
+  startup self-test) could eat the verifier's single first request and be
+  failed for an availability quirk unrelated to its implementation. After
+  the port accepts, the pipeline now probes `GET /` for up to 20s and
+  logs either "answered a readiness probe" or a warning before grading.
+  Bounded: a genuinely dead or wedged server is still graded as-is (the
+  verifier fails it), the harness just gives slow starters a fair window.
+  A test pins the probe's three cases (serving / closed /
+  accepts-but-silent-must-timeout).
+- Remaining bench work (not in this change): the TLS ticket and the proxy
+  throughput ticket (baseline gate) are their own waves; CI re-enable
+  needs the GitHub-side Actions toggle (the workflow + 80% gate are in the
+  repo); a coverage-margin wave is available on the biggest residuals.

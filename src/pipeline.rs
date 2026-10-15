@@ -25,6 +25,26 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
     ]
 }
 
+/// One raw `GET /` probe against a candidate: true when any HTTP response
+/// arrives (any status). A socket that accepts but never answers (a slow
+/// startup self-test, a wedged accept loop) does not count as ready.
+fn candidate_serves_http(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+    else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    if s.write_all(b"GET / HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    matches!(s.read(&mut buf), Ok(n) if n > 0) && buf[0] == b'H'
+}
+
 use crate::sandbox::omp::{AgentExecutionLimits, AgentRunSpec, OmpRunner, OmpSessionStats};
 use crate::sandbox::opencode::{OpenCodeRunner, OPENCODE_VERSION};
 use crate::sandbox::AgentRunner;
@@ -1060,6 +1080,26 @@ impl BenchmarkPipeline {
                         "[SETUP] Server on port {} is online! Proceeding to verifier.",
                         port
                     ));
+                    // Readiness grace (proxy/http): a candidate that binds
+                    // early but serves late (slow startup self-test) must
+                    // not eat the verifier's single first request. Bounded
+                    // so a genuinely dead server is graded as-is.
+                    if matches!(task, TaskType::Proxy | TaskType::Http) {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(20);
+                        let mut served = candidate_serves_http(port);
+                        while !served && std::time::Instant::now() < deadline {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            served = candidate_serves_http(port);
+                        }
+                        if served {
+                            logger.log("[SETUP] Candidate answered a readiness probe (GET /).");
+                        } else {
+                            logger.log(
+                                "[SETUP] Warning: candidate did not answer a readiness probe within 20s; grading as-is.",
+                            );
+                        }
+                    }
                 } else {
                     logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
                 }
@@ -5416,6 +5456,50 @@ main()
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
         }
+    }
+
+    #[test]
+    fn test_candidate_serves_http_probe() {
+        // A serving stub answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            }
+        });
+        assert!(
+            candidate_serves_http(port),
+            "a serving stub must read as ready"
+        );
+        handle.join().unwrap();
+
+        // A closed port is not ready.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert!(
+            !candidate_serves_http(closed_port),
+            "a closed port is not ready"
+        );
+
+        // A socket that accepts but never answers (slow startup) must time
+        // out rather than hang the readiness probe.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let silent_port = silent.local_addr().unwrap().port();
+        let _guard = std::thread::spawn(move || {
+            let _ = silent.accept();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+        let started = std::time::Instant::now();
+        assert!(
+            !candidate_serves_http(silent_port),
+            "a silent accept is not ready"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// Eval-only Redis config on a high worker offset: candidate/ref ports

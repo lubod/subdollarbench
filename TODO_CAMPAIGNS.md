@@ -924,6 +924,20 @@ flakes, serialize live-docker tests with a shared test lock.
 - No board mixing (single-shot vs campaign); no retroactive rescoring.
 - Engine idle during deploys; migrate-check clean after.
 
+## Bench-noise decisions (2026-10-15.6)
+
+- [x] Egress-proxy clarification in the proxy prompts (spec change; one
+  model burned ~5 turns on curl's proxy env var).
+- [x] Readiness grace for proxy/http candidates (bounded `GET /` probe up
+  to 20s before grading; test pins serving / closed / silent-accept).
+- [ ] TLS termination ticket and proxy throughput ticket (stage 5 +
+  baseline gate) — deferred waves.
+- [ ] CI re-enable — repo side is ready (workflow + 80% coverage gate);
+  needs the GitHub Actions toggle.
+- [ ] Coverage margin wave — biggest residuals: pipeline.rs (~1,650
+  missed), web/server.rs (1,098), web/queue.rs (798), verifier/redis.rs,
+  verifier/http.rs (415), report/leaderboard.rs.
+
 ## Hygiene backlog
 
 - [x] Incident fix (2026-10-14): a SIGTERM-killed campaign leaked its

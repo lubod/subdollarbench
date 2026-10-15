@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-15.6`: operator decisions — (1) the proxy prompts now note
+///   that the container's `http_proxy`/`https_proxy` env vars make tools
+///   like curl route through an egress proxy (raw sockets are unaffected;
+///   pass `--noproxy '*'` when probing `upstreamN`), removing a turn tax
+///   unrelated to the measured skill; (2) a **readiness grace** for the
+///   proxy and http tasks: after the port accepts, the pipeline probes
+///   `GET /` for up to 20s and only then starts grading, so a candidate
+///   that binds early but serves late (slow startup self-test) is not
+///   failed by the verifier's single first request. The captured
+///   transcript runs are unaffected (they pre-date both).
 /// - `2026-10-15.5`: sdb-http hardening tolerance — a garbage request line
 ///   ("GARBAGE / HTTP/1.1") is accepted when rejected with ANY 4xx
 ///   (400/405/501/505) or a clean close, not only 400/505 (an unknown
@@ -395,7 +405,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-15.5";
+pub const RULES_VERSION: &str = "2026-10-15.6";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -26,6 +26,7 @@ Your implementation must meet high professional software engineering standards:
 - Three upstream HTTP servers are reachable from your container at `upstream1:80`, `upstream2:80`, `upstream3:80`, each serving a distinct static body on `GET /`. Always dial these hostnames (port 80). `127.0.0.1:8101-8103` are host-published mirrors for the operator only: from inside your container `127.0.0.1` is yourself and those ports refuse connections.
 - Your proxy listens on `0.0.0.0:8091` and forwards client `GET /` requests to the upstreams.
 - Self-test tip: for local stub upstreams bind `127.0.0.1:8101` inside your own workspace; never expect the real upstreams there.
+- Tool noise: the container sets `http_proxy`/`https_proxy` (an egress proxy). `curl` and similar tools may route through it and fail on internal hostnames — pass `--noproxy '*'` when probing `upstreamN`. Your proxy must dial upstreams with raw sockets and must not read those env vars.
 
 ### Requirements
 1. **Reverse proxying**: `GET /` on :8091 returns an upstream's body with HTTP 200. Preserve the upstream status code and body byte-exactly.
