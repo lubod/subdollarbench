@@ -735,10 +735,14 @@ mod tests {
                 proxy_stages: Vec::new(),
                 queue_stages: Vec::new(),
                 http_stages: Vec::new(),
+                sql_stages: Vec::new(),
             },
             budget_usd: 0.1,
             max_turns: 3,
             feedback_rounds: 1,
+            tier: 1,
+            needs: Vec::new(),
+            lite: None,
         };
         let err = run_one_stage(
             &lc,

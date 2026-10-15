@@ -414,6 +414,47 @@ board (root/404/echo/user-agent/files) is unchanged.
   clean close (RULES `2026-10-15.5`, prompt wording updated).
 - [ ] L5b. Model grid cells for sdb-http.
 
+## Slice M — sdb-sql (the 21-ticket SQL ladder; spec: docs/PROPOSAL-sdb-sql.md)
+
+Operator directive 2026-10-15: fix the review issues, document, build.
+RULES for sdb-sql will be its own stamp when the first verifier lands
+(sdb-sql is its own board, never pooled).
+
+- [x] M1. Pre-build review fixes documented: 13 resolutions folded into
+  the proposal (coverage gating only where the harness computes it, STATS
+  semantics pinned, deterministic 5s-cancel query, oracle discard table +
+  per-stage comparable-check floors + generator profile-coverage
+  assertions, error-class mapping table, `reached` = highest stage passed,
+  wall/disk guards, pinned `psql` client container, rollup/portal shape,
+  rollback-aware prompts, full rollback scope, Q4/Q6 confirmed).
+  DECISIONS #19 records the acceptance (supersedes #11 once landed).
+- [x] M2. Repo-wide anti-cheat fix: references are detached from the run
+  network for every verification window (`detach_references`/
+  `reattach_references` around both `run_verification` call sites); the
+  agent and the bench keep them. Live test pins resolve -> unreachable ->
+  resolve. (This hole existed for ref-redis/ref-http in the live
+  campaigns; sdb-sql inherits the fix.)
+- [x] M3. Orchestrator foundations: `StageSpec` gains `tier`/`needs`/
+  `lite {prompt, profile, budget_usd, max_turns, weight=0.4}`; task
+  adapter accepts `sql` (`sql_stages`, range 1..=21); validation for
+  tiers/needs/lite invariants; `LadderOutcome` + `stage_points` +
+  `max_points` + `score_ladder` (tier x 1.0 full | weight lite | 0) with
+  unit tests, and back-compat for the four existing specs.
+- [ ] M4. Orchestrator execution semantics: rollback (git + data dir +
+  SPEC.md), lite attempt after a failed full, continue past failures,
+  `needs` skipping, points in the rollup, campaign wall cap, disk guards.
+- [ ] M5. Verifier core (`src/verifier/sql/`): schema, generator
+  (profiles 0-3), oracle (discard table + error-class mapping), compare,
+  shrink, wire client; oracle-vs-oracle and mutant-engine self-tests;
+  per-stage check floors and profile-coverage assertions.
+- [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
+  for stages 0-3 through the pipeline, then one cheap-model cell.
+- [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
+  engine -> ops -> resilience -> distributed), each with a live proof and
+  the 20/20 flake bar.
+- [ ] M8. Retirement switch for the old tasks/campaigns, portal labels,
+  README rewrite; calibration run; grid on the new stamp.
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the

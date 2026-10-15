@@ -42,6 +42,9 @@ pub struct Acceptance {
     /// sdb-http (file server) acceptance.
     #[serde(default)]
     pub http_stages: Vec<u32>,
+    /// sdb-sql (differential SQL database) acceptance.
+    #[serde(default)]
+    pub sql_stages: Vec<u32>,
 }
 
 impl Acceptance {
@@ -51,13 +54,14 @@ impl Acceptance {
             "proxy" => &self.proxy_stages,
             "queue" => &self.queue_stages,
             "http" => &self.http_stages,
+            "sql" => &self.sql_stages,
             _ => &self.redis_stages,
         }
     }
 
     /// Task ids with a campaign stage adapter.
     pub fn supported_task(task: &str) -> bool {
-        matches!(task, "redis" | "proxy" | "queue" | "http")
+        matches!(task, "redis" | "proxy" | "queue" | "http" | "sql")
     }
 
     /// Highest acceptance id a campaign of `task` may reference.
@@ -71,6 +75,8 @@ impl Acceptance {
             // http stages 6-10 (ranges, conditional GET, compression,
             // upload limits, hardening) extend the single-shot 5.
             "http" => 10,
+            // sdb-sql: 21 stages (tiers 1-7).
+            "sql" => 21,
             _ => 16,
         }
     }
@@ -89,6 +95,42 @@ pub struct StageSpec {
     pub max_turns: u32,
     #[serde(default = "default_feedback_rounds")]
     pub feedback_rounds: u32,
+    /// Difficulty tier (sdb-sql: 1..=7). Stage points = tier x weight.
+    #[serde(default = "default_tier")]
+    pub tier: u32,
+    /// Prerequisite stage ids. A stage whose needs include a failed stage is
+    /// skipped (and costs nothing). Empty = always runnable.
+    #[serde(default)]
+    pub needs: Vec<u32>,
+    /// Optional lite variant attempted after a failed full attempt (the
+    /// workspace rolls back to the last green commit first).
+    #[serde(default)]
+    pub lite: Option<LiteSpec>,
+}
+
+fn default_tier() -> u32 {
+    1
+}
+
+/// A weaker-but-real variant of a ticket, attempted only after the full
+/// attempt fails. Passing it satisfies `needs` but scores `weight` of the
+/// stage's points (0.4 by default).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiteSpec {
+    /// Path to the lite ticket prompt, relative to the campaign directory.
+    pub prompt: String,
+    /// Feature flags this lite variant's acceptance/profile covers (the
+    /// verifier's generator profile; opaque to the orchestrator).
+    #[serde(default)]
+    pub profile: Vec<String>,
+    pub budget_usd: f64,
+    pub max_turns: u32,
+    #[serde(default = "default_lite_weight")]
+    pub weight: f64,
+}
+
+fn default_lite_weight() -> f64 {
+    0.4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +216,7 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
     }
     if !Acceptance::supported_task(&spec.task) {
         bail!(
-            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy, queue, http)",
+            "campaign '{}': task '{}' has no stage adapter yet (supported: redis, proxy, queue, http, sql)",
             spec.name,
             spec.task
         );
@@ -248,6 +290,63 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
                     spec.name,
                     s.id,
                     id
+                );
+            }
+        }
+        // Tiers and needs (sdb-sql ladder semantics): a need must name an
+        // earlier, defined stage; the tier weights the stage's points.
+        if s.tier == 0 {
+            bail!("campaign '{}': stage {} tier must be >= 1", spec.name, s.id);
+        }
+        let defined: HashSet<u32> = spec.stages.iter().map(|st| st.id).collect();
+        for need in &s.needs {
+            if !defined.contains(need) {
+                bail!(
+                    "campaign '{}': stage {} needs unknown stage {}",
+                    spec.name,
+                    s.id,
+                    need
+                );
+            }
+            if *need >= s.id {
+                bail!(
+                    "campaign '{}': stage {} needs {} which is not an earlier stage",
+                    spec.name,
+                    s.id,
+                    need
+                );
+            }
+        }
+        if let Some(lite) = &s.lite {
+            if lite.budget_usd <= 0.0 {
+                bail!(
+                    "campaign '{}': stage {} lite budget must be > 0",
+                    spec.name,
+                    s.id
+                );
+            }
+            if lite.max_turns == 0 {
+                bail!(
+                    "campaign '{}': stage {} lite max_turns must be > 0",
+                    spec.name,
+                    s.id
+                );
+            }
+            if !(lite.weight > 0.0 && lite.weight < 1.0) {
+                bail!(
+                    "campaign '{}': stage {} lite weight must be in (0,1), got {}",
+                    spec.name,
+                    s.id,
+                    lite.weight
+                );
+            }
+            let lp = root.join(&lite.prompt);
+            if !lp.is_file() {
+                bail!(
+                    "campaign '{}': stage {} lite prompt missing: {}",
+                    spec.name,
+                    s.id,
+                    lp.display()
                 );
             }
         }
@@ -619,6 +718,59 @@ fn tmp_dir(tag: &str) -> PathBuf {
     d
 }
 
+/// One stage's outcome under the continue-past-failures ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LadderOutcome {
+    /// The full ticket's acceptance passed.
+    Full,
+    /// The lite variant passed (scores `lite.weight` of the tier).
+    Lite,
+    /// Full and lite both failed (or no lite existed).
+    Failed,
+    /// Skipped because a `needs` prerequisite failed.
+    Skipped,
+}
+
+/// Points for one stage: tier x (1.0 full | lite.weight lite | 0 else).
+pub fn stage_points(stage: &StageSpec, outcome: LadderOutcome) -> f64 {
+    let tier = stage.tier as f64;
+    match outcome {
+        LadderOutcome::Full => tier,
+        LadderOutcome::Lite => tier * stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.4),
+        LadderOutcome::Failed | LadderOutcome::Skipped => 0.0,
+    }
+}
+
+/// Maximum achievable points for a spec (every stage full).
+pub fn max_points(stages: &[StageSpec]) -> f64 {
+    stages.iter().map(|s| s.tier as f64).sum()
+}
+
+/// A scored ladder: points, ceiling, and the per-stage rows a rollup
+/// reports (profile, tier, points).
+pub struct LadderScore {
+    pub points: f64,
+    pub max_points: f64,
+    pub rows: Vec<(u32, u32, LadderOutcome, f64)>,
+}
+
+/// Score a ladder from per-stage outcomes (missing ids count as Skipped).
+pub fn score_ladder(stages: &[StageSpec], outcomes: &[(u32, LadderOutcome)]) -> LadderScore {
+    let by_id: HashMap<u32, LadderOutcome> = outcomes.iter().copied().collect();
+    let rows: Vec<(u32, u32, LadderOutcome, f64)> = stages
+        .iter()
+        .map(|s| {
+            let outcome = by_id.get(&s.id).copied().unwrap_or(LadderOutcome::Skipped);
+            (s.id, s.tier, outcome, stage_points(s, outcome))
+        })
+        .collect();
+    LadderScore {
+        points: rows.iter().map(|r| r.3).sum(),
+        max_points: max_points(stages),
+        rows,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,10 +831,14 @@ mod tests {
                         proxy_stages: Vec::new(),
                         queue_stages: Vec::new(),
                         http_stages: Vec::new(),
+                        sql_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
                     feedback_rounds: 1,
+                    tier: 1,
+                    needs: Vec::new(),
+                    lite: None,
                 },
                 StageSpec {
                     id: 1,
@@ -694,10 +850,14 @@ mod tests {
                         proxy_stages: Vec::new(),
                         queue_stages: Vec::new(),
                         http_stages: Vec::new(),
+                        sql_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
                     feedback_rounds: 1,
+                    tier: 1,
+                    needs: Vec::new(),
+                    lite: None,
                 },
                 StageSpec {
                     id: 2,
@@ -709,10 +869,14 @@ mod tests {
                         proxy_stages: Vec::new(),
                         queue_stages: Vec::new(),
                         http_stages: Vec::new(),
+                        sql_stages: Vec::new(),
                     },
                     budget_usd: 0.1,
                     max_turns: 10,
                     feedback_rounds: 1,
+                    tier: 1,
+                    needs: Vec::new(),
+                    lite: None,
                 },
             ],
         };
@@ -931,6 +1095,87 @@ mod tests {
         v["task"] = serde_json::json!("http");
         let bad: CampaignSpec = serde_json::from_value(v).unwrap();
         assert!(validate_spec(&bad, &lc.root).is_err());
+    }
+
+    #[test]
+    fn test_ladder_validation_and_scoring() {
+        let lc = fixture_campaign();
+        let good = serde_json::to_value(&lc.spec).unwrap();
+
+        // Tiers + needs + a lite variant validate.
+        let mut v = good.clone();
+        v["stages"][0]["tier"] = serde_json::json!(1);
+        v["stages"][1]["tier"] = serde_json::json!(2);
+        v["stages"][1]["needs"] = serde_json::json!([0]);
+        v["stages"][2]["tier"] = serde_json::json!(3);
+        v["stages"][2]["needs"] = serde_json::json!([0, 1]);
+        v["stages"][2]["lite"] = serde_json::json!({
+            "prompt": "stages/1.md",
+            "profile": ["inner_join"],
+            "budget_usd": 0.05,
+            "max_turns": 8
+        });
+        let spec: CampaignSpec = serde_json::from_value(v.clone()).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_ok());
+        assert_eq!(spec.stages[2].lite.as_ref().unwrap().weight, 0.4);
+
+        // Tier 0 is invalid.
+        let mut bad = v.clone();
+        bad["stages"][0]["tier"] = serde_json::json!(0);
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+
+        // A need that names an unknown stage is invalid.
+        let mut bad = v.clone();
+        bad["stages"][1]["needs"] = serde_json::json!([7]);
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+
+        // A forward need (self or later) is invalid.
+        let mut bad = v.clone();
+        bad["stages"][1]["needs"] = serde_json::json!([1]);
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+        let mut bad = v.clone();
+        bad["stages"][1]["needs"] = serde_json::json!([2]);
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+
+        // Lite invariants: missing prompt, bad weight, zero budget/turns.
+        let mut bad = v.clone();
+        bad["stages"][2]["lite"]["prompt"] = serde_json::json!("stages/missing.md");
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+        let mut bad = v.clone();
+        bad["stages"][2]["lite"]["weight"] = serde_json::json!(1.5);
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+        let mut bad = v.clone();
+        bad["stages"][2]["lite"]["budget_usd"] = serde_json::json!(0.0);
+        let spec: CampaignSpec = serde_json::from_value(bad).unwrap();
+        assert!(validate_spec(&spec, &lc.root).is_err());
+
+        // Scoring: tier x (1.0 full | 0.4 lite), failed/skipped zero, and a
+        // missing outcome counts as skipped.
+        let spec: CampaignSpec = serde_json::from_value(v).unwrap();
+        let score = score_ladder(
+            &spec.stages,
+            &[
+                (0, LadderOutcome::Full),
+                (1, LadderOutcome::Lite),
+                (2, LadderOutcome::Failed),
+            ],
+        );
+        assert_eq!(score.max_points, 6.0);
+        assert!(
+            (score.points - (1.0 + 2.0 * 0.4)).abs() < 1e-9,
+            "{}",
+            score.points
+        );
+
+        let score = score_ladder(&spec.stages, &[(0, LadderOutcome::Full)]);
+        assert!((score.points - 1.0).abs() < 1e-9);
+        assert_eq!(score.rows[1].2, LadderOutcome::Skipped);
     }
 
     #[test]
