@@ -605,8 +605,24 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   database at startup. Gates: 20/20 at every stage 0-4 against the
   reference (real restarts), a stage-4 live proof through the pipeline
   (5/5 + sentinel written), and a drift proof (stages 0-3 green, stage 4
-  red with `[upgrade]`). **Remaining**: one cell for tickets 0-4, then
-  ticket 5 (crash safety).
+  red with `[upgrade]`).
+  **Ticket 5 landed (2026-10-16)**: `crash.rs` holds the crash ladder's
+  protocol and invariants (acked rows exactly, a 50k-row UPDATE
+  all-or-nothing, a torn partial trailing record, double restarts) with
+  kill/restart/truncate as callbacks; the pipeline owns the ladder
+  (`crash_ladder`) and fails stage 5 through the same late-failure path
+  as upgrade drift. The reference runs WAL + synchronous=FULL so acked
+  commits survive SIGKILL and a torn WAL tail recovers; the reference
+  crash test SIGKILLs and restarts a real process. Gates: stage-5 live
+  proof under Docker (6/6, all four [CRASH] lines), sentinel for stage 5
+  written, `differential_supported` reaches 5.
+  **Remaining for ticket 5**: the lite variant (the proposal gives stage
+  5 one: acked rows survive, no torn tail/mid-statement atomicity). The
+  pipeline has no variant-aware grading yet, so a declared lite would be
+  judged by the full suite — variant-aware grading (`job.variant` into
+  `CampaignStageConfig`) is the prerequisite for the first lite (stages
+  5, 8, 11, 19), then the lite prompt. A cell for tickets 0-5 is also
+  outstanding.
   **Review fixes landed (REVIEW.md, 2026-10-16)**: the http health probes
   are bounded again; the sql shrink runs on throwaway stores (the real
   `sql-data` survives for ticket 4) and the driver waits for a

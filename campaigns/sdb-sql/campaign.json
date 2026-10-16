@@ -92,6 +92,28 @@
       "needs": [
         0
       ]
+    },
+    {
+      "id": 5,
+      "type": "resilience",
+      "title": "Crash safety",
+      "prompt": "stages/5_crash/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 36,
+      "tier": 2,
+      "needs": [
+        4
+      ]
     }
   ]
 }

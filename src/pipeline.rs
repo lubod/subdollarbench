@@ -62,6 +62,86 @@ fn restart_candidate(
     )
 }
 
+/// Stage 5's crash ladder against the candidate: acked rows survive a
+/// SIGKILL, a mid-flight bulk UPDATE is all-or-nothing, a torn newest data
+/// file recovers every committed statement, and a second restart changes
+/// nothing (docs/PROPOSAL-sdb-sql.md, "5. Crash safety").
+#[allow(clippy::too_many_arguments)]
+fn crash_ladder(
+    sandbox: &crate::sandbox::docker::SandboxManager,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+    data: &Path,
+    verifier_seed: &str,
+    logger: &Arc<dyn PipelineLogger>,
+) -> Result<(), String> {
+    use crate::verifier::sql::crash;
+    let addr = format!("127.0.0.1:{port}");
+    let t = std::time::Duration::from_secs(20);
+    let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 5) ^ 0x5E27_1E10_0000_0005;
+    let acked_table = format!("c{ns:x}_acked");
+    let bulk_table = format!("c{ns:x}_bulk");
+    let restart = || -> Result<(), String> {
+        restart_candidate(&sandbox.instance_id, workdir, port, extras).map_err(|e| {
+            logger.log(&format!("  [CRASH] restart failed: {e}"));
+            e
+        })
+    };
+
+    // (a) acked rows survive SIGKILL; unacked ones may not exist.
+    let acked = {
+        let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+        crash::ack_kill(&addr, t, &acked_table, 40, &mut kill).map_err(|e| format!("(a) {e}"))?
+    };
+    restart()?;
+    crash::check_acked_rows(&addr, t, &acked_table, acked).map_err(|e| format!("(a) {e}"))?;
+    logger.log(&format!("  [CRASH] {acked} acked rows survived a SIGKILL"));
+
+    // (b) a bulk UPDATE killed mid-flight is all or nothing.
+    {
+        let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+        crash::bulk_update_and_kill(
+            &addr,
+            t,
+            &bulk_table,
+            crash::BULK_ROWS,
+            crash::BULK_CHUNK,
+            &mut kill,
+        )
+        .map_err(|e| format!("(b) {e}"))?;
+    }
+    restart()?;
+    crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
+        .map_err(|e| format!("(b) {e}"))?;
+    logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
+
+    // (c) a torn tail: a partial trailing record may cost the newest
+    // statement, never an older committed row.
+    crash::append_row(&addr, t, &acked_table, acked).map_err(|e| format!("(c) {e}"))?;
+    let cut = crash::torn_tail(data, 256).map_err(|e| format!("(c) {e}"))?;
+    if cut == 0 {
+        logger.log("  [CRASH] no newest file to tear (skipped)");
+    } else {
+        restart()?;
+        crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
+            .map_err(|e| format!("(c) {e}"))?;
+        crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
+            .map_err(|e| format!("(c) {e}"))?;
+        logger.log(&format!(
+            "  [CRASH] {cut} torn bytes: every older row intact"
+        ));
+    }
+
+    // (d) a second restart changes nothing.
+    restart()?;
+    crash::check_acked_prefix(&addr, t, &acked_table, acked, 1).map_err(|e| format!("(d) {e}"))?;
+    crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
+        .map_err(|e| format!("(d) {e}"))?;
+    logger.log("  [CRASH] a double restart changed nothing");
+    Ok(())
+}
+
 /// `wait_for_port` only proves the socket accepts; under a loaded host the
 /// application may not serve yet, and the next request then dies on a reset
 /// (the http stages 9/10 restart flaked exactly so on 2026-10-16). Probe
@@ -2821,11 +2901,37 @@ impl BenchmarkPipeline {
                             log_stage(logger, &st);
                             stages.push(st);
                         }
-                        if let Some((lost, why)) = upgrade_failed {
-                            // The store written when stage `lost` passed no
-                            // longer answers: that ticket's contract is
-                            // broken now.
-                            let reason = format!("[upgrade] {why}");
+                        let mut late_failure: Option<(u32, String)> = upgrade_failed.take();
+                        if late_failure.is_none() && stages.iter().all(|s| s.passed) {
+                            // Stage 5's suite adds the crash ladder, which
+                            // needs kill/restart/truncate: the pipeline owns
+                            // the container, so it runs here.
+                            if wanted.contains(&5) {
+                                if let Some(data) = &sql_data {
+                                    if let Err(e) = crash_ladder(
+                                        sandbox,
+                                        workdir,
+                                        port,
+                                        &extras,
+                                        data,
+                                        verifier_seed,
+                                        logger,
+                                    ) {
+                                        logger.log(&format!("  [CRASH] FAILED: {e}"));
+                                        late_failure = Some((5, format!("crash safety: {e}")));
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((lost, why)) = late_failure {
+                            // A late check failed (upgrade drift or the crash
+                            // ladder): the stage that owns the broken
+                            // contract goes red.
+                            let reason = if why.starts_with('[') {
+                                why
+                            } else {
+                                format!("[upgrade] {why}")
+                            };
                             if let Some(st) = stages.iter_mut().find(|s| s.stage == lost) {
                                 st.passed = false;
                                 st.error = Some(reason.clone());
@@ -7151,6 +7257,55 @@ main()
             "the sentinel must be saved next to the store"
         );
         cleanup_covtest_network("sqlpersist");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-sql stage 5 live proof (eval-only, no model): the reference
+    /// survives the crash ladder under Docker — acked rows across a kill
+    /// -9, a mid-flight 50k-row UPDATE, a torn newest file, and a double
+    /// restart — and the stage result stays green.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage5_crash_live() {
+        let worker = 97u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlcrash");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-5 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlcrash");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 5,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-5 fixture run must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        for needle in [
+            "Stage 5: Crash safety -> PASS",
+            "[CRASH] 40 acked rows survived a SIGKILL",
+            "[CRASH] the killed bulk UPDATE was all-or-nothing",
+            "[CRASH] a double restart changed nothing",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (6, 6)
+        );
+        cleanup_covtest_network("sqlcrash");
         let _ = fs::remove_dir_all(&dir);
     }
 

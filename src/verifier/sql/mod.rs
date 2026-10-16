@@ -14,6 +14,7 @@
 
 pub mod client;
 pub mod compare;
+pub mod crash;
 pub mod driver;
 pub mod generator;
 pub mod oracle;

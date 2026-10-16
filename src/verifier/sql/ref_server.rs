@@ -196,6 +196,12 @@ def answer(conn, sql):
 def serve(sock, db_path):
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.execute("PRAGMA foreign_keys=ON")
+    # Ticket 5's crash ladder: acked commits must survive SIGKILL (FULL
+    # fsyncs the WAL on commit) and a torn *newest* file must recover; WAL
+    # keeps the hot tail in <db>-wal, whose torn tail SQLite discards
+    # frame by frame.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=FULL")
     f = sock.makefile("rwb")
     try:
         for raw in f:
@@ -311,10 +317,15 @@ mod tests {
             panic!("reference did not open port {}", self.port);
         }
 
-        /// Stop and start on the same store (ticket 4's persistence check).
-        fn restart(&mut self) -> Result<(), String> {
+        /// SIGKILL the reference (ticket 5's crash probe): no respawn.
+        fn kill(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+
+        /// Stop and start on the same store (tickets 4 and 5).
+        fn restart(&mut self) -> Result<(), String> {
+            self.kill();
             self.spawn();
             Ok(())
         }
@@ -386,6 +397,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Stage 5 against a real process: SIGKILL after acks, a mid-flight
+    /// bulk UPDATE, a torn newest data file, and a double restart.
+    #[test]
+    fn reference_survives_the_crash_safety_ladder() {
+        use super::super::crash;
+        use super::super::driver::wait_until_answering;
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let t = Duration::from_secs(10);
+
+        // (a) Acked rows survive a SIGKILL; unacked ones may not exist.
+        let acked = {
+            let mut kill = || {
+                proc.kill();
+                Ok(())
+            };
+            crash::ack_kill(&addr, t, "crash_acked", 40, &mut kill).expect("ack_kill")
+        };
+        assert_eq!(acked, 40);
+        proc.restart().unwrap();
+        wait_until_answering(&addr, t).expect("answers after the SIGKILL");
+        crash::check_acked_rows(&addr, t, "crash_acked", acked).expect("acked rows survived");
+
+        // (b) A bulk UPDATE killed mid-flight is all or nothing.
+        {
+            let mut kill = || {
+                proc.kill();
+                Ok(())
+            };
+            crash::bulk_update_and_kill(&addr, t, "crash_bulk", 2_000, 500, &mut kill)
+                .expect("bulk update");
+        }
+        proc.restart().unwrap();
+        wait_until_answering(&addr, t).expect("answers after the killed update");
+        crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("all-or-nothing");
+
+        // (c) A torn tail (a partial trailing record): the newest statement
+        // may be lost, every older committed row must survive.
+        crash::append_row(&addr, t, "crash_acked", acked).expect("victim row");
+        let cut = crash::torn_tail(&proc.data, 256).expect("torn tail");
+        assert!(cut > 0, "the store must have a newest file to tear");
+        proc.restart().unwrap();
+        wait_until_answering(&addr, t).expect("answers after a torn tail");
+        crash::check_acked_prefix(&addr, t, "crash_acked", acked, 1)
+            .expect("data after a torn tail");
+        crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("bulk after a torn tail");
+
+        // (d) A second restart changes nothing.
+        proc.restart().unwrap();
+        wait_until_answering(&addr, t).expect("answers after two restarts");
+        crash::check_acked_prefix(&addr, t, "crash_acked", acked, 1).expect("double restart");
+        crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("double restart");
     }
 
     /// A restart that loses the store must be caught (the reference's
