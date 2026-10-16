@@ -142,15 +142,27 @@ pub fn generate(seed: u64, table_count: usize, max_columns: usize) -> Schema {
         let cols_n = 2 + rng.below((max_columns.saturating_sub(2)).max(1) as u64 + 1) as usize;
         let cols_n = cols_n.min(max_columns);
         let mut columns = Vec::new();
+        // The first table anchors on an INTEGER PRIMARY KEY; later tables
+        // sometimes key on TEXT so the NOT NULL key rule is exercised.
+        let text_pk = t > 0 && rng.below(3) == 0;
+        let mut has_unique = false;
         for c in 0..cols_n {
             let cname = rng.ident(&mut used);
-            let ty = if c == 0 || rng.below(2) == 0 {
+            let ty = if c == 0 {
+                if text_pk {
+                    Ty::Text
+                } else {
+                    Ty::Integer
+                }
+            } else if rng.below(2) == 0 {
                 Ty::Integer
             } else {
                 Ty::Text
             };
             let primary_key = c == 0;
-            let unique = !primary_key && rng.below(4) == 0;
+            // At most one extra UNIQUE column per table.
+            let unique = !primary_key && !has_unique && rng.below(4) == 0;
+            has_unique |= unique;
             let not_null = !primary_key && rng.below(5) == 0;
             let default = if !primary_key && rng.below(4) == 0 {
                 Some(match ty {
@@ -169,7 +181,6 @@ pub fn generate(seed: u64, table_count: usize, max_columns: usize) -> Schema {
                 default,
             });
         }
-        let _ = t;
         tables.push(Table { name, columns });
     }
     Schema { tables }
@@ -266,5 +277,25 @@ mod tests {
                 "candidate DDL stays dialect-level"
             );
         }
+    }
+
+    #[test]
+    fn keys_and_uniques_follow_the_documented_invariants() {
+        let mut text_pk_seen = false;
+        for seed in 0..200u64 {
+            let s = generate(seed, 4, 6);
+            assert_eq!(s.tables[0].columns[0].ty, Ty::Integer, "seed {seed}");
+            for t in &s.tables {
+                assert!(
+                    t.columns.iter().filter(|c| c.unique).count() <= 1,
+                    "seed {seed}: more than one UNIQUE column in {}",
+                    t.name
+                );
+                let pk = &t.columns[0];
+                assert!(pk.primary_key && !pk.unique && !pk.not_null && pk.default.is_none());
+                text_pk_seen |= pk.ty == Ty::Text;
+            }
+        }
+        assert!(text_pk_seen, "no TEXT primary key in 200 seeds");
     }
 }

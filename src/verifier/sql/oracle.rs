@@ -105,7 +105,8 @@ pub fn classify(message: &str) -> Option<ErrClass> {
     if starts("no such table") {
         return Some(ErrClass::NoTable);
     }
-    if starts("no such column") || starts("no such function") {
+    if starts("no such column") || starts("no such function") || contains("has no column named") {
+        // The last form is an INSERT column list naming a missing column.
         return Some(ErrClass::NoColumn);
     }
     if starts("ambiguous column name") {
@@ -126,10 +127,22 @@ pub fn classify(message: &str) -> Option<ErrClass> {
         // Indexed/PK column drops: the dialect refuses with `constraint`.
         return Some(ErrClass::Constraint);
     }
-    if starts("syntax error") || starts("near ") || starts("unrecognized token") {
+    if starts("syntax error")
+        || starts("near ")
+        || starts("unrecognized token")
+        || starts("incomplete input")
+    {
         return Some(ErrClass::Syntax);
     }
-    if contains("wrong number of arguments") {
+    if contains("wrong number of arguments")
+        // INSERT column list vs VALUES row ("1 values for 2 columns") and
+        // the no-column-list form ("table t has 3 columns but 1 values ...").
+        || (contains(" values for ") && contains(" columns"))
+        || (contains(" columns but ") && contains("values were supplied"))
+        // Set operations and subqueries with the wrong column count.
+        || contains("do not have the same number of result columns")
+        || starts("sub-select returns")
+    {
         return Some(ErrClass::Arity);
     }
     if contains("cannot start a transaction within a transaction")
@@ -147,7 +160,9 @@ pub fn classify(message: &str) -> Option<ErrClass> {
     if contains("attempt to write a readonly database") {
         return Some(ErrClass::Readonly);
     }
-    if contains("too many") || contains("string or blob too big") {
+    // ("string or blob too big" never reaches here: `discard_reason` runs
+    // first and drops it.)
+    if contains("too many") {
         return Some(ErrClass::Limit);
     }
     None
@@ -160,6 +175,12 @@ pub fn discard_reason(message: &str) -> Option<String> {
     if message.contains("integer overflow") {
         return Some("integer overflow (not tested by the dialect)".to_string());
     }
+    // The dialect has no REAL, so a REAL can only come from integer overflow
+    // promoting inside INSERT/UPDATE (`n + 1` at i64::MAX); a STRICT INTEGER
+    // column then refuses it with "cannot store REAL value ...".
+    if message.contains("cannot store REAL value") || message.contains("cannot store BLOB value") {
+        return Some("REAL/BLOB produced by overflow (not tested by the dialect)".to_string());
+    }
     if message.contains("string or blob too big") {
         return Some("value beyond SQLite's internal size limit".to_string());
     }
@@ -171,61 +192,147 @@ pub struct Oracle {
     conn: Connection,
 }
 
+/// Blank out single-quoted literals (`''` escapes a quote) so keyword and
+/// punctuation scans never see text inside a string default.
+fn mask_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_q = false;
+    for ch in s.chars() {
+        if ch == '\'' {
+            in_q = !in_q;
+            out.push(ch);
+        } else if in_q {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Byte offset of the `)` matching the `(` at `open` (quote-aware).
+fn matching_close(s: &str, open: usize) -> Option<usize> {
+    let masked = mask_quoted(s);
+    let mut depth = 0i32;
+    for (i, ch) in masked.char_indices().skip_while(|(i, _)| *i < open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whole-word test on already-masked, upper-cased text.
+fn has_word(masked_upper: &str, word: &str) -> bool {
+    masked_upper
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|w| w == word)
+}
+
 /// Translate one candidate-dialect statement for SQLite: `CREATE TABLE`
-/// gets `STRICT` (typed columns), and a TEXT `PRIMARY KEY` column becomes
+/// gets `STRICT` (typed columns), and a TEXT `PRIMARY KEY` column, written
+/// on the column or as a table-level `PRIMARY KEY (col, ...)`, becomes
 /// `NOT NULL` (the dialect rejects NULL keys).
 pub fn translate_ddl(stmt: &str) -> String {
     let trimmed = stmt.trim().trim_end_matches(';').trim_end();
     let upper = trimmed.to_ascii_uppercase();
-    if !upper.starts_with("CREATE TABLE") || upper.contains("STRICT") {
+    if !upper.starts_with("CREATE TABLE") {
         return trimmed.to_string();
     }
-    // Split the column list at the first '(' and the matching last ')'.
-    let Some(open) = trimmed.find('(') else {
+    let masked = mask_quoted(trimmed);
+    let Some(open) = masked.find('(') else {
         return trimmed.to_string();
     };
-    let Some(close) = trimmed.rfind(')') else {
+    let Some(close) = matching_close(trimmed, open) else {
         return trimmed.to_string();
     };
     let head = &trimmed[..open];
     let body = &trimmed[open + 1..close];
-    let tail = &trimmed[close + 1..];
-    let cols: Vec<String> = split_top_level(body)
+    let tail = trimmed[close + 1..].trim();
+    // STRICT already present as a table option (a column named `strictness`
+    // or a default of 'strict' must not count).
+    if has_word(&mask_quoted(tail).to_ascii_uppercase(), "STRICT") {
+        return trimmed.to_string();
+    }
+    let segments = split_top_level(body);
+
+    // Columns named by a table-level `PRIMARY KEY (a, b)` constraint.
+    let mut table_pk: Vec<String> = Vec::new();
+    for seg in &segments {
+        let mu = mask_quoted(seg).to_ascii_uppercase();
+        if mu.trim_start().starts_with("PRIMARY KEY") {
+            if let (Some(o), Some(c)) = (seg.find('('), seg.rfind(')')) {
+                table_pk.extend(
+                    seg[o + 1..c]
+                        .split(',')
+                        .map(|n| n.trim().to_ascii_lowercase()),
+                );
+            }
+        }
+    }
+
+    let cols: Vec<String> = segments
         .into_iter()
         .map(|col| {
-            let cu = col.to_ascii_uppercase();
-            // The TYPE is the second token (`<name> <type> ...`).
-            let type_is_text = cu
-                .split_whitespace()
-                .nth(1)
-                .map(|t| t == "TEXT")
-                .unwrap_or(false);
-            if cu.contains("PRIMARY KEY") && type_is_text && !cu.contains("NOT NULL") {
+            let mu = mask_quoted(&col).to_ascii_uppercase();
+            let mut toks = mu.split_whitespace();
+            let first = toks.next().unwrap_or("");
+            // Table-level constraints pass through untouched.
+            if matches!(
+                first,
+                "PRIMARY" | "UNIQUE" | "FOREIGN" | "CHECK" | "CONSTRAINT"
+            ) {
+                return col;
+            }
+            // `<name> <type> ...`: the TYPE is the second token.
+            let type_is_text = toks.next() == Some("TEXT");
+            let is_pk =
+                mu.contains("PRIMARY KEY") || table_pk.contains(&first.to_ascii_lowercase());
+            if is_pk && type_is_text && !mu.contains("NOT NULL") {
                 format!("{col} NOT NULL")
             } else {
                 col
             }
         })
         .collect();
-    format!("{head}({}) STRICT{tail}", cols.join(", "))
+    // SQLite wants table options comma-separated: `STRICT, WITHOUT ROWID`.
+    let options = if tail.is_empty() {
+        "STRICT".to_string()
+    } else {
+        format!("STRICT, {tail}")
+    };
+    format!("{head}({}) {options}", cols.join(", "))
 }
 
-/// Split a column list on top-level commas (parenthesized defaults).
+/// Split a column list on top-level commas (not inside parentheses or
+/// quoted literals).
 fn split_top_level(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut depth = 0i32;
+    let mut in_q = false;
     let mut cur = String::new();
     for ch in body.chars() {
         match ch {
-            '(' => {
+            '\'' => {
+                in_q = !in_q;
+                cur.push(ch);
+            }
+            '(' if !in_q => {
                 depth += 1;
                 cur.push(ch);
             }
-            ')' => {
+            ')' if !in_q => {
                 depth -= 1;
                 cur.push(ch);
             }
-            ',' if depth == 0 => {
+            ',' if depth == 0 && !in_q => {
                 out.push(cur.trim().to_string());
                 cur.clear();
             }
@@ -238,55 +345,70 @@ fn split_top_level(body: &str) -> Vec<String> {
     out
 }
 
+/// Turn a SQLite error message into an outcome: discard first (outside the
+/// dialect), then the class table, else a loud `Unknown`.
+fn outcome_from_error(msg: String) -> OracleOutcome {
+    if let Some(reason) = discard_reason(&msg) {
+        return OracleOutcome::Discard(reason);
+    }
+    match classify(&msg) {
+        Some(c) => OracleOutcome::Error(c),
+        None => OracleOutcome::Unknown(msg),
+    }
+}
+
 impl Oracle {
-    pub fn new() -> Result<Self, String> {
-        let conn = Connection::open_in_memory().map_err(|e| format!("open sqlite: {e}"))?;
+    fn from_conn(conn: Connection) -> Result<Self, String> {
         conn.execute_batch("PRAGMA foreign_keys=ON;")
             .map_err(|e| format!("pragma: {e}"))?;
         Ok(Self { conn })
     }
 
+    pub fn new() -> Result<Self, String> {
+        let conn = Connection::open_in_memory().map_err(|e| format!("open sqlite: {e}"))?;
+        Self::from_conn(conn)
+    }
+
+    /// A second handle on a file-backed database (oracle-vs-oracle gates
+    /// compare in-memory against on-disk semantics).
+    pub fn new_file(path: &std::path::Path) -> Result<Self, String> {
+        let conn = Connection::open(path).map_err(|e| format!("open sqlite file: {e}"))?;
+        Self::from_conn(conn)
+    }
+
     /// Execute one statement (DDL translated) and classify the outcome.
     pub fn exec(&self, stmt: &str) -> OracleOutcome {
         let stmt_trimmed = stmt.trim().trim_end_matches(';').trim();
-        let upper = stmt_trimmed.to_ascii_uppercase();
-        let ddl = translate_ddl(stmt_trimmed);
-        let is_query = upper.starts_with("SELECT")
-            || upper.starts_with("EXPLAIN")
-            || (upper.starts_with("WITH") && !upper.starts_with("WITH RECURSIVE"));
-        if is_query {
-            return self.query(&ddl);
-        }
-        match self.conn.execute(&ddl, []) {
-            Ok(n) => OracleOutcome::Affected(n as u64),
-            Err(e) => {
-                let msg = e.to_string();
-                if let Some(reason) = discard_reason(&msg) {
-                    return OracleOutcome::Discard(reason);
-                }
-                match classify(&msg) {
-                    Some(c) => OracleOutcome::Error(c),
-                    None => OracleOutcome::Unknown(msg),
-                }
-            }
-        }
+        self.run(&translate_ddl(stmt_trimmed))
     }
 
-    /// Execute a query and collect headers + rows, discarding REAL/BLOB.
+    /// Run one statement. Whether it is a query is decided by SQLite itself
+    /// (`column_count() > 0`), not by a keyword prefix, so `WITH ...`,
+    /// `VALUES`, `EXPLAIN` and `INSERT ... RETURNING` all route correctly.
     pub fn query(&self, sql: &str) -> OracleOutcome {
+        self.run(sql)
+    }
+
+    fn run(&self, sql: &str) -> OracleOutcome {
         let mut prepared = match self.conn.prepare(sql) {
             Ok(p) => p,
-            Err(e) => {
-                let msg = e.to_string();
-                if let Some(reason) = discard_reason(&msg) {
-                    return OracleOutcome::Discard(reason);
-                }
-                return match classify(&msg) {
-                    Some(c) => OracleOutcome::Error(c),
-                    None => OracleOutcome::Unknown(msg),
-                };
-            }
+            Err(e) => return outcome_from_error(e.to_string()),
         };
+        if prepared.column_count() == 0 {
+            // DML/DDL/transaction control. `execute` reports
+            // `sqlite3_changes()`, which keeps the count of the last
+            // INSERT/UPDATE/DELETE across statements that change no rows
+            // (CREATE, BEGIN, COMMIT, ...), so use the delta of the
+            // connection's total instead.
+            let before = self.conn.total_changes();
+            return match prepared.execute([]) {
+                Ok(n) => {
+                    let changed = self.conn.total_changes() - before;
+                    OracleOutcome::Affected(if changed == 0 { 0 } else { n as u64 })
+                }
+                Err(e) => outcome_from_error(e.to_string()),
+            };
+        }
         let headers: Vec<String> = prepared
             .column_names()
             .into_iter()
@@ -295,16 +417,7 @@ impl Oracle {
         let mut rows_out: Vec<Vec<Value>> = Vec::new();
         let mut cursor = match prepared.query([]) {
             Ok(c) => c,
-            Err(e) => {
-                let msg = e.to_string();
-                if let Some(reason) = discard_reason(&msg) {
-                    return OracleOutcome::Discard(reason);
-                }
-                return match classify(&msg) {
-                    Some(c) => OracleOutcome::Error(c),
-                    None => OracleOutcome::Unknown(msg),
-                };
-            }
+            Err(e) => return outcome_from_error(e.to_string()),
         };
         loop {
             match cursor.next() {
@@ -330,32 +443,13 @@ impl Oracle {
                     rows_out.push(vals);
                 }
                 Ok(None) => break,
-                Err(e) => {
-                    let msg = e.to_string();
-                    return if let Some(reason) = discard_reason(&msg) {
-                        OracleOutcome::Discard(reason)
-                    } else {
-                        match classify(&msg) {
-                            Some(c) => OracleOutcome::Error(c),
-                            None => OracleOutcome::Unknown(msg),
-                        }
-                    };
-                }
+                Err(e) => return outcome_from_error(e.to_string()),
             }
         }
         OracleOutcome::Rows {
             headers,
             rows: rows_out,
         }
-    }
-
-    /// A second handle on a file-backed database (oracle-vs-oracle gates
-    /// compare in-memory against on-disk semantics).
-    pub fn new_file(path: &std::path::Path) -> Result<Self, String> {
-        let conn = Connection::open(path).map_err(|e| format!("open sqlite file: {e}"))?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")
-            .map_err(|e| format!("pragma: {e}"))?;
-        Ok(Self { conn })
     }
 }
 
@@ -564,5 +658,146 @@ mod tests {
             assert_eq!(a, b, "oracle disagreement on {stmt}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_dml_statements_report_zero_affected_after_dml() {
+        let o = oracle();
+        o.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)");
+        assert_eq!(
+            o.exec("INSERT INTO t (n) VALUES (1), (2), (3)"),
+            OracleOutcome::Affected(3)
+        );
+        // sqlite3_changes() would still say 3 for each of these.
+        for stmt in [
+            "CREATE TABLE u (id INTEGER PRIMARY KEY)",
+            "CREATE INDEX i ON t (n)",
+            "BEGIN",
+            "COMMIT",
+            "DROP INDEX i",
+            "DROP TABLE u",
+        ] {
+            assert_eq!(o.exec(stmt), OracleOutcome::Affected(0), "{stmt}");
+        }
+        // DML that touches no rows is 0; real counts are untouched.
+        assert_eq!(
+            o.exec("UPDATE t SET n = 9 WHERE id = 99"),
+            OracleOutcome::Affected(0)
+        );
+        assert_eq!(o.exec("UPDATE t SET n = n + 1"), OracleOutcome::Affected(3));
+        assert_eq!(o.exec("DELETE FROM t"), OracleOutcome::Affected(3));
+    }
+
+    #[test]
+    fn statements_route_by_column_count_not_keyword() {
+        let o = oracle();
+        o.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)");
+        match o.exec(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3) \
+             SELECT x FROM c",
+        ) {
+            OracleOutcome::Rows { rows, .. } => assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int(1)],
+                    vec![Value::Int(2)],
+                    vec![Value::Int(3)]
+                ]
+            ),
+            other => panic!("{other:?}"),
+        }
+        // A CTE-prefixed INSERT is DML, not a query.
+        assert_eq!(
+            o.exec("WITH s AS (SELECT 5 AS v) INSERT INTO t (n) SELECT v FROM s"),
+            OracleOutcome::Affected(1)
+        );
+        match o.exec("VALUES (1), (2)") {
+            OracleOutcome::Rows { rows, .. } => assert_eq!(rows.len(), 2),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn overflow_in_dml_is_a_discard_not_a_type_error() {
+        let o = oracle();
+        o.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)");
+        o.exec("INSERT INTO t (n) VALUES (9223372036854775807)");
+        for stmt in [
+            "UPDATE t SET n = n + 1",
+            "INSERT INTO t (n) SELECT n + 1 FROM t",
+        ] {
+            assert!(o.exec(stmt).is_discard(), "{stmt}: {:?}", o.exec(stmt));
+        }
+        // A genuine wrong-type value is still graded.
+        assert_eq!(
+            o.exec("INSERT INTO t (n) VALUES ('x')"),
+            OracleOutcome::Error(ErrClass::Type)
+        );
+    }
+
+    #[test]
+    fn arity_and_incomplete_input_classify() {
+        let o = oracle();
+        o.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, s TEXT)");
+        let cases = [
+            ("INSERT INTO t (n, s) VALUES (1)", ErrClass::Arity),
+            ("INSERT INTO t (n) VALUES (1, 2)", ErrClass::Arity),
+            ("INSERT INTO t VALUES (1)", ErrClass::Arity),
+            ("SELECT 1 UNION SELECT 1, 2", ErrClass::Arity),
+            (
+                "SELECT n FROM t WHERE n IN (SELECT n, s FROM t)",
+                ErrClass::Arity,
+            ),
+            ("SELECT * FROM", ErrClass::Syntax),
+            ("SELECT", ErrClass::Syntax),
+            ("INSERT INTO t (nope) VALUES (1)", ErrClass::NoColumn),
+        ];
+        for (stmt, want) in cases {
+            match o.exec(stmt) {
+                OracleOutcome::Error(got) => assert_eq!(got, want, "{stmt}"),
+                other => panic!("{stmt}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ddl_translation_is_quote_and_keyword_safe() {
+        // A comma inside a quoted default must not split the column, and the
+        // literal must survive byte for byte.
+        let t = translate_ddl("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT DEFAULT 'a,b')");
+        assert!(t.contains("DEFAULT 'a,b'"), "{t}");
+        assert!(t.ends_with(" STRICT"), "{t}");
+        // A paren inside a quoted default must not unbalance the scan.
+        let t = translate_ddl("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT DEFAULT '(')");
+        assert!(t.contains("DEFAULT '('") && t.ends_with(" STRICT"), "{t}");
+        // The word "strict" in a name or a default is not the STRICT option.
+        let t = translate_ddl(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, strictness INTEGER, s TEXT DEFAULT 'strict')",
+        );
+        assert!(t.ends_with(" STRICT"), "{t}");
+        // Table-level PRIMARY KEY on a TEXT column becomes NOT NULL.
+        let o = oracle();
+        assert_eq!(
+            o.exec("CREATE TABLE u (k TEXT, n INTEGER, PRIMARY KEY (k))"),
+            OracleOutcome::Affected(0)
+        );
+        assert_eq!(
+            o.exec("INSERT INTO u (k, n) VALUES (NULL, 1)"),
+            OracleOutcome::Error(ErrClass::Constraint)
+        );
+        // Existing table options keep working next to STRICT.
+        assert_eq!(
+            o.exec("CREATE TABLE w (k TEXT PRIMARY KEY) WITHOUT ROWID"),
+            OracleOutcome::Affected(0)
+        );
+        // End to end: the quoted default really is applied.
+        o.exec("CREATE TABLE d (id INTEGER PRIMARY KEY, s TEXT DEFAULT 'a,b')");
+        o.exec("INSERT INTO d (id) VALUES (1)");
+        match o.exec("SELECT s FROM d") {
+            OracleOutcome::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("a,b".into())]])
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
