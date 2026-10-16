@@ -183,7 +183,10 @@ impl Generator {
                         schema::DefaultVal::Int(v) => u128::from(v.unsigned_abs()),
                         schema::DefaultVal::Text(s) => s.chars().count() as u128,
                     };
-                    bounds.insert(c.name.clone(), b);
+                    // Bounds are keyed by column name; keep the max so a
+                    // name shared across tables never lowers a bound.
+                    let e = bounds.entry(c.name.clone()).or_insert(0);
+                    *e = (*e).max(b);
                 }
             }
         }
@@ -1512,7 +1515,10 @@ mod tests {
             let p = Profile::through(last);
             for seed in 0..seeds {
                 let s = build_script(seed, &p, 150);
-                assert_eq!(s.discarded, 0, "stage {last} seed {seed}: overflow discards");
+                assert_eq!(
+                    s.discarded, 0,
+                    "stage {last} seed {seed}: overflow discards"
+                );
                 assert!(s.unknown.is_empty());
                 with_max += usize::from(
                     s.setup

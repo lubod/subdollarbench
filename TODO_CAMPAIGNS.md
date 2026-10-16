@@ -505,6 +505,12 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.
+  Oracle gaps found by a 2026-10-16 probe of later-stage SQL (fix when
+  the generator starts emitting them): unmapped messages "no such index",
+  "duplicate column name", "there is already another table or index with
+  this name", "aggregate functions are not allowed in the GROUP BY
+  clause", "has more than one primary key"; `SUM(text)` discards as REAL.
+  (ALTER on a STRICT table answering `ROWS` instead of `OK 0` is fixed.)
 - [ ] M8. Retirement switch for the old tasks/campaigns, portal labels,
   README rewrite; calibration run; grid on the new stamp.
 

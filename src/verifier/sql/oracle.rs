@@ -403,7 +403,10 @@ impl Oracle {
             Ok(p) => p,
             Err(e) => return outcome_from_error(e.to_string()),
         };
-        if prepared.column_count() == 0 {
+        // A result-producing statement is a read. `column_count` alone is
+        // not enough: ALTER TABLE on a STRICT table compiles a nested
+        // `pragma_quick_check` SELECT and reports one result column.
+        if prepared.column_count() == 0 || !prepared.readonly() {
             // DML/DDL/transaction control. `execute` reports
             // `sqlite3_changes()`, which keeps the count of the last
             // INSERT/UPDATE/DELETE across statements that change no rows
@@ -826,6 +829,23 @@ mod tests {
             OracleOutcome::Rows { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Text("éé".into())]])
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// ALTER TABLE on a STRICT table compiles a nested quick_check SELECT,
+    /// so the statement reports a result column; it is still DDL (`OK 0`).
+    #[test]
+    fn alter_table_on_strict_table_is_ddl() {
+        let o = oracle();
+        o.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)");
+        o.exec("INSERT INTO t (n) VALUES (1)");
+        assert_eq!(
+            o.exec("ALTER TABLE t ADD COLUMN extra INTEGER"),
+            OracleOutcome::Affected(0)
+        );
+        match o.exec("SELECT extra FROM t") {
+            OracleOutcome::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Null]]),
             other => panic!("{other:?}"),
         }
     }
