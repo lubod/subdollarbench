@@ -74,10 +74,12 @@ pub enum Fault {
     AggregatesCountNulls,
     /// `GROUP BY` puts every NULL in its own group.
     GroupByNullsSeparate,
+    /// `LEFT JOIN` behaves like `INNER JOIN` (unmatched left rows vanish).
+    LeftJoinIsInner,
 }
 
 impl Fault {
-    pub const ALL: [Fault; 28] = [
+    pub const ALL: [Fault; 29] = [
         Fault::NullsLast,
         Fault::UpdateSeesNewValues,
         Fault::FloorDivision,
@@ -106,6 +108,7 @@ impl Fault {
         Fault::CoalesceFirstOnly,
         Fault::AggregatesCountNulls,
         Fault::GroupByNullsSeparate,
+        Fault::LeftJoinIsInner,
     ];
 }
 
@@ -203,6 +206,7 @@ fn lex(s: &str, fault: Option<Fault>) -> R<Vec<Tok>> {
                     '-' => "-",
                     '/' => "/",
                     '%' => "%",
+                    '.' => ".",
                     '=' => "=",
                     '<' => "<",
                     '>' => ">",
@@ -279,11 +283,30 @@ enum Items {
     List(Vec<(Item, Option<String>)>),
 }
 
+/// One `FROM` item: the table and the name its references may be
+/// qualified by (the alias, or the table name when there is none).
+#[derive(Debug, Clone)]
+struct FromItem {
+    table: String,
+    qualifier: String,
+    /// How this item joins the previous one (`Comma` for the first item).
+    join: JoinKind,
+    on: Option<Expr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinKind {
+    Comma,
+    Inner,
+    Left,
+}
+
 #[derive(Debug)]
 struct Sel {
     distinct: bool,
     items: Items,
-    from: Option<String>,
+    /// Empty for a `SELECT` without `FROM`.
+    from: Vec<FromItem>,
     wh: Option<Expr>,
     /// `GROUP BY` expressions (empty for a scalar aggregate).
     group: Vec<Expr>,
@@ -308,7 +331,7 @@ enum Stmt {
 const RESERVED: &[&str] = &[
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "FROM", "WHERE", "ORDER", "BY", "LIMIT",
     "OFFSET", "DISTINCT", "VALUES", "SET", "INTO", "AS", "AND", "OR", "NOT", "IS", "ASC", "DESC",
-    "TABLE",
+    "TABLE", "JOIN", "INNER", "LEFT", "OUTER", "ON", "GROUP", "HAVING", "NULL",
 ];
 
 // ----- parser ----------------------------------------------------------------
@@ -503,7 +526,7 @@ impl P {
         let mut sel = Sel {
             distinct,
             items,
-            from: None,
+            from: Vec::new(),
             wh: None,
             group: Vec::new(),
             having: None,
@@ -512,7 +535,50 @@ impl P {
             offset: None,
         };
         if self.eat_kw("FROM") {
-            sel.from = Some(self.ident()?);
+            // Items: `t [AS] a`, separated by `,` or a join keyword; a
+            // join keyword's `ON` predicate follows the item it joins.
+            let mut pending: Option<JoinKind> = None;
+            loop {
+                let table = self.ident()?;
+                let has_alias = self.eat_kw("AS")
+                    || matches!(self.peek(), Some(Tok::Id(w))
+                        if !RESERVED.iter().any(|r| w.eq_ignore_ascii_case(r)));
+                let qualifier = if has_alias {
+                    self.ident()?
+                } else {
+                    table.clone()
+                };
+                let join = pending.take().unwrap_or(JoinKind::Comma);
+                let mut item = FromItem {
+                    table,
+                    qualifier,
+                    join,
+                    on: None,
+                };
+                if join != JoinKind::Comma {
+                    self.expect_kw("ON")?;
+                    item.on = Some(self.expr()?);
+                }
+                sel.from.push(item);
+                if self.eat_sym(",") {
+                    pending = Some(JoinKind::Comma);
+                    continue;
+                }
+                let kind = if self.eat_kw("INNER") {
+                    self.expect_kw("JOIN")?;
+                    Some(JoinKind::Inner)
+                } else if self.eat_kw("LEFT") {
+                    self.eat_kw("OUTER");
+                    self.expect_kw("JOIN")?;
+                    Some(JoinKind::Left)
+                } else if self.eat_kw("JOIN") {
+                    Some(JoinKind::Inner)
+                } else {
+                    None
+                };
+                let Some(kind) = kind else { break };
+                pending = Some(kind);
+            }
             if self.eat_kw("WHERE") {
                 sel.wh = Some(self.expr()?);
             }
@@ -536,7 +602,14 @@ impl P {
             if self.eat_kw("ORDER") {
                 self.expect_kw("BY")?;
                 loop {
-                    let name = self.ident()?;
+                    let name = {
+                        let first = self.ident()?;
+                        if self.eat_sym(".") {
+                            format!("{first}.{}", self.ident()?)
+                        } else {
+                            first
+                        }
+                    };
                     let desc = if self.eat_kw("DESC") {
                         true
                     } else {
@@ -806,6 +879,11 @@ impl P {
                     return self.aggregate().map(Expr::Agg);
                 }
                 self.pos += 1;
+                if self.eat_sym(".") {
+                    // A qualified reference: `a.x` (alias or table name).
+                    let col = self.ident()?;
+                    return Ok(Expr::Col(format!("{}.{col}", s.to_ascii_lowercase())));
+                }
                 if self.eat_sym("(") {
                     let mut args = Vec::new();
                     if !self.is_sym(")") {
@@ -863,9 +941,70 @@ fn as_text(v: &V) -> String {
     }
 }
 
+/// Column-name resolution for one statement: the row layout's bare names
+/// plus how each `FROM` item's columns may be qualified. A bare name that
+/// matches several columns is `ERR ambiguous`; a qualifier that names no
+/// item, or a name missing from the item, is `ERR no_column`.
+#[derive(Debug, Default)]
+struct Names {
+    bare: Vec<String>,
+    by_bare: std::collections::BTreeMap<String, Vec<usize>>,
+    /// `(qualifier, first column index, column count)` in `FROM` order.
+    items: Vec<(String, usize, usize)>,
+}
+
+impl Names {
+    fn of(bare: Vec<String>, items: Vec<(String, usize, usize)>) -> Names {
+        let mut by_bare: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (i, n) in bare.iter().enumerate() {
+            by_bare.entry(n.clone()).or_default().push(i);
+        }
+        Names {
+            bare,
+            by_bare,
+            items,
+        }
+    }
+
+    /// A single-table statement: the table name qualifies its columns.
+    fn single(table: &str, cols: &[(String, Ty)]) -> Names {
+        let bare: Vec<String> = cols.iter().map(|(c, _)| c.clone()).collect();
+        let n = bare.len();
+        Names::of(bare, vec![(table.to_string(), 0, n)])
+    }
+
+    /// No columns (an `INSERT`'s values, a `SELECT` without `FROM`).
+    fn empty() -> Names {
+        Names::default()
+    }
+
+    fn resolve(&self, name: &str) -> R<usize> {
+        if let Some((q, n)) = name.split_once('.') {
+            let hits: Vec<&(String, usize, usize)> =
+                self.items.iter().filter(|(a, _, _)| a == q).collect();
+            if hits.len() != 1 {
+                return Err(ErrClass::NoColumn);
+            }
+            let (_, start, len) = *hits[0];
+            for i in start..start + len {
+                if self.bare.get(i).map(|s| s.as_str()) == Some(n) {
+                    return Ok(i);
+                }
+            }
+            return Err(ErrClass::NoColumn);
+        }
+        match self.by_bare.get(name).map(|v| v.as_slice()) {
+            Some([i]) => Ok(*i),
+            Some(_) => Err(ErrClass::Ambiguous),
+            None => Err(ErrClass::NoColumn),
+        }
+    }
+}
+
 struct Ctx<'a> {
     fault: Option<Fault>,
-    cols: &'a [(String, Ty)],
+    names: &'a Names,
     row: &'a [V],
     /// The aggregates computed for the current group (empty outside an
     /// aggregate query).
@@ -877,12 +1016,8 @@ fn eval(e: &Expr, cx: &Ctx) -> R<V> {
     Ok(match e {
         Expr::Lit(v) => v.clone(),
         Expr::Col(name) => {
-            let i = cx
-                .cols
-                .iter()
-                .position(|(c, _)| c == name)
-                .ok_or(ErrClass::NoColumn)?;
-            cx.row[i].clone()
+            let i = cx.names.resolve(name)?;
+            cx.row.get(i).cloned().ok_or(ErrClass::NoColumn)?
         }
         Expr::Neg(x) => match eval(x, cx)? {
             V::Null => V::Null,
@@ -1056,20 +1191,14 @@ fn func(name: &str, args: &[Expr], cx: &Ctx) -> R<V> {
 
 /// Every column an expression names must exist (checked at "prepare" time,
 /// so a missing column errors even when the table is empty).
-fn check_cols(e: &Expr, cols: &[(String, Ty)]) -> R<()> {
+fn check_cols(e: &Expr, names: &Names) -> R<()> {
     match e {
         Expr::Lit(_) => Ok(()),
-        Expr::Col(n) => {
-            if cols.iter().any(|(c, _)| c == n) {
-                Ok(())
-            } else {
-                Err(ErrClass::NoColumn)
-            }
-        }
-        Expr::Neg(x) | Expr::Not(x) | Expr::IsNull(x, _) => check_cols(x, cols),
+        Expr::Col(n) => names.resolve(n).map(|_| ()),
+        Expr::Neg(x) | Expr::Not(x) | Expr::IsNull(x, _) => check_cols(x, names),
         Expr::Bin(_, l, r) => {
-            check_cols(l, cols)?;
-            check_cols(r, cols)
+            check_cols(l, names)?;
+            check_cols(r, names)
         }
         Expr::Func(name, args) => {
             if matches!(name.as_str(), "count" | "sum" | "min" | "max") {
@@ -1083,11 +1212,11 @@ fn check_cols(e: &Expr, cols: &[(String, Ty)]) -> R<()> {
             ) {
                 return Err(ErrClass::NoColumn);
             }
-            args.iter().try_for_each(|a| check_cols(a, cols))
+            args.iter().try_for_each(|a| check_cols(a, names))
         }
         Expr::Agg(a) => match a {
             Agg::CountStar => Ok(()),
-            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => check_cols(x, cols),
+            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => check_cols(x, names),
         },
     }
 }
@@ -1122,13 +1251,13 @@ fn contains_agg(e: &Expr) -> bool {
 
 /// One aggregate over a group's rows. NULLs are skipped (`COUNT` counts
 /// non-NULLs, `SUM`/`MIN`/`MAX` ignore them) and `SUM` of nothing is NULL.
-fn eval_agg(a: &Agg, cols: &[(String, Ty)], rows: &[&Vec<V>], fault: Option<Fault>) -> R<V> {
+fn eval_agg(a: &Agg, names: &Names, rows: &[&Vec<V>], fault: Option<Fault>) -> R<V> {
     let values = |expr: &Expr| -> R<Vec<V>> {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let cx = Ctx {
                 fault,
-                cols,
+                names,
                 row: r,
                 aggs: &[],
             };
@@ -1299,6 +1428,8 @@ impl Toy {
         };
         let mut built: Vec<Vec<V>> = Vec::new();
         let mut failure: Option<ErrClass> = None;
+        // Values may not reference columns.
+        let none = Names::empty();
         for row in &rows {
             let step = (|| -> R<Vec<V>> {
                 if row.len() != targets.len() {
@@ -1306,12 +1437,12 @@ impl Toy {
                 }
                 let mut out = vec![V::Null; schema.len()];
                 for (e, &ti) in row.iter().zip(&targets) {
-                    check_cols(e, &[])?;
+                    check_cols(e, &none)?;
                     let v = eval(
                         e,
                         &Ctx {
                             fault: self.fault,
-                            cols: &[],
+                            names: &none,
                             row: &[],
                             aggs: &[],
                         },
@@ -1353,13 +1484,7 @@ impl Toy {
         }
     }
 
-    fn keep(
-        &self,
-        wh: &Option<Expr>,
-        cols: &[(String, Ty)],
-        row: &[V],
-        aggs: &[(Agg, V)],
-    ) -> R<bool> {
+    fn keep(&self, wh: &Option<Expr>, names: &Names, row: &[V], aggs: &[(Agg, V)]) -> R<bool> {
         match wh {
             None => Ok(true),
             Some(e) => {
@@ -1367,7 +1492,7 @@ impl Toy {
                     e,
                     &Ctx {
                         fault: self.fault,
-                        cols,
+                        names,
                         row,
                         aggs,
                     },
@@ -1377,34 +1502,100 @@ impl Toy {
         }
     }
 
-    fn select(&self, sel: Sel) -> R<Response> {
-        let (cols, rows): (Vec<(String, Ty)>, Vec<Vec<V>>) = match &sel.from {
-            Some(t) => {
-                let tbl = self.tables.get(t).ok_or(ErrClass::NoTable)?;
-                (tbl.cols.clone(), tbl.rows.clone())
+    /// Build the joined rows for `items`: one nested loop per item, `ON`
+    /// evaluated on the row combined so far (a reference to a later item is
+    /// `no_column`, which SQLite rejects too), and a NULL-padded row when a
+    /// `LEFT JOIN` finds no match.
+    fn join_rows(&self, items: &[FromItem]) -> R<(Names, Vec<Vec<V>>)> {
+        let mut bare: Vec<String> = Vec::new();
+        let mut parts: Vec<(String, usize, usize)> = Vec::new();
+        let mut tables: Vec<&Tbl> = Vec::new();
+        for it in items {
+            let tbl = self.tables.get(&it.table).ok_or(ErrClass::NoTable)?;
+            parts.push((it.qualifier.clone(), bare.len(), tbl.cols.len()));
+            bare.extend(tbl.cols.iter().map(|(c, _)| c.clone()));
+            tables.push(tbl);
+        }
+        let names = Names::of(bare, parts.clone());
+        // `ON` predicates are validated up front (SQLite rejects a missing
+        // column at prepare time, even when no pair would be tested).
+        for it in items {
+            if let Some(on) = &it.on {
+                check_cols(on, &names)?;
             }
-            None => (Vec::new(), vec![Vec::new()]),
+        }
+        let mut rows: Vec<Vec<V>> = vec![Vec::new()];
+        for (i, it) in items.iter().enumerate() {
+            let (_, _, len) = parts[i];
+            let tbl = tables[i];
+            let mut next: Vec<Vec<V>> = Vec::new();
+            for left in &rows {
+                let mut matched = false;
+                for r in &tbl.rows {
+                    let mut combined = left.clone();
+                    combined.extend(r.iter().cloned());
+                    if let Some(on) = &it.on {
+                        let cx = Ctx {
+                            fault: self.fault,
+                            names: &names,
+                            row: &combined,
+                            aggs: &[],
+                        };
+                        if !truthy(&eval(on, &cx)?) {
+                            continue;
+                        }
+                    }
+                    matched = true;
+                    next.push(combined);
+                }
+                if it.join == JoinKind::Left
+                    && !matched
+                    && self.fault != Some(Fault::LeftJoinIsInner)
+                {
+                    let mut combined = left.clone();
+                    combined.extend(std::iter::repeat_n(V::Null, len));
+                    next.push(combined);
+                }
+            }
+            rows = next;
+        }
+        Ok((names, rows))
+    }
+
+    fn select(&self, sel: Sel) -> R<Response> {
+        let (names, rows): (Names, Vec<Vec<V>>) = if sel.from.is_empty() {
+            (Names::empty(), vec![Vec::new()])
+        } else {
+            self.join_rows(&sel.from)?
         };
         if let Some(w) = &sel.wh {
-            check_cols(w, &cols)?;
+            check_cols(w, &names)?;
         }
         for g in &sel.group {
-            check_cols(g, &cols)?;
+            check_cols(g, &names)?;
         }
         if let Some(h) = &sel.having {
-            check_cols(h, &cols)?;
+            check_cols(h, &names)?;
         }
         // Output columns: (header, item).
         let mut outputs: Vec<(String, Item)> = Vec::new();
         match &sel.items {
             Items::Star => {
-                if sel.from.is_none() {
+                if sel.from.is_empty() {
                     return Err(ErrClass::Syntax);
                 }
-                let mut v: Vec<(String, Item)> = cols
-                    .iter()
-                    .map(|(c, _)| (c.clone(), Item::Expr(Expr::Col(c.clone()))))
-                    .collect();
+                // The header is the bare column name (SQLite's `SELECT *`),
+                // but each output resolves through its own item's
+                // qualifier: a self-join duplicates the bare names, and a
+                // bare reference to them is ambiguous.
+                let mut v: Vec<(String, Item)> = Vec::new();
+                for (q, start, len) in &names.items {
+                    for i in *start..*start + *len {
+                        let bare = names.bare[i].clone();
+                        let item = Item::Expr(Expr::Col(format!("{q}.{bare}")));
+                        v.push((bare, item));
+                    }
+                }
                 if self.fault == Some(Fault::StarReversed) {
                     v.reverse();
                 }
@@ -1418,11 +1609,11 @@ impl Toy {
                         _ => "?".to_string(),
                     };
                     match item {
-                        Item::Expr(e) => check_cols(e, &cols)?,
+                        Item::Expr(e) => check_cols(e, &names)?,
                         Item::Agg(a) => match a {
                             Agg::CountStar => {}
                             Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => {
-                                check_cols(x, &cols)?
+                                check_cols(x, &names)?
                             }
                         },
                     }
@@ -1434,13 +1625,25 @@ impl Toy {
         if self.fault == Some(Fault::HeadersUppercased) {
             headers = headers.iter().map(|h| h.to_ascii_uppercase()).collect();
         }
-        // Resolve ORDER BY against the output names.
+        // Resolve ORDER BY against the output names, then against the
+        // source columns (legal when the query selects them, as `SELECT *`
+        // does — the generator's join queries order by qualified refs).
         let mut keys: Vec<(usize, bool)> = Vec::new();
         for (name, desc) in &sel.order {
-            let i = outputs
-                .iter()
-                .position(|(h, _)| h == name)
-                .ok_or(ErrClass::NoColumn)?;
+            let i = if let Some(i) = outputs.iter().position(|(h, _)| h == name) {
+                i
+            } else {
+                let idx = names.resolve(name)?;
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                // `SELECT *` lists the source columns in order, so the
+                // source index is the output index.
+                match outputs.get(idx).map(|(_, item)| item) {
+                    Some(Item::Expr(Expr::Col(c))) if c.rsplit('.').next().unwrap_or(c) == bare => {
+                        idx
+                    }
+                    _ => return Err(ErrClass::NoColumn),
+                }
+            };
             keys.push((i, *desc));
         }
         let mut out_rows: Vec<Vec<V>> = Vec::new();
@@ -1454,12 +1657,12 @@ impl Toy {
             // scalar aggregate always yields exactly one row.
             let mut groups: Vec<(Vec<V>, Vec<&Vec<V>>)> = Vec::new();
             for row in &rows {
-                if !self.keep(&sel.wh, &cols, row, &[])? {
+                if !self.keep(&sel.wh, &names, row, &[])? {
                     continue;
                 }
                 let cx = Ctx {
                     fault: self.fault,
-                    cols: &cols,
+                    names: &names,
                     row,
                     aggs: &[],
                 };
@@ -1494,11 +1697,11 @@ impl Toy {
             if let Some(h) = &sel.having {
                 collect_aggs(h, &mut all_aggs);
             }
-            let null_row: Vec<V> = cols.iter().map(|_| V::Null).collect();
+            let null_row: Vec<V> = names.bare.iter().map(|_| V::Null).collect();
             for (key, g_rows) in &groups {
                 let mut aggs: Vec<(Agg, V)> = Vec::with_capacity(all_aggs.len());
                 for a in &all_aggs {
-                    aggs.push((a.clone(), eval_agg(a, &cols, g_rows, self.fault)?));
+                    aggs.push((a.clone(), eval_agg(a, &names, g_rows, self.fault)?));
                 }
                 let basis: &[V] = g_rows.first().map(|r| r.as_slice()).unwrap_or(&null_row);
                 if let Some(h) = &sel.having {
@@ -1506,7 +1709,7 @@ impl Toy {
                         h,
                         &Ctx {
                             fault: self.fault,
-                            cols: &cols,
+                            names: &names,
                             row: basis,
                             aggs: &aggs,
                         },
@@ -1520,7 +1723,7 @@ impl Toy {
                 for (_, item) in &outputs {
                     let cx = Ctx {
                         fault: self.fault,
-                        cols: &cols,
+                        names: &names,
                         row: basis,
                         aggs: &aggs,
                     };
@@ -1540,12 +1743,12 @@ impl Toy {
             }
         } else {
             for row in &rows {
-                if !self.keep(&sel.wh, &cols, row, &[])? {
+                if !self.keep(&sel.wh, &names, row, &[])? {
                     continue;
                 }
                 let cx = Ctx {
                     fault: self.fault,
-                    cols: &cols,
+                    names: &names,
                     row,
                     aggs: &[],
                 };
@@ -1629,6 +1832,7 @@ impl Toy {
 
     fn update(&mut self, name: &str, sets: Vec<(String, Expr)>, wh: Option<Expr>) -> R<Response> {
         let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
+        let names = Names::single(name, &tbl.cols);
         let cols = tbl.cols.clone();
         let rows = tbl.rows.clone();
         let mut targets = Vec::new();
@@ -1637,16 +1841,16 @@ impl Toy {
                 .iter()
                 .position(|(n, _)| n == c)
                 .ok_or(ErrClass::NoColumn)?;
-            check_cols(e, &cols)?;
+            check_cols(e, &names)?;
             targets.push(i);
         }
         if let Some(w) = &wh {
-            check_cols(w, &cols)?;
+            check_cols(w, &names)?;
         }
         let mut new_rows = rows.clone();
         let (mut matched, mut changed) = (0u64, 0u64);
         for (ri, row) in rows.iter().enumerate() {
-            if !self.keep(&wh, &cols, row, &[])? {
+            if !self.keep(&wh, &names, row, &[])? {
                 continue;
             }
             matched += 1;
@@ -1664,7 +1868,7 @@ impl Toy {
                     e,
                     &Ctx {
                         fault: self.fault,
-                        cols: &cols,
+                        names: &names,
                         row: basis,
                         aggs: &[],
                     },
@@ -1688,15 +1892,15 @@ impl Toy {
 
     fn delete(&mut self, name: &str, wh: Option<Expr>) -> R<Response> {
         let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
-        let cols = tbl.cols.clone();
+        let names = Names::single(name, &tbl.cols);
         let rows = tbl.rows.clone();
         if let Some(w) = &wh {
-            check_cols(w, &cols)?;
+            check_cols(w, &names)?;
         }
         let mut kept = Vec::new();
         let mut removed = 0u64;
         for row in rows {
-            if self.keep(&wh, &cols, &row, &[])? {
+            if self.keep(&wh, &names, &row, &[])? {
                 removed += 1;
             } else {
                 kept.push(row);
@@ -1758,7 +1962,7 @@ mod tests {
     /// does not capture, not a candidate bug.
     #[test]
     fn clean_toy_agrees_with_the_oracle_on_every_script() {
-        for last in [0u32, 1, 2, 3, 4, 5, 6, 7] {
+        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8] {
             let p = Profile::through(last);
             for seed in 0..SEEDS {
                 let script = build_script(seed, &p, STEPS);
@@ -1780,8 +1984,8 @@ mod tests {
     #[test]
     #[ignore]
     fn clean_toy_soak() {
-        // Through stage 7: the soak covers aggregates too.
-        let p = Profile::through(7);
+        // Through stage 8: the soak covers aggregates and joins too.
+        let p = Profile::through(8);
         for seed in 1000..4000u64 {
             let script = build_script(seed, &p, 300);
             let mut toy = Toy::new(None);
@@ -1794,6 +1998,72 @@ mod tests {
         }
     }
 
+    /// Joins: inner/comma shapes, `LEFT JOIN` padding unmatched rows with
+    /// NULLs, qualified references (alias and table name), ambiguity for a
+    /// bare name in two items, and `ON` predicates.
+    #[test]
+    fn joins_inner_left_and_ambiguity() {
+        let mut t = Toy::new(None);
+        assert!(matches!(
+            t.exec("CREATE TABLE j1 (x INTEGER, y TEXT)"),
+            Ok(Response::Ok(0))
+        ));
+        assert!(matches!(
+            t.exec("CREATE TABLE j2 (x INTEGER, z TEXT)"),
+            Ok(Response::Ok(0))
+        ));
+        assert!(matches!(
+            t.exec("INSERT INTO j1 VALUES (1, 'a'), (2, 'b'), (3, 'c')"),
+            Ok(Response::Ok(3))
+        ));
+        assert!(matches!(
+            t.exec("INSERT INTO j2 VALUES (2, 'B'), (3, 'C'), (4, 'D')"),
+            Ok(Response::Ok(3))
+        ));
+        let rows = |r: Result<Response, String>| match r {
+            Ok(Response::Rows { rows, headers, .. }) => (headers, rows),
+            other => panic!("expected rows: {other:?}"),
+        };
+        // INNER JOIN: the matching pairs only.
+        let (h, r) = rows(
+            t.exec("SELECT j1.x AS k, j2.z AS v FROM j1 INNER JOIN j2 ON j1.x = j2.x ORDER BY k"),
+        );
+        assert_eq!(h, vec!["k", "v"]);
+        assert_eq!(r.len(), 2);
+        // Comma join + WHERE, qualified by the table names.
+        let (_, r) = rows(t.exec("SELECT j1.y AS a FROM j1, j2 WHERE j1.x = j2.x"));
+        assert_eq!(r.len(), 2);
+        // LEFT JOIN pads the missing right side with NULL.
+        let (_, r) = rows(
+            t.exec("SELECT j1.x AS k, j2.x AS m FROM j1 LEFT JOIN j2 ON j1.x = j2.x ORDER BY k"),
+        );
+        assert_eq!(r.len(), 3);
+        assert!(
+            r.iter().any(|row| row[1] == "\\N"),
+            "LEFT JOIN must pad with NULL: {r:?}"
+        );
+        // A bare name present in both items is ambiguous.
+        assert!(matches!(
+            t.exec("SELECT x FROM j1, j2"),
+            Ok(Response::Err { ref class, .. }) if class == "ambiguous"
+        ));
+        // An unknown qualifier, and a missing column, are no_column.
+        assert!(matches!(
+            t.exec("SELECT zz.x FROM j1, j2"),
+            Ok(Response::Err { ref class, .. }) if class == "no_column"
+        ));
+        assert!(matches!(
+            t.exec("SELECT j1.zz FROM j1, j2"),
+            Ok(Response::Err { ref class, .. }) if class == "no_column"
+        ));
+        // The generated shape that the agreement gate found: an ON
+        // predicate mixing a qualified and a unique bare name.
+        let (_, r) = rows(t.exec(
+            "SELECT j1.x = (j2.x % 48) AS e0 FROM j1 INNER JOIN j2 ON j1.x = j2.z ORDER BY e0",
+        ));
+        assert!(r.is_empty(), "a text/int join matches nothing: {r:?}");
+    }
+
     /// Every planted bug is caught, and caught OFTEN: a blind spot in the
     /// generator shows up here as a surviving or barely-caught mutant. A
     /// model with such a bug would otherwise pass several verifications in a
@@ -1802,9 +2072,9 @@ mod tests {
     fn every_mutant_is_caught_in_most_scripts() {
         const SCRIPTS: u64 = 40;
         const MIN_RATE_PCT: u64 = 25;
-        // Through stage 7: the aggregate mutants only fire when the profile
-        // generates aggregates.
-        let p = Profile::through(7);
+        // Through stage 8: the aggregate and join mutants only fire when
+        // the profile generates those shapes.
+        let p = Profile::through(8);
         let mut weak = Vec::new();
         let mut report = Vec::new();
         for fault in Fault::ALL {

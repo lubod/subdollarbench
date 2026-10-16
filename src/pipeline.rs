@@ -2948,12 +2948,23 @@ impl BenchmarkPipeline {
                                     true,
                                 )
                             };
+                            // The variant each stage passed at: the
+                            // current attempt's lite profile applies to the
+                            // ticket being graded, earlier lite passes come
+                            // from the ladder (`passed_lite`).
+                            let mut variants: Vec<(u32, Vec<String>)> = passed_lite.to_vec();
+                            if let Some(&cur) = wanted.iter().max() {
+                                if !lite_profile.is_empty() {
+                                    variants.push((cur, lite_profile.to_vec()));
+                                }
+                            }
                             let run = tokio::task::spawn_blocking(move || {
-                                crate::verifier::sql::driver::run_stage(
+                                crate::verifier::sql::driver::run_stage_with_variants(
                                     &addr,
                                     std::time::Duration::from_secs(10),
                                     seed,
                                     &passed_ids,
+                                    &variants,
                                     crate::verifier::sql::driver::DEFAULT_STEPS,
                                     Some(&mut reset),
                                     Some(&mut restart),
@@ -7689,6 +7700,101 @@ main()
             (7, 7)
         );
         cleanup_covtest_network("sqltxnlite5");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-sql stage 8 live proof (eval-only, no model): the reference
+    /// passes the join suite under Docker — comma/`INNER`/`LEFT` joins with
+    /// `ON`, qualified references, `SELECT *` over a join, the ambiguity
+    /// probe — plus everything 0-7 again.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage8_joins_live() {
+        let worker = 83u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqljoin");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-8 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqljoin");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 8,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-8 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 8: Joins -> PASS",
+            "Stage 7: Aggregates -> PASS",
+            "[UPGRADE] sentinel for stage 8 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (9, 9)
+        );
+        cleanup_covtest_network("sqljoin");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Stage 8's lite variant through the pipeline: the attempt carries
+    /// `join-inner-only`, so the graded suite keeps comma/inner joins and
+    /// never runs a `LEFT JOIN`.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage8_lite_live() {
+        let worker = 82u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqljoinlite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-8 lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqljoinlite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 8,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
+            lite_profile: vec!["join-inner-only".to_string()],
+            passed_lite: Vec::new(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-8 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in ["Stage 8: Joins -> PASS", "Stage 7: Aggregates -> PASS"] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (9, 9)
+        );
+        cleanup_covtest_network("sqljoinlite");
         let _ = fs::remove_dir_all(&dir);
     }
 

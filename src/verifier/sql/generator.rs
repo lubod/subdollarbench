@@ -45,6 +45,11 @@ pub struct Profile {
     pub txn: bool,
     /// `COUNT`/`SUM`/`MIN`/`MAX`, `GROUP BY`, `HAVING` (ticket 7).
     pub aggregates: bool,
+    /// Joins: comma lists and `INNER JOIN` (ticket 8).
+    pub joins: bool,
+    /// `LEFT [OUTER] JOIN` (stage 8 full only; the lite variant keeps
+    /// inner/comma joins).
+    pub left_join: bool,
     pub constraints: bool,
 }
 
@@ -70,6 +75,10 @@ impl Profile {
             }
             6 => p.txn = true,
             7 => p.aggregates = true,
+            8 => {
+                p.joins = true;
+                p.left_join = true;
+            }
             9 => p.constraints = true,
             _ => {}
         }
@@ -89,6 +98,8 @@ impl Profile {
             delete: self.delete || o.delete,
             txn: self.txn || o.txn,
             aggregates: self.aggregates || o.aggregates,
+            joins: self.joins || o.joins,
+            left_join: self.left_join || o.left_join,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -98,6 +109,14 @@ impl Profile {
         stages
             .iter()
             .fold(Profile::default(), |acc, s| acc.union(&Profile::stage(*s)))
+    }
+
+    /// Apply a stage's lite flags: `join-inner-only` (stage 8's lite
+    /// variant) drops `LEFT JOIN` and keeps comma/inner joins.
+    pub fn narrow(&mut self, flags: &[String]) {
+        if flags.iter().any(|f| f == "join-inner-only") {
+            self.left_join = false;
+        }
     }
 
     /// Stages `0..=last`.
@@ -366,8 +385,18 @@ impl Generator {
         (Self::quote(&raw), 0, len)
     }
 
+    /// The bare name of a possibly qualified column reference (`a.x` ->
+    /// `x`): bounds, anchors and `seen` are keyed by the schema name.
+    fn bare_ref(col: &str) -> &str {
+        col.rsplit('.').next().unwrap_or(col)
+    }
+
     fn bound_of(&self, col: &str) -> u128 {
-        self.bounds.get(col).copied().unwrap_or(0)
+        self.bounds
+            .get(col)
+            .or_else(|| self.bounds.get(Self::bare_ref(col)))
+            .copied()
+            .unwrap_or(0)
     }
 
     fn bump(&mut self, col: &str, to: u128) {
@@ -382,7 +411,10 @@ impl Generator {
     /// everything or nothing and prove nothing about the candidate.
     fn mentions_col(sql: &str, cols: &[ColInfo]) -> bool {
         sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .any(|tok| cols.iter().any(|c| c.name == tok))
+            .any(|tok| {
+                cols.iter()
+                    .any(|c| c.name == tok || Self::bare_ref(&c.name) == tok)
+            })
     }
 
     /// Parenthesize a composite operand most of the time; the rest relies on
@@ -553,12 +585,17 @@ impl Generator {
         // Anchored: compare a column with a value that was really inserted,
         // so the predicate selects rows instead of (almost) never matching.
         let anchored: Vec<usize> = (0..cols.len())
-            .filter(|&i| self.seen.get(&cols[i].name).is_some_and(|v| !v.is_empty()))
+            .filter(|&i| {
+                self.seen
+                    .get(Self::bare_ref(&cols[i].name))
+                    .is_some_and(|v| !v.is_empty())
+            })
             .collect();
         if !anchored.is_empty() && self.rng.chance(45) {
             let c = &cols[anchored[self.rng.below(anchored.len() as u64) as usize]];
-            let n = self.seen[&c.name].len();
-            let lit = self.seen[&c.name][self.rng.below(n as u64) as usize].clone();
+            let key = Self::bare_ref(&c.name);
+            let n = self.seen[key].len();
+            let lit = self.seen[key][self.rng.below(n as u64) as usize].clone();
             let op = *self.rng.pick(&["=", "=", "<>", "<", "<=", ">", ">="]);
             return (format!("{} {op} {lit}", c.name), 5, 1);
         }
@@ -751,6 +788,10 @@ impl Generator {
         // Aggregate queries first: they have their own select-list rules.
         if self.profile.aggregates && self.rng.below(100) < 30 {
             return self.aggregate_stmt();
+        }
+        // Join queries (ticket 8), single-table SELECTs below.
+        if self.profile.joins && self.rng.below(100) < 30 {
+            return self.join_select();
         }
         // SELECT without FROM: pure expressions.
         if self.profile.select_no_from && self.rng.chance(8) {
@@ -1107,6 +1148,254 @@ impl Generator {
         self.stmt(sql, Kind::Select, true)
     }
 
+    /// The columns of a table by name (for join clauses).
+    fn cols_of(&self, tname: &str) -> Vec<ColInfo> {
+        let idx = self
+            .schema
+            .tables
+            .iter()
+            .position(|t| t.name == tname)
+            .unwrap_or(0);
+        self.table_infos(idx).1
+    }
+
+    /// Two or three `FROM` references: distinct tables, or the same table
+    /// twice (a self-join, whose unqualified columns are then ambiguous —
+    /// aliases keep qualified references legal).
+    fn join_items(&mut self) -> Vec<(String, String)> {
+        // Occasionally a single item: a plain query whose references are
+        // qualified (`FROM t` with `t.x`), which the dialect resolves.
+        if self.rng.chance(12) {
+            let ti = self.pick_table();
+            let t = self.table_infos(ti).0;
+            return vec![(t.clone(), t)];
+        }
+        let n = if self.rng.chance(30) { 3 } else { 2 };
+        if self.rng.chance(25) {
+            let ti = self.pick_table();
+            let t = self.table_infos(ti).0;
+            let mut out = vec![(t.clone(), "a".to_string()), (t, "b".to_string())];
+            if n == 3 {
+                let ti3 = self.pick_table();
+                let t3 = self.table_infos(ti3).0;
+                out.push((t3, "c".to_string()));
+            }
+            return out;
+        }
+        let mut idx: Vec<usize> = (0..self.schema.tables.len()).collect();
+        for i in (1..idx.len()).rev() {
+            let j = self.rng.below(i as u64 + 1) as usize;
+            idx.swap(i, j);
+        }
+        let mut out = Vec::new();
+        for (k, &i) in idx.iter().take(n).enumerate() {
+            let t = self.table_infos(i).0;
+            out.push((t, ["a", "b", "c"][k].to_string()));
+        }
+        out
+    }
+
+    /// The joined column list as expression inputs: each column is a
+    /// qualified reference (`a.x`), or — when its bare name is unique
+    /// across the join — sometimes a bare one (the dialect resolves those).
+    fn join_cols(&mut self, items: &[(String, String)]) -> Vec<ColInfo> {
+        let mut out: Vec<ColInfo> = Vec::new();
+        for (t, alias) in items {
+            for c in self.cols_of(t) {
+                out.push(ColInfo {
+                    name: format!("{alias}.{}", c.name),
+                    ..c
+                });
+            }
+        }
+        // Bare references only where they cannot be ambiguous.
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for c in &out {
+            *counts
+                .entry(Self::bare_ref(&c.name).to_string())
+                .or_insert(0) += 1;
+        }
+        for c in out.iter_mut() {
+            let bare = Self::bare_ref(&c.name).to_string();
+            if counts[&bare] == 1 && self.rng.chance(35) {
+                c.name = bare;
+            }
+        }
+        out
+    }
+
+    /// A link predicate between an earlier reference and a new one, over
+    /// type-compatible columns (`a.x = b.y`). `None` when no pair shares a
+    /// type: the caller then builds a cross product (comma style).
+    fn link_pred(&mut self, left: &[ColInfo], right: &[ColInfo]) -> Option<String> {
+        let ty = if self.rng.chance(50) {
+            Ty::Integer
+        } else {
+            Ty::Text
+        };
+        let l: Vec<&ColInfo> = left.iter().filter(|c| c.ty == ty).collect();
+        let r: Vec<&ColInfo> = right.iter().filter(|c| c.ty == ty).collect();
+        if l.is_empty() || r.is_empty() {
+            return None;
+        }
+        let a = l[self.rng.below(l.len() as u64) as usize];
+        let b = r[self.rng.below(r.len() as u64) as usize];
+        let op = *self
+            .rng
+            .pick(&["=", "=", "=", "=", "<", "<=", ">", ">=", "<>"]);
+        Some(format!("{} {op} {}", a.name, b.name))
+    }
+
+    /// A join query (ticket 8): 2-3 `FROM` items, comma / `INNER JOIN` /
+    /// `LEFT JOIN`, an `ON` link predicate per joined item, qualified
+    /// column references and `SELECT *` over the whole join in FROM order.
+    /// Every output column is in `ORDER BY`, so the frame is a sequence.
+    pub fn join_select(&mut self) -> Statement {
+        let items = self.join_items();
+        let cols = self.join_cols(&items);
+
+        // Style: the lite variant has no LEFT.
+        enum Style {
+            Comma,
+            Inner,
+            Left,
+        }
+        let style = if !self.profile.left_join {
+            if self.rng.chance(50) {
+                Style::Comma
+            } else {
+                Style::Inner
+            }
+        } else {
+            match self.rng.below(100) {
+                0..=34 => Style::Comma,
+                35..=69 => Style::Inner,
+                _ => Style::Left,
+            }
+        };
+
+        // Per item: its column range in `cols`.
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        let mut at = 0usize;
+        for (t, _) in &items {
+            let n = self.cols_of(t).len();
+            ranges.push((at, n));
+            at += n;
+        }
+
+        let from_kw = self.kw("FROM");
+        let mut from = format!("{from_kw} {} {}", items[0].0, items[0].1);
+        let mut where_conds: Vec<String> = Vec::new();
+        for i in 1..items.len() {
+            let (start, len) = ranges[i];
+            let right: Vec<ColInfo> = cols[start..start + len].to_vec();
+            let left: Vec<ColInfo> = cols[..start].to_vec();
+            let pred = self.link_pred(&left, &right);
+            match (&style, pred) {
+                (Style::Comma, Some(p)) => where_conds.push(p),
+                (Style::Comma, None) => {}
+                (Style::Inner, Some(p)) => {
+                    let join = self.kw("INNER");
+                    from.push_str(&format!(
+                        " {join} {} {} {} {} {}",
+                        self.kw("JOIN"),
+                        items[i].0,
+                        items[i].1,
+                        self.kw("ON"),
+                        p
+                    ));
+                }
+                (Style::Left, Some(p)) => {
+                    let left_kw = self.kw("LEFT");
+                    let outer = if self.rng.chance(30) {
+                        format!(" {}", self.kw("OUTER"))
+                    } else {
+                        String::new()
+                    };
+                    from.push_str(&format!(
+                        " {left_kw}{outer} {} {} {} {} {}",
+                        self.kw("JOIN"),
+                        items[i].0,
+                        items[i].1,
+                        self.kw("ON"),
+                        p
+                    ));
+                }
+                // No type-compatible pair: a cross product needs no ON, so
+                // fall back to the comma form for this item.
+                (Style::Inner | Style::Left, None) => {
+                    from.push_str(&format!(", {} {}", items[i].0, items[i].1));
+                }
+            }
+        }
+
+        // Output items.
+        let mut parts = vec![self.kw("SELECT")];
+        let distinct = self.rng.chance(20) && matches!(style, Style::Comma | Style::Inner);
+        if distinct {
+            parts.push(self.kw("DISTINCT"));
+        }
+        let order_terms: Vec<String>;
+        if self.rng.chance(45) {
+            // `SELECT *` over the join, in FROM order.
+            parts.push("*".to_string());
+            order_terms = cols.iter().map(|c| c.name.clone()).collect();
+        } else {
+            let n = 2 + self.rng.below(3) as usize;
+            let mut rendered = Vec::new();
+            order_terms = (0..n).map(|i| format!("e{i}")).collect();
+            for (i, term) in order_terms.iter().enumerate() {
+                let e = match self.rng.below(3) {
+                    0 => self.text_expr(&cols, 2),
+                    1 => self.bool_expr(&cols, 1),
+                    _ => self.int_expr(&cols, 2),
+                };
+                let alias = self.kw("AS");
+                rendered.push(format!("{} {alias} {term}", e.0));
+                let _ = i;
+            }
+            parts.push(rendered.join(", "));
+        }
+        parts.push(from);
+        if !where_conds.is_empty() {
+            let extra = if self.rng.chance(30) {
+                let e = self.bool_expr(&cols, 1);
+                Some(e.0)
+            } else {
+                None
+            };
+            if let Some(e) = extra {
+                where_conds.push(e);
+            }
+            let (w, and) = (self.kw("WHERE"), self.kw("AND"));
+            parts.push(format!("{w} {}", where_conds.join(&format!(" {and} "))));
+        }
+        let mut terms = order_terms.clone();
+        for i in (1..terms.len()).rev() {
+            let j = self.rng.below(i as u64 + 1) as usize;
+            terms.swap(i, j);
+        }
+        let rendered: Vec<String> = terms
+            .iter()
+            .map(|t| {
+                let dir = match self.rng.below(10) {
+                    0..=2 => String::new(),
+                    3..=6 => format!(" {}", self.kw("ASC")),
+                    _ => format!(" {}", self.kw("DESC")),
+                };
+                format!("{t}{dir}")
+            })
+            .collect();
+        let (o, b) = (self.kw("ORDER"), self.kw("BY"));
+        parts.push(format!("{o} {b} {}", rendered.join(", ")));
+        if self.rng.chance(20) {
+            parts.push(self.kw("LIMIT"));
+            parts.push(self.rng.below(7).to_string());
+        }
+        let sql = self.join(parts);
+        self.stmt(sql, Kind::Select, true)
+    }
+
     pub fn update_stmt(&mut self) -> Statement {
         let ti = self.pick_table();
         let (tname, cols) = self.table_infos(ti);
@@ -1218,6 +1507,9 @@ impl Generator {
             // spec pins (`syntax`).
             menu.extend([13, 14, 15, 16]);
         }
+        if self.profile.joins && !cols.is_empty() {
+            menu.extend([17, 18, 19]);
+        }
         let which = *self.rng.pick(&menu);
         let sql = match which {
             0 => format!("{} * {} zz_gone", self.kw("SELECT"), self.kw("FROM")),
@@ -1326,6 +1618,37 @@ impl Generator {
                 self.kw("BY"),
                 self.kw("COUNT")
             ),
+            17 => {
+                // A self-join makes every column name ambiguous
+                // unqualified.
+                let col = cols[self.rng.below(cols.len() as u64) as usize]
+                    .name
+                    .clone();
+                format!(
+                    "{} {col} {} {tname} a, {tname} b",
+                    self.kw("SELECT"),
+                    self.kw("FROM")
+                )
+            }
+            18 => {
+                let col = cols[self.rng.below(cols.len() as u64) as usize]
+                    .name
+                    .clone();
+                format!("{} zz.{col} {} {tname}", self.kw("SELECT"), self.kw("FROM"))
+            }
+            19 => {
+                let col = cols[self.rng.below(cols.len() as u64) as usize]
+                    .name
+                    .clone();
+                format!(
+                    "{} * {} {tname} a {} {} {tname} b {} a.zz_nocol = b.{col}",
+                    self.kw("SELECT"),
+                    self.kw("FROM"),
+                    self.kw("INNER"),
+                    self.kw("JOIN"),
+                    self.kw("ON")
+                )
+            }
             _ => format!(
                 "{} {tname} {} zz_nocol = 1",
                 self.kw("UPDATE"),
@@ -1712,6 +2035,120 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Ticket 8's join shapes: comma/`INNER`/`LEFT` joins over 2-3 items,
+    /// qualified references, `SELECT *` in FROM order, an `ON` per joined
+    /// item, a 3-way join, and the ambiguity probe; stage 7 must not leak
+    /// any of it, and the lite variant drops `LEFT`.
+    #[test]
+    fn join_profile_emits_joins_and_lite_drops_left() {
+        fn is_join(q: &str) -> bool {
+            if q.contains(" join ") {
+                return true;
+            }
+            let Some(rest) = q.split(" from ").nth(1) else {
+                return false;
+            };
+            let mut head = rest;
+            for cut in [" where ", " order ", " group ", " having ", " limit "] {
+                head = head.split(cut).next().unwrap_or(head);
+            }
+            head.contains(", ")
+        }
+
+        let p8 = Profile::through(8);
+        let (mut joins, mut left, mut star, mut on, mut three_way) = (0, 0, 0, 0, 0);
+        let mut probes = String::new();
+        for seed in 0..80u64 {
+            let s = build_script(seed, &p8, 150);
+            assert!(
+                s.unknown.is_empty(),
+                "{:?}",
+                &s.unknown[..s.unknown.len().min(2)]
+            );
+            for c in &s.steps {
+                // Tabs separate tokens too; the join heuristic wants spaces.
+                let q = lower(&c.stmt.sql)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if c.stmt.kind == Kind::Probe {
+                    probes.push_str(&q);
+                    probes.push('\n');
+                    continue;
+                }
+                if c.stmt.kind != Kind::Select {
+                    continue;
+                }
+                if is_join(&q) {
+                    joins += 1;
+                    if q.contains("left join") || q.contains("left outer join") {
+                        left += 1;
+                        assert!(q.contains(" on "), "LEFT JOIN without ON: {q}");
+                    }
+                    if q.contains(" join ") {
+                        on += 1;
+                    }
+                    if q.starts_with("select *") {
+                        star += 1;
+                    }
+                    if q.contains(", ") && q.contains(" join ") {
+                        three_way += 1;
+                    }
+                } else {
+                    assert!(!q.contains(" join "), "stage-8 join leaked: {q}");
+                }
+            }
+        }
+        assert!(joins >= 40, "too few join queries: {joins}");
+        assert!(left >= 5, "LEFT JOIN rarely generated: {left}");
+        assert!(on >= 10, "ON predicates rarely generated: {on}");
+        assert!(star >= 5, "SELECT * over a join rarely generated: {star}");
+        assert!(
+            three_way >= 3,
+            "mixed 3-way joins rarely generated: {three_way}"
+        );
+        for form in ["zz.", " on a.zz_nocol", " from", ", "] {
+            assert!(probes.contains(form), "join probes missing {form:?}");
+        }
+
+        // Stage 7 scripts have no joins at all.
+        let p7 = Profile::through(7);
+        for seed in 0..30u64 {
+            let s = build_script(seed, &p7, 150);
+            for c in s.setup.iter().chain(&s.steps) {
+                let q = lower(&c.stmt.sql)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(!q.contains(" join "), "stage 7 leaked a join: {q}");
+                if c.stmt.kind == Kind::Select {
+                    assert!(!is_join(&q), "stage 7 leaked a join: {q}");
+                }
+            }
+        }
+
+        // The lite variant (join-inner-only) keeps comma/inner joins and
+        // never emits LEFT.
+        let mut lite = Profile::through(8);
+        lite.narrow(&["join-inner-only".to_string()]);
+        let (mut lite_joins, mut lite_left) = (0, 0);
+        for seed in 0..60u64 {
+            let s = build_script(seed, &lite, 150);
+            for c in &s.steps {
+                let q = lower(&c.stmt.sql)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if c.stmt.kind == Kind::Select && is_join(&q) {
+                    lite_joins += 1;
+                    lite_left += usize::from(q.contains("left join"));
+                }
+            }
+        }
+        assert!(lite_joins >= 30, "lite joins vanished: {lite_joins}");
+        assert_eq!(lite_left, 0, "lite variant emitted LEFT JOIN");
     }
 
     /// Ticket 7's arithmetic promises: SUM of no rows is NULL and COUNT is

@@ -55,7 +55,7 @@ pub fn stage_title(stage: u32) -> &'static str {
 /// for later stages are not built yet). Stages 4-5 add no grammar; stage 6
 /// adds transactions.
 pub fn differential_supported(stage: u32) -> bool {
-    stage <= 7
+    stage <= 8
 }
 
 /// A deterministic seed for (verification, stage): every verification of a
@@ -165,7 +165,63 @@ pub fn run_stage(
     reset: Option<&mut dyn FnMut() -> Result<(), String>>,
     restart: Option<&mut dyn FnMut() -> Result<(), String>>,
 ) -> Result<StageOutcome, String> {
-    let script = build_script(seed, &Profile::for_passed(passed), steps);
+    run_stage_profiled(
+        addr,
+        timeout,
+        seed,
+        passed.iter().copied().max().unwrap_or(0),
+        &Profile::for_passed(passed),
+        steps,
+        reset,
+        restart,
+    )
+}
+
+/// The cumulative suite at the variant each stage passed at: a lite pass
+/// contributes its lite subset to the grammar (for example
+/// `join-inner-only` keeps comma/inner joins and drops `LEFT JOIN`), so a
+/// later ticket never demands what the lite prompt did not ask for.
+#[allow(clippy::too_many_arguments)]
+pub fn run_stage_with_variants(
+    addr: &str,
+    timeout: Duration,
+    seed: u64,
+    passed: &[u32],
+    variants: &[(u32, Vec<String>)],
+    steps: usize,
+    reset: Option<&mut dyn FnMut() -> Result<(), String>>,
+    restart: Option<&mut dyn FnMut() -> Result<(), String>>,
+) -> Result<StageOutcome, String> {
+    let mut profile = Profile::for_passed(passed);
+    for (stage, flags) in variants {
+        if passed.contains(stage) {
+            profile.narrow(flags);
+        }
+    }
+    run_stage_profiled(
+        addr,
+        timeout,
+        seed,
+        passed.iter().copied().max().unwrap_or(0),
+        &profile,
+        steps,
+        reset,
+        restart,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_stage_profiled(
+    addr: &str,
+    timeout: Duration,
+    seed: u64,
+    stage: u32,
+    profile: &Profile,
+    steps: usize,
+    reset: Option<&mut dyn FnMut() -> Result<(), String>>,
+    restart: Option<&mut dyn FnMut() -> Result<(), String>>,
+) -> Result<StageOutcome, String> {
+    let script = build_script(seed, profile, steps);
     if !script.unknown.is_empty() {
         return Err(format!(
             "unmapped oracle messages: {:?}",
@@ -211,7 +267,6 @@ pub fn run_stage(
     match run_script(&mut cand, &script) {
         Verdict::Pass { checks } => {
             drop(cand);
-            let stage = passed.iter().copied().max().unwrap_or(0);
             if let ScenarioResult::Fail(d) = super::scenarios::for_stage(stage, addr, timeout, seed)
             {
                 return Ok(failed(checks, MismatchKind::Protocol, d));

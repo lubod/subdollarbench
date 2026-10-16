@@ -8,6 +8,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-16.9`: sdb-sql ticket 8 (joins) — comma/`INNER`/`LEFT
+///   [OUTER] JOIN` over 2-3 items, `ON` predicates, qualified and unique
+///   bare references, `ERR ambiguous`, `SELECT *` in FROM order; the lite
+///   variant keeps comma/inner joins (a lite pass narrows the profile of
+///   every later ticket).
 /// - `2026-10-16.8`: sdb-sql ticket 7 (aggregates) — `COUNT`/`SUM`/`MIN`/
 ///   `MAX`, `GROUP BY`, `HAVING`, the empty-group contract and the
 ///   aggregate error classes enter the graded contract; the multi-row
@@ -419,7 +424,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-16.8";
+pub const RULES_VERSION: &str = "2026-10-16.9";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

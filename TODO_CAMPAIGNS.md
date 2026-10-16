@@ -710,8 +710,29 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   20/20 bar extended through stage 7, a stage-7 live proof under Docker
   (8/8, sentinel written), and the aggregate spec text updated (`SUM`
   INTEGER-only, the empty-group contract, the aggregate misuses).
-  **Next**: ticket 8 (joins), which starts with the lite profile
-  (inner/comma joins only).
+  **Ticket 8 landed (2026-10-16)**: the generator has a `joins` profile
+  (comma lists and `INNER JOIN`, plus `LEFT [OUTER] JOIN` in the full
+  variant) over 2-3 `FROM` items — distinct tables or a self-join with
+  aliases — with `ON` link predicates over type-compatible columns,
+  qualified references (`a.x`), bare references when the name is unique
+  across the join, `SELECT *` in FROM order ordered by every column, and a
+  total-order requirement on every emitted frame. New probes: an ambiguous
+  bare name in a self-join (`ERR ambiguous`), an unknown qualifier, a
+  missing `ON` column, and an unknown joined table. The toy resolves
+  per-statement names (bare -> unique or `ERR ambiguous`, qualifier ->
+  item, source-column `ORDER BY`), executes nested-loop joins with
+  NULL-padded `LEFT JOIN` rows, and classifies `ON` columns at prepare
+  time; it gained an `LeftJoinIsInner` mutant. The agreement gate covers
+  stage 8 (120 seeds x 9 profiles) and the 3000-seed soak runs stage-8
+  scripts; the stage-8 live proof (9/9) and its lite variant both pass
+  under Docker. Driver: `run_stage_with_variants` narrows the cumulative
+  profile per the variant each stage passed at (the pipeline passes the
+  current attempt's `lite_profile` plus the ladder's `passed_lite`), so
+  `join-inner-only` drops `LEFT JOIN` in the stage-8 lite suite and in
+  every later ticket. The campaign declares ticket 8 (tier 3, needs 1,
+  acceptance [0..8], lite `stages/8_joins_lite/prompt.md` weight 0.4);
+  RULES 2026-10-16.9; the 20/20 bar runs through stage 8 (180 stage
+  runs). **Next**: ticket 9 (constraints), tier 3.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

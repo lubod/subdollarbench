@@ -476,6 +476,56 @@ mod tests {
         }
     }
 
+    /// Stage 8's lite variant (`join-inner-only`): the cumulative suite
+    /// keeps comma/inner joins and never emits `LEFT JOIN`, and the
+    /// reference passes it.
+    #[test]
+    fn reference_passes_the_stage8_lite_suite() {
+        use super::super::driver::{run_stage_with_variants, wait_until_answering};
+        use super::super::generator::{build_script, Profile};
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let t = Duration::from_secs(10);
+        wait_until_answering(&addr, t).expect("answers");
+        let passed: Vec<u32> = (0..=8).collect();
+        let variants = vec![(8u32, vec!["join-inner-only".to_string()])];
+        for run in 0..3u64 {
+            let seed = stage_seed(&format!("stage8-lite-{run}"), 8);
+            let mut restart = || proc.restart();
+            let out = run_stage_with_variants(
+                &addr,
+                t,
+                seed,
+                &passed,
+                &variants,
+                120,
+                None,
+                Some(&mut restart),
+            )
+            .unwrap_or_else(|e| panic!("run {run}: verifier fault: {e}"));
+            assert!(out.passed, "stage-8 lite run {run}: {}", out.detail);
+        }
+        // The narrowed profile really drops LEFT JOIN (and keeps joins).
+        let mut p = Profile::for_passed(&passed);
+        p.narrow(&variants[0].1);
+        let (mut joins, mut left) = (0, 0);
+        for seed in 0..40u64 {
+            let s = build_script(seed, &p, 120);
+            for c in &s.steps {
+                let q = c.stmt.sql.to_lowercase();
+                if c.stmt.kind == super::super::generator::Kind::Select
+                    && (q.contains(" join ") || q.contains(", "))
+                {
+                    joins += 1;
+                    left += usize::from(q.contains("left join"));
+                }
+            }
+        }
+        assert!(joins > 0, "the lite profile emitted no joins at all");
+        assert_eq!(left, 0, "the lite profile emitted LEFT JOIN");
+    }
+
     /// The grader's bundled SQLite (3.46) rolls a failed multi-row INSERT
     /// back whole in autocommit, but keeps the rows it inserted before the
     /// failure inside an explicit transaction. The reference runs on the
@@ -520,7 +570,8 @@ mod tests {
     }
 
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
-    /// against the reference, through stage 7 (aggregate scripts). All
+    /// against the reference, through stage 8 (aggregate and join
+    /// scripts). All
     /// runs share one server process, so this also proves stage scripts
     /// never collide on schema names. Stages 7+ land here as they do.
     #[test]
@@ -528,7 +579,7 @@ mod tests {
         let port = free_port();
         let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=7u32 {
+        for stage in 0..=8u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);

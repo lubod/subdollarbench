@@ -241,10 +241,14 @@ argument in tests (`SUM` over TEXT is not tested), and a query mixing an
 aggregate with a bare, non-grouped column is not tested. No `AVG` (no
 REAL). An aggregate in `WHERE` or as a `GROUP BY` key is `ERR syntax`.
 
-**8. Joins.** Up to 3 tables; `ON` with compound predicates; `SELECT *`
-over a join lists all columns in table order; `ERR ambiguous` for an
-unqualified name present in two tables. Lite profile: inner and comma
-joins only.
+**8. Joins.** Up to 3 items, comma or `INNER JOIN`, and `LEFT [OUTER]
+JOIN` (unmatched left rows pad with `NULL`); `ON` with compound
+predicates; a table alias (`FROM t a`) qualifies references and enables
+self-joins; a bare name resolves when exactly one item has it and is
+`ERR ambiguous` otherwise; `SELECT *` over a join lists all columns in
+FROM order (duplicates included); `ORDER BY` may name an output column or
+a source column of a `SELECT *`. Lite profile: comma and inner joins
+only.
 
 **9. Constraints.** `INTEGER PRIMARY KEY` assigns max+1 (1 when empty) on
 `NULL` or omitted value; a `TEXT PRIMARY KEY` rejects `NULL`.
