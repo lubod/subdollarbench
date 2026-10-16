@@ -593,11 +593,20 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   restarts and stage rollbacks) to `/sdb-data`; the reference's
   `start.sh` honors `"$@"` with baked defaults. A live sandbox test
   proves the argv and the writable mount reach the container, and the sql
-  eval-only live proof runs on the new path. **Remaining for ticket 4**:
-  the sentinel dataset (write on a passing stage >= 4, re-verify before
-  the next ticket; `upgrade` regression class) and the data-dir
-  snapshot/restore alongside the workspace rollback, then the
-  persistence scenario, ticket prompt and cell.
+  eval-only live proof runs on the new path.
+  **Ticket 4 landed (2026-10-16)**: `sentinel.rs` (seeded datasets,
+  ordered reads recorded from the oracle; written when a stage >= 4
+  passes, re-checked reads-only before later suites; `drift:` is an
+  upgrade regression that fails the writing stage again), the
+  `scenarios::persistence` restart scenario wired through a new
+  `restart` callback on `run_stage`, the store snapshotted/restored with
+  the workspace on rollback, the campaign ticket (tier 2, acceptance
+  [0..4]) and its prompt, and the reference no longer wiping its
+  database at startup. Gates: 20/20 at every stage 0-4 against the
+  reference (real restarts), a stage-4 live proof through the pipeline
+  (5/5 + sentinel written), and a drift proof (stages 0-3 green, stage 4
+  red with `[upgrade]`). **Remaining**: one cell for tickets 0-4, then
+  ticket 5 (crash safety).
   **Review fixes landed (REVIEW.md, 2026-10-16)**: the http health probes
   are bounded again; the sql shrink runs on throwaway stores (the real
   `sql-data` survives for ticket 4) and the driver waits for a
