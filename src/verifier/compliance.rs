@@ -1037,6 +1037,327 @@ impl ComplianceChecker {
     }
 }
 
+/// Python modules that are (or embed) a SQL engine or SQL parser.
+const SQL_PY_MODULES: &[&str] = &[
+    "sqlite3",
+    "_sqlite3",
+    "pysqlite2",
+    "pysqlite3",
+    "apsw",
+    "duckdb",
+    "sqlglot",
+    "sqlparse",
+    "sqlalchemy",
+    "mo_sql_parsing",
+    "pglast",
+    "pglite",
+];
+
+/// Exact string literals that name an engine/parser module, package or
+/// binary (`require('sqlite3')`, `from 'bun:sqlite'`, `["sqlite3", ...]`).
+const SQL_LITERALS: &[&str] = &[
+    "sqlite3",
+    "_sqlite3",
+    "sqlite",
+    "better-sqlite3",
+    "node:sqlite",
+    "bun:sqlite",
+    "sql.js",
+    "duckdb",
+    "duckdb-async",
+    "@duckdb/node-api",
+    "@duckdb/duckdb-wasm",
+    "alasql",
+    "node-sql-parser",
+    "pgsql-ast-parser",
+    "@electric-sql/pglite",
+    "sqlglot",
+    "sqlparse",
+];
+
+/// Go module paths of engines/parsers (matched as substrings, also in
+/// go.mod/go.sum, which carry them unquoted).
+const SQL_GO_PATHS: &[&str] = &[
+    "github.com/mattn/go-sqlite3",
+    "modernc.org/sqlite",
+    "github.com/glebarez/go-sqlite",
+    "github.com/glebarez/sqlite",
+    "github.com/ncruces/go-sqlite3",
+    "crawshaw.io/sqlite",
+    "zombiezen.com/go/sqlite",
+    "github.com/marcboeker/go-duckdb",
+    "github.com/xwb1989/sqlparser",
+    "vitess.io/vitess/go/vt/sqlparser",
+    "github.com/blastrain/vitess-sqlparser",
+    "github.com/pingcap/tidb",
+    "github.com/dolthub/go-mysql-server",
+    "github.com/cockroachdb/cockroach",
+    "github.com/rqlite",
+];
+
+/// Cargo dependency names of engines/parsers/query layers.
+const SQL_CRATES: &[&str] = &[
+    "rusqlite",
+    "sqlite",
+    "sqlite3",
+    "libsqlite3-sys",
+    "sqlite3-sys",
+    "sqlparser",
+    "duckdb",
+    "gluesql",
+    "limbo",
+    "limbo_core",
+    "turso",
+    "sqlx",
+    "diesel",
+    "datafusion",
+    "polars-sql",
+];
+
+/// Database binaries a start script must not run or install.
+const SQL_BINARIES: &[&str] = &[
+    "sqlite3", "duckdb", "psql", "postgres", "pg_ctl", "mysqld", "mariadbd", "mysql",
+];
+
+/// Directory names a vendored or installed engine lives under.
+const SQL_DIRS: &[&str] = &[
+    "sqlite3",
+    "better-sqlite3",
+    "pysqlite2",
+    "pysqlite3",
+    "apsw",
+    "duckdb",
+    "sqlglot",
+    "sqlparse",
+    "sqlalchemy",
+    "rusqlite",
+    "libsqlite3-sys",
+    "go-sqlite3",
+    "pglite",
+];
+
+/// Source markers of a vendored engine (the SQLite amalgamation, DuckDB).
+const SQL_SOURCE_MARKERS: &[&str] = &[
+    "SQLITE_VERSION_NUMBER",
+    "sqlite3_prepare_v2(",
+    "sqlite3_open(",
+    "duckdb_open(",
+];
+
+const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
+
+impl ComplianceChecker {
+    /// sdb-sql only: the candidate must not embed, call, vendor or install
+    /// any SQL engine or SQL parser (docs/PROPOSAL-sdb-sql.md, "Constraints
+    /// on the build"). Unlike [`Self::check_no_frameworks`], test-named
+    /// files are NOT exempt: for SQL the import *is* the engine, so a
+    /// `sample_server.py` importing `sqlite3` would serve every answer. A
+    /// self-test compares against the `ref-sql` service instead.
+    ///
+    /// Files whose bytes are exactly the harness's own reference adapter
+    /// ([`crate::verifier::sql::ref_server::SQL_REF_SERVER_PY`], written by
+    /// the eval-only pipeline proof) are not candidate code and are skipped.
+    pub fn check_no_embedded_sql(workdir: &Path) -> Result<(), String> {
+        let mut violations = Vec::new();
+        Self::scan_sql_dir(workdir, false, &mut violations);
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            violations.truncate(8);
+            Err(format!(
+                "Anti-Cheat Violation: embedded SQL engine or parser: {}",
+                violations.join("; ")
+            ))
+        }
+    }
+
+    fn scan_sql_dir(dir: &Path, names_only: bool, violations: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let lower = name.to_lowercase();
+            // VCS objects are compressed (nothing there can run); build
+            // output is derived from the scanned sources and manifests.
+            if name == ".git" || name == "target" {
+                continue;
+            }
+            if path.is_symlink() {
+                continue; // check_no_frameworks already rejects symlinks
+            }
+            if path.is_dir() {
+                if SQL_DIRS.contains(&lower.as_str()) {
+                    violations.push(format!("directory {}", path.display()));
+                }
+                // Installed packages: names are the signal; their contents
+                // are too big to read and are not the candidate's code.
+                let deps = matches!(
+                    lower.as_str(),
+                    "node_modules" | "site-packages" | "dist-packages" | ".venv" | "venv"
+                );
+                Self::scan_sql_dir(&path, names_only || deps, violations);
+            } else if path.is_file() {
+                Self::inspect_sql_file(&path, &name, names_only, violations);
+            }
+        }
+    }
+
+    fn inspect_sql_file(path: &Path, name: &str, names_only: bool, violations: &mut Vec<String>) {
+        use std::io::Read;
+        let lower = name.to_lowercase();
+        let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        let vendored_name = ((lower.starts_with("sqlite3") || lower.starts_with("libsqlite3"))
+            && matches!(ext, "c" | "h" | "so" | "a" | "dll" | "dylib" | "wasm" | "o"))
+            || (lower.starts_with("duckdb") && matches!(ext, "hpp" | "cpp" | "h" | "so" | "a"))
+            || lower.starts_with("sql-wasm");
+        if vendored_name {
+            violations.push(format!("vendored engine file {}", path.display()));
+            return;
+        }
+        if names_only {
+            return;
+        }
+        let Ok(mut f) = fs::File::open(path) else {
+            return;
+        };
+        let mut head = Vec::new();
+        let _ = (&mut f).take(16).read_to_end(&mut head);
+        if head.starts_with(SQLITE_MAGIC) {
+            violations.push(format!("SQLite database file {}", path.display()));
+            return;
+        }
+        // Large files (data stores) only get the magic check.
+        let size = f.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+        if size > 16 << 20 {
+            return;
+        }
+        let Ok(bytes) = fs::read(path) else {
+            return;
+        };
+        // A binary (compiled server, .so, .pyc) that links SQLite carries
+        // the file-format magic string, NUL included.
+        if bytes.windows(SQLITE_MAGIC.len()).any(|w| w == SQLITE_MAGIC) {
+            violations.push(format!("embeds SQLite: {}", path.display()));
+            return;
+        }
+        let Ok(content) = String::from_utf8(bytes) else {
+            return;
+        };
+        if content == crate::verifier::sql::ref_server::SQL_REF_SERVER_PY {
+            return;
+        }
+        let code_ext = matches!(
+            ext,
+            "py" | "js"
+                | "mjs"
+                | "cjs"
+                | "ts"
+                | "go"
+                | "rs"
+                | "rb"
+                | "java"
+                | "kt"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "php"
+                | "pl"
+                | "lua"
+                | "sh"
+                | "bash"
+                | "json"
+                | "toml"
+                | "mod"
+                | "sum"
+        ) || lower.contains("dockerfile")
+            || lower == "procfile"
+            || lower == "requirements.txt";
+        if !code_ext {
+            return; // prose (SPEC.md, notes) may name SQLite freely
+        }
+        let report = |violations: &mut Vec<String>, what: String| {
+            violations.push(format!("{}: {what}", path.display()));
+        };
+        for m in SQL_SOURCE_MARKERS {
+            if content.contains(m) {
+                return report(violations, format!("vendored engine source ({m})"));
+            }
+        }
+        // Whole-line comments are dropped first: "# not using sqlite3" is
+        // prose, not a dependency.
+        let code: Vec<&str> = content
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with('#') || t.starts_with("//"))
+            })
+            .collect();
+        let code = code.join("\n");
+        if ext == "py" {
+            for m in SQL_PY_MODULES {
+                if Self::imports_py_module(&code, m) {
+                    return report(violations, format!("imports {m}"));
+                }
+            }
+        }
+        for p in SQL_GO_PATHS {
+            if code.contains(p) {
+                return report(violations, format!("uses {p}"));
+            }
+        }
+        for lit in Self::string_literals(&code) {
+            let l = lit.trim();
+            if SQL_LITERALS.contains(&l) {
+                return report(violations, format!("names {l:?}"));
+            }
+        }
+        if lower == "cargo.toml" {
+            for line in content.lines() {
+                let t = line.trim();
+                let key = t
+                    .strip_prefix("[dependencies.")
+                    .or_else(|| t.strip_prefix("[dev-dependencies."))
+                    .map(|r| r.trim_end_matches(']'))
+                    .unwrap_or_else(|| t.split('=').next().unwrap_or("").trim());
+                if SQL_CRATES.contains(&key) {
+                    return report(violations, format!("depends on crate {key}"));
+                }
+            }
+        }
+        if lower == "requirements.txt" || lower == "pyproject.toml" {
+            for line in content.lines() {
+                let t = line
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_lowercase();
+                let pkg: String = t
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                if SQL_PY_MODULES.contains(&pkg.replace('-', "_").as_str()) {
+                    return report(violations, format!("depends on {pkg}"));
+                }
+            }
+        }
+        let script =
+            matches!(ext, "sh" | "bash") || lower.contains("dockerfile") || lower == "procfile";
+        if script {
+            for line in code.lines() {
+                for tok in Self::tokenize_command(line) {
+                    let base = tok.rsplit('/').next().unwrap_or(&tok);
+                    if SQL_BINARIES.contains(&base) {
+                        return report(violations, format!("runs or installs {base}"));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1736,5 +2057,117 @@ RUN apk add redis
         assert!(res2.unwrap_err().contains("apache2/"));
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// One file in a fresh workspace -> the sdb-sql scanner's verdict.
+    fn sql_scan(files: &[(&str, &[u8])]) -> Result<(), String> {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "test_sql_compliance_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        for (rel, body) in files {
+            let p = dir.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, body).unwrap();
+        }
+        let r = ComplianceChecker::check_no_embedded_sql(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        r
+    }
+
+    #[test]
+    fn sql_scanner_catches_embedded_engines() {
+        let cases: &[(&str, &[u8])] = &[
+            ("server.py", b"import socket\nimport sqlite3\n"),
+            ("server.py", b"from sqlite3 import connect\n"),
+            // No test-scope exemption: for SQL the import is the engine.
+            ("sample_server.py", b"import sqlite3\n"),
+            ("srv.py", b"m = __import__('sqlite3')\n"),
+            (
+                "srv.py",
+                b"import subprocess\nsubprocess.run(['sqlite3', 'db'])\n",
+            ),
+            ("index.js", b"const D = require('better-sqlite3');\n"),
+            ("index.ts", b"import { Database } from 'bun:sqlite';\n"),
+            (
+                "package.json",
+                b"{\"dependencies\": {\"sql.js\": \"1.0\"}}\n",
+            ),
+            ("main.go", b"import _ \"modernc.org/sqlite\"\n"),
+            (
+                "go.mod",
+                b"module x\nrequire github.com/mattn/go-sqlite3 v1.14.0\n",
+            ),
+            ("Cargo.toml", b"[dependencies]\nrusqlite = \"0.32\"\n"),
+            (
+                "Cargo.toml",
+                b"[dependencies.sqlparser]\nversion = \"0.40\"\n",
+            ),
+            ("requirements.txt", b"duckdb==1.0\n"),
+            ("start.sh", b"#!/bin/bash\nexec sqlite3 data.db\n"),
+            (
+                "Dockerfile",
+                b"FROM debian\nRUN apt-get install -y sqlite3\n",
+            ),
+            ("data/store.bin", b"SQLite format 3\0rest-of-header"),
+            ("vendor/sqlite3.c", b"/* amalgamation */\n"),
+            ("engine.c", b"#define SQLITE_VERSION_NUMBER 3045000\n"),
+            (
+                "node_modules/better-sqlite3/index.js",
+                b"module.exports = 1\n",
+            ),
+            ("server", b"\x7fELF\x00\x01junkSQLite format 3\0more"),
+        ];
+        for (name, body) in cases {
+            let r = sql_scan(&[(name, body)]);
+            assert!(
+                r.is_err(),
+                "{name}: {:?} must be caught",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn sql_scanner_allows_honest_workspaces() {
+        let honest: &[(&str, &[u8])] = &[
+            // Comments and prose may name SQLite.
+            (
+                "server.py",
+                b"# a from-scratch engine; no sqlite3 here\nimport socket\n",
+            ),
+            (
+                "main.go",
+                b"// compatible with 'sqlite' semantics\npackage main\n",
+            ),
+            ("SPEC.md", b"Answers are compared with SQLite (sqlite3).\n"),
+            ("NOTES.txt", b"import sqlite3 is banned\n"),
+            // A PG-wire server may name the default database.
+            ("pg.py", b"db = params.get('database', 'postgres')\n"),
+            (
+                "start.sh",
+                b"#!/bin/bash\nexec python3 -u server.py --port 5480\n",
+            ),
+            ("data/catalog.json", b"{\"tables\": {\"slot\": [1, 2]}}\n"),
+            ("Cargo.toml", b"[package]\nname = \"sdb\"\n[dependencies]\n"),
+        ];
+        for (name, body) in honest {
+            let r = sql_scan(&[(name, body)]);
+            assert!(r.is_ok(), "{name}: false positive {r:?}");
+        }
+    }
+
+    /// The eval-only pipeline proof writes the harness's own sqlite3-backed
+    /// reference into the workspace; that exact file is not candidate code,
+    /// but any edit of it is.
+    #[test]
+    fn sql_scanner_skips_only_the_exact_reference_adapter() {
+        let reference = crate::verifier::sql::ref_server::SQL_REF_SERVER_PY;
+        assert!(sql_scan(&[("sql_server.py", reference.as_bytes())]).is_ok());
+        let edited = format!("{reference}\n# tweaked\n");
+        assert!(sql_scan(&[("sql_server.py", edited.as_bytes())]).is_err());
     }
 }

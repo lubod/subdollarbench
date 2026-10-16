@@ -298,8 +298,7 @@ mod tests {
             s.tables
                 .iter()
                 .flat_map(|t| {
-                    std::iter::once(t.name.clone())
-                        .chain(t.columns.iter().map(|c| c.name.clone()))
+                    std::iter::once(t.name.clone()).chain(t.columns.iter().map(|c| c.name.clone()))
                 })
                 .collect()
         };

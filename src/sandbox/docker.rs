@@ -781,10 +781,8 @@ impl SandboxManager {
 
         // The server script is generated on the host and mounted read-only;
         // the container's own DB lives in its /tmp (fresh per container).
-        let script_dir = std::env::temp_dir().join(format!(
-            "subdollar-ref-sql-src-{}",
-            self.instance_id
-        ));
+        let script_dir =
+            std::env::temp_dir().join(format!("subdollar-ref-sql-src-{}", self.instance_id));
         crate::verifier::sql::ref_server::write_reference(&script_dir, 5480)
             .map_err(|e| anyhow!("write ref-sql script: {e}"))?;
         let mount = format!("{}:/srv:ro", script_dir.display());

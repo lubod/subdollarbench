@@ -70,7 +70,8 @@ def has_word(masked_upper, word):
 
 def translate_ddl(sql):
     stmt = sql.strip().rstrip(";").rstrip()
-    if not stmt.upper().startswith("CREATE TABLE"):
+    # Keyword case and whitespace (spaces, tabs) are randomized.
+    if not re.match(r"\s*CREATE\s+TABLE\b", stmt, re.I):
         return stmt
     masked = mask_quoted(stmt)
     open_i = masked.find("(")
@@ -174,7 +175,9 @@ def answer(conn, sql):
     cur = conn.cursor()
     before = conn.total_changes
     cur.execute(translate_ddl(sql))
-    if cur.description is not None:
+    # ALTER TABLE on a STRICT table runs a nested check query and so has a
+    # description; it is still DDL (same rule as the Rust oracle).
+    if cur.description is not None and not re.match(r"\s*ALTER\b", sql, re.I):
         headers = [d[0] for d in cur.description]
         rows = cur.fetchall()
         lines = ["ROWS %d" % len(headers), "\t".join(headers)]
@@ -349,21 +352,22 @@ mod tests {
     fn reference_answers_a_pipelined_script() {
         let port = free_port();
         let _ref = start_reference(port);
-        let script = build_script(stage_seed("reference-pipeline", 3), &Profile::through(3), 60);
+        let script = build_script(
+            stage_seed("reference-pipeline", 3),
+            &Profile::through(3),
+            60,
+        );
         let checked: Vec<_> = script.setup.iter().chain(&script.steps).collect();
         let lines: Vec<String> = checked.iter().map(|c| c.stmt.sql.clone()).collect();
-        let got = pipeline(
-            ("127.0.0.1", port),
-            &lines,
-            Duration::from_secs(10),
-        )
-        .expect("the reference must answer every pipelined line");
+        let got = pipeline(("127.0.0.1", port), &lines, Duration::from_secs(10))
+            .expect("the reference must answer every pipelined line");
         assert_eq!(got.len(), lines.len());
         let oracle = Oracle::new().unwrap();
         for ((reply, line), c) in got.iter().zip(&lines).zip(&checked) {
             let expected = oracle.exec(line);
-            compare(&expected, reply, c.stmt.ordered)
-                .unwrap_or_else(|m| panic!("{line:?}: {m:?} (expected {})", render_expected(&expected)));
+            compare(&expected, reply, c.stmt.ordered).unwrap_or_else(|m| {
+                panic!("{line:?}: {m:?} (expected {})", render_expected(&expected))
+            });
         }
     }
 }

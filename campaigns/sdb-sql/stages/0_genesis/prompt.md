@@ -85,13 +85,21 @@ still answer afterwards.
 ## Constraints
 
 - **Standard library only.** No SQLite/DuckDB/Postgres bindings or
-  binaries, no vendored engine sources, no SQL parser libraries. The
-  sandbox scanner will find them.
+  binaries, no vendored engine sources, no SQL parser libraries — not in
+  test or helper files either. The sandbox scanner checks every file in
+  the workspace, and a violation disqualifies the ticket.
+- **Reference**: a server speaking this exact protocol runs at host
+  `ref-sql`, port 5480 (`printf 'SELECT 1\n' | nc ref-sql 5480`). Use it
+  to check answers while you develop; it is unreachable during grading.
 - Self-test before finishing, e.g.:
 
   ```bash
   printf 'CREATE TABLE t (id INTEGER, s TEXT)\nINSERT INTO t VALUES (1, '\''a'\''), (2, NULL)\nSELECT * FROM t\n' \
     | nc 127.0.0.1 5480
   ```
+
+- `SPEC.md` in the workspace holds the whole contract so far (launch,
+  protocol, dialect, constraints, every ticket to date). The harness
+  rewrites it before each ticket.
 
 - When done: create `/workspace/READY`.

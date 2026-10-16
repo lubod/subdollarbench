@@ -30,7 +30,7 @@ echo "[cell] building release binary ($BIN)"
 # (No `strings | grep -q`: pipefail + grep's early exit gives strings a
 # SIGPIPE and the guard misfires.)
 MARKERS="$(strings "$BIN" || true)"
-for marker in "did not reopen its port after a reset" "-repair"; do
+for marker in "did not reopen its port after a reset" "-repair" "embedded SQL engine or parser" "server unreachable"; do
     if [[ "$MARKERS" != *"$marker"* ]]; then
         echo "[cell] FATAL: $BIN is stale (missing marker '$marker'); refusing to run" >&2
         exit 1

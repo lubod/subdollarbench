@@ -42,4 +42,9 @@ zero-row updates (`WHERE` matches nothing -> `OK 0`).
   (one row matched), `ROWS 2` / `a\tb` / `2\t1` / `END 1`, `OK 1`,
   `ROWS 2` / `a\tb` / `END 0`.
 
+- `SPEC.md` in the workspace holds the whole contract so far (launch,
+  protocol, dialect, constraints, every ticket to date). The harness
+  rewrites it before each ticket. Answers can be checked against the
+  reference server at `ref-sql:5480`.
+
 - When done: create `/workspace/READY`.

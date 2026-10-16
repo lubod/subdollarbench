@@ -63,4 +63,9 @@ ticket.
   (`ORDER BY` arrives officially in ticket 2; if you already support it,
   the example works as shown.)
 
+- `SPEC.md` in the workspace holds the whole contract so far (launch,
+  protocol, dialect, constraints, every ticket to date). The harness
+  rewrites it before each ticket. Answers can be checked against the
+  reference server at `ref-sql:5480`.
+
 - When done: create `/workspace/READY`.

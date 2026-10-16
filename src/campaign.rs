@@ -169,6 +169,44 @@ impl LoadedCampaign {
     pub fn prompt_path(&self, stage: &StageSpec) -> PathBuf {
         self.root.join(&stage.prompt)
     }
+
+    /// The harness-owned `SPEC.md` for an attempt at `stage`
+    /// (docs/PROPOSAL-sdb-sql.md: "holds the sections unlocked so far, so a
+    /// fresh session can always read the rules"). Each session sees only
+    /// its own ticket, and tickets after genesis do not restate the launch
+    /// contract, protocol or constraints, so the spec is every earlier
+    /// ticket in ladder order followed by this attempt's own ticket
+    /// (`current_prompt`: the full or the lite text).
+    pub fn render_spec_md(&self, stage: &StageSpec, current_prompt: &Path) -> Result<String> {
+        let mut out = format!(
+            "# SPEC.md — {}\n\n\
+             Harness-owned: rewritten before every ticket, so edits here are \
+             discarded. It is every ticket released so far, oldest first; a \
+             later ticket extends the earlier ones and wins where they \
+             differ. The last section is the ticket you are working on now.\n",
+            self.spec.title
+        );
+        let mut push = |title: &str, path: &Path| -> Result<()> {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("SPEC.md: read {}", path.display()))?;
+            out.push_str(&format!(
+                "\n---\n\n<!-- {title} -->\n\n{}\n",
+                text.trim_end()
+            ));
+            Ok(())
+        };
+        for s in self.spec.stages.iter().filter(|s| s.id < stage.id) {
+            push(
+                &format!("ticket {}: {}", s.id, s.title),
+                &self.prompt_path(s),
+            )?;
+        }
+        push(
+            &format!("ticket {} (current): {}", stage.id, stage.title),
+            current_prompt,
+        )?;
+        Ok(out)
+    }
 }
 
 /// Stage config handed to `BenchmarkPipeline`: prompt override + workspace
@@ -290,8 +328,13 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
         let mut seen = HashSet::new();
         // The sdb-sql ladder is 0-based (ticket 0 is genesis and the
         // differential stages carry the same ids); every other suite
-        // numbers its stages from 1.
-        let min_stage = if spec.task == "sql" { 0 } else { 1 };
+        // numbers its stages from 1. Both span `max_stage` stages, so the
+        // 0-based ladder (21 tickets) ends at 20.
+        let (min_stage, max_stage) = if spec.task == "sql" {
+            (0, max_stage.saturating_sub(1))
+        } else {
+            (1, max_stage)
+        };
         for id in a {
             if !(min_stage..=max_stage).contains(id) {
                 bail!(
@@ -1263,6 +1306,29 @@ mod tests {
         assert!(err.contains("out of range 1..=9"), "{err}");
     }
 
+    /// SPEC.md for ticket 2 carries genesis (the launch contract and
+    /// protocol a fresh session would otherwise never see), ticket 1, then
+    /// the current ticket last; a later ticket never leaks in.
+    #[test]
+    fn test_sql_spec_md_holds_every_ticket_so_far() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+        let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+        let s2 = lc.spec.stages.iter().find(|s| s.id == 2).unwrap();
+        let md = lc.render_spec_md(s2, &lc.prompt_path(s2)).unwrap();
+        let pos = |needle: &str| {
+            md.find(needle)
+                .unwrap_or_else(|| panic!("SPEC.md misses {needle:?}"))
+        };
+        assert!(pos("Launch contract") < pos("# Ticket 1"));
+        assert!(pos("# Ticket 1") < pos("ticket 2 (current)"));
+        assert!(md.contains("ref-sql"), "the reference is named");
+        assert!(!md.contains("# Ticket 3"), "no later ticket");
+        // Genesis has no predecessors: just its own ticket.
+        let s0 = lc.spec.stages.iter().find(|s| s.id == 0).unwrap();
+        let md0 = lc.render_spec_md(s0, &lc.prompt_path(s0)).unwrap();
+        assert!(md0.contains("ticket 0 (current)") && !md0.contains("# Ticket 1"));
+    }
+
     #[test]
     fn test_sql_acceptance_validation() {
         let mut lc = fixture_campaign();
@@ -1274,10 +1340,12 @@ mod tests {
         lc.spec.stages[1].acceptance.sql_stages = vec![0, 1];
         lc.spec.stages[2].acceptance.sql_stages = vec![0, 1, 2, 3];
         assert!(validate_spec(&lc.spec, &lc.root).is_ok());
-        // The ladder tops out at stage 21 (tickets 0-20).
-        lc.spec.stages[2].acceptance.sql_stages = vec![0, 22];
+        // 21 tickets, 0-20: id 20 is the last valid one, 21 is out.
+        lc.spec.stages[2].acceptance.sql_stages = vec![0, 20];
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+        lc.spec.stages[2].acceptance.sql_stages = vec![0, 21];
         let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
-        assert!(err.contains("out of range 0..=21"), "{err}");
+        assert!(err.contains("out of range 0..=20"), "{err}");
     }
 
     #[test]

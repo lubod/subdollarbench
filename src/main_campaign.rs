@@ -373,6 +373,13 @@ async fn run_one_stage(
             rollback_workspace(workdir, &commit).await?;
         }
     }
+    // sdb-sql: the harness-owned contract so far, written after any
+    // rollback (a `git clean` would remove it) and before the session.
+    if lc.spec.task == "sql" {
+        let md = lc.render_spec_md(stage, &job.prompt_path)?;
+        std::fs::write(workdir.join("SPEC.md"), md)
+            .with_context(|| format!("write SPEC.md in {}", workdir.display()))?;
+    }
     let run_id = format!("{campaign_id}_s{}_{variant_tag}", stage.id);
     let stage_dir = cdir.join(format!("s{}_{variant_tag}", stage.id));
     std::fs::create_dir_all(&stage_dir)?;

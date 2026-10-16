@@ -11,6 +11,7 @@ use super::client::TcpCandidate;
 use super::compare::{render_expected, render_response, MismatchKind};
 use super::generator::{build_script, Profile, Statement};
 use super::run::{run_script, Candidate, Verdict};
+use super::scenarios::ScenarioResult;
 use super::shrink::{first_failure, shrink_with_budget, Repro};
 use super::wire::Response;
 use std::time::Duration;
@@ -59,12 +60,22 @@ pub fn differential_supported(stage: u32) -> bool {
 /// A deterministic seed for (verification, stage): every verification of a
 /// ticket uses a fresh seed, so a repair cannot overfit to the reported
 /// example (docs/PROPOSAL-sdb-sql.md, "Fresh seeds").
+///
+/// FNV-1a, not `DefaultHasher`: std does not promise the latter is stable
+/// across Rust releases, and a recorded seed must replay the same script
+/// after a toolchain upgrade.
 pub fn stage_seed(verifier_seed: &str, stage: u32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    verifier_seed.hash(&mut h);
-    stage.hash(&mut h);
-    h.finish()
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in verifier_seed
+        .as_bytes()
+        .iter()
+        .chain(&[0xff])
+        .chain(&stage.to_le_bytes())
+    {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// The result of one differential stage run.
@@ -104,8 +115,14 @@ pub const SHRINK_CHECKS: usize = 60;
 
 /// Run the cumulative differential suite of `passed` stages against the
 /// server at `addr`, using `seed`. `Err` is a verifier fault (unmapped
-/// oracle message, gradeable share under the floor, or no connection);
-/// `Ok` distinguishes pass from failure-with-repro.
+/// oracle message, gradeable share under the floor); `Ok` distinguishes
+/// pass from failure-with-repro. A server that cannot be reached is a
+/// candidate failure, not a verifier fault: a model whose server never
+/// binds (or died during an earlier stage) failed the ticket.
+///
+/// The highest stage in `passed` selects the suite; its scripted scenarios
+/// ([`super::scenarios::for_stage`]) run after the differential script
+/// passes.
 ///
 /// `reset` restarts the candidate with a fresh database. It is required for
 /// a sound shrink: a replay against left-over state answers `exists` and
@@ -138,17 +155,43 @@ pub fn run_stage(
         ));
     }
 
-    let mut cand = TcpCandidate::connect(addr, timeout)?;
+    let failed = |checks: usize, kind: MismatchKind, detail: String| StageOutcome {
+        seed,
+        passed: false,
+        checks,
+        discarded: script.discarded,
+        kind: Some(kind),
+        repro: None,
+        detail,
+    };
+    let mut cand = match TcpCandidate::connect(addr, timeout) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(failed(
+                0,
+                MismatchKind::Protocol,
+                format!("server unreachable ({e})"),
+            ))
+        }
+    };
     match run_script(&mut cand, &script) {
-        Verdict::Pass { checks } => Ok(StageOutcome {
-            seed,
-            passed: true,
-            checks,
-            discarded: script.discarded,
-            kind: None,
-            repro: None,
-            detail: String::new(),
-        }),
+        Verdict::Pass { checks } => {
+            drop(cand);
+            let stage = passed.iter().copied().max().unwrap_or(0);
+            match super::scenarios::for_stage(stage, addr, timeout, seed) {
+                ScenarioResult::Pass => Ok(StageOutcome {
+                    seed,
+                    passed: true,
+                    checks,
+                    discarded: script.discarded,
+                    kind: None,
+                    repro: None,
+                    detail: String::new(),
+                }),
+                ScenarioResult::Fail(d) => Ok(failed(checks, MismatchKind::Protocol, d)),
+                ScenarioResult::Fault(e) => Err(e),
+            }
+        }
         Verdict::Fail(f) => {
             let detail = format!("{:?}: {}", f.mismatch.kind, f.mismatch.detail);
             // Every shrink trial re-grades on a fresh oracle *and* a fresh
@@ -228,24 +271,33 @@ mod tests {
     fn oracle_server() -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // One database for every connection, like a real server: the
+        // stage-0 scenario checks that concurrent clients see each other.
+        let oracle = std::sync::Arc::new(std::sync::Mutex::new(Oracle::new().unwrap()));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(sock) = stream else { break };
+                let oracle = oracle.clone();
                 thread::spawn(move || {
-                    let oracle = Oracle::new().unwrap();
                     let mut sock = sock;
                     sock.set_nodelay(true).unwrap();
                     let mut reader = BufReader::new(sock.try_clone().unwrap());
                     let mut line = String::new();
-                    while reader.read_line(&mut line).unwrap() > 0 {
-                        let out = oracle.exec(line.trim_end());
-                        assert!(
-                            !matches!(out, OracleOutcome::Discard(_) | OracleOutcome::Unknown(_)),
-                            "ungradeable answer: {out:?}"
-                        );
-                        let text = super::super::compare::render_expected(&out);
-                        sock.write_all(text.as_bytes()).unwrap();
-                        sock.write_all(b"\n").unwrap();
+                    // Hostile input (invalid UTF-8, an unterminated line)
+                    // ends the connection, never the server.
+                    while matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                        let out = oracle.lock().unwrap().exec(line.trim_end());
+                        let text = match out {
+                            OracleOutcome::Discard(_) | OracleOutcome::Unknown(_) => {
+                                "ERR syntax".to_string()
+                            }
+                            out => super::super::compare::render_expected(&out),
+                        };
+                        if sock.write_all(text.as_bytes()).is_err()
+                            || sock.write_all(b"\n").is_err()
+                        {
+                            break;
+                        }
                         line.clear();
                     }
                 });
@@ -314,15 +366,14 @@ mod tests {
         let addr = oracle_server();
         let addr = addr.to_string();
         for stage in 0..=3u32 {
-            for seed in [7u64, 8] {
+            for tag in ["a", "b"] {
+                // One long-lived server, so every run needs its own seed
+                // (and namespace), exactly as the pipeline derives them.
+                let seed = stage_seed(tag, stage);
                 let passed: Vec<u32> = (0..=stage).collect();
                 let out = run_stage(&addr, Duration::from_secs(10), seed, &passed, 150, None)
                     .unwrap_or_else(|e| panic!("stage {stage} seed {seed}: {e}"));
-                assert!(
-                    out.passed,
-                    "stage {stage} seed {seed}: {}",
-                    out.detail
-                );
+                assert!(out.passed, "stage {stage} seed {seed}: {}", out.detail);
                 assert!(out.checks > 100, "stage {stage}: {} checks", out.checks);
                 assert!(out.repro.is_none());
             }
@@ -361,7 +412,10 @@ mod tests {
             repro.render()
         );
         let text = repro.render();
-        assert!(text.contains("Expected:") && text.contains("Got:"), "{text}");
+        assert!(
+            text.contains("Expected:") && text.contains("Got:"),
+            "{text}"
+        );
         // The repro is self-contained and still fails on a fresh engine.
         let mut mk = || -> Box<dyn Candidate> { Box::new(Toy::new(Some(Fault::NullsLast))) };
         assert!(super::super::shrink::first_failure(&repro.statements, &mut mk).is_some());
@@ -380,8 +434,15 @@ mod tests {
             // empty database, or its "original failure" is already an
             // artifact.
             let addr = shared_toy_server(Some(Fault::NullsLast)).to_string();
-            let out =
-                run_stage(&addr, Duration::from_secs(10), seed, &[0, 1, 2, 3], 80, None).unwrap();
+            let out = run_stage(
+                &addr,
+                Duration::from_secs(10),
+                seed,
+                &[0, 1, 2, 3],
+                80,
+                None,
+            )
+            .unwrap();
             if !out.passed {
                 found = Some(out);
                 break;
@@ -430,13 +491,18 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_server_is_a_verifier_visible_transport_failure() {
-        // Grab a port, then close it: connect is refused.
+    fn a_dead_server_is_a_candidate_failure_not_a_verifier_fault() {
+        // Grab a port, then close it: connect is refused. A model whose
+        // server never binds failed the ticket; reporting it as a verifier
+        // fault would score it as "measured nothing" and skip the lite try.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         drop(listener);
-        let err = run_stage(&addr, Duration::from_millis(500), 1, &[0], 10, None).unwrap_err();
-        assert!(err.starts_with("connect:"), "{err}");
+        let out = run_stage(&addr, Duration::from_millis(500), 1, &[0], 10, None)
+            .expect("an unreachable server is graded, not a verifier fault");
+        assert!(!out.passed);
+        assert_eq!(out.kind, Some(MismatchKind::Protocol));
+        assert!(out.detail.contains("server unreachable"), "{}", out.detail);
     }
 
     #[test]
@@ -448,5 +514,7 @@ mod tests {
         assert_eq!(a, b, "same input, same seed");
         assert_ne!(a, c, "different stage, different seed");
         assert_ne!(a, d, "different verification, different seed");
+        // Pinned: a recorded seed must replay the same script forever.
+        assert_eq!(a, 10_323_051_711_405_321_790);
     }
 }

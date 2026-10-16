@@ -557,6 +557,22 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
     minimized repro can name a different statement than the stage's first
     failure; it is always a real failure on a fresh database, and fixing
     it re-runs the suite.
+  **Review fixes (2026-10-16, after merging the branch)**: an unreachable
+  server is a failed stage, not a verifier fault (it was scored "fault":
+  no lite try, "measured nothing"); `check_no_embedded_sql` scans every
+  file (no test-name exemption) for SQLite/DuckDB/parser imports,
+  literals, Go paths, crates, binaries, vendored sources, `SQLite format
+  3` magic in data files and binaries, sql task only; the stage-0
+  scenarios the prompt promised now run (pipelined script answered in
+  order, 8 concurrent clients see each other's rows, garbage bytes /
+  unterminated line / 2 MiB line must not kill the server); the fresh
+  repair seed is sql-only (other tasks keep their grading); `SPEC.md`
+  (every earlier ticket + the current one) is written before each sql
+  session; prompts and omp guidance name `ref-sql:5480`; acceptance ids
+  are 0..=20; `stage_seed` is FNV-1a (stable across toolchains); the
+  reference's DDL match tolerates randomized whitespace. Tickets 0-3 have
+  no lite by the spec, so none is missing. **Remaining for M6**: one
+  cheap-model cell on the fixed build (`scripts/sql-cell.sh`).
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.

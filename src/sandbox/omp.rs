@@ -549,7 +549,7 @@ impl OmpRunner {
         // own ref probing bypasses the proxy. Harmless for the candidate, which
         // cannot resolve these names in the first place.
         // Both upper- and lower-case variants: pip/npm/go honor either.
-        let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1";
+        let no_proxy = "ref-redis,ref-http,ref-sql,egress-proxy,localhost,127.0.0.1";
         let egress_on = crate::sandbox::docker::egress_filter_enabled();
         if let Some(proxy_url) = (if egress_on { network } else { None })
             .and_then(|net| {
@@ -1975,8 +1975,10 @@ Content-Length: 0
                 5480,
                 "printf 'SELECT 1\n' | nc 127.0.0.1 5480",
                 r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources.
-- Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed."#,
+- Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources. This includes test and helper files: the scanner checks every file.
+- Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed.
+- Ground truth: a reference server speaking the same protocol runs at host `ref-sql`, port 5480 (`printf 'SELECT 1\n' | nc ref-sql 5480`). Compare against it while developing; it is not reachable while you are graded.
+- `SPEC.md` in the workspace holds the full contract so far (harness-owned, rewritten every ticket)."#,
             ),
             Some(crate::config::TaskType::Binproto) => (
                 6395,
@@ -2096,7 +2098,8 @@ mod tests {
         let base_pat =
             ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base.to_string()))).unwrap();
         let alias_pat =
-            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
+            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|ref-sql|upstream1|upstream2|upstream3)")
+                .unwrap();
         for line in content.lines() {
             if base_pat.is_match(line) && !alias_pat.is_match(line) {
                 panic!(

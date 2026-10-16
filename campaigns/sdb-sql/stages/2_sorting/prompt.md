@@ -36,4 +36,9 @@ escaped, integers are plain decimal.
     | nc 127.0.0.1 5480
   ```
 
+- `SPEC.md` in the workspace holds the whole contract so far (launch,
+  protocol, dialect, constraints, every ticket to date). The harness
+  rewrites it before each ticket. Answers can be checked against the
+  reference server at `ref-sql:5480`.
+
 - When done: create `/workspace/READY`.
