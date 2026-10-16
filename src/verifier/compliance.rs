@@ -1114,6 +1114,17 @@ const SQL_CRATES: &[&str] = &[
     "polars-sql",
 ];
 
+/// Engine spellings from ecosystems whose bundles the byte scan cannot see
+/// (JDBC, .NET, PHP extensions). Case-insensitive substring match on
+/// comment-stripped code.
+const SQL_FOREIGN_MARKERS: &[&str] = &[
+    "org.sqlite",
+    "microsoft.data.sqlite",
+    "system.data.sqlite",
+    "mono.data.sqlite",
+    "pdo_sqlite",
+];
+
 /// Database binaries a start script must not run or install.
 const SQL_BINARIES: &[&str] = &[
     "sqlite3", "duckdb", "psql", "postgres", "pg_ctl", "mysqld", "mariadbd", "mysql",
@@ -1171,6 +1182,72 @@ impl ComplianceChecker {
         }
     }
 
+    /// Inline comment markers by source kind. Block comments are not
+    /// handled: a mention inside `/* ... */` is rare enough that flagging
+    /// stays the conservative direction.
+    fn comment_markers(ext: &str, lower_name: &str) -> &'static [&'static str] {
+        if lower_name.contains("dockerfile") || lower_name == "procfile" {
+            return &["#"];
+        }
+        match ext {
+            "py" | "rb" | "sh" | "bash" | "pl" | "toml" => &["#"],
+            "php" => &["//", "#"],
+            "js" | "mjs" | "cjs" | "ts" | "go" | "rs" | "c" | "cc" | "cpp" | "h" | "hpp"
+            | "java" | "kt" | "cs" => &["//"],
+            _ => &[],
+        }
+    }
+
+    /// Cut inline comments, quote-aware: a `#`/`//` inside a string literal
+    /// or a raw string survives (`r#"http://x"#`, Go backticks).
+    fn strip_inline_comments(content: &str, markers: &[&str]) -> String {
+        if markers.is_empty() {
+            return content.to_string();
+        }
+        let marker_chars: Vec<Vec<char>> = markers.iter().map(|m| m.chars().collect()).collect();
+        let mut out = String::with_capacity(content.len());
+        for (li, line) in content.lines().enumerate() {
+            if li > 0 {
+                out.push('\n');
+            }
+            let chars: Vec<char> = line.chars().collect();
+            let mut quote: Option<char> = None;
+            let mut cut: Option<usize> = None;
+            let mut i = 0;
+            'scan: while i < chars.len() {
+                let c = chars[i];
+                if let Some(q) = quote {
+                    if c == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == q {
+                        quote = None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if c == '"' || c == '\'' || c == '`' {
+                    quote = Some(c);
+                    i += 1;
+                    continue;
+                }
+                for m in &marker_chars {
+                    if chars[i..].starts_with(&m[..]) {
+                        cut = Some(i);
+                        break 'scan;
+                    }
+                }
+                i += 1;
+            }
+            match cut {
+                Some(k) => out.extend(&chars[..k]),
+                None => out.extend(&chars),
+            }
+        }
+        out
+    }
+
     fn scan_sql_dir(dir: &Path, names_only: bool, violations: &mut Vec<String>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
@@ -1211,7 +1288,10 @@ impl ComplianceChecker {
         let vendored_name = ((lower.starts_with("sqlite3") || lower.starts_with("libsqlite3"))
             && matches!(ext, "c" | "h" | "so" | "a" | "dll" | "dylib" | "wasm" | "o"))
             || (lower.starts_with("duckdb") && matches!(ext, "hpp" | "cpp" | "h" | "so" | "a"))
-            || lower.starts_with("sql-wasm");
+            || lower.starts_with("sql-wasm")
+            // JVM/.NET bundles: the engine is compressed inside, so the raw
+            // byte scan cannot see it and the file name is the signal.
+            || (matches!(ext, "jar" | "class") && lower.contains("sqlite"));
         if vendored_name {
             violations.push(format!("vendored engine file {}", path.display()));
             return;
@@ -1265,6 +1345,7 @@ impl ComplianceChecker {
                 | "h"
                 | "hpp"
                 | "php"
+                | "cs"
                 | "pl"
                 | "lua"
                 | "sh"
@@ -1282,41 +1363,61 @@ impl ComplianceChecker {
         let report = |violations: &mut Vec<String>, what: String| {
             violations.push(format!("{}: {what}", path.display()));
         };
+        // Inline comments are cut (quote-aware): "# import sqlite3 is
+        // banned" is prose, and flagging it would disqualify an honest
+        // workspace. Block comments are left alone; a mention inside one is
+        // rare and flagging is the conservative direction.
+        let code = Self::strip_inline_comments(&content, Self::comment_markers(ext, &lower));
         for m in SQL_SOURCE_MARKERS {
-            if content.contains(m) {
+            if code.contains(m) {
                 return report(violations, format!("vendored engine source ({m})"));
             }
         }
-        // Whole-line comments are dropped first: "# not using sqlite3" is
-        // prose, not a dependency.
-        let code: Vec<&str> = content
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start();
-                !(t.starts_with('#') || t.starts_with("//"))
-            })
-            .collect();
-        let code = code.join("\n");
+        let literals = Self::string_literals(&code);
         if ext == "py" {
             for m in SQL_PY_MODULES {
-                if Self::imports_py_module(&code, m) {
+                // Anchored to an import statement: a docstring or an inline
+                // comment may name a module without being one.
+                // `__import__('sqlite3')` stays covered by the exact
+                // literal check below.
+                let pat = format!(r"(?m)^\s*(?:import|from)\s+{}\b", ::regex::escape(m));
+                if ::regex::Regex::new(&pat).unwrap().is_match(&code) {
                     return report(violations, format!("imports {m}"));
                 }
             }
         }
         for p in SQL_GO_PATHS {
-            if code.contains(p) {
+            // Go imports are quoted literals (`import _ "modernc.org/sqlite"`);
+            // go.mod/go.sum carry the path unquoted. Raw text elsewhere may
+            // be a comment naming the module without depending on it.
+            let hit = if lower == "go.mod" || lower == "go.sum" {
+                code.contains(p)
+            } else {
+                literals.iter().any(|l| l.contains(p))
+            };
+            if hit {
                 return report(violations, format!("uses {p}"));
             }
         }
-        for lit in Self::string_literals(&code) {
+        for m in SQL_FOREIGN_MARKERS {
+            if code.to_lowercase().contains(m) {
+                return report(violations, format!("uses {m}"));
+            }
+        }
+        for lit in &literals {
             let l = lit.trim();
             if SQL_LITERALS.contains(&l) {
                 return report(violations, format!("names {l:?}"));
             }
+            // PDO/DSN spellings: "sqlite:data.db", "sqlite::memory:".
+            if l.get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case("sqlite:"))
+            {
+                return report(violations, format!("names {l:?}"));
+            }
         }
         if lower == "cargo.toml" {
-            for line in content.lines() {
+            for line in code.lines() {
                 let t = line.trim();
                 let key = t
                     .strip_prefix("[dependencies.")
@@ -1329,7 +1430,7 @@ impl ComplianceChecker {
             }
         }
         if lower == "requirements.txt" || lower == "pyproject.toml" {
-            for line in content.lines() {
+            for line in code.lines() {
                 let t = line
                     .trim()
                     .trim_matches(|c| c == '"' || c == '\'')
@@ -1347,6 +1448,20 @@ impl ComplianceChecker {
             matches!(ext, "sh" | "bash") || lower.contains("dockerfile") || lower == "procfile";
         if script {
             for line in code.lines() {
+                let t = line.trim_start();
+                // `echo sqlite3` prints a word, it does not run one. Only
+                // skip when the line is a plain echo (a pipeline or `&&`
+                // after it still executes).
+                let chained =
+                    t.contains(';') || t.contains("&&") || t.contains("||") || t.contains('|');
+                if !chained
+                    && (t == "echo"
+                        || t.starts_with("echo ")
+                        || t == "printf"
+                        || t.starts_with("printf "))
+                {
+                    continue;
+                }
                 for tok in Self::tokenize_command(line) {
                     let base = tok.rsplit('/').next().unwrap_or(&tok);
                     if SQL_BINARIES.contains(&base) {
@@ -2120,6 +2235,12 @@ RUN apk add redis
                 b"module.exports = 1\n",
             ),
             ("server", b"\x7fELF\x00\x01junkSQLite format 3\0more"),
+            // Ecosystems whose bundles the raw byte scan cannot see.
+            ("srv.php", b"<?php\n$db = new PDO('sqlite:data.db');\n"),
+            ("Db.cs", b"using Microsoft.Data.Sqlite;\nclass X {}\n"),
+            ("Main.java", b"import org.sqlite.JDBC;\nclass X {}\n"),
+            ("lib/sqlite-jdbc-3.45.0.jar", b"PK\x03\x04junk"),
+            ("cfg.php", b"<?php\n$pdo = new PDO('sqlite::memory:');\n"),
         ];
         for (name, body) in cases {
             let r = sql_scan(&[(name, body)]);
@@ -2153,6 +2274,27 @@ RUN apk add redis
             ),
             ("data/catalog.json", b"{\"tables\": {\"slot\": [1, 2]}}\n"),
             ("Cargo.toml", b"[package]\nname = \"sdb\"\n[dependencies]\n"),
+            // Inline comments and docstrings may name the banned modules
+            // verbatim without importing anything (probed 2026-10-16).
+            (
+                "inline.py",
+                b"x = 1  # import sqlite3 would violate the rules\nprint(x)\n",
+            ),
+            (
+                "docstring.py",
+                b"def f():\n    \"\"\"We must never import sqlite3.\"\"\"\n    return 1\n",
+            ),
+            (
+                "inline.go",
+                b"package main\n\nfunc main() {} // github.com/mattn/go-sqlite3 is banned\n",
+            ),
+            ("echo.sh", b"#!/bin/bash\necho ok  # sqlite3 is banned\n"),
+            (
+                "marker.go",
+                b"package main\n// SQLITE_VERSION_NUMBER is what we must not vendor\nfunc main() {}\n",
+            ),
+            // A commented-out dependency is not a dependency.
+            ("Cargo.toml", b"[dependencies]\n# rusqlite = \"0.32\"\n"),
         ];
         for (name, body) in honest {
             let r = sql_scan(&[(name, body)]);

@@ -37,6 +37,12 @@ for marker in "did not reopen its port after a reset" "-repair" "embedded SQL en
     fi
 done
 
+# Merge hygiene: fmt is fast; clippy stays in CI so the preflight is quick.
+if ! (cd "$ROOT" && cargo fmt --check >/dev/null 2>&1); then
+    echo "[cell] FATAL: cargo fmt --check fails; run cargo fmt" >&2
+    exit 1
+fi
+
 # Preflight: campaigns run foreground on worker-0 ports, so no engine wave
 # may hold them, and the candidate port must be free.
 status="$(curl -fsS -m 3 http://127.0.0.1:3000/api/status 2>/dev/null || true)"
