@@ -14,9 +14,11 @@
 
 pub mod client;
 pub mod compare;
+pub mod driver;
 pub mod generator;
 pub mod oracle;
 pub mod run;
+pub mod scenarios;
 pub mod schema;
 pub mod shrink;
 #[cfg(test)]

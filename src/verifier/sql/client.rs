@@ -79,6 +79,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         thread::spawn(move || {
             let (sock, _) = listener.accept().unwrap();
+            // Without nodelay the small response writes pay a delayed-ACK
+            // stall (~40ms) per statement in these tests.
+            sock.set_nodelay(true).unwrap();
             serve(sock);
         });
         addr
