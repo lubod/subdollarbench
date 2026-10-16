@@ -22,6 +22,17 @@ pub struct HttpVerifier {
 }
 
 impl HttpVerifier {
+    /// A client that never reuses connections. The candidate's own idle
+    /// reclaim may close a pooled keep-alive connection between two
+    /// probes, and a rejected/closed idle socket is not a health signal
+    /// (the stage-10 final GET flaked exactly so on 2026-10-16).
+    fn fresh_client() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .map_err(|e| format!("client: {e}"))
+    }
+
     pub fn new(target_port: u16, seed: Option<&str>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
@@ -1347,8 +1358,7 @@ impl HttpVerifier {
             .await
             .map_err(|e| format!("stall write: {e}"))?;
         // Normal traffic must still work.
-        let probe = self
-            .client
+        let probe = Self::fresh_client()?
             .get(format!("http://127.0.0.1:{}/", self.target_port))
             .send()
             .await
@@ -1383,8 +1393,7 @@ impl HttpVerifier {
             );
         }
         // (e) Still healthy.
-        let resp = self
-            .client
+        let resp = Self::fresh_client()?
             .get(format!("http://127.0.0.1:{}/", self.target_port))
             .send()
             .await

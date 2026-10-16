@@ -40,6 +40,17 @@ fn sql_data_dir(workdir: &Path) -> PathBuf {
         .join("sql-data")
 }
 
+/// `wait_for_port` only proves the socket accepts; under a loaded host the
+/// application may not serve yet, and the next request then dies on a reset
+/// (the http stages 9/10 restart flaked exactly so on 2026-10-16). Probe
+/// like the pre-verification setup does.
+async fn wait_until_serving(port: u16, timeout_secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while !candidate_serves_http(port) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+}
+
 fn candidate_serves_http(port: u16) -> bool {
     use std::io::{Read, Write};
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -2063,6 +2074,7 @@ impl BenchmarkPipeline {
                                                 }
                                             }
                                         } else {
+                                            wait_until_serving(port, 20).await;
                                             if campaign_only(9) {
                                                 let st = verifier.test_stage9_uploads().await;
                                                 prior_failed |= !st.passed;
@@ -2090,6 +2102,7 @@ impl BenchmarkPipeline {
                                 let _ =
                                     sandbox.start_candidate_in_docker_with(workdir, port, &extras);
                                 let _ = sandbox.wait_for_port(port, 25).await;
+                                wait_until_serving(port, 20).await;
                             }
                         }
                         let ps = stages.iter().filter(|s| s.passed).count() as u32;
