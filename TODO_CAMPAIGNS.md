@@ -507,7 +507,7 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   `scenarios.rs` (harness-side pipelining client) and `driver.rs`
   (per-stage replay over the TCP candidate with shrink-on-failure and
   the health floors). **Remaining**: profile lite subsets, then M6.
-- [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
+- [x] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
   **Adapter + live proof landed**: `ref_server.rs` is a stdlib-only
   Python server backed by its own sqlite3 (STRICT DDL translation, error
@@ -571,8 +571,17 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   session; prompts and omp guidance name `ref-sql:5480`; acceptance ids
   are 0..=20; `stage_seed` is FNV-1a (stable across toolchains); the
   reference's DDL match tolerates randomized whitespace. Tickets 0-3 have
-  no lite by the spec, so none is missing. **Remaining for M6**: one
-  cheap-model cell on the fixed build (`scripts/sql-cell.sh`).
+  no lite by the spec, so none is missing.
+  - cell 4 (fixed build, 2026-10-16, `inkling-small:free`): **reached
+    ticket 0** — s0 PASS 1/1 ($0.0101, 28 turns; the new scanner and the
+    stage-0 scenarios included), s1 FAIL 0/2 ($0.0142, 30 turns) as a
+    stage-0 regression, total $0.0242. The first attempt aborted before
+    any model call (SPEC.md written before the genesis workspace existed;
+    fixed by handing it to the pipeline). Verified by hand: ticket 0's
+    commit answers the 4-statement repro `OK 4`, ticket 1's `ERR syntax`,
+    so the regression is real. Ticket 1's rewrite also dropped `--port`
+    (always 5480); the harness never passes it, so that contract clause
+    is unchecked.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.
