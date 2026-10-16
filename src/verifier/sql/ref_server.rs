@@ -331,7 +331,7 @@ mod tests {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);
-                let out = run_stage(&addr, Duration::from_secs(10), seed, &passed, 120)
+                let out = run_stage(&addr, Duration::from_secs(10), seed, &passed, 120, None)
                     .unwrap_or_else(|e| panic!("stage {stage} run {run}: verifier fault: {e}"));
                 assert!(
                     out.passed,

@@ -503,10 +503,24 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   split responses are reassembled and bytes past a response stay buffered
   for the next call). Review fixes on top of part 3: column bounds seeded
   from `DEFAULT`s, byte-safe DDL mask, loud oracle failure in
-  `first_failure`, stage-0 error list corrected. **Remaining**: pipelining
-  scenario, replay driver + stage wiring, profile lite subsets, then M6.
+  `first_failure`, stage-0 error list corrected. **Part 5 landed**:
+  `scenarios.rs` (harness-side pipelining client) and `driver.rs`
+  (per-stage replay over the TCP candidate with shrink-on-failure and
+  the health floors). **Remaining**: profile lite subsets, then M6.
 - [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
+  **Adapter + live proof landed**: `ref_server.rs` is a stdlib-only
+  Python server backed by its own sqlite3 (STRICT DDL translation, error
+  classes, total-changes affected counts); it passes every stage 20/20
+  at the verifier level and stages 0-3 through the real pipeline
+  (eval-only, one container, four scripts against one long-lived server
+  — schemas are seed-namespaced so stage scripts cannot collide).
+  Pipeline: `TaskType::Sql` (port 5480), the `run_verification` branch
+  (spawn_blocking, shrink repro on failure, verifier faults as infra
+  errors), `eval`/`replay` support, omp guidance. `campaigns/sdb-sql`
+  ships tickets 0-3 with the cumulative acceptance; validation accepts
+  the 0-based ladder. **Remaining**: a `ref-sql` container for agent
+  development (Q2), the cheap-model cell result below.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.

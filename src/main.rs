@@ -125,6 +125,7 @@ fn run_sql_stages_sync(port: u16, seed_tag: &str) -> (f64, u32, u32) {
             seed,
             &ids,
             driver::DEFAULT_STEPS,
+            None,
         ) {
             Ok(out) if out.passed => {
                 passed += 1;

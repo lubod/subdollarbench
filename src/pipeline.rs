@@ -2559,6 +2559,34 @@ impl BenchmarkPipeline {
                             let addr = format!("127.0.0.1:{port}");
                             let seed =
                                 crate::verifier::sql::driver::stage_seed(verifier_seed, stage);
+                            // The shrink replay needs a fresh database: a
+                            // contract-following candidate keeps its store in
+                            // <workspace>/data, so wipe that and restart the
+                            // container (in-memory state included).
+                            let instance_id = sandbox.instance_id.clone();
+                            let reset_dir = workdir.to_path_buf();
+                            let mut reset = move || -> Result<(), String> {
+                                let _ = std::fs::remove_dir_all(reset_dir.join("data"));
+                                let sb = crate::sandbox::docker::SandboxManager::with_id(
+                                    &instance_id,
+                                );
+                                sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
+                                sb.start_candidate_in_docker_with(
+                                    &reset_dir,
+                                    port,
+                                    &crate::sandbox::docker::CandidateRunExtras::default(),
+                                )
+                                .map_err(|e| format!("start: {e}"))?;
+                                let deadline = std::time::Instant::now()
+                                    + std::time::Duration::from_secs(20);
+                                while std::time::Instant::now() < deadline {
+                                    if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                                        return Ok(());
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
+                                }
+                                Err("candidate did not reopen its port after a reset".to_string())
+                            };
                             let run = tokio::task::spawn_blocking(move || {
                                 crate::verifier::sql::driver::run_stage(
                                     &addr,
@@ -2566,6 +2594,7 @@ impl BenchmarkPipeline {
                                     seed,
                                     &passed_ids,
                                     crate::verifier::sql::driver::DEFAULT_STEPS,
+                                    Some(&mut reset),
                                 )
                             })
                             .await;
@@ -3374,12 +3403,17 @@ impl BenchmarkPipeline {
                     // 4. Re-verify the updated candidate
                     let _ = fs::remove_file(config.workdir.join("READY"));
                     sandbox.detach_references();
+                    // Fresh seed per verification (docs/PROPOSAL-sdb-sql.md):
+                    // re-running the same seeded names against a candidate
+                    // that persisted them fails at statement 1 with `exists`
+                    // before anything is graded (live cell 2026-10-16).
+                    let repair_seed = format!("{verifier_seed}-repair{round}");
                     let next_outcome = Self::run_verification(
                         config.task,
                         &config.workdir,
                         &sandbox,
                         port,
-                        &verifier_seed,
+                        &repair_seed,
                         false,
                         config.worker,
                         &logger,
