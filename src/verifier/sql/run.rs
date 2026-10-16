@@ -1,8 +1,7 @@
 //! Replay a [`Script`] against a candidate and report the first mismatch.
 //!
 //! [`Candidate`] is the seam between the verifier and whatever answers
-//! statements: the in-test toy engines today, a TCP client against the
-//! model's server tomorrow.
+//! statements: the in-test toy engines and the TCP client in `client.rs`.
 
 use super::compare::{compare, Mismatch, MismatchKind};
 use super::generator::{Script, Statement};

@@ -498,8 +498,13 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   bound (ints <= i64::MAX, text <= 48), parentheses are only dropped when
   the printed text parses to the generated tree, and explicit bare
   left-associative chains test associativity. Result: 0 overflow discards
-  in 30k statements. **Remaining**: socket client + pipelining, profile
-  lite subsets, then M6.
+  in 30k statements. **Part 4 landed**: `client.rs`, a TCP `Candidate`
+  over one connection (timeouts, nodelay, one response per statement;
+  split responses are reassembled and bytes past a response stay buffered
+  for the next call). Review fixes on top of part 3: column bounds seeded
+  from `DEFAULT`s, byte-safe DDL mask, loud oracle failure in
+  `first_failure`, stage-0 error list corrected. **Remaining**: pipelining
+  scenario, replay driver + stage wiring, profile lite subsets, then M6.
 - [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
