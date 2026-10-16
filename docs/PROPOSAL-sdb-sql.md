@@ -98,10 +98,25 @@ sections unlocked so far, so a fresh session can always read the rules.
 - **Types:** `INTEGER` (64-bit signed) and `TEXT` (ASCII in tests). No
   REAL, BLOB or dates. Tables are strictly typed: a value of the wrong type
   is `ERR type`.
-- **Identifiers:** `[a-z_][a-z0-9_]*`, unquoted. Keywords are
-  case-insensitive (the generator randomizes keyword case and whitespace).
-- **Literals:** decimal integers with unary minus; single-quoted strings,
-  `''` escapes a quote; `NULL`.
+- **Identifiers:** `[a-z_][a-z0-9_]*`, unquoted. Keywords, function
+  names and the `AS` of an alias are case-insensitive (the generator
+  randomizes their case). Test identifiers are never SQL keywords; a
+  candidate may reserve any word from the standard SQL keyword lists
+  without failing a test.
+- **Whitespace:** space, tab and runs of either separate tokens; a
+  statement may end with an optional `;`. A tab inside a string literal is
+  an ordinary character.
+- **Literals:** decimal integers with unary minus (the generator
+  parenthesizes negative literals inside expressions: `(-5)`); single-quoted
+  strings in which `''` escapes a quote and **nothing else is special**
+  (a backslash is an ordinary character: `'a\b'` has three characters);
+  `NULL`. Test strings are ASCII, may be empty, may contain quotes, tabs,
+  backslashes and spaces, and never begin with `END`.
+- **Operator precedence** (tightest first, left associative within a
+  level): unary `-`; `||`; `* / %`; `+ -`; `< <= > >=`; `= <> != IS
+  IS NOT`; `NOT`; `AND`; `OR`. This is SQLite's table. The generator
+  parenthesizes most nested operands but deliberately leaves some bare, so
+  a parser that gets precedence or associativity wrong fails.
 - **Arithmetic:** `+ - * / %`. Integer division truncates toward zero
   (`-7/2 = -3`); `%` takes the sign of the dividend (`-7%3 = -1`);
   division or modulo by zero yields `NULL`. Overflow is not tested.

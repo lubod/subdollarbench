@@ -83,6 +83,16 @@ impl Rng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
+    /// True with probability `pct`/100.
+    pub fn chance(&mut self, pct: u64) -> bool {
+        self.below(100) < pct
+    }
+
+    /// A uniformly chosen element (the slice must be non-empty).
+    pub fn pick<'a, T>(&mut self, xs: &'a [T]) -> &'a T {
+        &xs[self.below(xs.len() as u64) as usize]
+    }
+
     pub fn below(&mut self, n: u64) -> u64 {
         if n == 0 {
             0
@@ -101,7 +111,7 @@ impl Rng {
     /// A short lowercase identifier from a syllable pool.
     pub fn ident(&mut self, used: &mut BTreeSet<String>) -> String {
         const A: [&str; 12] = [
-            "id", "name", "val", "cnt", "txt", "num", "key", "ref", "tag", "pos", "amt", "idx",
+            "id", "name", "val", "cnt", "txt", "num", "slot", "ref", "tag", "pos", "amt", "idx",
         ];
         let mut_name_seed: u64 = self.next_u64();
         for attempt in 0..64u64 {
@@ -212,6 +222,23 @@ impl Schema {
                         }
                         s
                     })
+                    .collect();
+                format!("CREATE TABLE {} ({})", t.name, cols.join(", "))
+            })
+            .collect()
+    }
+
+    /// Constraint-free DDL (`name TYPE` only). Primary keys, UNIQUE,
+    /// NOT NULL, DEFAULT and REFERENCES are a stage-9 feature, so earlier
+    /// stages must not see them.
+    pub fn create_statements_plain(&self) -> Vec<String> {
+        self.tables
+            .iter()
+            .map(|t| {
+                let cols: Vec<String> = t
+                    .columns
+                    .iter()
+                    .map(|c| format!("{} {}", c.name, c.ty.sql()))
                     .collect();
                 format!("CREATE TABLE {} ({})", t.name, cols.join(", "))
             })

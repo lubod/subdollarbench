@@ -9,5 +9,8 @@
 //! agreement, mutant toy engines, profile-coverage assertions and
 //! per-stage comparable-check floors.
 
+pub mod compare;
+pub mod generator;
 pub mod oracle;
 pub mod schema;
+pub mod wire;

@@ -466,12 +466,23 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   oracle-vs-oracle gate). Nine tests including the oracle-vs-oracle corpus
   (memory vs file) and pinned dialect semantics (division/modulo signs,
   div-by-zero NULL, NULL ordering). The self-tests caught five real bugs
-  before any candidate ran. **Remaining**: `generator` (type-directed,
-  profiles 0-3 + lite subsets), `wire` (text-protocol client),
-  `compare` (ordered/multiset + headers + OK counts + error class),
-  `shrink` (delta-debugged repro for repair feedback), the
-  oracle-vs-oracle 100k-statement gate, mutant toy engines, per-stage
-  comparable-check floors and profile-coverage assertions.
+  before any candidate ran. **Part 2 landed** (5a-5c): `generator.rs`
+  (seeded, type-directed; cumulative `Profile` per stage 0-3 + stage-9
+  constraints; keyword-case/whitespace/`;` randomization; total-order
+  `ORDER BY`; error probes incl. multi-row atomicity and the `a=b,b=a`
+  swap; predicates anchored on inserted values; `build_script` runs each
+  statement on a fresh oracle and fixes the expected answers up front),
+  `compare.rs` (ordered vs multiset, headers, OK counts, error class,
+  framing contradictions; cells compared in wire form), `wire.rs`
+  (value escaping + the OK/ROWS/ERR response reader; no socket yet).
+  Quality floors pinned in tests: >=90% gradeable statements, >=50% of
+  filtered SELECTs return rows, >=60% of UPDATE/DELETE touch a row,
+  <=3% constant WHEREs, every dialect error class probed. Dialect gaps the
+  generator exposed are now in the spec (precedence verified against
+  SQLite by brute force, backslash is literal, tab whitespace, no keyword
+  identifiers). **Remaining**: socket client + pipelining (5c tail),
+  `shrink` (delta-debugged repro for repair feedback), the oracle-vs-oracle
+  100k-statement gate, mutant toy engines, profile lite subsets.
 - [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
