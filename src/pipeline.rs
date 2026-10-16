@@ -2934,6 +2934,46 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Stage 6's suite: cross-connection isolation and
+                            // a kill with a transaction open (needs the
+                            // sandbox's kill/restart, so it runs here too).
+                            if late_failure.is_none() && wanted.contains(&6) {
+                                let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 6)
+                                    ^ 0x5E27_1E10_0000_0006;
+                                let addr = format!("127.0.0.1:{port}");
+                                let t = std::time::Duration::from_secs(20);
+                                let iso = crate::verifier::sql::txn::isolation(
+                                    &addr,
+                                    t,
+                                    &format!("c{ns:x}_iso"),
+                                );
+                                let killed = iso.and_then(|()| {
+                                    logger.log(
+                                        "  [TXN] uncommitted rows stay invisible across connections",
+                                    );
+                                    let mut kill =
+                                        || sandbox.kill_candidate().map_err(|e| e.to_string());
+                                    let mut restart = || {
+                                        restart_candidate(&sandbox.instance_id, workdir, port, &extras)
+                                    };
+                                    crate::verifier::sql::txn::kill_with_open_transaction(
+                                        &addr,
+                                        t,
+                                        &format!("c{ns:x}_kill"),
+                                        &mut kill,
+                                        &mut restart,
+                                    )
+                                });
+                                match killed {
+                                    Ok(()) => logger.log(
+                                        "  [TXN] a kill with an open transaction discarded it",
+                                    ),
+                                    Err(e) => {
+                                        logger.log(&format!("  [TXN] FAILED: {e}"));
+                                        late_failure = Some((6, format!("transactions: {e}")));
+                                    }
+                                }
+                            }
                         }
                         if let Some((lost, why)) = late_failure {
                             // A late check failed (upgrade drift or the crash
@@ -7392,6 +7432,52 @@ main()
             (6, 6)
         );
         cleanup_covtest_network("sqlcrashlite");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-sql stage 6 live proof (eval-only, no model): the reference
+    /// passes the transactions suite under Docker — cross-connection
+    /// isolation (two connections, uncommitted rows invisible) and a kill
+    /// -9 with a transaction open.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage6_transactions_live() {
+        let worker = 99u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqltxn");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-6 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqltxn");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 6,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5, 6],
+            lite_profile: Vec::new(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-6 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 6: Transactions -> PASS",
+            "[TXN] uncommitted rows stay invisible across connections",
+            "[TXN] a kill with an open transaction discarded it",
+            "[UPGRADE] sentinel for stage 6 written",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (7, 7)
+        );
+        cleanup_covtest_network("sqltxn");
         let _ = fs::remove_dir_all(&dir);
     }
 

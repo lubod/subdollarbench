@@ -644,6 +644,21 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   the embedded-SQL import check covers comma/`;`/`:` forms; Dockerfile
   candidates get `--port`/`--data` only with an `ENTRYPOINT` and read
   `SDB_PORT`/`SDB_DATA_DIR` otherwise; RULES 2026-10-16.7.
+  **Ticket 6 landed (2026-10-16)**: the generator has a `txn` profile —
+  whole transactions (`BEGIN`, a DML body, `COMMIT`/`ROLLBACK`), nested
+  `BEGIN` and bare `COMMIT`/`ROLLBACK` probes, `Kind::Txn`, and scripts
+  always closed (`build_script` drains an open transaction). The toy
+  engine implements transactions, so the independent-agreement gate now
+  covers the stage-6 scripts too. `txn.rs` holds the scripted checks the
+  generator cannot express: cross-connection isolation (uncommitted rows
+  invisible, `COMMIT` visible, `ROLLBACK` gone) and a kill with a
+  transaction open (committed survives, uncommitted leaves no trace),
+  wired through the pipeline's late-failure path for stage 6. The
+  reference passes both against a real process; the campaign declares
+  ticket 6 (tier 2, acceptance [0..6], no lite per the proposal). Gates:
+  20/20 at every stage 0-6, a stage-6 live proof (7/7, both `[TXN]`
+  lines, sentinel written). **Next**: ticket 7 (aggregates), which starts
+  tier 3.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

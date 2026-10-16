@@ -366,14 +366,15 @@ mod tests {
     }
 
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
-    /// against the reference. All runs share one server process, so this
-    /// also proves stage scripts never collide on schema names.
+    /// against the reference, through stage 6 (transaction scripts). All
+    /// runs share one server process, so this also proves stage scripts
+    /// never collide on schema names. Stages 7+ land here as they do.
     #[test]
     fn reference_passes_every_stage_twenty_times() {
         let port = free_port();
         let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=4u32 {
+        for stage in 0..=6u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);
@@ -452,6 +453,34 @@ mod tests {
         wait_until_answering(&addr, t).expect("answers after two restarts");
         crash::check_acked_prefix(&addr, t, "crash_acked", acked, 1).expect("double restart");
         crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("double restart");
+    }
+
+    /// Stage 6 against a real process: connections see only committed
+    /// rows, and a kill with a transaction open discards it.
+    #[test]
+    fn reference_transactions_isolate_and_roll_back_on_a_kill() {
+        use super::super::driver::wait_until_answering;
+        use super::super::txn;
+        let port = free_port();
+        let proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let t = Duration::from_secs(10);
+        txn::isolation(&addr, t, "txn_iso").expect("isolation");
+        {
+            // Two callbacks share one process: a cell keeps the borrows
+            // disjoint.
+            let proc = std::cell::RefCell::new(proc);
+            let mut kill = || {
+                proc.borrow_mut().kill();
+                Ok(())
+            };
+            let mut restart = || {
+                proc.borrow_mut().restart().map_err(|e| e.to_string())?;
+                wait_until_answering(&addr, t).map_err(|e| e.to_string())
+            };
+            txn::kill_with_open_transaction(&addr, t, "txn_kill", &mut kill, &mut restart)
+                .expect("open transaction discarded by recovery");
+        }
     }
 
     /// A restart that loses the store must be caught (the reference's

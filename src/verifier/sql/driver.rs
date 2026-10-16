@@ -52,10 +52,10 @@ pub fn stage_title(stage: u32) -> &'static str {
 }
 
 /// Stages the differential verifier can run today (the scripted scenarios
-/// for later stages are not built yet). Stages 4 and 5 add no grammar:
-/// their suites are the stage 0-3 profile plus scripted scenarios.
+/// for later stages are not built yet). Stages 4-5 add no grammar; stage 6
+/// adds transactions.
 pub fn differential_supported(stage: u32) -> bool {
-    stage <= 5
+    stage <= 6
 }
 
 /// A deterministic seed for (verification, stage): every verification of a

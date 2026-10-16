@@ -26,4 +26,5 @@ pub mod sentinel;
 pub mod shrink;
 #[cfg(test)]
 mod toy;
+pub mod txn;
 pub mod wire;

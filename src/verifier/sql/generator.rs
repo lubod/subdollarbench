@@ -41,6 +41,8 @@ pub struct Profile {
     pub distinct: bool,
     pub update: bool,
     pub delete: bool,
+    /// `BEGIN`/`COMMIT`/`ROLLBACK`: transactions, kept balanced per script.
+    pub txn: bool,
     pub constraints: bool,
 }
 
@@ -64,6 +66,7 @@ impl Profile {
                 p.update = true;
                 p.delete = true;
             }
+            6 => p.txn = true,
             9 => p.constraints = true,
             _ => {}
         }
@@ -81,6 +84,7 @@ impl Profile {
             distinct: self.distinct || o.distinct,
             update: self.update || o.update,
             delete: self.delete || o.delete,
+            txn: self.txn || o.txn,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -106,8 +110,10 @@ pub enum Kind {
     Select,
     Update,
     Delete,
+    /// `BEGIN`, `COMMIT` or `ROLLBACK`.
+    Txn,
     /// A deliberate error (missing table/column, arity, type, syntax,
-    /// duplicate create, atomicity).
+    /// duplicate create, atomicity, nested `BEGIN`, bare `COMMIT`).
     Probe,
 }
 
@@ -160,6 +166,9 @@ pub struct Generator {
     /// Recently inserted literals per column name (SQL text), so predicates
     /// can be anchored on values that really exist.
     seen: HashMap<String, Vec<String>>,
+    /// True while the generated stream is inside an open transaction.
+    /// `build_script` closes it at the end so no script leaves one open.
+    txn_open: bool,
     /// Per column: the largest magnitude (INTEGER) or length (TEXT) any
     /// value of it can have. Seeded from the schema's `DEFAULT`s (a column
     /// omitted from every explicit insert still holds its default) and
@@ -197,6 +206,7 @@ impl Generator {
             uniq: 0,
             seen: HashMap::new(),
             bounds,
+            txn_open: false,
         }
     }
 
@@ -936,6 +946,11 @@ impl Generator {
         if self.profile.where_clause {
             menu.push(8);
         }
+        if self.profile.txn {
+            // Outside a transaction these are `ERR txn` (the generator never
+            // calls probe() with one open).
+            menu.extend([11, 12]);
+        }
         let which = *self.rng.pick(&menu);
         let sql = match which {
             0 => format!("{} * {} zz_gone", self.kw("SELECT"), self.kw("FROM")),
@@ -1012,6 +1027,8 @@ impl Generator {
                 self.kw("FROM"),
                 self.kw("WHERE")
             ),
+            11 => self.kw("COMMIT"),
+            12 => self.kw("ROLLBACK"),
             _ => format!(
                 "{} {tname} {} zz_nocol = 1",
                 self.kw("UPDATE"),
@@ -1023,12 +1040,16 @@ impl Generator {
 
     /// The next statement of a mixed workload, weighted by the profile.
     pub fn next_statement(&mut self) -> Statement {
+        if self.txn_open {
+            return self.inside_transaction();
+        }
         let w_insert = 24u64;
         let w_select = 40u64;
         let w_update = if self.profile.update { 14 } else { 0 };
         let w_delete = if self.profile.delete { 6 } else { 0 };
         let w_probe = 10u64;
-        let total = w_insert + w_select + w_update + w_delete + w_probe;
+        let w_txn = if self.profile.txn { 10 } else { 0 };
+        let total = w_insert + w_select + w_update + w_delete + w_probe + w_txn;
         let mut roll = self.rng.below(total);
         if roll < w_insert {
             let ti = self.pick_table();
@@ -1046,7 +1067,61 @@ impl Generator {
         if roll < w_delete {
             return self.delete_stmt();
         }
-        self.probe()
+        roll -= w_delete;
+        if roll < w_probe {
+            return self.probe();
+        }
+        self.txn_open = true;
+        let sql = self.kw("BEGIN");
+        self.stmt(sql, Kind::Txn, false)
+    }
+
+    /// One statement of an open transaction: usually a DML body statement,
+    /// sometimes a committing close, rarely a nested `BEGIN` error probe
+    /// (the transaction keeps running, as SQLite does).
+    fn inside_transaction(&mut self) -> Statement {
+        let roll = self.rng.below(100);
+        if roll < 25 {
+            self.close_transaction_now()
+        } else if roll < 30 {
+            let sql = self.kw("BEGIN");
+            self.stmt(sql, Kind::Probe, false)
+        } else {
+            match self.rng.below(3) {
+                0 => {
+                    let ti = self.pick_table();
+                    self.insert_into(ti)
+                }
+                1 if self.profile.update => self.update_stmt(),
+                2 if self.profile.delete => self.delete_stmt(),
+                _ => {
+                    let ti = self.pick_table();
+                    self.insert_into(ti)
+                }
+            }
+        }
+    }
+
+    /// A statement that ends an open transaction (`COMMIT` mostly, sometimes
+    /// `ROLLBACK`).
+    fn close_transaction_now(&mut self) -> Statement {
+        self.txn_open = false;
+        let kw = if self.rng.chance(70) {
+            "COMMIT"
+        } else {
+            "ROLLBACK"
+        };
+        let sql = self.kw(kw);
+        self.stmt(sql, Kind::Txn, false)
+    }
+
+    /// Close an open transaction, if any, so a script never ends inside one.
+    pub fn close_transaction(&mut self) -> Option<Statement> {
+        if self.txn_open {
+            Some(self.close_transaction_now())
+        } else {
+            None
+        }
     }
 }
 
@@ -1123,6 +1198,11 @@ pub fn build_script(seed: u64, profile: &Profile, steps: usize) -> Script {
     while script.steps.len() < steps && attempts < steps * 4 {
         attempts += 1;
         let stmt = gen.next_statement();
+        run(&mut script, &oracle, stmt, false);
+    }
+    // A script never ends inside an open transaction: the candidate's
+    // connection stays up for later checks (and the oracle's too).
+    while let Some(stmt) = gen.close_transaction() {
         run(&mut script, &oracle, stmt, false);
     }
     script
@@ -1296,6 +1376,54 @@ mod tests {
         ] {
             assert!(classes.contains(want.token()), "no {} probe", want.token());
         }
+        // Transactions add nested-BEGIN and bare-COMMIT probes.
+        let p6 = Profile::through(6);
+        let mut txn = BTreeSet::new();
+        for seed in 0..60u64 {
+            let s = build_script(seed, &p6, 200);
+            for c in &s.steps {
+                if let OracleOutcome::Error(e) = c.expected {
+                    txn.insert(e.token());
+                }
+            }
+        }
+        assert!(txn.contains(ErrClass::Txn.token()), "no txn probe");
+    }
+
+    /// Transactions are balanced by construction (`Kind::Txn` begins equal
+    /// closes), so a script never ends inside one, and every script of the
+    /// stage-6 profile contains at least one `BEGIN` with a `COMMIT` or
+    /// `ROLLBACK` (nested-BEGIN probes are `Kind::Probe` and do not open a
+    /// transaction).
+    #[test]
+    fn transaction_scripts_are_balanced() {
+        let p = Profile::through(6);
+        let (mut scripts_with_txn, mut total_scripts) = (0usize, 0usize);
+        for seed in 0..40u64 {
+            let s = build_script(seed, &p, 150);
+            let stmts = || s.setup.iter().chain(&s.steps);
+            let opens = stmts()
+                .filter(|c| c.stmt.kind == Kind::Txn && c.stmt.sql.to_lowercase().contains("begin"))
+                .count();
+            let closes = stmts()
+                .filter(|c| {
+                    c.stmt.kind == Kind::Txn
+                        && (c.stmt.sql.to_lowercase().contains("commit")
+                            || c.stmt.sql.to_lowercase().contains("rollback"))
+                })
+                .count();
+            assert_eq!(opens, closes, "seed {seed}: {opens} BEGIN, {closes} closes");
+            // The closing statements answer OK 0.
+            for c in stmts().filter(|c| c.stmt.kind == Kind::Txn) {
+                assert_eq!(c.expected, OracleOutcome::Affected(0), "{:?}", c.stmt.sql);
+            }
+            total_scripts += 1;
+            scripts_with_txn += usize::from(opens > 0);
+        }
+        assert!(
+            scripts_with_txn * 4 >= total_scripts * 3,
+            "only {scripts_with_txn}/{total_scripts} scripts ran a transaction"
+        );
     }
 
     #[test]

@@ -271,6 +271,9 @@ enum Stmt {
     Select(Sel),
     Update(String, Vec<(String, Expr)>, Option<Expr>),
     Delete(String, Option<Expr>),
+    Begin,
+    Commit,
+    Rollback,
 }
 
 const RESERVED: &[&str] = &[
@@ -371,6 +374,12 @@ impl P {
             self.update()?
         } else if self.eat_kw("DELETE") {
             self.delete()?
+        } else if self.eat_kw("BEGIN") {
+            Stmt::Begin
+        } else if self.eat_kw("COMMIT") {
+            Stmt::Commit
+        } else if self.eat_kw("ROLLBACK") {
+            Stmt::Rollback
         } else {
             return Err(ErrClass::Syntax);
         };
@@ -961,6 +970,7 @@ fn check_cols(e: &Expr, cols: &[(String, Ty)]) -> R<()> {
 
 // ----- engine ----------------------------------------------------------------------
 
+#[derive(Clone)]
 struct Tbl {
     cols: Vec<(String, Ty)>,
     rows: Vec<Vec<V>>,
@@ -968,6 +978,8 @@ struct Tbl {
 
 pub struct Toy {
     tables: BTreeMap<String, Tbl>,
+    /// Snapshot taken at `BEGIN`; `Some` means a transaction is open.
+    txn: Option<BTreeMap<String, Tbl>>,
     fault: Option<Fault>,
 }
 
@@ -975,6 +987,7 @@ impl Toy {
     pub fn new(fault: Option<Fault>) -> Self {
         Toy {
             tables: BTreeMap::new(),
+            txn: None,
             fault,
         }
     }
@@ -1020,6 +1033,26 @@ impl Toy {
             Stmt::Select(sel) => self.select(sel),
             Stmt::Update(name, sets, wh) => self.update(&name, sets, wh),
             Stmt::Delete(name, wh) => self.delete(&name, wh),
+            Stmt::Begin => {
+                if self.txn.is_some() {
+                    return Err(ErrClass::Txn);
+                }
+                self.txn = Some(self.tables.clone());
+                Ok(Response::Ok(0))
+            }
+            Stmt::Commit => {
+                if self.txn.take().is_none() {
+                    return Err(ErrClass::Txn);
+                }
+                Ok(Response::Ok(0))
+            }
+            Stmt::Rollback => {
+                let Some(snapshot) = self.txn.take() else {
+                    return Err(ErrClass::Txn);
+                };
+                self.tables = snapshot;
+                Ok(Response::Ok(0))
+            }
         }
     }
 
@@ -1372,7 +1405,7 @@ mod tests {
     /// does not capture, not a candidate bug.
     #[test]
     fn clean_toy_agrees_with_the_oracle_on_every_script() {
-        for last in [0u32, 1, 2, 3] {
+        for last in [0u32, 1, 2, 3, 4, 5, 6] {
             let p = Profile::through(last);
             for seed in 0..SEEDS {
                 let script = build_script(seed, &p, STEPS);
