@@ -106,6 +106,18 @@ fn indent(s: &str) -> String {
 /// Minimize a failing statement sequence. `None` when `stmts` does not fail
 /// (nothing to shrink).
 pub fn shrink(stmts: &[Statement], make: &mut dyn FnMut() -> Box<dyn Candidate>) -> Option<Repro> {
+    shrink_with_budget(stmts, make, MAX_CHECKS)
+}
+
+/// [`shrink`] with an explicit trial budget. The TCP driver sets one
+/// because every trial against a live candidate has to reset it first (a
+/// stateful server makes a replay start from whatever the previous trial
+/// left behind).
+pub fn shrink_with_budget(
+    stmts: &[Statement],
+    make: &mut dyn FnMut() -> Box<dyn Candidate>,
+    max_checks: usize,
+) -> Option<Repro> {
     let first = first_failure(stmts, make)?;
     let kind = first.mismatch.kind;
     let mut checks = 1usize;
@@ -114,11 +126,11 @@ pub fn shrink(stmts: &[Statement], make: &mut dyn FnMut() -> Box<dyn Candidate>)
     let mut cur: Vec<Statement> = stmts[..first.index].to_vec();
 
     let mut n = 2usize;
-    while !cur.is_empty() && checks < MAX_CHECKS {
+    while !cur.is_empty() && checks < max_checks {
         let size = cur.len().div_ceil(n);
         let mut reduced = false;
         let mut start = 0usize;
-        while start < cur.len() && checks < MAX_CHECKS {
+        while start < cur.len() && checks < max_checks {
             let end = (start + size).min(cur.len());
             let mut trial: Vec<Statement> = cur[..start].to_vec();
             trial.extend_from_slice(&cur[end..]);
@@ -153,6 +165,12 @@ pub fn shrink(stmts: &[Statement], make: &mut dyn FnMut() -> Box<dyn Candidate>)
     // The final run may stop earlier than the last statement only if a
     // prefix already fails; keep exactly up to the failing one.
     statements.truncate(fin.index + 1);
+    // A sequence that now fails with a *different* kind is not a repro of
+    // the original failure (stateful candidates can drift): report "nothing
+    // to shrink" rather than a misleading report.
+    if fin.mismatch.kind != kind {
+        return None;
+    }
     Some(Repro {
         statements,
         kind: fin.mismatch.kind,

@@ -2495,6 +2495,170 @@ impl BenchmarkPipeline {
                             summary.stages,
                         )
                     }
+                    TaskType::Sql => {
+                        // The differential suite: one script per accepted
+                        // stage with the cumulative profile, a fresh
+                        // per-(verification, stage) seed, and shrink on
+                        // failure. `spawn_blocking` because a shrink replays
+                        // hundreds of sequences.
+                        let mut wanted: Vec<u32> = accepted
+                            .map(|a| a.to_vec())
+                            .unwrap_or_else(|| vec![0, 1, 2, 3]);
+                        wanted.sort_unstable();
+                        wanted.dedup();
+                        let log_stage =
+                            |logger: &Arc<dyn PipelineLogger>, s: &crate::verifier::StageResult| {
+                                logger.log(&format!(
+                                    "  Stage {}: {} -> {} {}",
+                                    s.stage,
+                                    crate::config::stage_label(s.stage, &s.name),
+                                    if s.passed { "PASS" } else { "FAIL" },
+                                    s.error.as_deref().unwrap_or("")
+                                ));
+                            };
+                        let mut stages: Vec<crate::verifier::StageResult> = Vec::new();
+                        let mut prior_failed = false;
+                        for &stage in &wanted {
+                            let name = format!(
+                                "Stage {stage}: {}",
+                                crate::verifier::sql::driver::stage_title(stage)
+                            );
+                            if !crate::verifier::sql::driver::differential_supported(stage) {
+                                let st = crate::verifier::StageResult {
+                                    stage,
+                                    name,
+                                    passed: false,
+                                    error: Some(
+                                        "differential suite for this stage is not built yet"
+                                            .to_string(),
+                                    ),
+                                };
+                                prior_failed = true;
+                                log_stage(logger, &st);
+                                stages.push(st);
+                                continue;
+                            }
+                            if prior_failed {
+                                let st = crate::verifier::StageResult {
+                                    stage,
+                                    name,
+                                    passed: false,
+                                    error: Some(
+                                        "skipped due to failure in earlier stages".to_string(),
+                                    ),
+                                };
+                                log_stage(logger, &st);
+                                stages.push(st);
+                                continue;
+                            }
+                            let passed_ids: Vec<u32> = wanted
+                                .iter()
+                                .copied()
+                                .filter(|&s| s <= stage)
+                                .collect();
+                            let addr = format!("127.0.0.1:{port}");
+                            let seed =
+                                crate::verifier::sql::driver::stage_seed(verifier_seed, stage);
+                            // The shrink replay needs a fresh database: a
+                            // contract-following candidate keeps its store in
+                            // <workspace>/data, so wipe that and restart the
+                            // container (in-memory state included).
+                            let instance_id = sandbox.instance_id.clone();
+                            let reset_dir = workdir.to_path_buf();
+                            let mut reset = move || -> Result<(), String> {
+                                let _ = std::fs::remove_dir_all(reset_dir.join("data"));
+                                let sb = crate::sandbox::docker::SandboxManager::with_id(
+                                    &instance_id,
+                                );
+                                sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
+                                sb.start_candidate_in_docker_with(
+                                    &reset_dir,
+                                    port,
+                                    &crate::sandbox::docker::CandidateRunExtras::default(),
+                                )
+                                .map_err(|e| format!("start: {e}"))?;
+                                let deadline = std::time::Instant::now()
+                                    + std::time::Duration::from_secs(20);
+                                while std::time::Instant::now() < deadline {
+                                    if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                                        return Ok(());
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
+                                }
+                                Err("candidate did not reopen its port after a reset".to_string())
+                            };
+                            let run = tokio::task::spawn_blocking(move || {
+                                crate::verifier::sql::driver::run_stage(
+                                    &addr,
+                                    std::time::Duration::from_secs(10),
+                                    seed,
+                                    &passed_ids,
+                                    crate::verifier::sql::driver::DEFAULT_STEPS,
+                                    Some(&mut reset),
+                                )
+                            })
+                            .await;
+                            let st = match run {
+                                Ok(Ok(out)) if out.passed => {
+                                    logger.log(&format!(
+                                        "    {} statements graded (seed {seed})",
+                                        out.checks
+                                    ));
+                                    crate::verifier::StageResult {
+                                        stage,
+                                        name,
+                                        passed: true,
+                                        error: None,
+                                    }
+                                }
+                                Ok(Ok(out)) => {
+                                    let mut err = out.detail.clone();
+                                    if let Some(repro) = &out.repro {
+                                        err.push('\n');
+                                        err.push_str(&repro.render());
+                                    }
+                                    crate::verifier::StageResult {
+                                        stage,
+                                        name,
+                                        passed: false,
+                                        error: Some(err),
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    infra_error = true;
+                                    logger.log(&format!(
+                                        "[INFRA] sql verifier fault at stage {stage}: {e}"
+                                    ));
+                                    crate::verifier::StageResult {
+                                        stage,
+                                        name,
+                                        passed: false,
+                                        error: Some(format!("verifier fault: {e}")),
+                                    }
+                                }
+                                Err(join) => {
+                                    infra_error = true;
+                                    crate::verifier::StageResult {
+                                        stage,
+                                        name,
+                                        passed: false,
+                                        error: Some(format!("verifier task failed: {join}")),
+                                    }
+                                }
+                            };
+                            prior_failed |= !st.passed;
+                            log_stage(logger, &st);
+                            stages.push(st);
+                        }
+                        let ps = stages.iter().filter(|s| s.passed).count() as u32;
+                        let ts = stages.len() as u32;
+                        let pr = if ts == 0 {
+                            0.0
+                        } else {
+                            ps as f64 / ts as f64 * 100.0
+                        };
+                        (pr, ps, ts, stages)
+                    }
                     TaskType::Queue => {
                         let allowed = |n: u32| accepted.map(|a| a.contains(&n)).unwrap_or(true);
                         let log_stage =
@@ -2917,6 +3081,16 @@ impl BenchmarkPipeline {
                     )),
                 }
             }
+            TaskType::Sql => {
+                if let Err(e) = sandbox
+                    .start_reference_sql(crate::web::server::worker_port(5481, config.worker))
+                {
+                    logger.log(&format!(
+                        "[SETUP] Warning: reference SQL unavailable: {}",
+                        e
+                    ));
+                }
+            }
             TaskType::Wal | TaskType::Pubsub | TaskType::Binproto | TaskType::Queue => {
                 logger.log("[SETUP] No reference container for this task (verifier-timed).");
             }
@@ -3234,12 +3408,17 @@ impl BenchmarkPipeline {
                     // 4. Re-verify the updated candidate
                     let _ = fs::remove_file(config.workdir.join("READY"));
                     sandbox.detach_references();
+                    // Fresh seed per verification (docs/PROPOSAL-sdb-sql.md):
+                    // re-running the same seeded names against a candidate
+                    // that persisted them fails at statement 1 with `exists`
+                    // before anything is graded (live cell 2026-10-16).
+                    let repair_seed = format!("{verifier_seed}-repair{round}");
                     let next_outcome = Self::run_verification(
                         config.task,
                         &config.workdir,
                         &sandbox,
                         port,
-                        &verifier_seed,
+                        &repair_seed,
                         false,
                         config.worker,
                         &logger,
@@ -3406,7 +3585,11 @@ impl BenchmarkPipeline {
                         }
                     }
                 }
-                TaskType::Wal | TaskType::Pubsub | TaskType::Binproto | TaskType::Queue => {
+                TaskType::Wal
+                | TaskType::Pubsub
+                | TaskType::Binproto
+                | TaskType::Queue
+                | TaskType::Sql => {
                     if let Some(tp) = extra_throughput {
                         let unit = match config.task {
                             TaskType::Wal => "msgs/sec",
@@ -6536,6 +6719,55 @@ main()
             (10, 10)
         );
         cleanup_covtest_network("httplive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-sql stages 0-3 live proof (eval-only, no model): the Python
+    /// sqlite3 reference adapter (`verifier::sql::ref_server`) driven
+    /// through the real pipeline with acceptance [0, 1, 2, 3]. All four
+    /// stage scripts run against one long-lived server, which also proves
+    /// the seed-namespaced schemas cannot collide.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stages_0_3_live() {
+        let worker = 93u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqllive");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stages 0-3 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqllive");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 3,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3],
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("sdb-sql stages 0-3 must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        for needle in [
+            "Stage 0: Genesis: tables, insert, select -> PASS",
+            "Stage 1: Expressions and WHERE -> PASS",
+            "Stage 2: Sorting and paging -> PASS",
+            "Stage 3: UPDATE and DELETE -> PASS",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (4, 4)
+        );
+        cleanup_covtest_network("sqllive");
         let _ = fs::remove_dir_all(&dir);
     }
 

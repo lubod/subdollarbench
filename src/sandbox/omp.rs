@@ -1971,6 +1971,13 @@ Content-Length: 0
 - Pre-built queue systems and job libraries (RabbitMQ, Redis, Kafka, NATS, nsq, celery, bullmq, sidekiq, RQ, etc.) are FORBIDDEN.
 - Build a job queue broker on TCP 6385 with LF-terminated commands: ENQ <queue> <payload> -> +OK <id> (fsync before ack), LEASE <queue> <lease_ms> -> +JOB <id> <attempts> <payload>|+NONE (visibility lease owned by the connection), ACK <id>/NACK <id> [delay_ms] -> +OK, 3 failed attempts -> <queue>.dead, REDRIVE <queue> <id>, +STATS counters, PING -> +PONG. Persist under ./data and recover after kill -9."#,
             ),
+            Some(crate::config::TaskType::Sql) => (
+                5480,
+                "printf 'SELECT 1\n' | nc 127.0.0.1 5480",
+                r#"ANTI-CHEAT REQUIREMENT (STRICT):
+- Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources.
+- Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed."#,
+            ),
             Some(crate::config::TaskType::Binproto) => (
                 6395,
                 "python3 -c \"import struct,zlib;print(zlib.crc32(b'x'))\"",

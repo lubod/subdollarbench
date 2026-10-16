@@ -511,6 +511,10 @@ impl SandboxManager {
         format!("subdollar-ref-pdf-{}", self.instance_id)
     }
 
+    pub fn ref_sql_name(&self) -> String {
+        format!("subdollar-ref-sql-{}", self.instance_id)
+    }
+
     /// Verification-time isolation: reference implementations are the
     /// harness's oracle, never the candidate's tool. Candidates run on the
     /// run network, so while verifying, every reference is detached from it
@@ -523,6 +527,7 @@ impl SandboxManager {
             self.ref_redis_name(),
             self.ref_http_name(),
             self.ref_pdf_name(),
+            self.ref_sql_name(),
         ] {
             let _ = Command::new("docker")
                 .args(["network", "disconnect", &net, &name])
@@ -537,6 +542,7 @@ impl SandboxManager {
             (self.ref_redis_name(), "ref-redis"),
             (self.ref_http_name(), "ref-http"),
             (self.ref_pdf_name(), "ref-pdf"),
+            (self.ref_sql_name(), "ref-sql"),
         ] {
             let _ = Command::new("docker")
                 .args(["network", "connect", "--alias", alias, &net, &name])
@@ -756,6 +762,72 @@ impl SandboxManager {
             ));
         }
 
+        Ok(())
+    }
+
+    /// The sdb-sql reference: a Python `sqlite3` adapter speaking the
+    /// text protocol, on the run network as `ref-sql`. The agent compares
+    /// semantics against it during development; verification detaches it
+    /// like every other reference.
+    pub fn start_reference_sql(&self, port: u16) -> Result<()> {
+        let name = self.ref_sql_name();
+        let net = self.network_name();
+        self.ensure_network()?;
+        info!(
+            "Starting sdb-sql reference on port {} ({}, alias ref-sql on {})",
+            port, name, net
+        );
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+
+        // The server script is generated on the host and mounted read-only;
+        // the container's own DB lives in its /tmp (fresh per container).
+        let script_dir = std::env::temp_dir().join(format!(
+            "subdollar-ref-sql-src-{}",
+            self.instance_id
+        ));
+        crate::verifier::sql::ref_server::write_reference(&script_dir, 5480)
+            .map_err(|e| anyhow!("write ref-sql script: {e}"))?;
+        let mount = format!("{}:/srv:ro", script_dir.display());
+
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--label",
+                &format!("sdb.run={}", self.instance_id),
+                "--label",
+                "sdb.role=ref-sql",
+                "--name",
+                &name,
+                "--network",
+                &net,
+                "--network-alias",
+                "ref-sql",
+                "--memory=2g",
+                "--cpus=2.0",
+                "--pids-limit=256",
+                "-v",
+                &mount,
+                "-p",
+                &format!("127.0.0.1:{}:5480", port),
+                EGRESS_PROXY_IMAGE,
+                "python3",
+                "-u",
+                "/srv/sql_server.py",
+                "--port",
+                "5480",
+                "--data",
+                "/tmp",
+            ])
+            .output()
+            .map_err(|e| anyhow!("reference sql spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "reference sql failed to start on host port {port}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
         Ok(())
     }
 
@@ -1813,6 +1885,7 @@ impl SandboxManager {
             self.ref_redis_name(),
             self.ref_http_name(),
             self.ref_pdf_name(),
+            self.ref_sql_name(),
             self.egress_proxy_name(),
             self.agent_container_name(),
             format!("subdollar-omp-agent-{}", std::process::id()),
@@ -2466,6 +2539,44 @@ mod tests {
             stdout.contains("PONG"),
             "expected PONG via ref-redis network alias, got: {:?}",
             stdout
+        );
+    }
+
+    /// The sdb-sql reference must answer the text protocol through its
+    /// `ref-sql` alias on the run network (that is how the agent uses it).
+    #[test]
+    fn test_run_network_sql_reference_alias_reachable() {
+        let sm = SandboxManager::with_id("net-sql-alias-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("net-sql-alias-test"));
+        sm.cleanup();
+        assert!(sm.ensure_network().is_ok());
+        assert!(sm.start_reference_sql(free_port()).is_ok());
+        // Give the reference a moment to accept connections.
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+
+        let net = sm.network_name();
+        let probe = "import socket; s = socket.create_connection(('ref-sql', 5480), 5); \
+                     s.sendall(b'SELECT 1\\n'); print(s.recv(200).decode())";
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                &net,
+                EGRESS_PROXY_IMAGE,
+                "python3",
+                "-c",
+                probe,
+            ])
+            .output();
+        sm.cleanup();
+
+        let stdout = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        assert!(
+            stdout.contains("ROWS 1") && stdout.contains("END 1"),
+            "expected a ROWS frame via ref-sql, got: {stdout:?}"
         );
     }
 

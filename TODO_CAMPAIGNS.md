@@ -498,10 +498,65 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   bound (ints <= i64::MAX, text <= 48), parentheses are only dropped when
   the printed text parses to the generated tree, and explicit bare
   left-associative chains test associativity. Result: 0 overflow discards
-  in 30k statements. **Remaining**: socket client + pipelining, profile
-  lite subsets, then M6.
+  in 30k statements. **Part 4 landed**: `client.rs`, a TCP `Candidate`
+  over one connection (timeouts, nodelay, one response per statement;
+  split responses are reassembled and bytes past a response stay buffered
+  for the next call). Review fixes on top of part 3: column bounds seeded
+  from `DEFAULT`s, byte-safe DDL mask, loud oracle failure in
+  `first_failure`, stage-0 error list corrected. **Part 5 landed**:
+  `scenarios.rs` (harness-side pipelining client) and `driver.rs`
+  (per-stage replay over the TCP candidate with shrink-on-failure and
+  the health floors). **Remaining**: profile lite subsets, then M6.
 - [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
+  **Adapter + live proof landed**: `ref_server.rs` is a stdlib-only
+  Python server backed by its own sqlite3 (STRICT DDL translation, error
+  classes, total-changes affected counts); it passes every stage 20/20
+  at the verifier level and stages 0-3 through the real pipeline
+  (eval-only, one container, four scripts against one long-lived server
+  — schemas are seed-namespaced so stage scripts cannot collide).
+  Pipeline: `TaskType::Sql` (port 5480), the `run_verification` branch
+  (spawn_blocking, shrink repro on failure, verifier faults as infra
+  errors), `eval`/`replay` support, omp guidance. `campaigns/sdb-sql`
+  ships tickets 0-3 with the cumulative acceptance; validation accepts
+  the 0-based ladder. **ref-sql landed**: `SandboxManager::start_reference_sql`
+  mounts the generated Python adapter (`ref_server.rs`) into the reference
+  image on the run network as `ref-sql`, detached during verification like
+  every other reference; a live test probes it through the alias. **Cell
+  tooling**: `scripts/sql-cell.sh` rebuilds the release binary, refuses a
+  stale one (marker check; cell 2 ran the old verifier for exactly this
+  reason), preflights the engine and port 5480, then runs the campaign.
+  **Cells (2026-10-16, `inkling-small:free`, cap $0.25/40min)**:
+  - cell 1 (ticket 0, pre-fix): FAIL 0/1, $0.0196. It exposed two verifier
+    bugs: `shrink` replayed trials against the live candidate, so a
+    stateful server answered `exists` at the first CREATE and the
+    minimizer reported that as the bug (the original failure was a 10s
+    read timeout); and the repair round reused the run seed, so a
+    persisting candidate re-created its own tables and failed before
+    anything was graded. Fixed (commit "M6 fixes"): the driver takes a
+    reset callback (the pipeline wipes `<workspace>/data` and restarts
+    the container), shrinks only after a full replay on the reset state
+    reproduces the failure, and falls back to the original run's prefix
+    otherwise; the repair round uses a fresh seed.
+  - cell 2 (ticket 0 -> ticket 1, pre-fix binary): **reached ticket 0** —
+    s0 PASS 1/1 ($0.0089, 25 turns), s1 FAIL 0/2 ($0.0110, 30 turns),
+    total $0.0199. Ran the *pre-fix* release (not rebuilt), so it
+    validates the pipeline and campaign wiring, not the fixes: ticket 1
+    failed on genuine candidate bugs (CREATE reporting the column count
+    as affected, INSERT into a missing table answering `OK 2`, then a
+    parser/semantics error), and the repro drift it shows is the old
+    shrink bug.
+  - cell 3 (fix validation, rebuilt release): **reached ticket 0** — s0
+    PASS 1/1 ($0.0099, 28 turns), s1 FAIL 0/2 ($0.0086, 30 turns), total
+    $0.0185. The candidate persists its store in `./data`, so both fixes
+    were exercised for real: the repair round ran under a fresh seed (two
+    distinct table prefixes in the log, no `exists`), and the failure
+    report is a truthful 6-statement minimal prefix whose statement and
+    detail match the stage failure (`INSERT ...` -> `ERR syntax`, expected
+    `OK 1`). Known limitation: when the coarse mismatch kind allows it, a
+    minimized repro can name a different statement than the stage's first
+    failure; it is always a real failure on a fresh database, and fixing
+    it re-runs the suite.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.

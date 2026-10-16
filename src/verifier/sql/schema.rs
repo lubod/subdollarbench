@@ -143,12 +143,18 @@ impl Rng {
 /// first table always carrying an INTEGER PRIMARY KEY (a stable anchor for
 /// later tickets) and at most one extra unique/primary-key column per
 /// table.
+///
+/// Every identifier is namespaced with the seed. Stage scripts run one
+/// after another against a single long-lived candidate (the cumulative
+/// suite), and a candidate is free to keep its state, so two scripts must
+/// never collide on a table name.
 pub fn generate(seed: u64, table_count: usize, max_columns: usize) -> Schema {
     let mut rng = Rng::new(seed);
     let mut used = BTreeSet::new();
+    let ns = format!("s{seed:x}_");
     let mut tables = Vec::new();
     for t in 0..table_count {
-        let name = rng.ident(&mut used);
+        let name = format!("{ns}{}", rng.ident(&mut used));
         let cols_n = 2 + rng.below((max_columns.saturating_sub(2)).max(1) as u64 + 1) as usize;
         let cols_n = cols_n.min(max_columns);
         let mut columns = Vec::new();
@@ -157,7 +163,7 @@ pub fn generate(seed: u64, table_count: usize, max_columns: usize) -> Schema {
         let text_pk = t > 0 && rng.below(3) == 0;
         let mut has_unique = false;
         for c in 0..cols_n {
-            let cname = rng.ident(&mut used);
+            let cname = format!("{ns}{}", rng.ident(&mut used));
             let ty = if c == 0 {
                 if text_pk {
                     Ty::Text
@@ -281,6 +287,28 @@ mod tests {
         }
         assert!(a.tables[0].columns[0].primary_key);
         assert_eq!(a.tables[0].columns[0].ty, Ty::Integer);
+    }
+
+    /// Two seeds never share table or column names: stage scripts run back
+    /// to back against one long-lived server (the cumulative suite), so a
+    /// collision would corrupt the later script.
+    #[test]
+    fn identifiers_are_namespaced_per_seed() {
+        let names = |s: &Schema| -> BTreeSet<String> {
+            s.tables
+                .iter()
+                .flat_map(|t| {
+                    std::iter::once(t.name.clone())
+                        .chain(t.columns.iter().map(|c| c.name.clone()))
+                })
+                .collect()
+        };
+        let a = generate(42, 4, 5);
+        let b = generate(43, 4, 5);
+        let (na, nb) = (names(&a), names(&b));
+        assert!(na.is_disjoint(&nb), "seeds 42 and 43 share a name");
+        assert!(na.iter().all(|n| n.starts_with("s2a_")), "{na:?}");
+        assert!(nb.iter().all(|n| n.starts_with("s2b_")), "{nb:?}");
     }
 
     #[test]

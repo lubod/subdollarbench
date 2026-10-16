@@ -5,16 +5,21 @@
 //! Module layout (built in order): `schema` (seeded tables/columns),
 //! `oracle` (rusqlite reference + DDL translation + error-class mapping +
 //! discard rules), `generator`, `wire`, `compare`, `run` (replay against a
-//! `Candidate`), `shrink` (minimal repros), and later `scenarios`. The
+//! `Candidate`), `client` (a TCP `Candidate` for the model's server),
+//! `shrink` (minimal repros), and later `scenarios`. The
 //! self-tests gate the verifier itself: oracle-vs-oracle agreement, an
 //! independent toy engine (`toy`, test-only) that must agree with the
 //! oracle, 26 planted-bug mutants that must be caught, profile-coverage
 //! assertions and per-stage comparable-check floors.
 
+pub mod client;
 pub mod compare;
+pub mod driver;
 pub mod generator;
 pub mod oracle;
+pub mod ref_server;
 pub mod run;
+pub mod scenarios;
 pub mod schema;
 pub mod shrink;
 #[cfg(test)]

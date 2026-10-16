@@ -1131,6 +1131,10 @@ pub enum TaskType {
     /// Job queue broker (leases / ack / nack / retries / DLQ). The campaign
     /// is its primary home; the single-shot suite is the same 9 stages.
     Queue,
+    /// Differential SQL database (docs/PROPOSAL-sdb-sql.md). The campaign
+    /// is its only home: 21 ladder tickets, verified differentially against
+    /// an in-process SQLite oracle.
+    Sql,
 }
 
 impl TaskType {
@@ -1144,6 +1148,9 @@ impl TaskType {
             TaskType::Pubsub => 4,
             TaskType::Binproto => 5,
             TaskType::Queue => 9,
+            // The full sdb-sql ladder (tickets 0-20); the campaign is its
+            // only home, so the single-shot count is the whole ladder.
+            TaskType::Sql => 21,
         }
     }
 
@@ -1157,6 +1164,7 @@ impl TaskType {
             TaskType::Pubsub => 8092,
             TaskType::Binproto => 6395,
             TaskType::Queue => 6385,
+            TaskType::Sql => 5480,
         }
     }
 
@@ -1172,6 +1180,7 @@ impl TaskType {
             "pubsub" => Self::Pubsub,
             "binproto" => Self::Binproto,
             "queue" => Self::Queue,
+            "sql" => Self::Sql,
             _ => return None,
         })
     }
@@ -1198,6 +1207,7 @@ impl std::fmt::Display for TaskType {
             TaskType::Pubsub => write!(f, "pubsub"),
             TaskType::Binproto => write!(f, "binproto"),
             TaskType::Queue => write!(f, "queue"),
+            TaskType::Sql => write!(f, "sql"),
         }
     }
 }

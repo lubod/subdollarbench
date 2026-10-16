@@ -1,0 +1,76 @@
+{
+  "name": "sdb-sql",
+  "version": 1,
+  "task": "sql",
+  "title": "sdb-sql: a SQL database, verified differentially",
+  "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition ships tickets 0-3 (query core); later tickets land as their verifiers do.",
+  "stages": [
+    {
+      "id": 0,
+      "type": "genesis",
+      "title": "Genesis: tables, insert, select",
+      "prompt": "stages/0_genesis/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0
+        ]
+      },
+      "budget_usd": 0.2,
+      "max_turns": 40
+    },
+    {
+      "id": 1,
+      "type": "feature",
+      "title": "Expressions and WHERE",
+      "prompt": "stages/1_expressions/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1
+        ]
+      },
+      "budget_usd": 0.12,
+      "max_turns": 30,
+      "needs": [
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "type": "feature",
+      "title": "Sorting and paging",
+      "prompt": "stages/2_sorting/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2
+        ]
+      },
+      "budget_usd": 0.1,
+      "max_turns": 24,
+      "needs": [
+        1
+      ]
+    },
+    {
+      "id": 3,
+      "type": "feature",
+      "title": "UPDATE and DELETE",
+      "prompt": "stages/3_update_delete/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "budget_usd": 0.1,
+      "max_turns": 24,
+      "needs": [
+        1
+      ]
+    }
+  ]
+}
