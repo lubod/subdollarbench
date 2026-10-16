@@ -417,11 +417,40 @@ impl Oracle {
             // (CREATE, BEGIN, COMMIT, ...), so use the delta of the
             // connection's total instead.
             let before = self.conn.total_changes();
-            return match prepared.execute([]) {
+            // The dialect's statement atomicity: a failing statement changes
+            // nothing. Plain SQLite 3.46 keeps the rows an earlier
+            // multi-row `VALUES` inserted when the failure happens *inside
+            // an explicit transaction* (a statement-journal quirk, not a
+            // dialect rule). A statement savepoint makes the graded
+            // behavior the spec's, in every SQLite version and in both
+            // modes.
+            let upper = sql.trim_start().to_ascii_uppercase();
+            let is_txn_ctl = ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"]
+                .iter()
+                .any(|k| upper.starts_with(k));
+            if !is_txn_ctl {
+                let _ = self.conn.execute_batch("SAVEPOINT sdb_stmt;");
+            }
+            let result = prepared.execute([]);
+            if !is_txn_ctl {
+                // Success merges the savepoint; a failure rolls the whole
+                // statement back before releasing.
+                if result.is_ok() {
+                    let _ = self.conn.execute_batch("RELEASE sdb_stmt;");
+                } else {
+                    let _ = self
+                        .conn
+                        .execute_batch("ROLLBACK TO sdb_stmt; RELEASE sdb_stmt;");
+                }
+            }
+            return match result {
                 Ok(n) => {
                     let changed = self.conn.total_changes() - before;
                     OracleOutcome::Affected(if changed == 0 { 0 } else { n as u64 })
                 }
+                // The savepoint already undid the statement's rows
+                // (`total_changes` counts rolled-back rows too, so it is no
+                // atomicity check).
                 Err(e) => outcome_from_error(e.to_string()),
             };
         }
@@ -472,6 +501,41 @@ impl Oracle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Statement atomicity holds in autocommit *and* inside a transaction:
+    /// plain SQLite 3.46 keeps the rows a failed multi-row `VALUES` had
+    /// already inserted inside a transaction (a statement-journal quirk),
+    /// and the oracle's statement savepoint makes the graded behavior the
+    /// spec's ("a failing statement changes nothing").
+    #[test]
+    fn a_failing_statement_changes_nothing_in_a_transaction() {
+        let o = Oracle::new().unwrap();
+        let _ = o.exec("CREATE TABLE t (a INTEGER, b INTEGER)");
+        let _ = o.exec("BEGIN");
+        match o.exec("INSERT INTO t VALUES (1, 1), ('zz', 2)") {
+            OracleOutcome::Error(ErrClass::Type) => {}
+            other => panic!("expected a type error, got {other:?}"),
+        }
+        match o.exec("SELECT * FROM t") {
+            OracleOutcome::Rows { rows, .. } => {
+                assert!(rows.is_empty(), "the failed statement left rows: {rows:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = o.exec("ROLLBACK");
+        // `INSERT ... SELECT` with one bad row is atomic too (autocommit).
+        let _ = o.exec("INSERT INTO t VALUES (5, 5)");
+        match o.exec("INSERT INTO t SELECT a, 'zz' FROM t") {
+            OracleOutcome::Error(ErrClass::Type) => {}
+            other => panic!("expected a type error, got {other:?}"),
+        }
+        match o.exec("SELECT COUNT(*) FROM t") {
+            OracleOutcome::Rows { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Int(1), "only the good row")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     /// The aggregate misuses the stage-7 probes emit are statement-level
     /// rejections (class `syntax`), and the empty-group contract the spec

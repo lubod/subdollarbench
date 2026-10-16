@@ -129,9 +129,9 @@ sections unlocked so far, so a fresh session can always read the rules.
   `DISTINCT` and `GROUP BY` treat `NULL`s as equal. `UNIQUE` allows any
   number of `NULL`s.
 - **Statement atomicity:** a statement that fails changes nothing (a
-  multi-row `INSERT` with one bad row inserts none). Tested outside an
-  explicit transaction; inside one, a failed statement's earlier rows are
-  not tested.
+  multi-row `INSERT` with one bad row inserts none) — in autocommit and
+  inside an explicit transaction alike. No SQLite-version behavior leaks
+  into grading: the oracle wraps each statement in a savepoint.
 - **Not tested (any answer is accepted):** integer overflow, mixed-type
   comparison, inserting `'123'` into an INTEGER column or `5` into a TEXT
   column, non-ASCII text, bare non-grouped columns in aggregate queries, a
@@ -212,6 +212,10 @@ are compared.
 **4. Persistence.** Write a seeded dataset, `SIGTERM`, restart on the same
 `--data`, re-run the read queries: identical. **Upgrade check starts here**
 (see below).
+
+Clean stops deliver **SIGTERM to every process in the container** (`docker
+stop` signals PID 1 only, and a `start.sh` without `exec` would hide the
+server behind a shell that ignores it).
 
 **5. Crash safety.** (a) A client sends N autocommit `INSERT`s, collects
 acks, SIGKILL at a random ack count; after restart every acked row exists

@@ -264,6 +264,7 @@ pub async fn run(
                 max_turns: attempt.max_turns,
                 lite_profile: attempt.lite_profile.clone(),
                 passed_lite: attempt.passed_lite.clone(),
+                passed: attempt.passed.clone(),
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -323,6 +324,9 @@ struct StageJob {
     lite_profile: Vec<String>,
     /// Lite profile of earlier stages this ladder passed on a lite variant.
     passed_lite: Vec<(u32, Vec<String>)>,
+    /// Every stage passed so far (full or lite); the declared acceptance
+    /// list is intersected with it plus the current ticket.
+    passed: Vec<u32>,
     rollback_first: bool,
 }
 
@@ -501,9 +505,17 @@ async fn run_one_stage(
             stage: stage.id,
             prompt_path: job.prompt_path.clone(),
             continuity: stage.id > 0,
-            accepted_stages: stage.acceptance.stages_for(&lc.spec.task).to_vec(),
+            // The suite at stage k is the *passed* stages' suites plus k
+            // itself: a stage the model failed or skipped contributes
+            // nothing, so one failure cannot sink every later ticket.
+            accepted_stages: campaign::Acceptance::accepted_for(
+                stage.acceptance.stages_for(&lc.spec.task),
+                &job.passed,
+                stage.id,
+            ),
             lite_profile: job.lite_profile.clone(),
             passed_lite: job.passed_lite.clone(),
+            passed_stages: job.passed.clone(),
             spec_md,
         }),
         baseline_rps,
@@ -922,6 +934,7 @@ mod tests {
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed: Vec::new(),
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));

@@ -36,11 +36,11 @@ pub struct InFlight {
     pub completed: bool,
 }
 
-/// How long the in-flight probe waits for an answer before deciding the
-/// statement was still running: short enough that a fast server still
-/// counts as in flight, long enough not to mistake scheduling jitter for
-/// work.
-const PROBE_WINDOW: Duration = Duration::from_millis(10);
+/// How long the *post-kill* read waits: an answer the server had already
+/// written is in the socket buffer and arrives at once, and the kill closes
+/// the connection, so 250 ms only matters for a server that is somehow
+/// still alive.
+const POST_KILL_WINDOW: Duration = Duration::from_millis(250);
 
 /// Send `inserts` acked single-row INSERTs, then one *more* INSERT without
 /// reading its answer, and SIGKILL. The connection stays open: the kill
@@ -65,17 +65,21 @@ pub fn ack_kill(
             Err(_) => break,
         }
     }
-    // Sent; the answer is only read for [`PROBE_WINDOW`] to learn whether
-    // the statement finished before the kill. If it did, the store owes us
-    // that row; if it did not, the row may or may not have made it.
+    // Sent, and the connection stays open *through* the kill: a server
+    // that answers first and fsyncs on disconnect must not get the close
+    // (plus the kill latency) to make the row durable.
     c.send(&format!(
         "INSERT INTO {table} VALUES ({inserts}, 'in-flight')"
     ))
     .map_err(|e| format!("in-flight INSERT: {e}"))?;
-    c.set_read_timeout(PROBE_WINDOW)?;
+    kill()?;
+    // Read after the kill: an `OK` that is already in the socket buffer was
+    // written before the server died, so the statement completed and the
+    // row is owed. EOF, a reset or a timeout means it was unanswered when
+    // the kill landed — the rep really tested the un-acked tail.
+    c.set_read_timeout(POST_KILL_WINDOW)?;
     let completed = matches!(c.recv(), Ok(Response::Ok(_)));
     drop(c);
-    kill()?;
     Ok(InFlight { acked, completed })
 }
 
@@ -119,6 +123,53 @@ pub fn check_acked_prefix(
                     got.len(),
                     keep + extra
                 ));
+            }
+            Ok(())
+        }
+        other => Err(format!("SELECT k answered {other:?}")),
+    }
+}
+
+/// After a torn tail (or a double restart): every key in `must` exists,
+/// every key in `maybe` exists or not, and no other key does. Keys are
+/// distinct by construction (the harness inserts each once).
+pub fn check_keys(
+    addr: &str,
+    timeout: Duration,
+    table: &str,
+    must: &[usize],
+    maybe: &[usize],
+) -> Result<(), String> {
+    let mut c = TcpCandidate::connect(addr, timeout)?;
+    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+        Response::Rows { rows, .. } => {
+            let got: Vec<u128> = rows
+                .iter()
+                .flatten()
+                .map(|v| {
+                    v.parse::<u128>()
+                        .map_err(|_| format!("key {v:?} is not a number"))
+                })
+                .collect::<Result<_, _>>()?;
+            let want = |k: &usize| *k as u128;
+            for k in must {
+                if !got.contains(&want(k)) {
+                    return Err(format!(
+                        "key {k} is missing (committed before the tear and owed)"
+                    ));
+                }
+            }
+            for k in &got {
+                if !must.iter().any(|m| want(m) == *k) && !maybe.iter().any(|m| want(m) == *k) {
+                    return Err(format!("unexpected key {k} came back"));
+                }
+            }
+            // Duplicates would mean two rows with one key.
+            let mut sorted = got.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            if sorted.len() != got.len() {
+                return Err(format!("duplicate keys came back: {got:?}"));
             }
             Ok(())
         }
@@ -181,25 +232,31 @@ pub fn bulk_update_and_kill(
         }
         k += chunk;
     }
-    // Sent, never read: the ack would mean the update completed before the
-    // kill, which is exactly what this probe must avoid.
+    // Sent, and the socket stays open through the kill (see `ack_kill`).
     c.send(&format!("UPDATE {table} SET c = c + 1"))
         .map_err(|e| format!("UPDATE send: {e}"))?;
-    c.set_read_timeout(PROBE_WINDOW)?;
-    let in_flight = c.recv().is_err();
-    drop(c);
     kill()?;
-    Ok(in_flight)
+    // An `OK` already in the buffer means the update completed before the
+    // kill: it is owed, and the caller must see it applied. EOF/reset is
+    // the kill landing mid-statement.
+    c.set_read_timeout(POST_KILL_WINDOW)?;
+    let completed = matches!(c.recv(), Ok(Response::Ok(_)));
+    drop(c);
+    Ok(completed)
 }
 
-/// After the kill and a restart the update must be all-or-nothing: one
-/// distinct value for `c` (old or new), never a mixture, and every row
-/// still there.
+/// After the kill and a restart the update (`c = c + 1`, starting at 0)
+/// must be all-or-nothing: one distinct value for `c`, never a mixture, and
+/// every row still there. `owed` is the probe's verdict: an `OK` that
+/// arrived before the kill means the update was acknowledged, so the new
+/// value must be there — a uniform *old* column would be an acked update
+/// that was lost.
 pub fn check_uniform(
     addr: &str,
     timeout: Duration,
     table: &str,
     rows: usize,
+    owed: bool,
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
     match c.exec(&format!("SELECT DISTINCT c FROM {table} ORDER BY c"))? {
@@ -208,6 +265,17 @@ pub fn check_uniform(
                 return Err(format!(
                     "{} distinct values after the kill: the update applied partially",
                     distinct.len()
+                ));
+            }
+            let value = distinct
+                .into_iter()
+                .next()
+                .and_then(|r| r.into_iter().next())
+                .unwrap_or_default();
+            if owed && value != "1" {
+                return Err(format!(
+                    "the update was acknowledged before the kill but the column is {value}, \
+                     not 1: an acked update was lost"
                 ));
             }
         }
@@ -465,6 +533,99 @@ mod tests {
         check_acked_prefix(&addr, Duration::from_secs(5), "ack_t", 12, 1).expect("prefix");
     }
 
+    /// After a torn tail only the newest victim may be missing: an older
+    /// committed victim that vanished is caught.
+    #[test]
+    fn only_the_newest_victim_may_vanish() {
+        let addr = oracle_server().to_string();
+        let mut c = TcpCandidate::connect(&addr, Duration::from_secs(5)).unwrap();
+        c.exec("CREATE TABLE torn_t (k INTEGER, v TEXT)").unwrap();
+        for k in 0..4 {
+            c.exec(&format!("INSERT INTO torn_t VALUES ({k}, 'v{k}')"))
+                .unwrap();
+        }
+        let must = [0usize, 1, 2];
+        let maybe = [3usize];
+        check_keys(&addr, Duration::from_secs(5), "torn_t", &must, &maybe).expect("all present");
+        // The newest (key 3) may vanish.
+        c.exec("DELETE FROM torn_t WHERE k = 3").unwrap();
+        check_keys(&addr, Duration::from_secs(5), "torn_t", &must, &maybe).expect("victim lost");
+        // An older committed key may not.
+        c.exec("DELETE FROM torn_t WHERE k = 1").unwrap();
+        let err = check_keys(&addr, Duration::from_secs(5), "torn_t", &must, &maybe).unwrap_err();
+        assert!(err.contains("committed before the tear"), "{err}");
+        // Nor may an unexpected key appear.
+        c.exec("INSERT INTO torn_t VALUES (1, 'v1')").unwrap();
+        c.exec("INSERT INTO torn_t VALUES (9, 'x')").unwrap();
+        let err = check_keys(&addr, Duration::from_secs(5), "torn_t", &must, &maybe).unwrap_err();
+        assert!(err.contains("unexpected key"), "{err}");
+    }
+
+    /// The `owed` rule: an UPDATE whose `OK` arrived before the kill must
+    /// survive — a uniform *old* column is an acked update that was lost.
+    #[test]
+    fn an_owed_update_must_be_applied() {
+        let addr = oracle_server().to_string();
+        let mut c = TcpCandidate::connect(&addr, Duration::from_secs(5)).unwrap();
+        c.exec("CREATE TABLE owed_t (k INTEGER, c INTEGER)")
+            .unwrap();
+        c.exec("INSERT INTO owed_t VALUES (0, 0), (1, 0)").unwrap();
+        // Before the update: owed => the new value is required (it fails),
+        // not owed => either value is fine.
+        let err = check_uniform(&addr, Duration::from_secs(5), "owed_t", 2, true).unwrap_err();
+        assert!(err.contains("acked update was lost"), "{err}");
+        check_uniform(&addr, Duration::from_secs(5), "owed_t", 2, false).expect("either value");
+        c.exec("UPDATE owed_t SET c = c + 1").unwrap();
+        check_uniform(&addr, Duration::from_secs(5), "owed_t", 2, true).expect("applied");
+    }
+
+    /// A kill that closes the connection before the statement's answer is
+    /// the in-flight case: the post-kill read sees EOF, so nothing is owed.
+    #[test]
+    fn a_kill_that_closes_the_answer_is_in_flight() {
+        use std::sync::mpsc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (close_tx, close_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut line = String::new();
+                // Answer the CREATE, then hold the in-flight statement and
+                // close without answering it when the kill arrives.
+                if matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                    let _ = sock.write_all(b"OK 0\n");
+                }
+                line.clear();
+                if matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                    let _ = close_rx.recv();
+                }
+            }
+        });
+        let mut kill = || {
+            let _ = close_tx.send(());
+            Ok(())
+        };
+        let out = ack_kill(&addr, Duration::from_secs(5), "closing_t", 0, &mut kill).unwrap();
+        assert!(
+            !out.completed,
+            "an answer that never arrived must not be owed"
+        );
+    }
+
+    /// A kill that leaves an already-written answer in the buffer is the
+    /// completed case (the row is owed and must survive).
+    #[test]
+    fn an_answer_written_before_the_kill_is_owed() {
+        let addr = oracle_server().to_string();
+        let mut kill = no_kill();
+        let out = ack_kill(&addr, Duration::from_secs(5), "answered_t", 1, &mut kill).unwrap();
+        assert!(out.completed, "the oracle answered before the kill");
+        check_acked_rows(&addr, Duration::from_secs(5), "answered_t", out.acked + 1)
+            .expect("the owed row survives");
+    }
+
     #[test]
     fn changed_file_finds_the_commit_and_torn_tail_cuts_safely() {
         let dir = std::env::temp_dir().join(format!("sdb-crash-{}", std::process::id()));
@@ -600,8 +761,8 @@ mod tests {
             "the slow-answering INSERT must still be unanswered"
         );
         let mut kill = no_kill();
-        let in_flight =
+        let completed =
             bulk_update_and_kill(&addr, Duration::from_secs(5), "slow_b", 4, 2, &mut kill).unwrap();
-        assert!(in_flight, "the bulk UPDATE must be unanswered");
+        assert!(!completed, "the bulk UPDATE must be unanswered");
     }
 }

@@ -8,6 +8,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-16.11`: statement atomicity is graded the same way in
+///   autocommit and inside a transaction (the oracle wraps statements in a
+///   savepoint; the reference does the same), a clean stop delivers
+///   SIGTERM to every process in the container, the suite is the *passed*
+///   stages plus the current ticket, `ORDER BY`/`LIMIT` in aggregate and
+///   join queries are gated on ticket 2, and the crash probes read the
+///   socket after the kill (an answered statement is owed).
 /// - `2026-10-16.10`: sdb-sql ticket 9 (constraints) — primary keys
 ///   (INTEGER auto-assign, TEXT NOT NULL), `UNIQUE`, `NOT NULL`,
 ///   `DEFAULT` and `REFERENCES` (restrict, `foreign_keys=ON`) enter the
@@ -428,7 +435,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-16.10";
+pub const RULES_VERSION: &str = "2026-10-16.11";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

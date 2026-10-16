@@ -775,6 +775,25 @@ impl SandboxManager {
     /// semantics against it during development; verification detaches it
     /// like every other reference.
     pub fn start_reference_sql(&self, port: u16) -> Result<()> {
+        // Sweep staging copies a hard kill left behind (the per-instance
+        // dir is otherwise reused; anything an hour old cannot belong to a
+        // live run).
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.starts_with("subdollar-ref-sql-src-") {
+                    continue;
+                }
+                let stale = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().map(|d| d.as_secs() > 3600).unwrap_or(false))
+                    .unwrap_or(false);
+                if stale {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
         let name = self.ref_sql_name();
         let net = self.network_name();
         self.ensure_network()?;
@@ -899,20 +918,41 @@ impl SandboxManager {
     /// and remove. The ticket-4 contract ("the harness stops the server
     /// cleanly; you have a few seconds to flush"); ticket 5's ladder uses
     /// [`Self::kill_candidate`] instead.
+    ///
+    /// `docker stop` signals PID 1 only, and a `start.sh` without `exec`
+    /// leaves the server as a child of a shell that ignores SIGTERM (PID 1
+    /// has no default action for it): the signal goes to every process in
+    /// the container instead, so the server sees it however it was started.
     pub fn stop_candidate_gracefully(&self, timeout_secs: u64) -> Result<()> {
         let name = self.candidate_container_name();
-        let out = Command::new("docker")
-            .args(["stop", "-t", &timeout_secs.to_string(), &name])
-            .output()?;
-        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "docker stop failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ))
+        let state = |format: &str| -> Option<String> {
+            Command::new("docker")
+                .args(["inspect", &name, "--format", format])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let Some(running) = state("{{.State.Running}}") else {
+            return Ok(()); // already gone
+        };
+        if running == "true" {
+            let _ = Command::new("docker")
+                // `--` so dash's `kill` reads `-1` as a target, not an option.
+                .args(["exec", &name, "sh", "-c", "kill -s TERM -- -1"])
+                .output();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            while std::time::Instant::now() < deadline
+                && state("{{.State.Running}}").as_deref() == Some("true")
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let _ = Command::new("docker")
+                .args(["stop", "-t", "1", &name])
+                .output();
         }
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        Ok(())
     }
 
     /// Restart a killed candidate container.
@@ -2202,6 +2242,12 @@ impl SandboxManager {
     /// (label-filtered, panic-safe). Idempotent: safe to call twice.
     pub fn cleanup(&self) {
         self.needs_cleanup.store(false, Ordering::SeqCst);
+        // The sdb-sql reference is staged in a per-instance temp dir and
+        // bind-mounted into its container: once the containers go, the
+        // staging copy goes too (round-3 review finding 9).
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("subdollar-ref-sql-src-{}", self.instance_id)),
+        );
         // Label-filtered reaper (no shell, no name-grep): selects by
         // `sdb.run=<instance_id>`. Covers legacy unlabelled names via
         // owned-rm belt below.
@@ -2296,6 +2342,10 @@ impl RunGuard {
         for idx in 1..=8u8 {
             let _ = fs::remove_file(m.upstream_marker_path(idx));
         }
+        // The sdb-sql reference staging copy for this instance (finding 9).
+        let _ = fs::remove_dir_all(
+            std::env::temp_dir().join(format!("subdollar-ref-sql-src-{}", m.instance_id)),
+        );
     }
 }
 
@@ -2713,6 +2763,81 @@ mod tests {
         assert!(
             data.join("marker").exists(),
             "the harness-owned data dir must be writable from the container"
+        );
+        sm.cleanup();
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A `start.sh` *without* `exec` leaves the server as a child of a
+    /// shell that is PID 1; `docker stop` would signal only that shell, and
+    /// PID 1 ignores an unhandled SIGTERM. The graceful stop must reach the
+    /// server anyway (the flush marker is written).
+    #[test]
+    fn test_graceful_stop_reaches_a_non_exec_start_sh() {
+        use super::CandidateRunExtras;
+        let sm = SandboxManager::with_id("noexec-stop-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("noexec-stop-test"));
+        sm.cleanup();
+        let work = std::env::temp_dir().join(format!("test_noexec_{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("test_noexec_data_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            work.join("trap_server.py"),
+            r#"import signal, sys, time
+
+def bye(signum, frame):
+    open('/sdb-data/flushed.txt', 'w').write('bye')
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, bye)
+while True:
+    time.sleep(0.2)
+"#,
+        )
+        .unwrap();
+        // No `exec`: bash stays PID 1 and waits for python.
+        std::fs::write(
+            work.join("start.sh"),
+            "#!/bin/bash\npython3 /workspace/trap_server.py\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                work.join("start.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+        let extras = CandidateRunExtras {
+            binds: vec![(data.display().to_string(), "/sdb-data".to_string())],
+            ..Default::default()
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&work, free_port(), &extras)
+            .is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // The fixture must really be serving before the stop.
+        let ps = Command::new("docker")
+            .args(["exec", &sm.candidate_container_name(), "ps", "-ef"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        assert!(
+            ps.contains("trap_server.py"),
+            "the fixture is not running: {ps}"
+        );
+        assert!(sm.stop_candidate_gracefully(5).is_ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !data.join("flushed.txt").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(
+            data.join("flushed.txt").exists(),
+            "SIGTERM must reach the server behind a non-exec start.sh"
         );
         sm.cleanup();
         let _ = std::fs::remove_dir_all(&work);

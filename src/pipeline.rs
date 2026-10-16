@@ -100,7 +100,12 @@ fn crash_ladder(
     let acked_table = format!("c{ns:x}_acked");
     let mut bulk_table = String::new();
     let mut rows = 0usize;
+    let mut bulk_rows = 0usize;
     let mut victims = 0usize;
+    let mut owed = false;
+    // Keys the tear may not cost (`must`) and those it may (`maybe`).
+    let mut must: Vec<usize> = Vec::new();
+    let mut maybe: Vec<usize> = Vec::new();
 
     let scratch = data.with_file_name(format!(
         "{}-crash",
@@ -130,129 +135,163 @@ fn crash_ladder(
         scratch.display()
     ));
 
-    // (a) acked rows survive SIGKILL. One more INSERT is sent and never
-    // read; if its answer arrived before the kill, the row is owed too.
-    let (acked, in_flight_owed) = {
-        let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
-        let out = crash::ack_kill(&addr, t, &acked_table, 40, &mut kill)
-            .map_err(|e| format!("(a) {e}"))?;
-        (out.acked, out.completed)
-    };
-    restart(&scratch_extras)?;
-    if in_flight_owed {
-        // The statement completed and was answered: it must be there.
-        crash::check_acked_rows(&addr, t, &acked_table, acked + 1)
-            .map_err(|e| format!("(a) {e}"))?;
-        logger.log(&format!(
+    // The ladder body: any early return must still put the candidate back
+    // on the real store and drop the scratch copy, because the rest of this
+    // verification (and the repair round) works on the real store.
+    let body = (|| -> Result<(), String> {
+        // (a) acked rows survive SIGKILL. One more INSERT is sent and never
+        // read; if its answer arrived before the kill, the row is owed too.
+        let (acked, in_flight_owed) = {
+            let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+            let out = crash::ack_kill(&addr, t, &acked_table, 40, &mut kill)
+                .map_err(|e| format!("(a) {e}"))?;
+            (out.acked, out.completed)
+        };
+        restart(&scratch_extras)?;
+        if in_flight_owed {
+            // The statement completed and was answered: it must be there.
+            crash::check_acked_rows(&addr, t, &acked_table, acked + 1)
+                .map_err(|e| format!("(a) {e}"))?;
+            logger.log(&format!(
             "  [CRASH] {acked} acked rows (and the in-flight one, which answered first) survived a SIGKILL"
         ));
-    } else {
-        crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
-            .map_err(|e| format!("(a) {e}"))?;
-        logger.log(&format!("  [CRASH] {acked} acked rows survived a SIGKILL"));
-    }
-
-    if lite {
-        // Lite stage 5 (proposal): acked rows survive kill -9; torn tails
-        // and mid-statement atomicity are not required.
-        logger.log("  [CRASH] lite variant: acked rows and restarts only");
-    } else {
-        // (b) a bulk UPDATE killed mid-flight is all or nothing. If the
-        // answer arrives before the kill lands the server finished the
-        // update, so that rep proved nothing: retry with a bigger table.
-        let mut in_flight = false;
-        rows = crash::BULK_ROWS;
-        for attempt in 0..3 {
-            bulk_table = format!("c{ns:x}_bulk{attempt}");
-            let killed = {
-                let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
-                crash::bulk_update_and_kill(
-                    &addr,
-                    t,
-                    &bulk_table,
-                    rows,
-                    crash::BULK_CHUNK,
-                    &mut kill,
-                )
-                .map_err(|e| format!("(b) {e}"))?
-            };
-            restart(&scratch_extras)?;
-            in_flight = killed;
-            if in_flight {
-                break;
-            }
-            logger.log(&format!(
-                "  [CRASH] the {rows}-row bulk UPDATE answered before the kill; retrying bigger"
-            ));
-            rows *= 2;
+        } else {
+            crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
+                .map_err(|e| format!("(a) {e}"))?;
+            logger.log(&format!("  [CRASH] {acked} acked rows survived a SIGKILL"));
         }
-        if !in_flight {
-            logger.log(
-                "  [WARN] the bulk UPDATE kept answering before the kill; that check was \
-                 weaker this run",
-            );
-        }
-        crash::check_uniform(&addr, t, &bulk_table, rows).map_err(|e| format!("(b) {e}"))?;
-        logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
 
-        // (c) a torn tail. Kill first: a running server may rewrite the
-        // file. Then cut into the file the victim commit touched: a partial
-        // trailing record may cost the newest statement, never an older
-        // committed row. A commit that lands on a WAL checkpoint rewrites
-        // in place and grows nothing (or nothing tearable), so retry with
-        // another victim instead of skipping.
-        let mut torn: Option<(std::path::PathBuf, u64)> = None;
-        for attempt in 0..3 {
-            let before = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
-            crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
-                .map_err(|e| format!("(c) {e}"))?;
-            victims += 1;
-            let _ = sandbox.kill_candidate();
-            if let Some(path) =
-                crash::changed_file(&scratch, &before).map_err(|e| format!("(c) {e}"))?
-            {
-                let cut = crash::torn_tail(&path, 256).map_err(|e| format!("(c) {e}"))?;
-                if cut > 0 {
-                    torn = Some((path, cut));
+        // The base of what the tear may not cost (`must`) and what it may
+        // (`maybe`); the victims committed during (c) extend it below.
+        must = (0..acked).collect();
+        maybe = vec![acked];
+        if in_flight_owed {
+            must.push(acked);
+            maybe.clear();
+        }
+
+        if lite {
+            // Lite stage 5 (proposal): acked rows survive kill -9; torn tails
+            // and mid-statement atomicity are not required.
+            logger.log("  [CRASH] lite variant: acked rows and restarts only");
+        } else {
+            // (b) a bulk UPDATE killed mid-flight is all or nothing. If the
+            // answer arrives before the kill lands the server finished the
+            // update, so that rep proved nothing: retry with a bigger table.
+            rows = crash::BULK_ROWS;
+            // The last attempt's own row count: `rows` doubles between
+            // attempts, but the final table holds only what that attempt built.
+            // `owed` is the probe's post-kill verdict: true when the UPDATE's
+            // `OK` arrived before the kill (then the new value must survive).
+            // Four attempts (50k .. 400k rows) give even a fast engine a real
+            // chance of being killed mid-statement.
+            for attempt in 0..4 {
+                bulk_table = format!("c{ns:x}_bulk{attempt}");
+                bulk_rows = rows;
+                owed = {
+                    let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+                    crash::bulk_update_and_kill(
+                        &addr,
+                        t,
+                        &bulk_table,
+                        rows,
+                        crash::BULK_CHUNK,
+                        &mut kill,
+                    )
+                    .map_err(|e| format!("(b) {e}"))?
+                };
+                restart(&scratch_extras)?;
+                if !owed {
                     break;
                 }
+                logger.log(&format!(
+                "  [CRASH] the {rows}-row bulk UPDATE answered before the kill; retrying bigger"
+            ));
+                rows *= 2;
             }
-            // Nothing changed (or nothing tearable): bring the store back
-            // and try one more commit.
+            if owed {
+                logger.log(
+                    "  [WARN] the bulk UPDATE kept answering before the kill; the atomicity \
+                 check is weaker this run (the acked update is still required)",
+                );
+            }
+            crash::check_uniform(&addr, t, &bulk_table, bulk_rows, owed)
+                .map_err(|e| format!("(b) {e}"))?;
+            logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
+
+            // (c) a torn tail. Kill first: a running server may rewrite the
+            // file. Then cut into the file the victim commit touched: a partial
+            // trailing record may cost the newest statement, never an older
+            // committed row. A commit that lands on a WAL checkpoint rewrites
+            // in place and grows nothing (or nothing tearable), so retry with
+            // another victim instead of skipping.
+            let mut torn: Option<(std::path::PathBuf, u64)> = None;
+            for attempt in 0..3 {
+                let before = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
+                crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
+                    .map_err(|e| format!("(c) {e}"))?;
+                victims += 1;
+                let _ = sandbox.kill_candidate();
+                if let Some(path) =
+                    crash::changed_file(&scratch, &before).map_err(|e| format!("(c) {e}"))?
+                {
+                    let cut = crash::torn_tail(&path, 256).map_err(|e| format!("(c) {e}"))?;
+                    if cut > 0 {
+                        torn = Some((path, cut));
+                        break;
+                    }
+                }
+                // Nothing changed (or nothing tearable): bring the store back
+                // and try one more commit.
+                restart(&scratch_extras)?;
+            }
+            let Some((path, cut)) = torn else {
+                return Err(
+                    "(c) three acked INSERTs changed no file: commits never reached the store"
+                        .to_string(),
+                );
+            };
+            logger.log(&format!(
+                "  [CRASH] (c) torn tail: {cut} bytes off {}",
+                path.display()
+            ));
             restart(&scratch_extras)?;
+            // Only the newest victim may be missing: the older ones were
+            // acked before a clean restart, so they are owed.
+            for v in 1..victims {
+                must.push(acked + v);
+            }
+            if victims > 0 {
+                maybe.push(acked + victims);
+            }
+            crash::check_keys(&addr, t, &acked_table, &must, &maybe)
+                .map_err(|e| format!("(c) {e}"))?;
+            // The torn tail may cost the newest statement, so a uniform old
+            // value is fine here.
+            crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
+                .map_err(|e| format!("(c) {e}"))?;
+            logger.log(&format!(
+                "  [CRASH] {cut} torn bytes from {}: every older row intact",
+                path.display()
+            ));
         }
-        let Some((path, cut)) = torn else {
-            return Err(
-                "(c) three acked INSERTs changed no file: commits never reached the store"
-                    .to_string(),
-            );
-        };
-        logger.log(&format!(
-            "  [CRASH] (c) torn tail: {cut} bytes off {}",
-            path.display()
-        ));
+
+        // (d) a second restart changes nothing.
         restart(&scratch_extras)?;
-        crash::check_acked_prefix(&addr, t, &acked_table, acked, 1 + victims)
-            .map_err(|e| format!("(c) {e}"))?;
-        crash::check_uniform(&addr, t, &bulk_table, rows).map_err(|e| format!("(c) {e}"))?;
-        logger.log(&format!(
-            "  [CRASH] {cut} torn bytes from {}: every older row intact",
-            path.display()
-        ));
-    }
+        crash::check_keys(&addr, t, &acked_table, &must, &maybe).map_err(|e| format!("(d) {e}"))?;
+        if !lite {
+            crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
+                .map_err(|e| format!("(d) {e}"))?;
+        }
+        logger.log("  [CRASH] a double restart changed nothing");
+        Ok(())
+    })();
 
-    // (d) a second restart changes nothing.
-    restart(&scratch_extras)?;
-    crash::check_acked_prefix(&addr, t, &acked_table, acked, 1 + victims)
-        .map_err(|e| format!("(d) {e}"))?;
-    if !lite {
-        crash::check_uniform(&addr, t, &bulk_table, rows).map_err(|e| format!("(d) {e}"))?;
-    }
-    logger.log("  [CRASH] a double restart changed nothing");
-
-    // Back onto the real store; the rest of the campaign must see it.
-    restart(extras)?;
+    // Always: back onto the real store, then drop the scratch copy.
+    let restored = restart(extras);
     let _ = std::fs::remove_dir_all(&scratch);
+    body?;
+    restored?;
     Ok(())
 }
 
@@ -4822,11 +4861,33 @@ mod tests {
         }
     }
 
+    /// A test's temp dir, removed when the guard drops — on success and on
+    /// panic alike (the suite used to leave hundreds of `/tmp/covtest-*`
+    /// dirs behind, round-3 review finding 9). Derefs to the path, so
+    /// `dir.join(..)` and `&dir` keep working.
+    struct TestDir(PathBuf);
+    impl std::ops::Deref for TestDir {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Temp fixture root unique to this process and test tag.
-    fn covtest_dir(tag: &str) -> PathBuf {
+    fn covtest_dir(tag: &str) -> TestDir {
         let dir = std::env::temp_dir().join(format!("covtest-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
-        dir
+        TestDir(dir)
     }
 
     /// Minimal RESP candidate: raw sockets + a thread per connection, so
@@ -7127,6 +7188,7 @@ main()
             accepted_stages: vec![1, 2, 3],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7182,6 +7244,7 @@ main()
             accepted_stages: vec![14, 15, 16],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7234,6 +7297,7 @@ main()
             accepted_stages: vec![1],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7282,6 +7346,7 @@ main()
             accepted_stages: vec![1, 2, 3, 4, 6, 7, 8, 9],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7337,6 +7402,7 @@ main()
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7393,6 +7459,7 @@ main()
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7451,6 +7518,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: Some("# SPEC.md fixture\n".to_string()),
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7508,6 +7576,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7562,6 +7631,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7616,6 +7686,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5],
             lite_profile: vec!["crash-acked-only".to_string()],
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7629,7 +7700,11 @@ main()
             "[CRASH] 40 acked rows",
             "[CRASH] a double restart changed nothing",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
         }
         for absent in [
             "[CRASH] the killed bulk UPDATE was all-or-nothing",
@@ -7671,6 +7746,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5, 6],
             lite_profile: Vec::new(),
             passed_lite: vec![(5, vec!["crash-acked-only".to_string()])],
+            passed_stages: (0..=5).collect(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7703,6 +7779,58 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Stage 7 after a failed storage tier: the acceptance list carries
+    /// only the *passed* stages plus the current ticket, so stage 7's suite
+    /// runs the aggregate grammar against stages 0-4 and never touches the
+    /// crash ladder or the transaction checks (finding: the raw declared
+    /// list made one storage failure sink every later ticket).
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage7_without_storage_stages() {
+        let worker = 80u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlno5");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-7 fixture without stage 5").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlno5");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 7,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 7],
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: vec![0, 1, 2, 3, 4],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-7 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert!(
+            logger.contains("Stage 7: Aggregates -> PASS"),
+            "missing the stage-7 pass; log:\n{}",
+            logger.text()
+        );
+        for absent in ["[CRASH]", "[TXN]"] {
+            assert!(
+                !logger.contains(absent),
+                "{absent} ran although stage 5/6 are not in the suite"
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (6, 6)
+        );
+        cleanup_covtest_network("sqlno5");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// sdb-sql stage 9 live proof (eval-only, no model): the reference
     /// passes the constraint suite under Docker — constrained DDL, key
     /// auto-assignment, defaults, UNIQUE/NOT NULL and foreign keys
@@ -7727,6 +7855,7 @@ main()
             accepted_stages: (0..=9).collect(),
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7777,6 +7906,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7826,6 +7956,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
             lite_profile: vec!["join-inner-only".to_string()],
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7872,6 +8003,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5, 6, 7],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7923,6 +8055,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4, 5, 6],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7936,7 +8069,11 @@ main()
             "[TXN] a kill with an open transaction discarded it",
             "[UPGRADE] sentinel for stage 6 written",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
         }
         assert_eq!(
             (out.manifest.passed_stages, out.manifest.total_stages),
@@ -7972,6 +8109,7 @@ main()
             accepted_stages: vec![0, 1, 2, 3, 4],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -8026,6 +8164,7 @@ main()
             accepted_stages: vec![0],
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());

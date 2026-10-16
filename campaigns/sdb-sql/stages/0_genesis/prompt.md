@@ -17,7 +17,9 @@ hard-coded, and the schema is different every run.
   started with **its own `CMD` followed by `--port <p> --data <dir>`**, so
   put the server in an exec-form `CMD` (or an `ENTRYPOINT` with no `CMD`)
   and the flags arrive as argv. `SDB_PORT` / `SDB_DATA_DIR` are exported
-  too, as a fallback.
+  too, as a fallback. A clean stop sends **SIGTERM to every process in the
+  container** (not just PID 1), so a `start.sh` without `exec` still
+  delivers it; `exec` remains the recommended form.
 - **Port**: listen on **`0.0.0.0:5480`** by default; honor `--port <p>`.
 - **Data directory**: `./data` by default; honor `--data <dir>`. The
   harness owns that directory and restarts the server on it between

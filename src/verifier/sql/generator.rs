@@ -1132,7 +1132,9 @@ impl Generator {
                 parts.push(w.0);
             }
             let sql = self.join(parts);
-            return self.stmt(sql, Kind::Select, true);
+            // One row: ordered or not is the same frame. Ordering only
+            // enters the grammar when ticket 2 passed.
+            return self.stmt(sql, Kind::Select, self.profile.order_limit);
         }
 
         let key = self.group_key(&cols);
@@ -1156,20 +1158,25 @@ impl Generator {
             let pred = self.having_pred(&cols, &key.0, rows_bound);
             parts.push(format!("{having} {pred}"));
         }
-        let order = self.kw("ORDER");
-        let by = self.kw("BY");
-        let desc = if self.rng.chance(35) {
-            format!(" {}", self.kw("DESC"))
-        } else {
-            String::new()
-        };
-        parts.push(format!("{order} {by} k{desc}"));
-        if self.rng.chance(15) {
-            parts.push(self.kw("LIMIT"));
-            parts.push(self.rng.below(7).to_string());
+        // Sorting and paging are ticket 2's features: without them the
+        // grouped frame is unordered and compares as a multiset.
+        let ordered = self.profile.order_limit;
+        if ordered {
+            let order = self.kw("ORDER");
+            let by = self.kw("BY");
+            let desc = if self.rng.chance(35) {
+                format!(" {}", self.kw("DESC"))
+            } else {
+                String::new()
+            };
+            parts.push(format!("{order} {by} k{desc}"));
+            if self.rng.chance(15) {
+                parts.push(self.kw("LIMIT"));
+                parts.push(self.rng.below(7).to_string());
+            }
         }
         let sql = self.join(parts);
-        self.stmt(sql, Kind::Select, true)
+        self.stmt(sql, Kind::Select, ordered)
     }
 
     /// The columns of a table by name (for join clauses).
@@ -1394,30 +1401,35 @@ impl Generator {
             let (w, and) = (self.kw("WHERE"), self.kw("AND"));
             parts.push(format!("{w} {}", where_conds.join(&format!(" {and} "))));
         }
-        let mut terms = order_terms.clone();
-        for i in (1..terms.len()).rev() {
-            let j = self.rng.below(i as u64 + 1) as usize;
-            terms.swap(i, j);
-        }
-        let rendered: Vec<String> = terms
-            .iter()
-            .map(|t| {
-                let dir = match self.rng.below(10) {
-                    0..=2 => String::new(),
-                    3..=6 => format!(" {}", self.kw("ASC")),
-                    _ => format!(" {}", self.kw("DESC")),
-                };
-                format!("{t}{dir}")
-            })
-            .collect();
-        let (o, b) = (self.kw("ORDER"), self.kw("BY"));
-        parts.push(format!("{o} {b} {}", rendered.join(", ")));
-        if self.rng.chance(20) {
-            parts.push(self.kw("LIMIT"));
-            parts.push(self.rng.below(7).to_string());
+        // Ordering and paging are ticket 2's features: without them the
+        // join frame is unordered and compares as a multiset.
+        let ordered = self.profile.order_limit;
+        if ordered {
+            let mut terms = order_terms.clone();
+            for i in (1..terms.len()).rev() {
+                let j = self.rng.below(i as u64 + 1) as usize;
+                terms.swap(i, j);
+            }
+            let rendered: Vec<String> = terms
+                .iter()
+                .map(|t| {
+                    let dir = match self.rng.below(10) {
+                        0..=2 => String::new(),
+                        3..=6 => format!(" {}", self.kw("ASC")),
+                        _ => format!(" {}", self.kw("DESC")),
+                    };
+                    format!("{t}{dir}")
+                })
+                .collect();
+            let (o, b) = (self.kw("ORDER"), self.kw("BY"));
+            parts.push(format!("{o} {b} {}", rendered.join(", ")));
+            if self.rng.chance(20) {
+                parts.push(self.kw("LIMIT"));
+                parts.push(self.rng.below(7).to_string());
+            }
         }
         let sql = self.join(parts);
-        self.stmt(sql, Kind::Select, true)
+        self.stmt(sql, Kind::Select, ordered)
     }
 
     pub fn update_stmt(&mut self) -> Statement {
@@ -1504,10 +1516,9 @@ impl Generator {
         let mut menu: Vec<u32> = vec![0, 1, 2, 3, 5, 5];
         if plain_int.is_some() {
             menu.push(4);
-            // The multi-row atomicity probe only outside a transaction:
-            // inside one SQLite keeps the rows a failed statement inserted
-            // before the bad one, and the dialect leaves that untested.
-            if self.profile.multi_row_insert && !self.txn_open {
+            // The multi-row atomicity probe (the oracle grades it
+            // statement-atomically everywhere, transactions included).
+            if self.profile.multi_row_insert {
                 menu.push(9);
             }
         }
@@ -2199,6 +2210,41 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Tickets 7 and 8 need ticket 1, not 2: a model that failed sorting
+    /// and paging still gets aggregates and joins graded, and those
+    /// profiles must not emit `ORDER BY` or `LIMIT` (the frame compares as
+    /// a multiset then).
+    #[test]
+    fn aggregates_and_joins_without_stage2_are_unordered() {
+        for last in [7u32, 8, 9] {
+            let p = Profile::for_passed(&[0, 1, last]);
+            let mut selects = 0;
+            for seed in 0..40u64 {
+                let s = build_script(seed, &p, 150);
+                for c in s.setup.iter().chain(&s.steps) {
+                    let q = lower(&c.stmt.sql);
+                    if c.stmt.kind != Kind::Select {
+                        continue;
+                    }
+                    selects += 1;
+                    assert!(
+                        !q.contains("order by"),
+                        "stage {last} without 2 emitted ORDER BY: {q}"
+                    );
+                    assert!(
+                        !q.contains("limit") && !q.contains("offset"),
+                        "stage {last} without 2 emitted LIMIT/OFFSET: {q}"
+                    );
+                    assert!(
+                        !c.stmt.ordered,
+                        "an unordered frame must compare as a multiset: {q}"
+                    );
+                }
+            }
+            assert!(selects > 100, "too few selects generated: {selects}");
         }
     }
 

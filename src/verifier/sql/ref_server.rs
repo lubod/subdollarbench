@@ -177,14 +177,13 @@ def encode_cell(v):
 def answer(conn, sql):
     cur = conn.cursor()
     before = conn.total_changes
-    # SQLite changed here between 3.45 and 3.46 (the grader's bundled
-    # version): outside an explicit transaction a failed statement is
-    # rolled back whole, but inside one the rows a multi-row VALUES already
-    # inserted stay until the transaction ends. The host's 3.45 keeps them
-    # in both cases, so an autocommit savepoint emulates the grader.
+    # The dialect's statement atomicity: a failing statement changes
+    # nothing. The host's SQLite (3.45) keeps the rows a failed multi-row
+    # VALUES inserted before the bad one, inside a transaction and in
+    # autocommit alike (3.46 fixed the autocommit case only), so a
+    # statement savepoint enforces the spec in both modes.
     guard = None
-    if (not conn.in_transaction
-            and re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.I)):
+    if re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.I):
         guard = "sdb_stmt"
         conn.execute("SAVEPOINT sdb_stmt")
     try:
@@ -365,6 +364,12 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            // The fixture's script and data dirs go with it (the suite used
+            // to leave /tmp/sdb-sql-* dirs behind, including on panics).
+            if let Some(dir) = self.script.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            let _ = std::fs::remove_dir_all(&self.data);
         }
     }
 
@@ -378,6 +383,7 @@ mod tests {
 
     fn start_reference(port: u16) -> RefProc {
         let dir = std::env::temp_dir().join(format!("sdb-sql-ref-{}-{port}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         write_reference(&dir, port).unwrap();
         let data = std::env::temp_dir().join(format!("sdb-sql-data-{}-{port}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
@@ -427,17 +433,18 @@ mod tests {
                     .expect("acked prefix");
             }
 
-            {
+            let completed = {
                 let mut kill = || {
                     proc.kill();
                     Ok(())
                 };
                 crash::bulk_update_and_kill(&addr, t, &format!("r{rep}_b"), 2_000, 500, &mut kill)
-                    .expect("bulk update");
-            }
+                    .expect("bulk update")
+            };
             proc.restart().unwrap();
             wait_until_answering(&addr, t).expect("answers after the killed update");
-            crash::check_uniform(&addr, t, &format!("r{rep}_b"), 2_000).expect("uniform");
+            crash::check_uniform(&addr, t, &format!("r{rep}_b"), 2_000, completed)
+                .expect("uniform");
 
             let before = crash::snapshot_files(&proc.data).expect("stamps");
             crash::append_row(&addr, t, &format!("r{rep}_a"), acked + 1).expect("victim");
@@ -526,12 +533,12 @@ mod tests {
         assert_eq!(left, 0, "the lite profile emitted LEFT JOIN");
     }
 
-    /// The grader's bundled SQLite (3.46) rolls a failed multi-row INSERT
-    /// back whole in autocommit, but keeps the rows it inserted before the
-    /// failure inside an explicit transaction. The reference runs on the
-    /// host's older SQLite (3.45), so it emulates the autocommit case.
+    /// The dialect's statement atomicity: a failed multi-row INSERT
+    /// changes nothing, in autocommit and inside a transaction alike. The
+    /// host's SQLite keeps earlier rows, so the reference wraps DML in a
+    /// statement savepoint — this pins both cases.
     #[test]
-    fn reference_multi_row_type_failure_matches_the_grader() {
+    fn reference_statement_atomicity_always_holds() {
         use super::super::client::TcpCandidate;
         use super::super::run::Candidate;
         use super::super::wire::Response;
@@ -553,6 +560,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // Inside a transaction the same statement changes nothing either.
         c.exec("BEGIN").unwrap();
         assert!(matches!(
             c.exec("INSERT INTO quirk VALUES (2, 2), ('zz', 3)")
@@ -561,7 +569,23 @@ mod tests {
         ));
         match c.exec("SELECT * FROM quirk").unwrap() {
             Response::Rows { rows, .. } => {
-                assert_eq!(rows.len(), 1, "inside a transaction: {rows:?}")
+                assert!(rows.is_empty(), "inside a transaction: {rows:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // `INSERT ... SELECT` with a bad cell is atomic too.
+        c.exec("CREATE TABLE quirk_src (a INTEGER, b TEXT)")
+            .unwrap();
+        c.exec("INSERT INTO quirk_src VALUES (1, '1'), (2, 'zz')")
+            .unwrap();
+        assert!(matches!(
+            c.exec("INSERT INTO quirk SELECT a, b FROM quirk_src")
+                .unwrap(),
+            Response::Err { .. }
+        ));
+        match c.exec("SELECT * FROM quirk").unwrap() {
+            Response::Rows { rows, .. } => {
+                assert!(rows.is_empty(), "insert-select left rows: {rows:?}")
             }
             other => panic!("{other:?}"),
         }
@@ -638,17 +662,17 @@ mod tests {
         }
 
         // (b) A bulk UPDATE killed mid-flight is all or nothing.
-        {
+        let completed = {
             let mut kill = || {
                 proc.kill();
                 Ok(())
             };
             crash::bulk_update_and_kill(&addr, t, "crash_bulk", 2_000, 500, &mut kill)
-                .expect("bulk update");
-        }
+                .expect("bulk update")
+        };
         proc.restart().unwrap();
         wait_until_answering(&addr, t).expect("answers after the killed update");
-        crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("all-or-nothing");
+        crash::check_uniform(&addr, t, "crash_bulk", 2_000, completed).expect("all-or-nothing");
 
         // (c) A torn tail (a partial trailing record): kill first, cut the
         // file the victim commit touched, and require every older row.
@@ -664,13 +688,13 @@ mod tests {
         wait_until_answering(&addr, t).expect("answers after a torn tail");
         crash::check_acked_prefix(&addr, t, "crash_acked", acked, 2)
             .expect("data after a torn tail");
-        crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("bulk after a torn tail");
+        crash::check_uniform(&addr, t, "crash_bulk", 2_000, false).expect("bulk after a torn tail");
 
         // (d) A second restart changes nothing.
         proc.restart().unwrap();
         wait_until_answering(&addr, t).expect("answers after two restarts");
         crash::check_acked_prefix(&addr, t, "crash_acked", acked, 2).expect("double restart");
-        crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("double restart");
+        crash::check_uniform(&addr, t, "crash_bulk", 2_000, false).expect("double restart");
     }
 
     /// Stage 6 against a real process: connections see only committed

@@ -49,9 +49,12 @@ enum PeerView {
     /// transaction to end (a single global lock design; legal at stage 6,
     /// where a *non-blocking* reader is not required yet).
     Blocked(std::sync::mpsc::Receiver<Result<Vec<String>, String>>),
-    /// It answered an error (a lock/busy rejection). The retry after the
+    /// It answered `ERR busy` (a lock rejection). The retry after the
     /// transaction ends must succeed.
     Errored,
+    /// Any other error: a syntax answer, a dropped connection, a crash.
+    /// That is a failure, not something to retry.
+    Failed(String),
 }
 
 /// Read the visible keys on a fresh connection *without* blocking this
@@ -66,9 +69,15 @@ fn peer_read(addr: &str, timeout: Duration, table: &str) -> PeerView {
     });
     match rx.recv_timeout(PEER_WINDOW) {
         Ok(Ok(keys)) => PeerView::Answered(keys),
-        Ok(Err(_)) => PeerView::Errored,
+        Ok(Err(e)) if is_busy(&e) => PeerView::Errored,
+        Ok(Err(e)) => PeerView::Failed(e),
         Err(_) => PeerView::Blocked(rx),
     }
+}
+
+/// Is this error string a `busy` response (the only retryable answer)?
+fn is_busy(e: &str) -> bool {
+    e.contains("class: \"busy\"")
 }
 
 /// The keys of a blocked reader, after the transaction ended: the commit
@@ -76,9 +85,11 @@ fn peer_read(addr: &str, timeout: Duration, table: &str) -> PeerView {
 /// post-commit state; anything else is a failure. Returns the keys it saw.
 fn released(
     blocked: std::sync::mpsc::Receiver<Result<Vec<String>, String>>,
-) -> Result<Vec<String>, String> {
+) -> Result<Option<Vec<String>>, String> {
     match blocked.recv_timeout(RELEASE_WINDOW) {
-        Ok(Ok(keys)) => Ok(keys),
+        Ok(Ok(keys)) => Ok(Some(keys)),
+        // A busy answer after the release is retried with a fresh read.
+        Ok(Err(e)) if is_busy(&e) => Ok(None),
         Ok(Err(e)) => Err(format!(
             "the blocked reader failed after the transaction ended: {e}"
         )),
@@ -122,13 +133,19 @@ pub fn isolation(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
             None
         }
         PeerView::Errored => None, // a busy answer is retried after COMMIT
+        PeerView::Failed(e) => {
+            return Err(format!(
+                "the second connection failed while a transaction was open: {e}"
+            ))
+        }
         PeerView::Blocked(rx) => Some(rx),
     };
     ok0(a.exec("COMMIT")?, "COMMIT")?;
     if let Some(rx) = blocked {
-        let seen = released(rx)?;
-        if seen != vec!["0".to_string()] && seen != vec!["0".to_string(), "1".to_string()] {
-            return Err(format!("the released reader saw {seen:?} after COMMIT"));
+        if let Some(seen) = released(rx)? {
+            if seen != vec!["0".to_string()] && seen != vec!["0".to_string(), "1".to_string()] {
+                return Err(format!("the released reader saw {seen:?} after COMMIT"));
+            }
         }
     }
     let seen = visible_keys(addr, timeout, table)?;
@@ -151,13 +168,19 @@ pub fn isolation(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
             None
         }
         PeerView::Errored => None,
+        PeerView::Failed(e) => {
+            return Err(format!(
+                "the second connection failed while a transaction was open: {e}"
+            ))
+        }
         PeerView::Blocked(rx) => Some(rx),
     };
     ok0(a.exec("ROLLBACK")?, "ROLLBACK")?;
     if let Some(rx) = blocked {
-        let seen = released(rx)?;
-        if seen != vec!["0".to_string(), "1".to_string()] {
-            return Err(format!("the released reader saw {seen:?} after ROLLBACK"));
+        if let Some(seen) = released(rx)? {
+            if seen != vec!["0".to_string(), "1".to_string()] {
+                return Err(format!("the released reader saw {seen:?} after ROLLBACK"));
+            }
         }
     }
     let seen = visible_keys(addr, timeout, table)?;
@@ -218,6 +241,60 @@ mod tests {
         in_txn: bool,
         committed: Vec<String>,
         pending: Vec<String>,
+    }
+
+    /// A peer that answers anything but `ERR busy` while a transaction is
+    /// open fails the check: a syntax answer or a dropped connection is not
+    /// something to retry (finding: every error used to count as busy).
+    #[test]
+    fn a_non_busy_peer_error_fails_the_isolation_check() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // The transaction state is shared across connections, like a real
+        // server's.
+        let open = Arc::new(Mutex::new(false));
+        let open2 = open.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(sock) = stream else { break };
+                let open = open2.clone();
+                std::thread::spawn(move || {
+                    let mut sock = sock;
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    while matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                        let low = line.trim().to_ascii_lowercase();
+                        let reply = if low.starts_with("begin") {
+                            *open.lock().unwrap() = true;
+                            "OK 0".to_string()
+                        } else if low.starts_with("create") {
+                            "OK 0".to_string()
+                        } else if low.starts_with("commit") || low.starts_with("rollback") {
+                            *open.lock().unwrap() = false;
+                            "OK 0".to_string()
+                        } else if low.starts_with("select") {
+                            if *open.lock().unwrap() {
+                                // The bug under test: not a busy answer.
+                                "ERR syntax".to_string()
+                            } else {
+                                "ROWS 1\nk\n0\nEND 1".to_string()
+                            }
+                        } else {
+                            "OK 1".to_string()
+                        };
+                        if sock.write_all(format!("{reply}\n").as_bytes()).is_err() {
+                            return;
+                        }
+                        line.clear();
+                    }
+                });
+            }
+        });
+        let err = isolation(&addr, Duration::from_secs(5), "bad_t").unwrap_err();
+        assert!(err.contains("failed while a transaction was open"), "{err}");
     }
 
     /// A candidate built on one global lock: a reader blocks until the

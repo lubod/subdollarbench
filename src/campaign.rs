@@ -49,6 +49,19 @@ pub struct Acceptance {
 
 impl Acceptance {
     /// The stage ids this acceptance gates for `task` (`redis` default).
+    /// The suite run at stage `current`: the declared acceptance list
+    /// intersected with the stages passed so far, plus `current` itself.
+    /// A failed or skipped stage contributes nothing — otherwise one
+    /// failure would sink every later ticket (docs/PROPOSAL-sdb-sql.md,
+    /// "the ladder continues").
+    pub fn accepted_for(declared: &[u32], passed: &[u32], current: u32) -> Vec<u32> {
+        declared
+            .iter()
+            .copied()
+            .filter(|s| *s == current || passed.contains(s))
+            .collect()
+    }
+
     pub fn stages_for(&self, task: &str) -> &[u32] {
         match task {
             "proxy" => &self.proxy_stages,
@@ -227,6 +240,8 @@ pub struct CampaignStageConfig {
     /// Lite profile of every earlier stage this ladder passed on a lite
     /// variant, by stage (empty for a full run). See [`StageAttempt`].
     pub passed_lite: Vec<(u32, Vec<String>)>,
+    /// Every stage passed so far; `accepted_stages` is intersected with it.
+    pub passed_stages: Vec<u32>,
     /// sdb-sql: the harness-owned `SPEC.md`, written into the workspace
     /// after the pipeline prepares it (a genesis workspace is wiped first,
     /// so the campaign runner cannot write it beforehand).
@@ -494,6 +509,11 @@ pub struct StageAttempt<'a> {
     /// stages at the variant the model actually passed, or it would demand
     /// work that ticket-5-lite never asked for.
     pub passed_lite: Vec<(u32, Vec<String>)>,
+    /// Every stage passed so far (full or lite). The suite at stage k is
+    /// the *passed* stages' suites plus k itself: a stage the model failed
+    /// or skipped contributes nothing, or one failure would sink every
+    /// later ticket (docs/PROPOSAL-sdb-sql.md, "the ladder continues").
+    pub passed: Vec<u32>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
     /// True when the workspace/data must be rolled back to the last green
@@ -656,6 +676,9 @@ where
     // Which stages passed on a lite variant (stage -> profile).
     let mut liters: std::collections::BTreeMap<u32, Vec<String>> =
         std::collections::BTreeMap::new();
+    // Every stage passed so far (full or lite): the declared acceptance
+    // list is intersected with it, so a failed stage sinks nothing later.
+    let mut passed_all: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let mut dirty = false;
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
@@ -723,6 +746,7 @@ where
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            passed: passed_all.iter().copied().collect(),
             weight: 1.0,
             rollback_first: dirty,
         };
@@ -755,6 +779,7 @@ where
         if out.passed {
             outcomes.insert(stage.id, LadderOutcome::Full);
             liters.remove(&stage.id);
+            passed_all.insert(stage.id);
             reached = Some(stage.id);
             dirty = false;
         } else if fault {
@@ -773,6 +798,7 @@ where
                 max_turns: lite.max_turns,
                 lite_profile: lite.profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                passed: passed_all.iter().copied().collect(),
                 weight: lite.weight,
                 rollback_first: true,
             };
@@ -805,6 +831,7 @@ where
             if out2.passed {
                 outcomes.insert(stage.id, LadderOutcome::Lite);
                 liters.insert(stage.id, lite.profile.clone());
+                passed_all.insert(stage.id);
                 if reached.map(|r| stage.id > r).unwrap_or(true) {
                     reached = Some(stage.id);
                 }
@@ -1658,6 +1685,28 @@ mod tests {
         LoadedCampaign { spec, root: dir }
     }
 
+    /// A stage that failed (full and lite) or was skipped contributes
+    /// nothing to the later tickets' suites: the declared acceptance list
+    /// is intersected with the passed stages. One failure must not sink
+    /// every later ticket.
+    #[test]
+    fn accepted_stages_are_the_passed_ones() {
+        // Declared [0..=7]; stages 0-4 passed, 5 failed, 6 skipped.
+        let declared: Vec<u32> = (0..=7).collect();
+        let passed = vec![0, 1, 2, 3, 4];
+        assert_eq!(
+            Acceptance::accepted_for(&declared, &passed, 7),
+            vec![0, 1, 2, 3, 4, 7]
+        );
+        // The current stage is always included, even before it passed.
+        assert_eq!(Acceptance::accepted_for(&declared, &[], 0), vec![0]);
+        // A previously passed stage that regressed stays graded.
+        assert_eq!(
+            Acceptance::accepted_for(&declared, &passed, 5),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+    }
+
     #[tokio::test]
     async fn test_orchestrator_continue_ladder_lite_needs_and_points() {
         let lc = ladder_fixture();
@@ -1672,6 +1721,7 @@ mod tests {
         };
         let seen = std::cell::RefCell::new(Vec::<(u32, StageVariant, bool)>::new());
         let passed_lite = std::cell::RefCell::new(Vec::<Vec<(u32, Vec<String>)>>::new());
+        let passed_seen = std::cell::RefCell::new(Vec::<Vec<u32>>::new());
         let rollup = run_campaign(
             &lc,
             &opts,
@@ -1681,6 +1731,7 @@ mod tests {
                 seen.borrow_mut()
                     .push((id, variant, attempt.rollback_first));
                 passed_lite.borrow_mut().push(attempt.passed_lite.clone());
+                passed_seen.borrow_mut().push(attempt.passed.clone());
                 let passed = match (id, variant) {
                     (0, StageVariant::Full) => true,
                     (1, StageVariant::Full) => false,
@@ -1726,6 +1777,18 @@ mod tests {
         );
         assert_eq!(carried[3], prof, "the stage-2 attempt keeps stage 1 lite");
         assert_eq!(carried[4], prof, "the stage-4 attempt keeps stage 1 lite");
+        // The passed set grows with every pass, lite passes included
+        // (stage 1 passed lite; stage 3 was skipped).
+        let passed = passed_seen.into_inner();
+        assert_eq!(passed[0], Vec::<u32>::new(), "nothing before stage 0");
+        assert_eq!(passed[1], vec![0]);
+        assert_eq!(passed[2], vec![0u32], "the lite attempt sees the same");
+        assert_eq!(passed[3], vec![0, 1], "a lite pass counts as passed");
+        assert_eq!(
+            passed[4],
+            vec![0, 1],
+            "stage 2 failed and is excluded; stage 3 was skipped"
+        );
         // Records: 0 full pass, 1 full fail + 1 lite pass, 2 failed,
         // 3 skipped, 4 full pass.
         let by_id: Vec<(u32, &str, bool, f64)> = rollup
