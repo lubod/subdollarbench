@@ -773,8 +773,22 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   retryable; the crash ladder always restores the real store and drops the
   scratch copy; test temp dirs are guard-cleaned (TestDir/RefProc) and
   stale reference staging dirs are swept; RULES 2026-10-16.11. **Next**:
-  a cell through tickets 0-9 (at least one failed ticket in the middle),
-  then ticket 10 (subqueries).
+  - cell 6 (2026-10-16, `inkling-small:free`, after the round-3 fixes):
+    s0 PASS 1/1 ($0.0103, 28 turns), s1 FAIL 0/2 ($0.0110, regression on
+    stage 0) — and the run **stopped after s1**: the shipped spec never
+    declared `ladder`, so it defaulted to `pass_stop` and no cell had ever
+    exercised "the ladder continues" (fixed in `081d513`, pinned by
+    `shipped_sdb_sql_campaign_continues`).
+  - cell 7 (2026-10-16, rerun with `ladder: continue`, $0.0504):
+    s0 PASS 1/1 ($0.0267, 26 turns); s1 FAIL 0/2 ($0.0092, regression on
+    stage 0); s2/s3 skipped (`needs` 1); **s4 ran with acceptance [0,4]**
+    — exactly two stages in the suite, so the passed-set intersection
+    (finding 1 of round 3) works end to end — s4 FAIL 0/2 ($0.0145, stage
+    0 broken again by the candidate's rewrite, so stage 4 was skipped
+    within the verification); s5-s9 skipped by `needs`; reached ticket 0,
+    $0.0504 total. The candidate regresses stage 0 on every rewrite
+    (genuine: `expected ERR exists, got ERR syntax`), which is the ticket
+    it should repair before climbing. **Next**: ticket 10 (subqueries).
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions
