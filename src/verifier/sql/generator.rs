@@ -43,6 +43,8 @@ pub struct Profile {
     pub delete: bool,
     /// `BEGIN`/`COMMIT`/`ROLLBACK`: transactions, kept balanced per script.
     pub txn: bool,
+    /// `COUNT`/`SUM`/`MIN`/`MAX`, `GROUP BY`, `HAVING` (ticket 7).
+    pub aggregates: bool,
     pub constraints: bool,
 }
 
@@ -67,6 +69,7 @@ impl Profile {
                 p.delete = true;
             }
             6 => p.txn = true,
+            7 => p.aggregates = true,
             9 => p.constraints = true,
             _ => {}
         }
@@ -85,6 +88,7 @@ impl Profile {
             update: self.update || o.update,
             delete: self.delete || o.delete,
             txn: self.txn || o.txn,
+            aggregates: self.aggregates || o.aggregates,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -169,6 +173,10 @@ pub struct Generator {
     /// True while the generated stream is inside an open transaction.
     /// `build_script` closes it at the end so no script leaves one open.
     txn_open: bool,
+    /// Per table: an upper bound on its row count (every generated INSERT
+    /// counts; deletes never lower it). Only `SUM`'s overflow guard uses
+    /// it, so being conservative is free.
+    rows: HashMap<String, u128>,
     /// Per column: the largest magnitude (INTEGER) or length (TEXT) any
     /// value of it can have. Seeded from the schema's `DEFAULT`s (a column
     /// omitted from every explicit insert still holds its default) and
@@ -205,6 +213,7 @@ impl Generator {
             profile,
             uniq: 0,
             seen: HashMap::new(),
+            rows: HashMap::new(),
             bounds,
             txn_open: false,
         }
@@ -721,6 +730,10 @@ impl Generator {
             let cells: Vec<String> = chosen.iter().map(|c| self.cell(c)).collect();
             rows.push(format!("({})", cells.join(", ")));
         }
+        // Every insert (seed or step, accepted or rejected) counts towards
+        // the table's row bound: SUM's overflow guard stays conservative.
+        let rows_bound = self.rows.entry(tname.clone()).or_insert(0);
+        *rows_bound += rows.len() as u128;
         let mut parts = vec![self.kw("INSERT"), self.kw("INTO")];
         if use_list {
             let names: Vec<&str> = chosen.iter().map(|c| c.name.as_str()).collect();
@@ -735,6 +748,10 @@ impl Generator {
     }
 
     pub fn select_stmt(&mut self) -> Statement {
+        // Aggregate queries first: they have their own select-list rules.
+        if self.profile.aggregates && self.rng.below(100) < 30 {
+            return self.aggregate_stmt();
+        }
         // SELECT without FROM: pure expressions.
         if self.profile.select_no_from && self.rng.chance(8) {
             let n = 1 + self.rng.below(3) as usize;
@@ -849,6 +866,247 @@ impl Generator {
         self.stmt(sql, Kind::Select, ordered)
     }
 
+    /// A comparison operator, for `HAVING` predicates.
+    fn cmp_op(&mut self) -> String {
+        ["=", "<>", "<", "<=", ">", ">="][self.rng.below(6) as usize].to_string()
+    }
+
+    /// One aggregate argument: a column, or a one-column expression whose
+    /// bound is still exact (`abs`, `length`, `upper`/`lower`, a small
+    /// shift or scale). `want_int` restricts to INTEGER arguments.
+    fn agg_arg(&mut self, cols: &[ColInfo], want_int: bool) -> Option<(Ex, Ty)> {
+        let cands: Vec<&ColInfo> = cols
+            .iter()
+            .filter(|c| !want_int || c.ty == Ty::Integer)
+            .collect();
+        if cands.is_empty() {
+            return None;
+        }
+        let c = cands[self.rng.below(cands.len() as u64) as usize];
+        let b = self.bound_of(&c.name);
+        let e: (Ex, Ty) = match self.rng.below(10) {
+            0 if c.ty == Ty::Integer => {
+                // `ABS` over TEXT coerces through a REAL (SQLite), which is
+                // outside the dialect: INTEGER arguments only.
+                (
+                    (format!("{}({})", self.kw("abs"), c.name), 0, b),
+                    Ty::Integer,
+                )
+            }
+            1 => {
+                // LENGTH yields the character count: bounded by the text
+                // length, or by 20 digits for an INTEGER.
+                let lb = if c.ty == Ty::Text {
+                    b.min(TEXT_BOUND)
+                } else {
+                    20
+                };
+                (
+                    (format!("{}({})", self.kw("length"), c.name), 0, lb),
+                    Ty::Integer,
+                )
+            }
+            2..=3 if c.ty == Ty::Text => {
+                let f = if self.rng.chance(50) {
+                    "upper"
+                } else {
+                    "lower"
+                };
+                ((format!("{}({})", self.kw(f), c.name), 0, b), Ty::Text)
+            }
+            4..=5 if c.ty == Ty::Integer && b < INT_BOUND => {
+                // Keep the shifted bound inside 64 bits: SQLite promotes an
+                // overflow to REAL, which is outside the dialect.
+                let room = (INT_BOUND - b).min(50);
+                let k = 1 + self.rng.below(room as u64);
+                (
+                    (format!("({} + {k})", c.name), 0, b + k as u128),
+                    Ty::Integer,
+                )
+            }
+            6 if c.ty == Ty::Integer && b > 0 && b <= INT_BOUND / 9 => {
+                let k = 1 + self.rng.below(9);
+                (
+                    (format!("({} * {k})", c.name), 0, b * k as u128),
+                    Ty::Integer,
+                )
+            }
+            _ => ((c.name.clone(), 0, b), c.ty),
+        };
+        Some(e)
+    }
+
+    /// One aggregate output item, with the type of its result.
+    fn agg_item(&mut self, cols: &[ColInfo], rows_bound: u128) -> (String, Ty) {
+        match self.rng.below(100) {
+            0..=19 => (format!("{}(*)", self.kw("count")), Ty::Integer),
+            20..=39 => {
+                let arg = self.agg_arg(cols, false).map(|(e, _)| e.0);
+                let arg = arg.unwrap_or_else(|| cols[0].name.clone());
+                (format!("{}({})", self.kw("count"), arg), Ty::Integer)
+            }
+            40..=64 => {
+                // SUM only over INTEGER arguments whose worst case (max
+                // magnitude x row bound) still fits: overflow is untested,
+                // and SQLite's REAL promotion would be ungradeable.
+                if let Some(((e, _, b), _)) = self.agg_arg(cols, true) {
+                    if b.saturating_mul(rows_bound) <= INT_BOUND {
+                        return (format!("{}({})", self.kw("sum"), e), Ty::Integer);
+                    }
+                }
+                (format!("{}(*)", self.kw("count")), Ty::Integer)
+            }
+            65..=81 => {
+                let arg = self.agg_arg(cols, false);
+                match arg {
+                    Some(((e, _, _), ty)) => (format!("{}({})", self.kw("min"), e), ty),
+                    None => (format!("{}(*)", self.kw("count")), Ty::Integer),
+                }
+            }
+            _ => {
+                let arg = self.agg_arg(cols, false);
+                match arg {
+                    Some(((e, _, _), ty)) => (format!("{}({})", self.kw("max"), e), ty),
+                    None => (format!("{}(*)", self.kw("count")), Ty::Integer),
+                }
+            }
+        }
+    }
+
+    /// The `GROUP BY` key: a column, or a one-column expression whose text
+    /// is reused verbatim as a select item and in `ORDER BY` (SQLite
+    /// matches expressions structurally; an alias would not group).
+    fn group_key(&mut self, cols: &[ColInfo]) -> Ex {
+        let c = &cols[self.rng.below(cols.len() as u64) as usize];
+        let b = self.bound_of(&c.name);
+        match self.rng.below(10) {
+            0..=5 => (c.name.clone(), 0, b),
+            6..=7 if c.ty == Ty::Text => {
+                let f = if self.rng.chance(50) {
+                    "upper"
+                } else {
+                    "lower"
+                };
+                (format!("{}({})", self.kw(f), c.name), 0, b)
+            }
+            8 if c.ty == Ty::Integer && b < INT_BOUND => {
+                let room = (INT_BOUND - b).min(50);
+                let k = 1 + self.rng.below(room as u64);
+                (format!("({} + {k})", c.name), 0, b + k as u128)
+            }
+            _ => (format!("{}({})", self.kw("length"), c.name), 0, 20),
+        }
+    }
+
+    /// A `HAVING` predicate over a group's aggregates or its key. All
+    /// forms are deterministic; the three-valued logic of the comparison
+    /// is part of the dialect.
+    fn having_pred(&mut self, cols: &[ColInfo], key: &str, rows_bound: u128) -> String {
+        let atom = |g: &mut Self| -> String {
+            match g.rng.below(10) {
+                0..=3 => {
+                    let (sql, _) = g.agg_item(cols, rows_bound);
+                    let cmp = g.cmp_op();
+                    let k = g.rng.below(6);
+                    format!("{sql} {cmp} {k}")
+                }
+                4..=5 => {
+                    let f = if g.rng.chance(50) { "max" } else { "min" };
+                    let arg = g
+                        .agg_arg(cols, false)
+                        .map(|(e, _)| e.0)
+                        .unwrap_or_else(|| cols[0].name.clone());
+                    format!("{}({arg}) IS NOT NULL", g.kw(f))
+                }
+                6..=7 => {
+                    let neg = if g.rng.chance(50) { "NOT " } else { "" };
+                    format!("{key} IS {neg}NULL")
+                }
+                _ => {
+                    let cmp = g.cmp_op();
+                    let k = g.rng.below(4);
+                    format!("{}(*) {cmp} {k}", g.kw("count"))
+                }
+            }
+        };
+        let a = atom(self);
+        if self.rng.chance(30) {
+            let op = if self.rng.chance(50) { "AND" } else { "OR" };
+            let op = self.kw(op);
+            let b = atom(self);
+            format!("{a} {op} {b}")
+        } else {
+            a
+        }
+    }
+
+    /// An aggregate query (ticket 7): `COUNT`/`SUM`/`MIN`/`MAX`, optional
+    /// `GROUP BY` and `HAVING`. Fairness and determinism rules:
+    /// - the select list holds only aggregates and the group key, never a
+    ///   bare column of a grouped query (the dialect leaves those untested);
+    /// - the key text is repeated in `SELECT`, `GROUP BY` and `ORDER BY`,
+    ///   so the grouped frame is a total order and compares as a sequence;
+    /// - a scalar aggregate returns exactly one row even with no match
+    ///   (`COUNT` 0, `SUM` NULL), which the empty-group case exercises.
+    pub fn aggregate_stmt(&mut self) -> Statement {
+        let ti = self.pick_table();
+        let (tname, cols) = self.table_infos(ti);
+        let rows_bound = self.rows.get(&tname).copied().unwrap_or(2);
+
+        if self.rng.chance(35) {
+            let n = 1 + self.rng.below(3) as usize;
+            let mut items = Vec::new();
+            for i in 0..n {
+                let (sql, _) = self.agg_item(&cols, rows_bound);
+                items.push(format!("{sql} {} c{i}", self.kw("AS")));
+            }
+            let mut parts = vec![self.kw("SELECT"), items.join(", "), self.kw("FROM"), tname];
+            if self.profile.where_clause && self.rng.chance(45) {
+                parts.push(self.kw("WHERE"));
+                let w = self.bool_expr(&cols, 2);
+                parts.push(w.0);
+            }
+            let sql = self.join(parts);
+            return self.stmt(sql, Kind::Select, true);
+        }
+
+        let key = self.group_key(&cols);
+        let n = 1 + self.rng.below(3) as usize;
+        let mut items: Vec<String> = vec![format!("{} {} k", key.0, self.kw("AS"))];
+        for i in 0..n {
+            let (sql, _) = self.agg_item(&cols, rows_bound);
+            items.push(format!("{sql} {} c{i}", self.kw("AS")));
+        }
+        let mut parts = vec![self.kw("SELECT"), items.join(", "), self.kw("FROM"), tname];
+        if self.profile.where_clause && self.rng.chance(45) {
+            parts.push(self.kw("WHERE"));
+            let w = self.bool_expr(&cols, 2);
+            parts.push(w.0);
+        }
+        let group = self.kw("GROUP");
+        let by = self.kw("BY");
+        parts.push(format!("{group} {by} {}", key.0));
+        if self.rng.chance(55) {
+            let having = self.kw("HAVING");
+            let pred = self.having_pred(&cols, &key.0, rows_bound);
+            parts.push(format!("{having} {pred}"));
+        }
+        let order = self.kw("ORDER");
+        let by = self.kw("BY");
+        let desc = if self.rng.chance(35) {
+            format!(" {}", self.kw("DESC"))
+        } else {
+            String::new()
+        };
+        parts.push(format!("{order} {by} k{desc}"));
+        if self.rng.chance(15) {
+            parts.push(self.kw("LIMIT"));
+            parts.push(self.rng.below(7).to_string());
+        }
+        let sql = self.join(parts);
+        self.stmt(sql, Kind::Select, true)
+    }
+
     pub fn update_stmt(&mut self) -> Statement {
         let ti = self.pick_table();
         let (tname, cols) = self.table_infos(ti);
@@ -933,7 +1191,10 @@ impl Generator {
         let mut menu: Vec<u32> = vec![0, 1, 2, 3, 5, 5];
         if plain_int.is_some() {
             menu.push(4);
-            if self.profile.multi_row_insert {
+            // The multi-row atomicity probe only outside a transaction:
+            // inside one SQLite keeps the rows a failed statement inserted
+            // before the bad one, and the dialect leaves that untested.
+            if self.profile.multi_row_insert && !self.txn_open {
                 menu.push(9);
             }
         }
@@ -951,6 +1212,11 @@ impl Generator {
             // COMMIT/ROLLBACK *succeeds* (it ends it), so it is not a
             // statement-level probe there.
             menu.extend([11, 12]);
+        }
+        if self.profile.aggregates {
+            // Aggregate misuses: prepare-time rejections whose class the
+            // spec pins (`syntax`).
+            menu.extend([13, 14, 15, 16]);
         }
         let which = *self.rng.pick(&menu);
         let sql = match which {
@@ -1030,6 +1296,36 @@ impl Generator {
             ),
             11 => self.kw("COMMIT"),
             12 => self.kw("ROLLBACK"),
+            13 => format!(
+                "{} {}(*) {} {tname} {} {} zz_nocol",
+                self.kw("SELECT"),
+                self.kw("COUNT"),
+                self.kw("FROM"),
+                self.kw("GROUP"),
+                self.kw("BY")
+            ),
+            14 => format!(
+                "{} {}(zz_gone) {} {tname}",
+                self.kw("SELECT"),
+                self.kw("SUM"),
+                self.kw("FROM")
+            ),
+            15 => format!(
+                "{} {}(*) {} {tname} {} {}(*) > 1",
+                self.kw("SELECT"),
+                self.kw("COUNT"),
+                self.kw("FROM"),
+                self.kw("WHERE"),
+                self.kw("COUNT")
+            ),
+            16 => format!(
+                "{} * {} {tname} {} {} {}(*)",
+                self.kw("SELECT"),
+                self.kw("FROM"),
+                self.kw("GROUP"),
+                self.kw("BY"),
+                self.kw("COUNT")
+            ),
             _ => format!(
                 "{} {tname} {} zz_nocol = 1",
                 self.kw("UPDATE"),
@@ -1234,6 +1530,7 @@ pub fn build_script(seed: u64, profile: &Profile, steps: usize) -> Script {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verifier::sql::oracle::Value;
     use std::collections::BTreeSet;
 
     fn lower(s: &str) -> String {
@@ -1274,7 +1571,7 @@ mod tests {
     /// messages, and most are gradeable (the comparable-check floor).
     #[test]
     fn every_profile_is_oracle_clean_and_mostly_comparable() {
-        for last in [0u32, 1, 2, 3, 9] {
+        for last in [0u32, 1, 2, 3, 7, 9] {
             let p = Profile::through(last);
             let (mut total, mut kept) = (0usize, 0usize);
             for seed in 0..40u64 {
@@ -1351,6 +1648,124 @@ mod tests {
         ] {
             assert!(text.contains(feature), "stage 3 never produced {feature:?}");
         }
+
+        // Aggregates are stage 7 only.
+        let p6 = Profile::through(6);
+        for seed in 0..30u64 {
+            let s = build_script(seed, &p6, 150);
+            for c in s.setup.iter().chain(&s.steps) {
+                let q = lower(&c.stmt.sql);
+                for banned in ["count(", "sum(", "min(", "max(", "group by", "having"] {
+                    assert!(!q.contains(banned), "stage 6 leaked {banned:?}: {q}");
+                }
+            }
+        }
+        let p7 = Profile::through(7);
+        let mut text7 = String::new();
+        for seed in 0..40u64 {
+            let s = build_script(seed, &p7, 150);
+            assert!(
+                s.unknown.is_empty(),
+                "{:?}",
+                &s.unknown[..s.unknown.len().min(2)]
+            );
+            for c in &s.steps {
+                text7.push_str(&lower(&c.stmt.sql));
+                text7.push('\n');
+            }
+        }
+        for feature in [
+            "count(*)",
+            "count(",
+            "sum(",
+            "min(",
+            "max(",
+            "group by",
+            "having",
+            "order by k",
+        ] {
+            assert!(
+                text7.contains(feature),
+                "stage 7 never produced {feature:?}"
+            );
+        }
+        // Every grouped query is totally ordered by its key and never puts
+        // a bare column in the list: the dialect leaves those untested.
+        for seed in 0..40u64 {
+            let s = build_script(seed, &p7, 150);
+            for c in &s.steps {
+                let q = lower(&c.stmt.sql);
+                if c.stmt.kind == Kind::Select && q.contains("group by") {
+                    assert!(c.stmt.ordered, "grouped query without ORDER BY: {q}");
+                    assert!(q.contains("order by k"), "grouped query not keyed: {q}");
+                    assert!(
+                        !q.contains("select *") && q.contains(" as k"),
+                        "grouped query leaks a bare star/column: {q}"
+                    );
+                }
+                if c.stmt.kind == Kind::Select && q.contains("count(") && q.contains("from") {
+                    // Every aggregate select item is aliased.
+                    assert!(
+                        q.contains(" as c0") || q.contains(" as c1") || q.contains(" as c2"),
+                        "aggregate item without alias: {q}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Ticket 7's arithmetic promises: SUM of no rows is NULL and COUNT is
+    /// 0 (they must really be exercised), SUM is only generated where the
+    /// worst case fits in 64 bits (checked by the overflow gates), and every
+    /// aggregate query is gradeable as a frame.
+    #[test]
+    fn aggregate_queries_grade_and_exercise_the_empty_group() {
+        let p = Profile::through(7);
+        let (mut sum_seen, mut empty_scalar) = (0usize, 0usize);
+        for seed in 0..120u64 {
+            let s = build_script(seed, &p, 150);
+            for c in &s.steps {
+                let q = lower(&c.stmt.sql);
+                if c.stmt.kind != Kind::Select {
+                    continue;
+                }
+                if !(q.contains("count(")
+                    || q.contains("sum(")
+                    || q.contains("min(")
+                    || q.contains("max("))
+                {
+                    continue;
+                }
+                // The oracle must produce a frame (never an error) and the
+                // statement must not be a discard (no REAL results).
+                match &c.expected {
+                    OracleOutcome::Rows { rows, .. } => {
+                        if !q.contains("group by") && rows.len() != 1 {
+                            panic!(
+                                "a scalar aggregate must return one row: {q} -> {:?}",
+                                rows.len()
+                            );
+                        }
+                        if !q.contains("group by") && rows.len() == 1 {
+                            let empty = rows[0].iter().any(|v| matches!(v, Value::Null))
+                                || rows[0].iter().any(|v| matches!(v, Value::Int(0)));
+                            if empty {
+                                empty_scalar += 1;
+                            }
+                        }
+                        if q.contains("sum(") {
+                            sum_seen += 1;
+                        }
+                    }
+                    other => panic!("aggregate query expected {other:?}: {q}"),
+                }
+            }
+        }
+        assert!(sum_seen >= 10, "SUM rarely generated: {sum_seen}");
+        assert!(
+            empty_scalar >= 5,
+            "COUNT 0 / SUM NULL over no matching rows never exercised: {empty_scalar}"
+        );
     }
 
     #[test]

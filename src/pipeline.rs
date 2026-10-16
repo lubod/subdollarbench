@@ -7692,6 +7692,57 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// sdb-sql stage 7 live proof (eval-only, no model): the reference
+    /// passes the aggregate suite under Docker — `COUNT`/`SUM`/`MIN`/`MAX`,
+    /// grouped queries with `HAVING`, the empty-group contract and the
+    /// aggregate error probes — plus everything 0-6 again.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage7_aggregates_live() {
+        let worker = 84u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlagg");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-7 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlagg");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 7,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-7 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 7: Aggregates -> PASS",
+            "Stage 6: Transactions -> PASS",
+            "Stage 5: Crash safety -> PASS",
+            "[UPGRADE] sentinel for stage 7 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (8, 8)
+        );
+        cleanup_covtest_network("sqlagg");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// sdb-sql stage 6 live proof (eval-only, no model): the reference
     /// passes the transactions suite under Docker — cross-connection
     /// isolation (two connections, uncommitted rows invisible) and a kill

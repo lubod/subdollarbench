@@ -129,7 +129,9 @@ sections unlocked so far, so a fresh session can always read the rules.
   `DISTINCT` and `GROUP BY` treat `NULL`s as equal. `UNIQUE` allows any
   number of `NULL`s.
 - **Statement atomicity:** a statement that fails changes nothing (a
-  multi-row `INSERT` with one bad row inserts none).
+  multi-row `INSERT` with one bad row inserts none). Tested outside an
+  explicit transaction; inside one, a failed statement's earlier rows are
+  not tested.
 - **Not tested (any answer is accepted):** integer overflow, mixed-type
   comparison, inserting `'123'` into an INTEGER column or `5` into a TEXT
   column, non-ASCII text, bare non-grouped columns in aggregate queries, a
@@ -231,8 +233,13 @@ or a bare `COMMIT`. S: a second connection never sees uncommitted rows;
 SIGKILL with an open transaction leaves none of it; a committed
 transaction survives entirely.
 
-**7. Aggregates.** `SUM` of no rows is `NULL`, `COUNT` is `0`; aggregates
-ignore `NULL`s; `GROUP BY` puts `NULL`s in one group. No `AVG` (no REAL).
+**7. Aggregates.** `COUNT(*)`/`COUNT(x)`/`SUM(x)`/`MIN(x)`/`MAX(x)`,
+`GROUP BY` (any single expression) and `HAVING`. `SUM` of no rows is
+`NULL`, `COUNT` is `0`; aggregates skip `NULL`s; `GROUP BY` puts `NULL`s
+in one group and `NULL` still sorts first. `SUM` takes an INTEGER
+argument in tests (`SUM` over TEXT is not tested), and a query mixing an
+aggregate with a bare, non-grouped column is not tested. No `AVG` (no
+REAL). An aggregate in `WHERE` or as a `GROUP BY` key is `ERR syntax`.
 
 **8. Joins.** Up to 3 tables; `ON` with compound predicates; `SELECT *`
 over a join lists all columns in table order; `ERR ambiguous` for an

@@ -70,10 +70,14 @@ pub enum Fault {
     LengthOffByOne,
     /// `coalesce` only looks at its first argument.
     CoalesceFirstOnly,
+    /// `COUNT(x)` counts NULLs as values.
+    AggregatesCountNulls,
+    /// `GROUP BY` puts every NULL in its own group.
+    GroupByNullsSeparate,
 }
 
 impl Fault {
-    pub const ALL: [Fault; 26] = [
+    pub const ALL: [Fault; 28] = [
         Fault::NullsLast,
         Fault::UpdateSeesNewValues,
         Fault::FloorDivision,
@@ -100,6 +104,8 @@ impl Fault {
         Fault::HeadersUppercased,
         Fault::LengthOffByOne,
         Fault::CoalesceFirstOnly,
+        Fault::AggregatesCountNulls,
+        Fault::GroupByNullsSeparate,
     ];
 }
 
@@ -230,7 +236,7 @@ enum Op {
     Or,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Expr {
     Lit(V),
     Col(String),
@@ -239,6 +245,26 @@ enum Expr {
     Bin(Op, Box<Expr>, Box<Expr>),
     IsNull(Box<Expr>, bool),
     Func(String, Vec<Expr>),
+    /// An aggregate call: select-list items and `HAVING` only.
+    Agg(Agg),
+}
+
+/// One aggregate call. `COUNT` is the only one that takes `*`; the others
+/// take exactly one argument (the dialect has no two-argument min/max).
+#[derive(Debug, Clone, PartialEq)]
+enum Agg {
+    CountStar,
+    Count(Box<Expr>),
+    Sum(Box<Expr>),
+    Min(Box<Expr>),
+    Max(Box<Expr>),
+}
+
+/// A select-list item: a plain expression or an aggregate.
+#[derive(Debug, Clone)]
+enum Item {
+    Expr(Expr),
+    Agg(Agg),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +276,7 @@ enum Ty {
 #[derive(Debug)]
 enum Items {
     Star,
-    List(Vec<(Expr, Option<String>)>),
+    List(Vec<(Item, Option<String>)>),
 }
 
 #[derive(Debug)]
@@ -259,6 +285,9 @@ struct Sel {
     items: Items,
     from: Option<String>,
     wh: Option<Expr>,
+    /// `GROUP BY` expressions (empty for a scalar aggregate).
+    group: Vec<Expr>,
+    having: Option<Expr>,
     order: Vec<(String, bool)>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -288,6 +317,10 @@ struct P {
     toks: Vec<Tok>,
     pos: usize,
     fault: Option<Fault>,
+    /// True while parsing a context where an aggregate call may appear
+    /// (select items, `HAVING`). Elsewhere the aggregate names are ordinary
+    /// identifiers and an aggregate use is a prepare-time misuse.
+    allow_agg: bool,
 }
 
 impl P {
@@ -451,13 +484,16 @@ impl P {
         } else {
             let mut v = Vec::new();
             loop {
-                let e = self.expr()?;
+                self.allow_agg = true;
+                let parsed = self.item();
+                self.allow_agg = false;
+                let item = parsed?;
                 let alias = if self.eat_kw("AS") {
                     Some(self.ident()?)
                 } else {
                     None
                 };
-                v.push((e, alias));
+                v.push((item, alias));
                 if !self.eat_sym(",") {
                     break;
                 }
@@ -469,6 +505,8 @@ impl P {
             items,
             from: None,
             wh: None,
+            group: Vec::new(),
+            having: None,
             order: Vec::new(),
             limit: None,
             offset: None,
@@ -477,6 +515,23 @@ impl P {
             sel.from = Some(self.ident()?);
             if self.eat_kw("WHERE") {
                 sel.wh = Some(self.expr()?);
+            }
+            if self.eat_kw("GROUP") {
+                self.expect_kw("BY")?;
+                loop {
+                    // An aggregate here is a misuse: SQLite rejects it, and
+                    // `allow_agg` stays false so the parse fails.
+                    sel.group.push(self.expr()?);
+                    if !self.eat_sym(",") {
+                        break;
+                    }
+                }
+            }
+            if self.eat_kw("HAVING") {
+                self.allow_agg = true;
+                let h = self.expr();
+                self.allow_agg = false;
+                sel.having = Some(h?);
             }
             if self.eat_kw("ORDER") {
                 self.expect_kw("BY")?;
@@ -502,6 +557,47 @@ impl P {
             }
         }
         Ok(sel)
+    }
+
+    /// A select-list item: the expression parser already recognizes an
+    /// aggregate call (when `allow_agg`) and returns `Expr::Agg`.
+    fn item(&mut self) -> R<Item> {
+        Ok(match self.expr()? {
+            Expr::Agg(a) => Item::Agg(a),
+            other => Item::Expr(other),
+        })
+    }
+
+    /// `COUNT(*)`, `COUNT(x)`, `SUM(x)`, `MIN(x)`, `MAX(x)`. The dialect's
+    /// shapes only: `*` is COUNT's, everything else takes one argument.
+    fn aggregate(&mut self) -> R<Agg> {
+        let name = self.ident()?.to_ascii_lowercase();
+        self.expect_sym("(")?;
+        if self.eat_sym("*") {
+            self.expect_sym(")")?;
+            return if name == "count" {
+                Ok(Agg::CountStar)
+            } else {
+                Err(ErrClass::Arity)
+            };
+        }
+        if self.eat_sym(")") {
+            return Err(ErrClass::Arity);
+        }
+        self.allow_agg = false;
+        let arg = self.expr();
+        self.allow_agg = true;
+        let arg = arg?;
+        if !self.eat_sym(")") {
+            // A second argument or a stray token.
+            return Err(ErrClass::Arity);
+        }
+        Ok(match name.as_str() {
+            "count" => Agg::Count(Box::new(arg)),
+            "sum" => Agg::Sum(Box::new(arg)),
+            "min" => Agg::Min(Box::new(arg)),
+            _ => Agg::Max(Box::new(arg)),
+        })
     }
 
     fn int_lit(&mut self) -> R<i64> {
@@ -699,6 +795,16 @@ impl P {
                 if RESERVED.iter().any(|r| s.eq_ignore_ascii_case(r)) {
                     return Err(ErrClass::Syntax);
                 }
+                let agg_name = matches!(
+                    s.to_ascii_lowercase().as_str(),
+                    "count" | "sum" | "min" | "max"
+                );
+                if agg_name
+                    && self.allow_agg
+                    && matches!(self.toks.get(self.pos + 1), Some(Tok::Sym("(")))
+                {
+                    return self.aggregate().map(Expr::Agg);
+                }
                 self.pos += 1;
                 if self.eat_sym("(") {
                     let mut args = Vec::new();
@@ -761,6 +867,9 @@ struct Ctx<'a> {
     fault: Option<Fault>,
     cols: &'a [(String, Ty)],
     row: &'a [V],
+    /// The aggregates computed for the current group (empty outside an
+    /// aggregate query).
+    aggs: &'a [(Agg, V)],
 }
 
 fn eval(e: &Expr, cx: &Ctx) -> R<V> {
@@ -789,6 +898,12 @@ fn eval(e: &Expr, cx: &Ctx) -> R<V> {
             V::Int(i64::from(n != *neg))
         }
         Expr::Func(name, args) => func(name, args, cx)?,
+        Expr::Agg(a) => cx
+            .aggs
+            .iter()
+            .find(|(k, _)| k == a)
+            .map(|(_, v)| v.clone())
+            .ok_or(ErrClass::Syntax)?,
         Expr::Bin(op, l, r) => {
             let (a, b) = (eval(l, cx)?, eval(r, cx)?);
             bin(*op, a, b, cx.fault)?
@@ -957,6 +1072,11 @@ fn check_cols(e: &Expr, cols: &[(String, Ty)]) -> R<()> {
             check_cols(r, cols)
         }
         Expr::Func(name, args) => {
+            if matches!(name.as_str(), "count" | "sum" | "min" | "max") {
+                // A parse context that does not allow aggregates (WHERE,
+                // GROUP BY, an insert, ...): SQLite rejects the statement.
+                return Err(ErrClass::Syntax);
+            }
             if !matches!(
                 name.as_str(),
                 "length" | "upper" | "lower" | "abs" | "coalesce"
@@ -964,6 +1084,106 @@ fn check_cols(e: &Expr, cols: &[(String, Ty)]) -> R<()> {
                 return Err(ErrClass::NoColumn);
             }
             args.iter().try_for_each(|a| check_cols(a, cols))
+        }
+        Expr::Agg(a) => match a {
+            Agg::CountStar => Ok(()),
+            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => check_cols(x, cols),
+        },
+    }
+}
+
+/// Every aggregate call in an expression tree, once each.
+fn collect_aggs(e: &Expr, out: &mut Vec<Agg>) {
+    match e {
+        Expr::Agg(a) => {
+            if !out.contains(a) {
+                out.push(a.clone());
+            }
+            match a {
+                Agg::CountStar => {}
+                Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => collect_aggs(x, out),
+            }
+        }
+        Expr::Neg(x) | Expr::Not(x) | Expr::IsNull(x, _) => collect_aggs(x, out),
+        Expr::Bin(_, l, r) => {
+            collect_aggs(l, out);
+            collect_aggs(r, out);
+        }
+        Expr::Func(_, args) => args.iter().for_each(|a| collect_aggs(a, out)),
+        Expr::Lit(_) | Expr::Col(_) => {}
+    }
+}
+
+fn contains_agg(e: &Expr) -> bool {
+    let mut v = Vec::new();
+    collect_aggs(e, &mut v);
+    !v.is_empty()
+}
+
+/// One aggregate over a group's rows. NULLs are skipped (`COUNT` counts
+/// non-NULLs, `SUM`/`MIN`/`MAX` ignore them) and `SUM` of nothing is NULL.
+fn eval_agg(a: &Agg, cols: &[(String, Ty)], rows: &[&Vec<V>], fault: Option<Fault>) -> R<V> {
+    let values = |expr: &Expr| -> R<Vec<V>> {
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let cx = Ctx {
+                fault,
+                cols,
+                row: r,
+                aggs: &[],
+            };
+            out.push(eval(expr, &cx)?);
+        }
+        Ok(out)
+    };
+    match a {
+        Agg::CountStar => Ok(V::Int(rows.len() as i64)),
+        Agg::Count(x) => {
+            let count_nulls = fault == Some(Fault::AggregatesCountNulls);
+            let n = values(x)?
+                .iter()
+                .filter(|v| count_nulls || !matches!(v, V::Null))
+                .count();
+            Ok(V::Int(n as i64))
+        }
+        Agg::Sum(x) => {
+            let vs = values(x)?;
+            let mut acc: i64 = 0;
+            let mut seen = false;
+            for v in &vs {
+                match v {
+                    V::Null => {}
+                    V::Int(i) => {
+                        seen = true;
+                        acc = acc.checked_add(*i).ok_or(ErrClass::Limit)?;
+                    }
+                    V::Text(_) => return Err(ErrClass::Type),
+                }
+            }
+            Ok(if seen { V::Int(acc) } else { V::Null })
+        }
+        Agg::Min(x) | Agg::Max(x) => {
+            let want_max = matches!(a, Agg::Max(_));
+            let mut best: Option<V> = None;
+            for v in values(x)? {
+                if matches!(v, V::Null) {
+                    continue;
+                }
+                best = Some(match best {
+                    None => v,
+                    Some(b) => {
+                        let o = cmp_vals(&v, &b);
+                        if (want_max && o == Ordering::Greater)
+                            || (!want_max && o == Ordering::Less)
+                        {
+                            v
+                        } else {
+                            b
+                        }
+                    }
+                });
+            }
+            Ok(best.unwrap_or(V::Null))
         }
     }
 }
@@ -1014,6 +1234,7 @@ impl Toy {
             toks,
             pos: 0,
             fault: self.fault,
+            allow_agg: false,
         };
         match p.statement()? {
             Stmt::Create(name, cols) => {
@@ -1092,6 +1313,7 @@ impl Toy {
                             fault: self.fault,
                             cols: &[],
                             row: &[],
+                            aggs: &[],
                         },
                     )?;
                     out[ti] = self.coerce(v, schema[ti].1)?;
@@ -1131,7 +1353,13 @@ impl Toy {
         }
     }
 
-    fn keep(&self, wh: &Option<Expr>, cols: &[(String, Ty)], row: &[V]) -> R<bool> {
+    fn keep(
+        &self,
+        wh: &Option<Expr>,
+        cols: &[(String, Ty)],
+        row: &[V],
+        aggs: &[(Agg, V)],
+    ) -> R<bool> {
         match wh {
             None => Ok(true),
             Some(e) => {
@@ -1141,6 +1369,7 @@ impl Toy {
                         fault: self.fault,
                         cols,
                         row,
+                        aggs,
                     },
                 )?;
                 Ok(truthy(&v) || (self.fault == Some(Fault::WhereNullIsTrue) && v == V::Null))
@@ -1159,16 +1388,22 @@ impl Toy {
         if let Some(w) = &sel.wh {
             check_cols(w, &cols)?;
         }
-        // Output columns: (header, expression).
-        let mut outputs: Vec<(String, Expr)> = Vec::new();
+        for g in &sel.group {
+            check_cols(g, &cols)?;
+        }
+        if let Some(h) = &sel.having {
+            check_cols(h, &cols)?;
+        }
+        // Output columns: (header, item).
+        let mut outputs: Vec<(String, Item)> = Vec::new();
         match &sel.items {
             Items::Star => {
                 if sel.from.is_none() {
                     return Err(ErrClass::Syntax);
                 }
-                let mut v: Vec<(String, Expr)> = cols
+                let mut v: Vec<(String, Item)> = cols
                     .iter()
-                    .map(|(c, _)| (c.clone(), Expr::Col(c.clone())))
+                    .map(|(c, _)| (c.clone(), Item::Expr(Expr::Col(c.clone()))))
                     .collect();
                 if self.fault == Some(Fault::StarReversed) {
                     v.reverse();
@@ -1176,14 +1411,22 @@ impl Toy {
                 outputs = v;
             }
             Items::List(items) => {
-                for (e, alias) in items {
-                    check_cols(e, &cols)?;
-                    let header = match (alias, e) {
+                for (item, alias) in items {
+                    let header = match (alias, item) {
                         (Some(a), _) => a.clone(),
-                        (None, Expr::Col(c)) => c.clone(),
+                        (None, Item::Expr(Expr::Col(c))) => c.clone(),
                         _ => "?".to_string(),
                     };
-                    outputs.push((header, e.clone()));
+                    match item {
+                        Item::Expr(e) => check_cols(e, &cols)?,
+                        Item::Agg(a) => match a {
+                            Agg::CountStar => {}
+                            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => {
+                                check_cols(x, &cols)?
+                            }
+                        },
+                    }
+                    outputs.push((header, item.clone()));
                 }
             }
         }
@@ -1201,20 +1444,120 @@ impl Toy {
             keys.push((i, *desc));
         }
         let mut out_rows: Vec<Vec<V>> = Vec::new();
-        for row in &rows {
-            if !self.keep(&sel.wh, &cols, row)? {
-                continue;
+        let aggregates = outputs.iter().any(|(_, i)| match i {
+            Item::Agg(_) => true,
+            Item::Expr(e) => contains_agg(e),
+        }) || sel.having.as_ref().map(contains_agg).unwrap_or(false);
+        if aggregates {
+            // Group the filtered rows by the GROUP BY expressions; with no
+            // GROUP BY the whole (possibly empty) result is one group, so a
+            // scalar aggregate always yields exactly one row.
+            let mut groups: Vec<(Vec<V>, Vec<&Vec<V>>)> = Vec::new();
+            for row in &rows {
+                if !self.keep(&sel.wh, &cols, row, &[])? {
+                    continue;
+                }
+                let cx = Ctx {
+                    fault: self.fault,
+                    cols: &cols,
+                    row,
+                    aggs: &[],
+                };
+                let key: Vec<V> = sel.group.iter().map(|e| eval(e, &cx)).collect::<R<_>>()?;
+                let separate = self.fault == Some(Fault::GroupByNullsSeparate);
+                let found = groups.iter_mut().find(|(k, _)| {
+                    k.len() == key.len()
+                        && k.iter().zip(&key).all(|(a, b)| {
+                            if separate && (matches!(a, V::Null) || matches!(b, V::Null)) {
+                                false
+                            } else {
+                                cmp_vals(a, b) == Ordering::Equal
+                            }
+                        })
+                });
+                match found {
+                    Some((_, rs)) => rs.push(row),
+                    None => groups.push((key, vec![row])),
+                }
             }
-            let cx = Ctx {
-                fault: self.fault,
-                cols: &cols,
-                row,
-            };
-            let mut o = Vec::with_capacity(outputs.len());
-            for (_, e) in &outputs {
-                o.push(eval(e, &cx)?);
+            if sel.group.is_empty() && groups.is_empty() {
+                groups.push((Vec::new(), Vec::new()));
             }
-            out_rows.push(o);
+            let mut all_aggs: Vec<Agg> = Vec::new();
+            for (_, item) in &outputs {
+                match item {
+                    Item::Agg(a) if !all_aggs.contains(a) => all_aggs.push(a.clone()),
+                    Item::Agg(_) => {}
+                    Item::Expr(e) => collect_aggs(e, &mut all_aggs),
+                }
+            }
+            if let Some(h) = &sel.having {
+                collect_aggs(h, &mut all_aggs);
+            }
+            let null_row: Vec<V> = cols.iter().map(|_| V::Null).collect();
+            for (key, g_rows) in &groups {
+                let mut aggs: Vec<(Agg, V)> = Vec::with_capacity(all_aggs.len());
+                for a in &all_aggs {
+                    aggs.push((a.clone(), eval_agg(a, &cols, g_rows, self.fault)?));
+                }
+                let basis: &[V] = g_rows.first().map(|r| r.as_slice()).unwrap_or(&null_row);
+                if let Some(h) = &sel.having {
+                    let v = eval(
+                        h,
+                        &Ctx {
+                            fault: self.fault,
+                            cols: &cols,
+                            row: basis,
+                            aggs: &aggs,
+                        },
+                    )?;
+                    if !truthy(&v) {
+                        continue;
+                    }
+                }
+                let _ = key;
+                let mut o = Vec::with_capacity(outputs.len());
+                for (_, item) in &outputs {
+                    let cx = Ctx {
+                        fault: self.fault,
+                        cols: &cols,
+                        row: basis,
+                        aggs: &aggs,
+                    };
+                    match item {
+                        Item::Agg(a) => o.push(
+                            aggs.iter()
+                                .find(|(k, _)| k == a)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or(V::Null),
+                        ),
+                        // An expression item in an aggregate query may
+                        // itself contain aggregates (`COUNT(*) + 1`).
+                        Item::Expr(e) => o.push(eval(e, &cx)?),
+                    }
+                }
+                out_rows.push(o);
+            }
+        } else {
+            for row in &rows {
+                if !self.keep(&sel.wh, &cols, row, &[])? {
+                    continue;
+                }
+                let cx = Ctx {
+                    fault: self.fault,
+                    cols: &cols,
+                    row,
+                    aggs: &[],
+                };
+                let mut o = Vec::with_capacity(outputs.len());
+                for (_, item) in &outputs {
+                    match item {
+                        Item::Expr(e) => o.push(eval(e, &cx)?),
+                        Item::Agg(_) => unreachable!("aggregate mode caught above"),
+                    }
+                }
+                out_rows.push(o);
+            }
         }
         if sel.distinct {
             let nulls_distinct = self.fault == Some(Fault::DistinctKeepsNulls);
@@ -1303,7 +1646,7 @@ impl Toy {
         let mut new_rows = rows.clone();
         let (mut matched, mut changed) = (0u64, 0u64);
         for (ri, row) in rows.iter().enumerate() {
-            if !self.keep(&wh, &cols, row)? {
+            if !self.keep(&wh, &cols, row, &[])? {
                 continue;
             }
             matched += 1;
@@ -1323,6 +1666,7 @@ impl Toy {
                         fault: self.fault,
                         cols: &cols,
                         row: basis,
+                        aggs: &[],
                     },
                 )?;
                 updated[ti] = self.coerce(v, cols[ti].1)?;
@@ -1352,7 +1696,7 @@ impl Toy {
         let mut kept = Vec::new();
         let mut removed = 0u64;
         for row in rows {
-            if self.keep(&wh, &cols, &row)? {
+            if self.keep(&wh, &cols, &row, &[])? {
                 removed += 1;
             } else {
                 kept.push(row);
@@ -1414,7 +1758,7 @@ mod tests {
     /// does not capture, not a candidate bug.
     #[test]
     fn clean_toy_agrees_with_the_oracle_on_every_script() {
-        for last in [0u32, 1, 2, 3, 4, 5, 6] {
+        for last in [0u32, 1, 2, 3, 4, 5, 6, 7] {
             let p = Profile::through(last);
             for seed in 0..SEEDS {
                 let script = build_script(seed, &p, STEPS);
@@ -1436,7 +1780,8 @@ mod tests {
     #[test]
     #[ignore]
     fn clean_toy_soak() {
-        let p = Profile::through(3);
+        // Through stage 7: the soak covers aggregates too.
+        let p = Profile::through(7);
         for seed in 1000..4000u64 {
             let script = build_script(seed, &p, 300);
             let mut toy = Toy::new(None);
@@ -1457,7 +1802,9 @@ mod tests {
     fn every_mutant_is_caught_in_most_scripts() {
         const SCRIPTS: u64 = 40;
         const MIN_RATE_PCT: u64 = 25;
-        let p = Profile::through(3);
+        // Through stage 7: the aggregate mutants only fire when the profile
+        // generates aggregates.
+        let p = Profile::through(7);
         let mut weak = Vec::new();
         let mut report = Vec::new();
         for fault in Fault::ALL {

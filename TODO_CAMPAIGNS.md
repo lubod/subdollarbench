@@ -456,7 +456,7 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   archived specs. Remaining M4 tail (moves with M6): the harness-owned
   data dir + snapshot/restore (sdb-sql's `--data` lives outside the
   workspace) and disk guards.
-- [~] M5. Verifier core (`src/verifier/sql/`): **part 1 landed** — `mod.rs`
+- [x] M5. Verifier core (`src/verifier/sql/`): **part 1 landed** — `mod.rs`
   (module + the self-test doctrine), `schema.rs` (seeded 3-5-table
   2-6-column schemas, deterministic per seed, dialect DDL emitter, one
   INT rowid-alias PK per table) and `oracle.rs` (in-process SQLite;
@@ -506,7 +506,10 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   `first_failure`, stage-0 error list corrected. **Part 5 landed**:
   `scenarios.rs` (harness-side pipelining client) and `driver.rs`
   (per-stage replay over the TCP candidate with shrink-on-failure and
-  the health floors). **Remaining**: profile lite subsets, then M6.
+  the health floors). **Profile lite subsets landed** with stage 5's
+  `crash-acked-only` (the ladder narrows) and, in round 2, the
+  per-ladder `passed_lite` propagation that keeps a stage's variant
+  graded in every later ticket. M5 complete.
 - [x] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
   **Adapter + live proof landed**: `ref_server.rs` is a stdlib-only
@@ -683,8 +686,32 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   case on the host's 3.45; Docker launches append `--port`/`--data` to the
   image's *CMD* (inherited entrypoints keep their command); shrink stores
   are per-instance and cleaned after the stage; plus a 20x bar for the
-  ladder and txn checks. **Next**: ticket 7 (aggregates), which starts
-  tier 3.
+  ladder and txn checks.
+  **Ticket 7 landed (2026-10-16)**: the generator has an `aggregates`
+  profile — `COUNT(*)`/`COUNT(x)`/`SUM`/`MIN`/`MAX`, scalar aggregates
+  (one row even over no matching rows), grouped queries whose key text is
+  repeated in SELECT/GROUP BY/ORDER BY (a total order, so the frame
+  compares as a sequence), and `HAVING` over aggregates and the key.
+  Fairness rules: the select list never mixes an aggregate with a bare
+  non-grouped column, `SUM` is INTEGER-only and generated only while
+  `bound x row bound` fits in 64 bits (a REAL promotion is ungradeable),
+  `ABS`/arithmetic aggregate arguments are type-checked, and the
+  multi-row statement-atomicity probe is now autocommit-only (inside a
+  transaction SQLite 3.46 keeps the rows an earlier `VALUES` inserted,
+  which the dialect leaves untested). New aggregate error probes
+  (`GROUP BY zz_nocol`, `SUM(zz_gone)`, an aggregate in `WHERE`, an
+  aggregate as the `GROUP BY` key) and their classes pinned in the oracle
+  and the reference (`syntax`). The toy implements aggregates, `GROUP BY`
+  (NULL is one group) and `HAVING`, gained two mutants (`COUNT` counts
+  NULLs, per-NULL groups), and the independent-agreement gate now covers
+  stage 7 (120 seeds x 8 profiles) plus the 3000-seed soak at 300 steps.
+  `differential_supported` reaches 7; the campaign declares ticket 7
+  (tier 3, needs 1, acceptance [0..7]); RULES 2026-10-16.8. Gates: the
+  20/20 bar extended through stage 7, a stage-7 live proof under Docker
+  (8/8, sentinel written), and the aggregate spec text updated (`SUM`
+  INTEGER-only, the empty-group contract, the aggregate misuses).
+  **Next**: ticket 8 (joins), which starts with the lite profile
+  (inner/comma joins only).
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

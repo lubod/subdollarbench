@@ -131,6 +131,10 @@ pub fn classify(message: &str) -> Option<ErrClass> {
         || starts("near ")
         || starts("unrecognized token")
         || starts("incomplete input")
+        // Prepare-time aggregate misuses (an aggregate in WHERE, or an
+        // aggregate as a GROUP BY key) are statement-level rejections.
+        || starts("misuse of aggregate")
+        || contains("aggregate functions are not allowed")
     {
         return Some(ErrClass::Syntax);
     }
@@ -468,6 +472,33 @@ impl Oracle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The aggregate misuses the stage-7 probes emit are statement-level
+    /// rejections (class `syntax`), and the empty-group contract the spec
+    /// pins holds: `SUM` of no rows is NULL, `COUNT` is 0.
+    #[test]
+    fn aggregate_misuses_and_the_empty_group() {
+        let o = Oracle::new().unwrap();
+        let _ = o.exec("CREATE TABLE t (a INTEGER, b TEXT)");
+        for sql in [
+            "SELECT COUNT(*) FROM t WHERE COUNT(*) > 1",
+            "SELECT * FROM t GROUP BY COUNT(*)",
+        ] {
+            match o.exec(sql) {
+                OracleOutcome::Error(ErrClass::Syntax) => {}
+                other => panic!("{sql}: {other:?}"),
+            }
+        }
+        match o.exec("SELECT SUM(a), COUNT(*), MAX(b) FROM t WHERE a > 999") {
+            OracleOutcome::Rows { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Null, "SUM of no rows");
+                assert_eq!(rows[0][1], Value::Int(0), "COUNT of no rows");
+                assert_eq!(rows[0][2], Value::Null, "MAX of no rows");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     fn oracle() -> Oracle {
         Oracle::new().unwrap()

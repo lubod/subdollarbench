@@ -139,6 +139,8 @@ def classify(msg):
             or msg.startswith("near ")
             or msg.startswith("unrecognized token")
             or msg.startswith("incomplete input")
+            or msg.startswith("misuse of aggregate")
+            or "aggregate functions are not allowed" in msg
             or msg.startswith("the query contains a null character")):
         return "syntax"
     if ("wrong number of arguments" in msg
@@ -518,7 +520,7 @@ mod tests {
     }
 
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
-    /// against the reference, through stage 6 (transaction scripts). All
+    /// against the reference, through stage 7 (aggregate scripts). All
     /// runs share one server process, so this also proves stage scripts
     /// never collide on schema names. Stages 7+ land here as they do.
     #[test]
@@ -526,7 +528,7 @@ mod tests {
         let port = free_port();
         let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=6u32 {
+        for stage in 0..=7u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);
