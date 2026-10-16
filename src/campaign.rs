@@ -220,6 +220,10 @@ pub struct CampaignStageConfig {
     /// (every stage after genesis).
     pub continuity: bool,
     pub accepted_stages: Vec<u32>,
+    /// sdb-sql: the harness-owned `SPEC.md`, written into the workspace
+    /// after the pipeline prepares it (a genesis workspace is wiped first,
+    /// so the campaign runner cannot write it beforehand).
+    pub spec_md: Option<String>,
 }
 
 pub fn campaigns_root() -> PathBuf {

@@ -373,13 +373,13 @@ async fn run_one_stage(
             rollback_workspace(workdir, &commit).await?;
         }
     }
-    // sdb-sql: the harness-owned contract so far, written after any
-    // rollback (a `git clean` would remove it) and before the session.
-    if lc.spec.task == "sql" {
-        let md = lc.render_spec_md(stage, &job.prompt_path)?;
-        std::fs::write(workdir.join("SPEC.md"), md)
-            .with_context(|| format!("write SPEC.md in {}", workdir.display()))?;
-    }
+    // sdb-sql: the harness-owned contract so far. The pipeline writes it
+    // once the workspace is prepared (genesis wipes it first).
+    let spec_md = if lc.spec.task == "sql" {
+        Some(lc.render_spec_md(stage, &job.prompt_path)?)
+    } else {
+        None
+    };
     let run_id = format!("{campaign_id}_s{}_{variant_tag}", stage.id);
     let stage_dir = cdir.join(format!("s{}_{variant_tag}", stage.id));
     std::fs::create_dir_all(&stage_dir)?;
@@ -424,6 +424,7 @@ async fn run_one_stage(
             prompt_path: job.prompt_path.clone(),
             continuity: stage.id > 0,
             accepted_stages: stage.acceptance.stages_for(&lc.spec.task).to_vec(),
+            spec_md,
         }),
         baseline_rps,
     };

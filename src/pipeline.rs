@@ -2983,6 +2983,13 @@ impl BenchmarkPipeline {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&config.workdir, fs::Permissions::from_mode(0o777));
         }
+        if let Some(md) = config
+            .campaign_stage
+            .as_ref()
+            .and_then(|c| c.spec_md.as_deref())
+        {
+            fs::write(config.workdir.join("SPEC.md"), md)?;
+        }
 
         let sandbox = SandboxManager::with_id(&run_id);
         // RAII owner: trial exit (return/Err/panic/cancel) reaps by label.
@@ -6451,6 +6458,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3],
+            spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6503,6 +6511,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![14, 15, 16],
+            spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6552,6 +6561,7 @@ main()
             prompt_path,
             continuity: false,
             accepted_stages: vec![1],
+            spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6597,6 +6607,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 6, 7, 8, 9],
+            spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6649,6 +6660,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6702,6 +6714,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6757,6 +6770,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3],
+            spec_md: Some("# SPEC.md fixture\n".to_string()),
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -6778,6 +6792,11 @@ main()
         assert_eq!(
             (out.manifest.passed_stages, out.manifest.total_stages),
             (4, 4)
+        );
+        // The harness-owned contract lands in the prepared workspace.
+        assert_eq!(
+            fs::read_to_string(workdir.join("SPEC.md")).unwrap(),
+            "# SPEC.md fixture\n"
         );
         cleanup_covtest_network("sqllive");
         let _ = fs::remove_dir_all(&dir);
