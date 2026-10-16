@@ -107,6 +107,36 @@ fn trial_accounting(output: &PipelineOutput) -> (bool, bool) {
     }
 }
 
+/// The differential SQL stages the verifier implements today, run
+/// synchronously for the `eval` and `replay` commands: one script per
+/// stage, fresh per-(seed tag, stage) seeds, shrink on failure.
+fn run_sql_stages_sync(port: u16, seed_tag: &str) -> (f64, u32, u32) {
+    use subdollarbench::verifier::sql::driver;
+    let addr = format!("127.0.0.1:{port}");
+    let total = 4u32;
+    let mut passed = 0u32;
+    for stage in 0..total {
+        let ids: Vec<u32> = (0..=stage).collect();
+        let seed = driver::stage_seed(seed_tag, stage);
+        let title = driver::stage_title(stage);
+        match driver::run_stage(
+            &addr,
+            std::time::Duration::from_secs(10),
+            seed,
+            &ids,
+            driver::DEFAULT_STEPS,
+        ) {
+            Ok(out) if out.passed => {
+                passed += 1;
+                println!("  Stage {stage}: {title} -> PASS");
+            }
+            Ok(out) => println!("  Stage {stage}: {title} -> FAIL {}", out.detail),
+            Err(e) => println!("  Stage {stage}: {title} -> VERIFIER FAULT {e}"),
+        }
+    }
+    (passed as f64 / total as f64 * 100.0, passed, total)
+}
+
 fn parse_task(s: &str) -> Result<TaskType> {
     // Single source of truth: the queue engine resolves task names too, and
     // when the two had separate match blocks any gate here was bypassed there.
@@ -711,6 +741,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Pubsub => 8092,
                 TaskType::Binproto => 6395,
                 TaskType::Queue => 6385,
+                TaskType::Sql => 5480,
             });
             println!("Evaluating {} on port {}...", task, p);
             match task {
@@ -786,6 +817,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                         "Pass rate: {:.1}% ({}/{})",
                         res.pass_rate, res.passed_count, res.total_stages
                     );
+                }
+                TaskType::Sql => {
+                    let (_rate, passed, total) = run_sql_stages_sync(p, &eval_seed);
+                    println!("Pass rate: {:.1}% ({}/{})", _rate, passed, total);
                 }
             }
         }
@@ -1322,6 +1357,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 TaskType::Pubsub => 8092,
                 TaskType::Binproto => 6395,
                 TaskType::Queue => 6385,
+                TaskType::Sql => 5480,
             });
             // Port safety: never fight a live engine over task ports.
             // Best-effort check — an unreachable engine means idle-or-down,
@@ -1507,6 +1543,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     let r = v.run_all().await;
                     (r.pass_rate, r.passed_count, r.total_stages)
                 }
+                TaskType::Sql => run_sql_stages_sync(p, &replay_seed),
             };
             for s in &replay_robust {
                 println!(
