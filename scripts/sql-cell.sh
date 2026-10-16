@@ -26,11 +26,13 @@ echo "[cell] building release binary ($BIN)"
 (cd "$ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --bins)
 
 # Guard against the cell-2 mistake: the binary must contain the current
-# verifier fixes. Add a marker here whenever a fix must not be missed.
+# verifier fixes. Keep this list current when code markers move (a missing
+# marker is fail-closed, and cost one cell run on 2026-10-16 when the reset
+# message was replaced by the readiness probe).
 # (No `strings | grep -q`: pipefail + grep's early exit gives strings a
 # SIGPIPE and the guard misfires.)
 MARKERS="$(strings "$BIN" || true)"
-for marker in "did not reopen its port after a reset" "-repair" "embedded SQL engine or parser" "server unreachable"; do
+for marker in "never answered a probe" "-repair" "embedded SQL engine or parser" "server unreachable" "sentinel from stage"; do
     if [[ "$MARKERS" != *"$marker"* ]]; then
         echo "[cell] FATAL: $BIN is stale (missing marker '$marker'); refusing to run" >&2
         exit 1
