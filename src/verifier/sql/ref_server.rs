@@ -570,8 +570,8 @@ mod tests {
     }
 
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
-    /// against the reference, through stage 8 (aggregate and join
-    /// scripts). All
+    /// against the reference, through stage 9 (aggregate, join and
+    /// constraint scripts). All
     /// runs share one server process, so this also proves stage scripts
     /// never collide on schema names. Stages 7+ land here as they do.
     #[test]
@@ -579,7 +579,7 @@ mod tests {
         let port = free_port();
         let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=8u32 {
+        for stage in 0..=9u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);

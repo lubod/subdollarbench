@@ -76,10 +76,13 @@ pub enum Fault {
     GroupByNullsSeparate,
     /// `LEFT JOIN` behaves like `INNER JOIN` (unmatched left rows vanish).
     LeftJoinIsInner,
+    /// No constraint is enforced: NOT NULL/UNIQUE stay, no FK check, no
+    /// INTEGER PRIMARY KEY auto-assignment.
+    ConstraintIgnored,
 }
 
 impl Fault {
-    pub const ALL: [Fault; 29] = [
+    pub const ALL: [Fault; 30] = [
         Fault::NullsLast,
         Fault::UpdateSeesNewValues,
         Fault::FloorDivision,
@@ -109,6 +112,7 @@ impl Fault {
         Fault::AggregatesCountNulls,
         Fault::GroupByNullsSeparate,
         Fault::LeftJoinIsInner,
+        Fault::ConstraintIgnored,
     ];
 }
 
@@ -283,6 +287,17 @@ enum Items {
     List(Vec<(Item, Option<String>)>),
 }
 
+/// Column constraints (stage 9), parallel to a table's `(name, ty)` list.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Cons {
+    pk: bool,
+    unique: bool,
+    not_null: bool,
+    default: Option<V>,
+    /// `REFERENCES parent(column)` with restrict semantics.
+    references: Option<(String, String)>,
+}
+
 /// One `FROM` item: the table and the name its references may be
 /// qualified by (the alias, or the table name when there is none).
 #[derive(Debug, Clone)]
@@ -318,7 +333,7 @@ struct Sel {
 
 #[derive(Debug)]
 enum Stmt {
-    Create(String, Vec<(String, Ty)>),
+    Create(String, Vec<(String, Ty)>, Vec<Cons>),
     Insert(String, Option<Vec<String>>, Vec<Vec<Expr>>),
     Select(Sel),
     Update(String, Vec<(String, Expr)>, Option<Expr>),
@@ -452,6 +467,7 @@ impl P {
         let name = self.ident()?;
         self.expect_sym("(")?;
         let mut cols = Vec::new();
+        let mut cons = Vec::new();
         loop {
             let c = self.ident()?;
             let ty = if self.eat_kw("INTEGER") {
@@ -461,14 +477,63 @@ impl P {
             } else {
                 return Err(ErrClass::Syntax);
             };
+            // Column constraints, in any order.
+            let mut cc = Cons::default();
+            loop {
+                if self.eat_kw("PRIMARY") {
+                    self.expect_kw("KEY")?;
+                    cc.pk = true;
+                } else if self.eat_kw("UNIQUE") {
+                    cc.unique = true;
+                } else if self.eat_kw("NOT") {
+                    self.expect_kw("NULL")?;
+                    cc.not_null = true;
+                } else if self.eat_kw("DEFAULT") {
+                    cc.default = Some(self.literal()?);
+                } else if self.eat_kw("REFERENCES") {
+                    let pt = self.ident()?;
+                    self.expect_sym("(")?;
+                    let pc = self.ident()?;
+                    self.expect_sym(")")?;
+                    cc.references = Some((pt, pc));
+                } else {
+                    break;
+                }
+            }
             cols.push((c, ty));
+            cons.push(cc);
             if self.eat_sym(",") {
                 continue;
             }
             self.expect_sym(")")?;
             break;
         }
-        Ok(Stmt::Create(name, cols))
+        Ok(Stmt::Create(name, cols, cons))
+    }
+
+    /// A literal value (a possibly negative integer, a string, or `NULL`),
+    /// for `DEFAULT`.
+    fn literal(&mut self) -> R<V> {
+        let neg = self.eat_sym("-");
+        match self.peek().cloned() {
+            Some(Tok::Int(n)) => {
+                self.pos += 1;
+                if neg {
+                    Ok(V::Int(n.checked_neg().ok_or(ErrClass::Syntax)?))
+                } else {
+                    Ok(V::Int(n))
+                }
+            }
+            Some(Tok::Str(s)) if !neg => {
+                self.pos += 1;
+                Ok(V::Text(s))
+            }
+            Some(Tok::Id(w)) if !neg && w.eq_ignore_ascii_case("NULL") => {
+                self.pos += 1;
+                Ok(V::Null)
+            }
+            _ => Err(ErrClass::Syntax),
+        }
     }
 
     fn insert(&mut self) -> R<Stmt> {
@@ -1322,6 +1387,7 @@ fn eval_agg(a: &Agg, names: &Names, rows: &[&Vec<V>], fault: Option<Fault>) -> R
 #[derive(Clone)]
 struct Tbl {
     cols: Vec<(String, Ty)>,
+    cons: Vec<Cons>,
     rows: Vec<Vec<V>>,
 }
 
@@ -1339,6 +1405,175 @@ impl Toy {
             txn: None,
             fault,
         }
+    }
+
+    /// The row a column-omitting `INSERT` starts from: each column's
+    /// `DEFAULT` literal, or NULL.
+    fn insert_defaults(&self, name: &str) -> R<Vec<V>> {
+        let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
+        Ok(tbl
+            .cons
+            .iter()
+            .map(|c| c.default.clone().unwrap_or(V::Null))
+            .collect())
+    }
+
+    /// Constraints for one `INSERT` row (stage 9): `INTEGER PRIMARY KEY`
+    /// assigns max+1 (1 when empty) on NULL, a TEXT primary key rejects
+    /// NULL, `NOT NULL`/`UNIQUE` reject violations (several NULLs are
+    /// fine), and `REFERENCES` requires the parent row to exist.
+    /// `built` holds the statement's earlier rows, which are visible to
+    /// UNIQUE and to the auto-assignment.
+    fn insert_row_checks(&self, name: &str, out: &mut [V], built: &[Vec<V>]) -> R<()> {
+        let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
+        let ignore = self.fault == Some(Fault::ConstraintIgnored);
+        for (ti, (_, ty)) in tbl.cols.iter().enumerate() {
+            let c = &tbl.cons[ti];
+            if ignore {
+                continue;
+            }
+            if c.pk && *ty == Ty::Int && matches!(out[ti], V::Null) {
+                let maxv = tbl
+                    .rows
+                    .iter()
+                    .chain(built.iter())
+                    .filter_map(|r| match r.get(ti) {
+                        Some(V::Int(i)) => Some(*i),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                out[ti] = V::Int(maxv.saturating_add(1).max(1));
+            }
+            if matches!(out[ti], V::Null) {
+                if c.not_null || (c.pk && *ty == Ty::Text) {
+                    return Err(ErrClass::Constraint);
+                }
+                continue;
+            }
+            if (c.unique || c.pk)
+                && tbl.rows.iter().chain(built.iter()).any(|r| {
+                    r.get(ti)
+                        .map(|v| cmp_vals(v, &out[ti]) == Ordering::Equal)
+                        .unwrap_or(false)
+                })
+            {
+                return Err(ErrClass::Constraint);
+            }
+        }
+        Ok(())
+    }
+
+    /// Foreign keys are *immediate* constraints, but SQLite checks them at
+    /// the end of the statement: a later row's type or UNIQUE error wins
+    /// over an earlier row's missing parent. One pass over the statement's
+    /// new rows.
+    fn fk_checks(&self, name: &str, rows: &[&Vec<V>]) -> R<()> {
+        let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
+        if self.fault == Some(Fault::ConstraintIgnored) {
+            return Ok(());
+        }
+        for (ti, c) in tbl.cons.iter().enumerate() {
+            let Some((pt, pc)) = &c.references else {
+                continue;
+            };
+            let parent = self.tables.get(pt).ok_or(ErrClass::NoColumn)?;
+            let pi = parent
+                .cols
+                .iter()
+                .position(|(n, _)| n == pc)
+                .ok_or(ErrClass::NoColumn)?;
+            for r in rows {
+                let Some(v) = r.get(ti) else { continue };
+                if matches!(v, V::Null) {
+                    continue;
+                }
+                let found = parent.rows.iter().any(|pr| {
+                    pr.get(pi)
+                        .map(|pv| cmp_vals(pv, v) == Ordering::Equal)
+                        .unwrap_or(false)
+                });
+                if !found {
+                    return Err(ErrClass::Constraint);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Constraints for one `UPDATE` result row: NULL into `NOT NULL`/TEXT
+    /// key and a duplicate `UNIQUE`/primary key (the row itself excluded).
+    /// Foreign keys are checked at the statement end (`fk_checks`). `rows`
+    /// is the table's state with the rows updated so far.
+    fn update_row_checks(&self, name: &str, out: &[V], row_at: usize, rows: &[Vec<V>]) -> R<()> {
+        let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
+        if self.fault == Some(Fault::ConstraintIgnored) {
+            return Ok(());
+        }
+        for (ti, (_, ty)) in tbl.cols.iter().enumerate() {
+            let c = &tbl.cons[ti];
+            if matches!(out[ti], V::Null) {
+                if c.not_null || (c.pk && *ty == Ty::Text) {
+                    return Err(ErrClass::Constraint);
+                }
+                continue;
+            }
+            if (c.unique || c.pk)
+                && rows.iter().enumerate().any(|(ri, r)| {
+                    ri != row_at
+                        && r.get(ti)
+                            .map(|v| cmp_vals(v, &out[ti]) == Ordering::Equal)
+                            .unwrap_or(false)
+                })
+            {
+                return Err(ErrClass::Constraint);
+            }
+        }
+        Ok(())
+    }
+
+    /// A `DELETE` that removes a row another table's `REFERENCES` points at
+    /// is `ERR constraint` (restrict), and nothing is deleted.
+    fn delete_fk_restrict(
+        &self,
+        name: &str,
+        deleted: &[Vec<V>],
+        my_cols: &[(String, Ty)],
+    ) -> R<()> {
+        if self.fault == Some(Fault::ConstraintIgnored) || deleted.is_empty() {
+            return Ok(());
+        }
+        for (child_name, child) in &self.tables {
+            if child_name == name {
+                continue;
+            }
+            for (ti, c) in child.cons.iter().enumerate() {
+                let Some((pt, pc)) = &c.references else {
+                    continue;
+                };
+                if pt != name {
+                    continue;
+                }
+                let Some(pi) = my_cols.iter().position(|(n, _)| n == pc) else {
+                    continue;
+                };
+                let gone: Vec<&V> = deleted
+                    .iter()
+                    .filter_map(|r| r.get(pi))
+                    .filter(|v| !matches!(v, V::Null))
+                    .collect();
+                for crow in &child.rows {
+                    if let Some(cv) = crow.get(ti) {
+                        if !matches!(cv, V::Null)
+                            && gone.iter().any(|g| cmp_vals(g, cv) == Ordering::Equal)
+                        {
+                            return Err(ErrClass::Constraint);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn coerce(&self, v: V, ty: Ty) -> R<V> {
@@ -1366,7 +1601,7 @@ impl Toy {
             allow_agg: false,
         };
         match p.statement()? {
-            Stmt::Create(name, cols) => {
+            Stmt::Create(name, cols, cons) => {
                 if self.tables.contains_key(&name) {
                     return Err(ErrClass::Exists);
                 }
@@ -1374,6 +1609,7 @@ impl Toy {
                     name,
                     Tbl {
                         cols,
+                        cons,
                         rows: Vec::new(),
                     },
                 );
@@ -1428,14 +1664,16 @@ impl Toy {
         };
         let mut built: Vec<Vec<V>> = Vec::new();
         let mut failure: Option<ErrClass> = None;
-        // Values may not reference columns.
+        // Values may not reference columns; omitted columns start at their
+        // DEFAULT literal (or NULL).
         let none = Names::empty();
+        let defaults = self.insert_defaults(name)?;
         for row in &rows {
             let step = (|| -> R<Vec<V>> {
                 if row.len() != targets.len() {
                     return Err(ErrClass::Arity);
                 }
-                let mut out = vec![V::Null; schema.len()];
+                let mut out = defaults.clone();
                 for (e, &ti) in row.iter().zip(&targets) {
                     check_cols(e, &none)?;
                     let v = eval(
@@ -1449,6 +1687,7 @@ impl Toy {
                     )?;
                     out[ti] = self.coerce(v, schema[ti].1)?;
                 }
+                self.insert_row_checks(name, &mut out, &built)?;
                 Ok(out)
             })();
             match step {
@@ -1457,6 +1696,13 @@ impl Toy {
                     failure = Some(c);
                     break;
                 }
+            }
+        }
+        // Statement end: the FK checks see every new row (SQLite's
+        // immediate constraints fire here, after per-row type/UNIQUE).
+        if failure.is_none() {
+            if let Err(c) = self.fk_checks(name, &built.iter().collect::<Vec<_>>()) {
+                failure = Some(c);
             }
         }
         let tbl = self.tables.get_mut(name).ok_or(ErrClass::NoTable)?;
@@ -1875,11 +2121,14 @@ impl Toy {
                 )?;
                 updated[ti] = self.coerce(v, cols[ti].1)?;
             }
+            self.update_row_checks(name, &updated, ri, &new_rows)?;
             if updated != *row {
                 changed += 1;
             }
             new_rows[ri] = updated;
         }
+        // Statement end: the FK checks see every new row.
+        self.fk_checks(name, &new_rows.iter().collect::<Vec<_>>())?;
         self.tables.get_mut(name).ok_or(ErrClass::NoTable)?.rows = new_rows;
         Ok(Response::Ok(
             if self.fault == Some(Fault::UpdateCountsChangedOnly) {
@@ -1898,14 +2147,17 @@ impl Toy {
             check_cols(w, &names)?;
         }
         let mut kept = Vec::new();
-        let mut removed = 0u64;
+        let mut deleted: Vec<Vec<V>> = Vec::new();
         for row in rows {
             if self.keep(&wh, &names, &row, &[])? {
-                removed += 1;
+                deleted.push(row);
             } else {
                 kept.push(row);
             }
         }
+        let mut removed = deleted.len() as u64;
+        // A referenced parent cannot be deleted (restrict).
+        self.delete_fk_restrict(name, &deleted, &tbl.cols)?;
         if self.fault == Some(Fault::DeleteIgnoresWhere) && wh.is_some() {
             let t = self.tables.get_mut(name).ok_or(ErrClass::NoTable)?;
             removed = t.rows.len() as u64;
@@ -1962,7 +2214,7 @@ mod tests {
     /// does not capture, not a candidate bug.
     #[test]
     fn clean_toy_agrees_with_the_oracle_on_every_script() {
-        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8] {
+        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
             let p = Profile::through(last);
             for seed in 0..SEEDS {
                 let script = build_script(seed, &p, STEPS);
@@ -1984,8 +2236,9 @@ mod tests {
     #[test]
     #[ignore]
     fn clean_toy_soak() {
-        // Through stage 8: the soak covers aggregates and joins too.
-        let p = Profile::through(8);
+        // Through stage 9: the soak covers aggregates, joins and
+        // constraints too.
+        let p = Profile::through(9);
         for seed in 1000..4000u64 {
             let script = build_script(seed, &p, 300);
             let mut toy = Toy::new(None);
@@ -2064,17 +2317,77 @@ mod tests {
         assert!(r.is_empty(), "a text/int join matches nothing: {r:?}");
     }
 
+    /// Stage 9: an INTEGER PRIMARY KEY assigns max+1 (1 when empty) on
+    /// NULL/omitted, a TEXT PRIMARY KEY rejects NULL, omitted columns read
+    /// their DEFAULT, `NOT NULL`/`UNIQUE` reject violations (several NULLs
+    /// are fine) and `REFERENCES` enforces restrict semantics — including
+    /// on `DELETE` of a referenced parent.
+    #[test]
+    fn constraints_pk_defaults_unique_and_fk() {
+        let mut t = Toy::new(None);
+        let ok0 = |r: Result<Response, String>| matches!(r, Ok(Response::Ok(0)));
+        let ok_n = |r: Result<Response, String>, n: u64| matches!(r, Ok(Response::Ok(m)) if m == n);
+        let constraint = |r: Result<Response, String>| matches!(r, Ok(Response::Err { ref class, .. }) if class == "constraint");
+        let rows = |r: Result<Response, String>| match r {
+            Ok(Response::Rows { rows, .. }) => rows,
+            other => panic!("expected rows: {other:?}"),
+        };
+        assert!(ok0(
+            t.exec("CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT)")
+        ));
+        assert!(ok_n(t.exec("INSERT INTO p (name) VALUES ('a')"), 1));
+        assert!(ok_n(t.exec("INSERT INTO p VALUES (NULL, 'b')"), 1));
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p ORDER BY id")),
+            vec![vec!["1"], vec!["2"]],
+            "auto-assign is max+1, 1 when empty"
+        );
+        assert!(ok0(t.exec(
+            "CREATE TABLE d (id INTEGER PRIMARY KEY, n INTEGER NOT NULL DEFAULT -5, u INTEGER UNIQUE)"
+        )));
+        assert!(ok_n(t.exec("INSERT INTO d (id) VALUES (NULL)"), 1));
+        assert_eq!(rows(t.exec("SELECT n FROM d")), vec![vec!["-5"]], "DEFAULT");
+        assert!(constraint(t.exec("INSERT INTO d (n) VALUES (NULL)")));
+        assert!(ok_n(t.exec("INSERT INTO d (u) VALUES (7)"), 1));
+        assert!(constraint(t.exec("INSERT INTO d (u) VALUES (7)")));
+        assert!(ok_n(t.exec("INSERT INTO d (u) VALUES (NULL), (NULL)"), 2));
+        assert!(ok0(t.exec(
+            "CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id))"
+        )));
+        assert!(ok_n(t.exec("INSERT INTO c (pid) VALUES (1)"), 1));
+        assert!(constraint(t.exec("INSERT INTO c (pid) VALUES (99)")));
+        assert!(ok_n(t.exec("INSERT INTO c (pid) VALUES (NULL)"), 1));
+        assert!(
+            constraint(t.exec("DELETE FROM p WHERE id = 1")),
+            "referenced parent"
+        );
+        assert!(
+            ok_n(t.exec("DELETE FROM p WHERE id = 2"), 1),
+            "unreferenced parent"
+        );
+        assert_eq!(rows(t.exec("SELECT id FROM p")), vec![vec!["1"]]);
+        // A TEXT primary key is NOT NULL.
+        assert!(ok0(
+            t.exec("CREATE TABLE tk (k TEXT PRIMARY KEY, v INTEGER)")
+        ));
+        assert!(ok_n(t.exec("INSERT INTO tk VALUES ('a', 1)"), 1));
+        assert!(constraint(t.exec("INSERT INTO tk VALUES (NULL, 2)")));
+    }
+
     /// Every planted bug is caught, and caught OFTEN: a blind spot in the
     /// generator shows up here as a surviving or barely-caught mutant. A
     /// model with such a bug would otherwise pass several verifications in a
     /// row by luck.
     #[test]
     fn every_mutant_is_caught_in_most_scripts() {
-        const SCRIPTS: u64 = 40;
+        // 60 scripts: the stage-9 profile dilutes any single feature, and a
+        // bug that is only caught in a quarter of scripts needs the sample
+        // to stay above the floor reliably.
+        const SCRIPTS: u64 = 60;
         const MIN_RATE_PCT: u64 = 25;
-        // Through stage 8: the aggregate and join mutants only fire when
-        // the profile generates those shapes.
-        let p = Profile::through(8);
+        // Through stage 9: the aggregate, join and constraint mutants only
+        // fire when the profile generates those shapes.
+        let p = Profile::through(9);
         let mut weak = Vec::new();
         let mut report = Vec::new();
         for fault in Fault::ALL {

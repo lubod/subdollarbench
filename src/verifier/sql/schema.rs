@@ -33,6 +33,10 @@ pub struct Column {
     /// Optional literal default (rendered in the DDL and INSERT-omitted
     /// cases; only decimal integers and simple quoted strings are used).
     pub default: Option<DefaultVal>,
+    /// `REFERENCES <table>(<column>)` with restrict semantics (stage 9).
+    /// The parent is always the first table's INTEGER primary key, so the
+    /// child column is `INTEGER`.
+    pub references: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,7 +156,7 @@ pub fn generate(seed: u64, table_count: usize, max_columns: usize) -> Schema {
     let mut rng = Rng::new(seed);
     let mut used = BTreeSet::new();
     let ns = format!("s{seed:x}_");
-    let mut tables = Vec::new();
+    let mut tables: Vec<Table> = Vec::new();
     for t in 0..table_count {
         let name = format!("{ns}{}", rng.ident(&mut used));
         let cols_n = 2 + rng.below((max_columns.saturating_sub(2)).max(1) as u64 + 1) as usize;
@@ -195,6 +199,23 @@ pub fn generate(seed: u64, table_count: usize, max_columns: usize) -> Schema {
                 unique,
                 not_null,
                 default,
+                references: None,
+            });
+        }
+        // Later tables may carry a foreign key to the first table's
+        // INTEGER primary key (restrict semantics, `PRAGMA
+        // foreign_keys=ON`). The parent column exists from the first
+        // table, so the child column's values can be anchored on it.
+        if t > 0 && columns.len() < max_columns && rng.below(10) < 6 {
+            let fname = format!("{ns}{}", rng.ident(&mut used));
+            columns.push(Column {
+                name: fname,
+                ty: Ty::Integer,
+                primary_key: false,
+                unique: false,
+                not_null: false,
+                default: None,
+                references: Some((tables[0].name.clone(), tables[0].columns[0].name.clone())),
             });
         }
         tables.push(Table { name, columns });
@@ -225,6 +246,9 @@ impl Schema {
                         }
                         if let Some(d) = &c.default {
                             s.push_str(&format!(" DEFAULT {}", d.sql()));
+                        }
+                        if let Some((pt, pc)) = &c.references {
+                            s.push_str(&format!(" REFERENCES {pt}({pc})"));
                         }
                         s
                     })

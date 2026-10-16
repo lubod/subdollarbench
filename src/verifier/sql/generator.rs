@@ -157,6 +157,8 @@ struct ColInfo {
     unique: bool,
     not_null: bool,
     default: bool,
+    /// `REFERENCES parent(column)`, when the profile enables constraints.
+    references: Option<(String, String)>,
 }
 
 /// Generated expression: SQL text, its precedence level, and a conservative
@@ -322,6 +324,7 @@ impl Generator {
                 unique: cons && c.unique,
                 not_null: cons && c.not_null,
                 default: cons && c.default.is_some(),
+                references: if cons { c.references.clone() } else { None },
             })
             .collect();
         (t.name.clone(), cols)
@@ -666,6 +669,13 @@ impl Generator {
     /// One INSERT cell for column `c`; non-NULL literals are remembered.
     fn cell(&mut self, c: &ColInfo) -> String {
         let lit = self.cell_inner(c);
+        // An INTEGER PRIMARY KEY that gets NULL (or is omitted) is
+        // auto-assigned max+1, so the column's bound must allow one more
+        // than any value it already holds.
+        if c.pk && c.ty == Ty::Integer && lit == "NULL" && self.profile.constraints {
+            let b = self.bound_of(&c.name);
+            self.bump(&c.name, b.saturating_add(1));
+        }
         match c.ty {
             Ty::Integer => {
                 if let Ok(v) = lit.parse::<i64>() {
@@ -713,6 +723,20 @@ impl Generator {
             return match c.ty {
                 Ty::Integer => (1_000_000 + self.uniq).to_string(),
                 Ty::Text => format!("'u{}'", self.uniq),
+            };
+        }
+        if let Some((_, pc)) = &c.references {
+            // A foreign key: a parent value most of the time (anchored on
+            // the parent's inserted values), NULL sometimes (an FK ignores
+            // NULLs). A missing parent is a deliberate probe, never noise.
+            let parent: Option<String> = self
+                .seen
+                .get(pc)
+                .filter(|v| !v.is_empty())
+                .map(|v| v[self.rng.below(v.len() as u64) as usize].clone());
+            return match self.rng.below(100) {
+                0..=54 => parent.unwrap_or_else(|| "NULL".to_string()),
+                _ => "NULL".to_string(),
             };
         }
         if !c.not_null && self.rng.chance(10) {
@@ -1510,6 +1534,9 @@ impl Generator {
         if self.profile.joins && !cols.is_empty() {
             menu.extend([17, 18, 19]);
         }
+        if self.profile.constraints {
+            menu.extend([20, 21, 22]);
+        }
         let which = *self.rng.pick(&menu);
         let sql = match which {
             0 => format!("{} * {} zz_gone", self.kw("SELECT"), self.kw("FROM")),
@@ -1649,11 +1676,64 @@ impl Generator {
                     self.kw("ON")
                 )
             }
-            _ => format!(
-                "{} {tname} {} zz_nocol = 1",
-                self.kw("UPDATE"),
-                self.kw("SET")
-            ),
+            20 => {
+                // An explicit NULL into a NOT NULL column (no DEFAULT can
+                // rescue it).
+                let col = cols
+                    .iter()
+                    .find(|c| c.not_null && !c.pk)
+                    .or_else(|| cols.iter().find(|c| !c.pk))
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| cols[0].name.clone());
+                format!(
+                    "{} {} {tname} ({col}) {} (NULL)",
+                    self.kw("INSERT"),
+                    self.kw("INTO"),
+                    self.kw("VALUES")
+                )
+            }
+            21 => {
+                // A duplicate UNIQUE value: the second insert fails (the
+                // FIRST may fail too when the value already exists — the
+                // oracle decides).
+                let mut candidate: Option<(String, String)> = None;
+                for c in &cols {
+                    if (c.unique || c.pk) && self.seen.get(&c.name).is_some_and(|v| !v.is_empty()) {
+                        let key = self.seen[&c.name][0].clone();
+                        candidate = Some((c.name.clone(), key));
+                        break;
+                    }
+                }
+                match candidate {
+                    Some((col, val)) => format!(
+                        "{} {} {tname} ({col}) {} ({val})",
+                        self.kw("INSERT"),
+                        self.kw("INTO"),
+                        self.kw("VALUES")
+                    ),
+                    None => format!("{} zz_nocol {} {tname}", self.kw("SELECT"), self.kw("FROM")),
+                }
+            }
+            _ => {
+                // A foreign key with no parent row.
+                let fk = cols.iter().find(|c| c.references.is_some()).cloned();
+                match fk {
+                    Some(c) => format!(
+                        "{} {} {tname} ({}) {} (-4242424242424242)",
+                        self.kw("INSERT"),
+                        self.kw("INTO"),
+                        c.name,
+                        self.kw("VALUES")
+                    ),
+                    None => format!(
+                        "{} {} {tname} ({}) {} (NULL)",
+                        self.kw("INSERT"),
+                        self.kw("INTO"),
+                        cols[0].name,
+                        self.kw("VALUES")
+                    ),
+                }
+            }
         };
         self.stmt(sql, Kind::Probe, false)
     }
@@ -2032,6 +2112,91 @@ mod tests {
                         q.contains(" as c0") || q.contains(" as c1") || q.contains(" as c2"),
                         "aggregate item without alias: {q}"
                     );
+                }
+            }
+        }
+    }
+
+    /// Ticket 9's constraint shapes: the constrained DDL (PRIMARY KEY,
+    /// UNIQUE, NOT NULL, DEFAULT, REFERENCES) appears only from stage 9,
+    /// the violations are probed, and omitted-but-defaulted columns are
+    /// exercised.
+    #[test]
+    fn constraint_profile_emits_ddl_and_violation_probes() {
+        let p9 = Profile::through(9);
+        let mut ddl = String::new();
+        let mut probes = String::new();
+        let (mut auto_pk, mut omitted_default) = (0, 0);
+        for seed in 0..60u64 {
+            let s = build_script(seed, &p9, 150);
+            assert!(
+                s.unknown.is_empty(),
+                "{:?}",
+                &s.unknown[..s.unknown.len().min(2)]
+            );
+            assert_eq!(s.discarded, 0, "seed {seed}: discards");
+            for c in s.setup.iter().chain(&s.steps) {
+                let q = lower(&c.stmt.sql);
+                if c.stmt.kind == Kind::Create {
+                    ddl.push_str(&q);
+                    ddl.push('\n');
+                }
+                if c.stmt.kind == Kind::Probe {
+                    probes.push_str(&q);
+                    probes.push('\n');
+                }
+                if q.contains("insert") && q.contains("values (null") {
+                    auto_pk += 1;
+                }
+                // A column-list INSERT omits at least one column, so the
+                // DEFAULT path is exercised.
+                if q.contains("insert into") && q.contains(" (") && q.contains(" values ") {
+                    omitted_default += 1;
+                }
+            }
+        }
+        for feature in [
+            "primary key",
+            "unique",
+            "not null",
+            "default ",
+            "references ",
+        ] {
+            assert!(ddl.contains(feature), "stage 9 never emitted {feature:?}");
+        }
+        assert!(auto_pk >= 5, "NULL/omitted primary keys rare: {auto_pk}");
+        assert!(
+            omitted_default >= 20,
+            "column-list inserts rare: {omitted_default}"
+        );
+        // The violation probes are present (the class comes from the oracle).
+        for needle in ["(null)", "-4242424242424242"] {
+            assert!(
+                probes.contains(needle),
+                "constraint probes missing {needle:?}"
+            );
+        }
+        // Stage 8 must not leak any constraint (predicates may still say
+        // `IS NOT NULL`: that is stage 1, not DDL).
+        let p8 = Profile::through(8);
+        for seed in 0..30u64 {
+            let s = build_script(seed, &p8, 150);
+            for c in s.setup.iter().chain(&s.steps) {
+                let q = lower(&c.stmt.sql);
+                if c.stmt.kind == Kind::Create {
+                    for banned in [
+                        "primary key",
+                        "unique",
+                        "not null",
+                        " default ",
+                        "references ",
+                    ] {
+                        assert!(!q.contains(banned), "stage 8 leaked {banned:?}: {q}");
+                    }
+                } else {
+                    for banned in ["default ", "references "] {
+                        assert!(!q.contains(banned), "stage 8 leaked {banned:?}: {q}");
+                    }
                 }
             }
         }
@@ -2591,6 +2756,7 @@ mod tests {
                         unique: false,
                         not_null: false,
                         default: None,
+                        references: None,
                     },
                     Column {
                         name: "n".into(),
@@ -2599,6 +2765,7 @@ mod tests {
                         unique: false,
                         not_null: false,
                         default: Some(DefaultVal::Int(-9)),
+                        references: None,
                     },
                     Column {
                         name: "s".into(),
@@ -2607,6 +2774,7 @@ mod tests {
                         unique: false,
                         not_null: false,
                         default: Some(DefaultVal::Text("d123".into())),
+                        references: None,
                     },
                 ],
             }],
@@ -2637,6 +2805,7 @@ mod tests {
                         unique: false,
                         not_null: false,
                         default: None,
+                        references: None,
                     },
                     Column {
                         name: "n".into(),
@@ -2645,6 +2814,7 @@ mod tests {
                         unique: false,
                         not_null: false,
                         default: Some(DefaultVal::Int(i64::MAX)),
+                        references: None,
                     },
                 ],
             }],

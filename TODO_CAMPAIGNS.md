@@ -732,7 +732,26 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   every later ticket. The campaign declares ticket 8 (tier 3, needs 1,
   acceptance [0..8], lite `stages/8_joins_lite/prompt.md` weight 0.4);
   RULES 2026-10-16.9; the 20/20 bar runs through stage 8 (180 stage
-  runs). **Next**: ticket 9 (constraints), tier 3.
+  runs).
+  **Ticket 9 landed (2026-10-16)**: the schema's constrained DDL now
+  includes `REFERENCES` (a later table's child column pointing at the
+  first table's INTEGER primary key) beside PRIMARY KEY/UNIQUE/NOT
+  NULL/DEFAULT, and the generator emits it only from stage 9; foreign-key
+  cells read the parent's inserted values (or NULL — an FK ignores
+  NULLs), and probes cover a NULL into `NOT NULL`, a duplicate `UNIQUE`
+  value and a child with no parent. The toy enforces the whole contract:
+  INTEGER primary-key auto-assignment (max+1, 1 when empty), TEXT keys
+  NOT NULL, defaults for omitted columns (an explicit NULL does not get
+  the default), UNIQUE with several NULLs allowed, and restrict-semantics
+  foreign keys on insert, update and delete — with the FK pass at the
+  *statement end* because SQLite's immediate constraints fire there
+  (a later row's type error wins over an earlier row's missing parent,
+  which the soak found). The toy gained a `ConstraintIgnored` mutant; the
+  agreement gate covers stage 9 (120 seeds x 10 profiles) and the
+  3000-seed soak runs stage-9 scripts. A generator bounds bug the soak
+  found (an auto-assigned key can exceed the column's recorded bound) is
+  fixed. Gates: 20/20 through stage 9 (200 stage runs), a stage-9 live
+  proof (10/10), RULES 2026-10-16.10. **Next**: ticket 10 (subqueries).
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

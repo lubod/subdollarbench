@@ -7703,6 +7703,56 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// sdb-sql stage 9 live proof (eval-only, no model): the reference
+    /// passes the constraint suite under Docker — constrained DDL, key
+    /// auto-assignment, defaults, UNIQUE/NOT NULL and foreign keys
+    /// (including the violation probes) — plus everything 0-8 again.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage9_constraints_live() {
+        let worker = 81u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlcons");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-9 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlcons");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 9,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=9).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-9 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 9: Constraints -> PASS",
+            "Stage 8: Joins -> PASS",
+            "[UPGRADE] sentinel for stage 9 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (10, 10)
+        );
+        cleanup_covtest_network("sqlcons");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// sdb-sql stage 8 live proof (eval-only, no model): the reference
     /// passes the join suite under Docker — comma/`INNER`/`LEFT` joins with
     /// `ON`, qualified references, `SELECT *` over a join, the ambiguity

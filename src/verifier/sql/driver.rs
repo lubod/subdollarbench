@@ -55,7 +55,7 @@ pub fn stage_title(stage: u32) -> &'static str {
 /// for later stages are not built yet). Stages 4-5 add no grammar; stage 6
 /// adds transactions.
 pub fn differential_supported(stage: u32) -> bool {
-    stage <= 8
+    stage <= 9
 }
 
 /// A deterministic seed for (verification, stage): every verification of a
