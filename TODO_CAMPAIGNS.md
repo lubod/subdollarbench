@@ -598,6 +598,14 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   the next ticket; `upgrade` regression class) and the data-dir
   snapshot/restore alongside the workspace rollback, then the
   persistence scenario, ticket prompt and cell.
+  **Review fixes landed (REVIEW.md, 2026-10-16)**: the http health probes
+  are bounded again; the sql shrink runs on throwaway stores (the real
+  `sql-data` survives for ticket 4) and the driver waits for a
+  protocol-level answer before replaying — docker's port proxy accepts
+  before the server inside serves, which had made every reset untrusted;
+  the embedded-SQL import check covers comma/`;`/`:` forms; Dockerfile
+  candidates get `--port`/`--data` only with an `ENTRYPOINT` and read
+  `SDB_PORT`/`SDB_DATA_DIR` otherwise; RULES 2026-10-16.7.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions
