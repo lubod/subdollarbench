@@ -788,7 +788,28 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
     within the verification); s5-s9 skipped by `needs`; reached ticket 0,
     $0.0504 total. The candidate regresses stage 0 on every rewrite
     (genuine: `expected ERR exists, got ERR syntax`), which is the ticket
-    it should repair before climbing. **Next**: ticket 10 (subqueries).
+    it should repair before climbing.
+  **Ticket 10, part 1 landed (2026-10-16)**: the `subqueries` profile and
+  the toy's subquery engine — scalar subqueries in select items and
+  comparisons (always aggregate-wrapped, result-type matched so no
+  mixed-type comparison creeps in), `[NOT] IN (subquery)`, `IN (list)`/
+  `NOT IN` (three-valued: a NULL in the list makes a non-match NULL, and
+  an *empty* set is false even for a NULL left side), `[NOT] EXISTS` with
+  a correlated predicate, correlated references via a scope chain
+  (`Ctx::outer`), static validation (a subquery's columns and its
+  one-column arity are checked before any row exists), `INSERT ... SELECT`
+  execution (shared per-row checks with `VALUES`), the four subquery error
+  probes, and an `InNullIgnored` mutant. The independent agreement gate
+  now covers stage 10 for those shapes (120 seeds x 11 profiles) and the
+  mutant suite runs over stage 10. **Pending for the completion commit**:
+  (a) the generated `INSERT ... SELECT` form stays at weight 0 — the gate
+  caught a divergence around SQLite's rowid assignment for a mixed
+  NULL/explicit multi-row insert into a constrained table (seed 41,
+  statement 73: the oracle takes 3 rows, the toy errors), which needs one
+  more debugging round before the shape can be graded; (b) the ticket
+  declaration + prompt, `differential_supported(10)`, the 20/20 bar
+  through 10, a stage-10 live proof and the RULES bump. **Next**: finish
+  ticket 10, then ticket 11 (indexes + perf gate).
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions
