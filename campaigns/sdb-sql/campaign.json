@@ -71,6 +71,27 @@
       "needs": [
         1
       ]
+    },
+    {
+      "id": 4,
+      "type": "storage",
+      "title": "Persistence",
+      "prompt": "stages/4_persistence/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 30,
+      "tier": 2,
+      "needs": [
+        0
+      ]
     }
   ]
 }

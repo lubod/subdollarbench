@@ -319,6 +319,21 @@ struct StageJob {
     rollback_first: bool,
 }
 
+/// Recursively copy `src` onto `dst` (created if needed).
+fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
 async fn rollback_workspace(workdir: &Path, commit: &str) -> Result<()> {
     for args in [vec!["reset", "--hard", commit], vec!["clean", "-fd"]] {
         let out = std::process::Command::new("git")
@@ -371,6 +386,23 @@ async fn run_one_stage(
                 .yellow()
             );
             rollback_workspace(workdir, &commit).await?;
+        }
+    }
+    // sdb-sql: the harness-owned data directory rolls back with the
+    // workspace ("A rollback restores the data directory snapshot along
+    // with the code"). Snapshot the store this attempt starts from; a later
+    // rollback restores it.
+    if lc.spec.task == "sql" {
+        let data = cdir.join("sql-data");
+        let snap = cdir.join("sql-data.snap");
+        if job.rollback_first && snap.is_dir() {
+            let _ = std::fs::remove_dir_all(&data);
+            copy_dir(&snap, &data).context("restore the sdb-sql store snapshot")?;
+            println!("  [ROLLBACK] sdb-sql store restored from its snapshot");
+        }
+        if data.is_dir() {
+            let _ = std::fs::remove_dir_all(&snap);
+            copy_dir(&data, &snap).context("snapshot the sdb-sql store")?;
         }
     }
     // sdb-sql: the harness-owned contract so far. The pipeline writes it

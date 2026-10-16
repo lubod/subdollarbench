@@ -54,7 +54,7 @@ pub fn stage_title(stage: u32) -> &'static str {
 /// Stages the differential verifier can run today (the scripted scenarios
 /// for later stages are not built yet).
 pub fn differential_supported(stage: u32) -> bool {
-    stage <= 3
+    stage <= 4
 }
 
 /// A deterministic seed for (verification, stage): every verification of a
@@ -151,6 +151,10 @@ pub const SHRINK_CHECKS: usize = 60;
 /// Without a reset — or when a reset does not reproduce the failure — the
 /// repro is the original run's prefix: bigger, but always what actually
 /// happened.
+///
+/// `restart` stops and starts the candidate *keeping its store*: stage 4+
+/// suites include the persistence scenario, which needs it. `None` skips
+/// that scenario (eval/replay and tests without container control).
 pub fn run_stage(
     addr: &str,
     timeout: Duration,
@@ -158,6 +162,7 @@ pub fn run_stage(
     passed: &[u32],
     steps: usize,
     reset: Option<&mut dyn FnMut() -> Result<(), String>>,
+    restart: Option<&mut dyn FnMut() -> Result<(), String>>,
 ) -> Result<StageOutcome, String> {
     let script = build_script(seed, &Profile::for_passed(passed), steps);
     if !script.unknown.is_empty() {
@@ -206,19 +211,32 @@ pub fn run_stage(
         Verdict::Pass { checks } => {
             drop(cand);
             let stage = passed.iter().copied().max().unwrap_or(0);
-            match super::scenarios::for_stage(stage, addr, timeout, seed) {
-                ScenarioResult::Pass => Ok(StageOutcome {
-                    seed,
-                    passed: true,
-                    checks,
-                    discarded: script.discarded,
-                    kind: None,
-                    repro: None,
-                    detail: String::new(),
-                }),
-                ScenarioResult::Fail(d) => Ok(failed(checks, MismatchKind::Protocol, d)),
-                ScenarioResult::Fault(e) => Err(e),
+            if let ScenarioResult::Fail(d) = super::scenarios::for_stage(stage, addr, timeout, seed)
+            {
+                return Ok(failed(checks, MismatchKind::Protocol, d));
             }
+            // Stage 4's suite adds the restart scenario: the candidate must
+            // come back on the same store it wrote.
+            if stage >= 4 {
+                if let Some(restart) = restart {
+                    match super::scenarios::persistence(addr, timeout, seed, restart) {
+                        ScenarioResult::Pass => {}
+                        ScenarioResult::Fail(d) => {
+                            return Ok(failed(checks, MismatchKind::Protocol, d))
+                        }
+                        ScenarioResult::Fault(e) => return Err(e),
+                    }
+                }
+            }
+            Ok(StageOutcome {
+                seed,
+                passed: true,
+                checks,
+                discarded: script.discarded,
+                kind: None,
+                repro: None,
+                detail: String::new(),
+            })
         }
         Verdict::Fail(f) => {
             let detail = format!("{:?}: {}", f.mismatch.kind, f.mismatch.detail);
@@ -399,8 +417,16 @@ mod tests {
                 // (and namespace), exactly as the pipeline derives them.
                 let seed = stage_seed(tag, stage);
                 let passed: Vec<u32> = (0..=stage).collect();
-                let out = run_stage(&addr, Duration::from_secs(10), seed, &passed, 150, None)
-                    .unwrap_or_else(|e| panic!("stage {stage} seed {seed}: {e}"));
+                let out = run_stage(
+                    &addr,
+                    Duration::from_secs(10),
+                    seed,
+                    &passed,
+                    150,
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("stage {stage} seed {seed}: {e}"));
                 assert!(out.passed, "stage {stage} seed {seed}: {}", out.detail);
                 assert!(out.checks > 100, "stage {stage}: {} checks", out.checks);
                 assert!(out.repro.is_none());
@@ -423,6 +449,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 80,
                 Some(&mut reset),
+                None,
             )
             .unwrap();
             if !out.passed {
@@ -469,6 +496,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 80,
                 None,
+                None,
             )
             .unwrap();
             if !out.passed {
@@ -505,6 +533,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 80,
                 Some(&mut reset),
+                None,
             )
             .unwrap();
             if !out.passed {
@@ -526,7 +555,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         drop(listener);
-        let out = run_stage(&addr, Duration::from_millis(500), 1, &[0], 10, None)
+        let out = run_stage(&addr, Duration::from_millis(500), 1, &[0], 10, None, None)
             .expect("an unreachable server is graded, not a verifier fault");
         assert!(!out.passed);
         assert_eq!(out.kind, Some(MismatchKind::Protocol));

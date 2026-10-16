@@ -42,6 +42,26 @@ fn sql_data_dir(workdir: &Path, campaign: bool) -> PathBuf {
     std::env::temp_dir().join(format!("sdb-sql-data-{}", std::process::id()))
 }
 
+/// Stop the candidate and start it again with `extras`, then wait until it
+/// answers one protocol-level probe. `Err` means the harness could not get
+/// it back up (or it stayed silent); for a model candidate that is a
+/// failure, so callers grade it accordingly.
+fn restart_candidate(
+    instance_id: &str,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+) -> Result<(), String> {
+    let sb = crate::sandbox::docker::SandboxManager::with_id(instance_id);
+    sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
+    sb.start_candidate_in_docker_with(workdir, port, extras)
+        .map_err(|e| format!("start: {e}"))?;
+    crate::verifier::sql::driver::wait_until_answering(
+        &format!("127.0.0.1:{port}"),
+        std::time::Duration::from_secs(20),
+    )
+}
+
 /// `wait_for_port` only proves the socket accepts; under a loaded host the
 /// application may not serve yet, and the next request then dies on a reset
 /// (the http stages 9/10 restart flaked exactly so on 2026-10-16). Probe
@@ -2591,6 +2611,50 @@ impl BenchmarkPipeline {
                             };
                         let mut stages: Vec<crate::verifier::StageResult> = Vec::new();
                         let mut prior_failed = false;
+                        // Upgrade checks run before the suite, against the
+                        // harness-owned store: data written when an earlier
+                        // ticket passed must still answer (docs/PROPOSAL-sdb-sql.md,
+                        // "Upgrade check"). Drift fails that ticket's stage
+                        // again (regression class `upgrade`); an unreachable
+                        // server is left to the suite, which fails anyway.
+                        let sentinel_dir = sql_data
+                            .as_ref()
+                            .and_then(|d| d.parent().map(Path::to_path_buf));
+                        let sentinels: Vec<crate::verifier::sql::sentinel::Sentinel> =
+                            if accepted.is_some() {
+                                sentinel_dir
+                                    .as_deref()
+                                    .map(crate::verifier::sql::sentinel::load_all)
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+                        let mut upgrade_failed: Option<(u32, String)> = None;
+                        for sent in &sentinels {
+                            match crate::verifier::sql::sentinel::check(
+                                &format!("127.0.0.1:{port}"),
+                                std::time::Duration::from_secs(10),
+                                sent,
+                            ) {
+                                Ok(()) => logger.log(&format!(
+                                    "  [UPGRADE] sentinel from stage {} verified ({} reads)",
+                                    sent.stage,
+                                    sent.queries.len()
+                                )),
+                                Err(e) if e.starts_with("drift:") => {
+                                    logger.log(&format!(
+                                        "  [UPGRADE] sentinel from stage {} FAILED: {e}",
+                                        sent.stage
+                                    ));
+                                    upgrade_failed = Some((sent.stage, e));
+                                    break;
+                                }
+                                Err(e) => logger.log(&format!(
+                                    "  [UPGRADE] sentinel from stage {} not checkable now: {e}",
+                                    sent.stage
+                                )),
+                            }
+                        }
                         for &stage in &wanted {
                             let name = format!(
                                 "Stage {stage}: {}",
@@ -2629,7 +2693,6 @@ impl BenchmarkPipeline {
                             let addr = format!("127.0.0.1:{port}");
                             let seed =
                                 crate::verifier::sql::driver::stage_seed(verifier_seed, stage);
-                            // The shrink replay needs a fresh database: a
                             // The shrink replay needs a *fresh* database, but
                             // the real one is the candidate's persistent
                             // store (ticket 4+) and must survive. Every trial
@@ -2637,10 +2700,8 @@ impl BenchmarkPipeline {
                             // stage is graded the candidate goes back on the
                             // real store for the repair round and diagnostics.
                             let instance_id = sandbox.instance_id.clone();
-                            let restore_instance = sandbox.instance_id.clone();
                             let reset_dir = workdir.to_path_buf();
                             let real_extras = extras.clone();
-                            let restore_extras = extras.clone();
                             let shrink_root = sql_data
                                 .as_ref()
                                 .map(|d| d.with_file_name("sql-shrink"))
@@ -2658,14 +2719,19 @@ impl BenchmarkPipeline {
                                 // Non-conforming candidates may still use the
                                 // workspace store; wipe it too.
                                 let _ = std::fs::remove_dir_all(reset_dir.join("data"));
-                                let sb =
-                                    crate::sandbox::docker::SandboxManager::with_id(&instance_id);
-                                sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
-                                sb.start_candidate_in_docker_with(&reset_dir, port, &trial_extras)
-                                    .map_err(|e| format!("start: {e}"))?;
-                                crate::verifier::sql::driver::wait_until_answering(
-                                    &format!("127.0.0.1:{port}"),
-                                    std::time::Duration::from_secs(20),
+                                restart_candidate(&instance_id, &reset_dir, port, &trial_extras)
+                            };
+                            // Stage 4+'s persistence scenario restarts the
+                            // candidate *keeping* its store.
+                            let restart_instance = sandbox.instance_id.clone();
+                            let restart_dir = workdir.to_path_buf();
+                            let restart_extras = extras.clone();
+                            let mut restart = move || -> Result<(), String> {
+                                restart_candidate(
+                                    &restart_instance,
+                                    &restart_dir,
+                                    port,
+                                    &restart_extras,
                                 )
                             };
                             let run = tokio::task::spawn_blocking(move || {
@@ -2676,6 +2742,7 @@ impl BenchmarkPipeline {
                                     &passed_ids,
                                     crate::verifier::sql::driver::DEFAULT_STEPS,
                                     Some(&mut reset),
+                                    Some(&mut restart),
                                 )
                             })
                             .await;
@@ -2683,32 +2750,13 @@ impl BenchmarkPipeline {
                                 // The shrink left the candidate on a
                                 // throwaway bind; put it back on the real
                                 // store.
-                                let sb = crate::sandbox::docker::SandboxManager::with_id(
-                                    &restore_instance,
-                                );
-                                let _ = sb.stop_candidate();
-                                match sb.start_candidate_in_docker_with(
-                                    workdir,
-                                    port,
-                                    &restore_extras,
-                                ) {
-                                    Ok(()) => {
-                                        let deadline = std::time::Instant::now()
-                                            + std::time::Duration::from_secs(20);
-                                        while std::time::Instant::now() < deadline
-                                            && std::net::TcpStream::connect(("127.0.0.1", port))
-                                                .is_err()
-                                        {
-                                            tokio::time::sleep(std::time::Duration::from_millis(
-                                                200,
-                                            ))
-                                            .await;
-                                        }
-                                    }
-                                    Err(e) => logger.log(&format!(
+                                if let Err(e) =
+                                    restart_candidate(&sandbox.instance_id, workdir, port, &extras)
+                                {
+                                    logger.log(&format!(
                                         "[SETUP] Warning: could not restore the candidate after \
                                          the shrink: {e}"
-                                    )),
+                                    ));
                                 }
                             }
                             let st = match run {
@@ -2772,6 +2820,71 @@ impl BenchmarkPipeline {
                             prior_failed |= !st.passed;
                             log_stage(logger, &st);
                             stages.push(st);
+                        }
+                        if let Some((lost, why)) = upgrade_failed {
+                            // The store written when stage `lost` passed no
+                            // longer answers: that ticket's contract is
+                            // broken now.
+                            let reason = format!("[upgrade] {why}");
+                            if let Some(st) = stages.iter_mut().find(|s| s.stage == lost) {
+                                st.passed = false;
+                                st.error = Some(reason.clone());
+                            } else if let Some(st) = stages.first_mut() {
+                                st.passed = false;
+                                st.error = Some(format!("{reason} (data from stage {lost})"));
+                            }
+                            logger.log(&format!(
+                                "  Stage {lost}: {} -> FAIL {reason}",
+                                crate::config::stage_label(
+                                    lost,
+                                    &format!(
+                                        "Stage {lost}: {}",
+                                        crate::verifier::sql::driver::stage_title(lost)
+                                    )
+                                )
+                            ));
+                        } else if stages.iter().all(|s| s.passed) {
+                            // A passing stage >= 4 leaves a sentinel for
+                            // later tickets (its own seed keeps namespaces
+                            // apart from the differential script).
+                            let top = wanted.iter().copied().max().unwrap_or(0);
+                            if top >= 4 {
+                                if let Some(dir) = &sentinel_dir {
+                                    let seed = crate::verifier::sql::driver::stage_seed(
+                                        verifier_seed,
+                                        top,
+                                    ) ^ 0x5E27_1E10_0000_0004;
+                                    let addr = format!("127.0.0.1:{port}");
+                                    let built = crate::verifier::sql::sentinel::build(seed, top)
+                                        .and_then(|s| {
+                                            crate::verifier::sql::sentinel::write(
+                                                &addr,
+                                                std::time::Duration::from_secs(10),
+                                                &s,
+                                            )
+                                            .map(|()| s)
+                                        });
+                                    match built {
+                                        Ok(s) => {
+                                            let path = dir.join(format!("sentinel-{top}.json"));
+                                            match crate::verifier::sql::sentinel::save(&path, &s) {
+                                                Ok(()) => logger.log(&format!(
+                                                    "  [UPGRADE] sentinel for stage {top} written: \
+                                                     {} writes, {} reads",
+                                                    s.writes.len(),
+                                                    s.queries.len()
+                                                )),
+                                                Err(e) => logger.log(&format!(
+                                                    "[WARN] sentinel not saved: {e}"
+                                                )),
+                                            }
+                                        }
+                                        Err(e) => logger.log(&format!(
+                                            "[WARN] sentinel for stage {top} not written: {e}"
+                                        )),
+                                    }
+                                }
+                            }
                         }
                         let ps = stages.iter().filter(|s| s.passed).count() as u32;
                         let ts = stages.len() as u32;
@@ -6986,6 +7099,111 @@ main()
         );
         cleanup_covtest_network("sqllive");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sdb-sql stage 4 live proof (eval-only, no model): the reference
+    /// passes the cumulative suite through stage 4 — the differential
+    /// script plus the persistence scenario, which restarts the candidate
+    /// container on the same harness-owned store — and leaves a sentinel
+    /// for later tickets.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage4_persistence_live() {
+        let worker = 95u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlpersist");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-4 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlpersist");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 4,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-4 fixture run must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        for needle in [
+            "Stage 0: Genesis: tables, insert, select -> PASS",
+            "Stage 4: Persistence -> PASS",
+            "  [UPGRADE] sentinel for stage 4 written",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (5, 5)
+        );
+        assert!(
+            dir.join("sentinel-4.json").is_file(),
+            "the sentinel must be saved next to the store"
+        );
+        cleanup_covtest_network("sqlpersist");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A sentinel whose data is gone fails the stage that wrote it
+    /// (regression class `upgrade`): the check runs before the suite and
+    /// the stage result is overridden even though the suite itself passes.
+    #[tokio::test]
+    async fn test_pipeline_sql_sentinel_drift_fails_the_writing_stage() {
+        let worker = 96u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqldrift");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql sentinel-drift fixture").unwrap();
+        // A sentinel the store never saw: its reads cannot answer.
+        let sent = crate::verifier::sql::sentinel::build(0x5EED_0001, 4).unwrap();
+        crate::verifier::sql::sentinel::save(&dir.join("sentinel-4.json"), &sent).unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqldrift");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 4,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the drift fixture run must complete");
+        assert!(!out.infra_error);
+        assert!(
+            logger.contains("[UPGRADE] sentinel from stage 4 FAILED"),
+            "the drift must be reported"
+        );
+        assert!(
+            logger.contains("Stage 4: Persistence -> FAIL"),
+            "the writing stage must fail"
+        );
+        assert!(
+            logger.contains("[upgrade]"),
+            "the stage error must carry the upgrade class"
+        );
+        // The suite itself passed: stages 0-3 are green, only stage 4 is red.
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (4, 5)
+        );
+        cleanup_covtest_network("sqldrift");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Review finding 2: a failing sql stage must still get a *minimized*

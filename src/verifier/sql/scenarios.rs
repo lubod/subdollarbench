@@ -63,6 +63,37 @@ pub enum ScenarioResult {
     Fault(String),
 }
 
+/// Stage 4 (docs/PROPOSAL-sdb-sql.md, "4. Persistence"): write a seeded
+/// dataset, restart the candidate on the same `--data`, read it back. The
+/// restart is the pipeline's job (it owns the container), so it arrives as
+/// a callback. Data that does not survive is a candidate failure; a
+/// restart the harness cannot even attempt is reported with it.
+///
+/// Stages >= 4's suite includes this: the store is written once and later
+/// tickets must keep answering for it.
+pub fn persistence(
+    addr: &str,
+    timeout: Duration,
+    seed: u64,
+    restart: &mut dyn FnMut() -> Result<(), String>,
+) -> ScenarioResult {
+    let pseed = seed ^ 0x5E27_A510_0000_0004;
+    let sent = match super::sentinel::build(pseed, 4) {
+        Ok(s) => s,
+        Err(e) => return ScenarioResult::Fault(format!("persistence dataset: {e}")),
+    };
+    if let Err(e) = super::sentinel::write(addr, timeout, &sent) {
+        return ScenarioResult::Fail(format!("persistence: writing the dataset: {e}"));
+    }
+    if let Err(e) = restart() {
+        return ScenarioResult::Fail(format!("persistence: restart failed: {e}"));
+    }
+    if let Err(e) = super::sentinel::check(addr, timeout, &sent) {
+        return ScenarioResult::Fail(format!("persistence: after a clean restart: {e}"));
+    }
+    ScenarioResult::Pass
+}
+
 /// Run the scripted scenarios of `stage`'s suite. Stages without scenarios
 /// pass trivially. `seed` namespaces every table the scenarios create.
 pub fn for_stage(stage: u32, addr: &str, timeout: Duration, seed: u64) -> ScenarioResult {

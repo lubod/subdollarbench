@@ -21,6 +21,7 @@ pub mod ref_server;
 pub mod run;
 pub mod scenarios;
 pub mod schema;
+pub mod sentinel;
 pub mod shrink;
 #[cfg(test)]
 mod toy;

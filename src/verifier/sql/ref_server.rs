@@ -138,7 +138,8 @@ def classify(msg):
     if (msg.startswith("syntax error")
             or msg.startswith("near ")
             or msg.startswith("unrecognized token")
-            or msg.startswith("incomplete input")):
+            or msg.startswith("incomplete input")
+            or msg.startswith("the query contains a null character")):
         return "syntax"
     if ("wrong number of arguments" in msg
             or (" values for " in msg and " columns" in msg)
@@ -233,8 +234,8 @@ def main():
     if data is None:
         data = "/tmp"
     db_path = os.path.join(data, "sdb-sql-ref-%d.sqlite" % port)
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    # The store is the harness's to own: it hands a fresh --data per run and
+    # expects the same directory to survive a restart (persistence).
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
@@ -285,6 +286,38 @@ mod tests {
     /// Kills the reference on drop, panics included.
     struct RefProc {
         child: Child,
+        script: std::path::PathBuf,
+        port: u16,
+        data: std::path::PathBuf,
+    }
+
+    impl RefProc {
+        fn spawn(&mut self) {
+            self.child = Command::new("python3")
+                .arg(&self.script)
+                .args(["--port", &self.port.to_string(), "--data"])
+                .arg(&self.data)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("python3 must be installed for the reference adapter");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if std::net::TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("reference did not open port {}", self.port);
+        }
+
+        /// Stop and start on the same store (ticket 4's persistence check).
+        fn restart(&mut self) -> Result<(), String> {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.spawn();
+            Ok(())
+        }
     }
 
     impl Drop for RefProc {
@@ -305,25 +338,20 @@ mod tests {
     fn start_reference(port: u16) -> RefProc {
         let dir = std::env::temp_dir().join(format!("sdb-sql-ref-{}-{port}", std::process::id()));
         write_reference(&dir, port).unwrap();
-        let child = Command::new("python3")
-            .arg(dir.join("sql_server.py"))
-            .args(["--port", &port.to_string(), "--data"])
-            .arg(std::env::temp_dir())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("python3 must be installed for the reference adapter");
-        // The guard owns the child from here, so the wait-for-port panic
+        let data = std::env::temp_dir().join(format!("sdb-sql-data-{}-{port}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let mut guard = RefProc {
+            // Placeholder replaced by spawn(): the struct owns the child.
+            child: Command::new("true").spawn().unwrap(),
+            script: dir.join("sql_server.py"),
+            port,
+            data,
+        };
+        // From here the guard owns the child, so the wait-for-port panic
         // path still kills and reaps it.
-        let guard = RefProc { child };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return guard;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        panic!("reference did not open port {port}");
+        guard.spawn();
+        guard
     }
 
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
@@ -332,20 +360,68 @@ mod tests {
     #[test]
     fn reference_passes_every_stage_twenty_times() {
         let port = free_port();
-        let _ref = start_reference(port);
+        let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=3u32 {
+        for stage in 0..=4u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);
-                let out = run_stage(&addr, Duration::from_secs(10), seed, &passed, 120, None)
-                    .unwrap_or_else(|e| panic!("stage {stage} run {run}: verifier fault: {e}"));
+                // Stage 4's suite restarts the candidate: the reference
+                // comes back on the same store.
+                let mut restart = || proc.restart();
+                let out = run_stage(
+                    &addr,
+                    Duration::from_secs(10),
+                    seed,
+                    &passed,
+                    120,
+                    None,
+                    Some(&mut restart),
+                )
+                .unwrap_or_else(|e| panic!("stage {stage} run {run}: verifier fault: {e}"));
                 assert!(
                     out.passed,
                     "stage {stage} run {run} (seed {seed}): {}",
                     out.detail
                 );
             }
+        }
+    }
+
+    /// A restart that loses the store must be caught (the reference's
+    /// `--data` is the harness-owned directory).
+    #[test]
+    fn reference_data_lost_across_a_restart_is_a_failure() {
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let mut keep = || proc.restart();
+        assert_eq!(
+            super::super::scenarios::persistence(
+                &addr,
+                Duration::from_secs(10),
+                stage_seed("reference-persistence", 4),
+                &mut keep,
+            ),
+            super::super::scenarios::ScenarioResult::Pass
+        );
+        // Point the reference at a fresh store and restart: the reads must
+        // drift.
+        proc.data =
+            std::env::temp_dir().join(format!("sdb-sql-data-lost-{}-{port}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proc.data);
+        std::fs::create_dir_all(&proc.data).unwrap();
+        let mut fresh = || proc.restart();
+        match super::super::scenarios::persistence(
+            &addr,
+            Duration::from_secs(10),
+            stage_seed("reference-persistence", 4) ^ 1,
+            &mut fresh,
+        ) {
+            super::super::scenarios::ScenarioResult::Fail(d) => {
+                assert!(d.contains("after a clean restart"), "{d}")
+            }
+            other => panic!("{other:?}"),
         }
     }
 
