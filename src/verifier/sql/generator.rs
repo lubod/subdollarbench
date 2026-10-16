@@ -130,8 +130,26 @@ struct ColInfo {
     default: bool,
 }
 
-/// Generated expression text and whether it is an atom (needs no parens).
-type Ex = (String, bool);
+/// Generated expression: SQL text, its precedence level, and a conservative
+/// bound.
+///
+/// Precedence: 0 is an atom or function call (needs no parentheses), then
+/// `||` is 1, `* / %` is 2, `+ -` is 3, and comparisons and boolean
+/// operators are 5.
+///
+/// Bound: for an integer expression, its maximum magnitude; for a text
+/// expression, its maximum length; booleans use the value one. Bounds are
+/// what keeps the workload overflow-free: SQLite silently promotes an
+/// overflowing intermediate to REAL (a comparison then hides it), the
+/// dialect leaves overflow untested, and a REAL the oracle cannot see would
+/// be graded as if it were defined behavior.
+type Ex = (String, u8, u128);
+
+/// Largest magnitude an integer expression may reach (no 64-bit overflow).
+const INT_BOUND: u128 = i64::MAX as u128;
+/// Longest text an expression or column may reach. Without a cap,
+/// `txt = txt || txt` doubles every row's text with each UPDATE.
+const TEXT_BOUND: u128 = 48;
 
 pub struct Generator {
     rng: Rng,
@@ -142,6 +160,10 @@ pub struct Generator {
     /// Recently inserted literals per column name (SQL text), so predicates
     /// can be anchored on values that really exist.
     seen: HashMap<String, Vec<String>>,
+    /// Per column: the largest magnitude (INTEGER) or length (TEXT) any
+    /// value of it can have, over everything generated so far. Conservative:
+    /// a generated statement counts even if the oracle later rejects it.
+    bounds: HashMap<String, u128>,
 }
 
 const TEXT_ALPHABET: &[u8] = b"abcdefghXYZ0123456789_-";
@@ -154,6 +176,7 @@ impl Generator {
             profile,
             uniq: 0,
             seen: HashMap::new(),
+            bounds: HashMap::new(),
         }
     }
 
@@ -261,16 +284,17 @@ impl Generator {
     }
 
     /// An integer literal safe as an expression operand (negatives wrapped).
-    fn int_atom(&mut self) -> String {
+    fn int_atom(&mut self) -> Ex {
         if self.rng.chance(6) {
-            return "NULL".to_string();
+            return ("NULL".to_string(), 0, 0);
         }
         let v = self.int_value();
-        if v < 0 {
+        let text = if v < 0 {
             format!("({v})")
         } else {
             v.to_string()
-        }
+        };
+        (text, 0, u128::from(v.unsigned_abs()))
     }
 
     fn text_raw(&mut self) -> String {
@@ -294,12 +318,22 @@ impl Generator {
         format!("'{}'", s.replace('\'', "''"))
     }
 
-    fn text_atom(&mut self) -> String {
+    fn text_atom(&mut self) -> Ex {
         if self.rng.chance(6) {
-            return "NULL".to_string();
+            return ("NULL".to_string(), 0, 0);
         }
         let raw = self.text_raw();
-        Self::quote(&raw)
+        let len = raw.chars().count() as u128;
+        (Self::quote(&raw), 0, len)
+    }
+
+    fn bound_of(&self, col: &str) -> u128 {
+        self.bounds.get(col).copied().unwrap_or(0)
+    }
+
+    fn bump(&mut self, col: &str, to: u128) {
+        let b = self.bounds.entry(col.to_string()).or_insert(0);
+        *b = (*b).max(to);
     }
 
     // ----- expressions ---------------------------------------------------
@@ -315,63 +349,136 @@ impl Generator {
     /// Parenthesize a composite operand most of the time; the rest relies on
     /// standard SQL precedence, which a candidate's parser must get right.
     fn wrap(&mut self, e: Ex, pct: u64) -> String {
-        if e.1 || !self.rng.chance(pct) {
+        if e.1 == 0 || !self.rng.chance(pct) {
             e.0
         } else {
             format!("({})", e.0)
         }
     }
 
-    fn int_expr(&mut self, cols: &[ColInfo], depth: u32) -> Ex {
-        let ints: Vec<&ColInfo> = cols.iter().filter(|c| c.ty == Ty::Integer).collect();
-        if depth == 0 || self.rng.chance(35) {
-            if !ints.is_empty() && self.rng.chance(60) {
-                let c = ints[self.rng.below(ints.len() as u64) as usize];
-                return (c.name.clone(), true);
-            }
-            return (self.int_atom(), true);
+    /// Parenthesize an arithmetic operand. A child may go bare only if the
+    /// printed text still parses to the tree that was generated (the bound
+    /// reasoning depends on it): it binds tighter than its parent, or it is
+    /// the LEFT operand of the same level. A looser child, or a right
+    /// operand of the same level, would re-associate (`a - (b - c)` printed
+    /// bare is `(a - b) - c`), so it keeps its parentheses. Left
+    /// associativity itself is exercised by the explicit chains.
+    fn wrap_arith(&mut self, e: Ex, parent: u8, right: bool, pct: u64) -> String {
+        let required = e.1 > parent || (e.1 == parent && right);
+        if e.1 != 0 && (required || self.rng.chance(pct)) {
+            format!("({})", e.0)
+        } else {
+            e.0
         }
-        match self.rng.below(8) {
+    }
+
+    fn int_leaf(&mut self, cols: &[ColInfo]) -> Ex {
+        let ints: Vec<&ColInfo> = cols.iter().filter(|c| c.ty == Ty::Integer).collect();
+        if !ints.is_empty() && self.rng.chance(60) {
+            let c = ints[self.rng.below(ints.len() as u64) as usize];
+            return (c.name.clone(), 0, self.bound_of(&c.name));
+        }
+        self.int_atom()
+    }
+
+    fn text_leaf(&mut self, cols: &[ColInfo]) -> Ex {
+        let texts: Vec<&ColInfo> = cols.iter().filter(|c| c.ty == Ty::Text).collect();
+        if !texts.is_empty() && self.rng.chance(60) {
+            let c = texts[self.rng.below(texts.len() as u64) as usize];
+            return (c.name.clone(), 0, self.bound_of(&c.name));
+        }
+        self.text_atom()
+    }
+
+    /// An integer expression whose magnitude provably fits in 64 bits.
+    fn int_expr(&mut self, cols: &[ColInfo], depth: u32) -> Ex {
+        if depth == 0 || self.rng.chance(35) {
+            return self.int_leaf(cols);
+        }
+        let built: Ex = match self.rng.below(10) {
+            // A bare chain of two operators from the same precedence level,
+            // `a - b - c`, `a / b % c`: left associativity is part of the
+            // dialect and only a chain with no parentheses can test it.
+            8..=9 => {
+                let level: &[&str] = if self.rng.chance(50) {
+                    &["+", "-"]
+                } else {
+                    &["*", "/", "%"]
+                };
+                let (a, b, c) = (
+                    self.int_leaf(cols),
+                    self.int_leaf(cols),
+                    self.int_leaf(cols),
+                );
+                let (o1, o2) = (*self.rng.pick(level), *self.rng.pick(level));
+                let step = |op: &str, x: u128, y: u128| match op {
+                    "+" | "-" => x.saturating_add(y),
+                    "*" => x.saturating_mul(y),
+                    "/" => x,
+                    _ => x.min(y),
+                };
+                // The intermediate result must fit too: `%` shrinks the final
+                // bound back down after a product that already overflowed.
+                let mid = step(o1, a.2, b.2);
+                let bound = if mid > INT_BOUND {
+                    u128::MAX
+                } else {
+                    step(o2, mid, c.2)
+                };
+                let prec = if level[0] == "+" { 3 } else { 2 };
+                (format!("{} {o1} {} {o2} {}", a.0, b.0, c.0), prec, bound)
+            }
             0..=3 => {
                 let l = self.int_expr(cols, depth - 1);
                 let r = self.int_expr(cols, depth - 1);
                 let op = *self.rng.pick(&["+", "-", "*", "/", "%"]);
-                let (l, r) = (self.wrap(l, 60), self.wrap(r, 60));
-                (format!("{l} {op} {r}"), false)
+                let bound = match op {
+                    "+" | "-" => l.2.saturating_add(r.2),
+                    "*" => l.2.saturating_mul(r.2),
+                    "/" => l.2,
+                    _ => l.2.min(r.2),
+                };
+                let prec = if op == "+" || op == "-" { 3 } else { 2 };
+                let (l, r) = (
+                    self.wrap_arith(l, prec, false, 60),
+                    self.wrap_arith(r, prec, true, 60),
+                );
+                (format!("{l} {op} {r}"), prec, bound)
             }
             4 => {
                 let e = self.int_expr(cols, depth - 1);
-                (format!("-({})", e.0), true)
+                (format!("-({})", e.0), 0, e.2)
             }
             5 => {
                 let e = self.int_expr(cols, depth - 1);
                 let f = self.kw("abs");
-                (format!("{f}({})", e.0), true)
+                (format!("{f}({})", e.0), 0, e.2)
             }
             6 => {
                 let e = self.text_expr(cols, depth - 1);
                 let f = self.kw("length");
-                (format!("{f}({})", e.0), true)
+                (format!("{f}({})", e.0), 0, e.2)
             }
             _ => {
                 let a = self.int_expr(cols, depth - 1);
                 let b = self.int_expr(cols, depth - 1);
                 let f = self.kw("coalesce");
-                (format!("{f}({}, {})", a.0, b.0), true)
+                (format!("{f}({}, {})", a.0, b.0), 0, a.2.max(b.2))
             }
+        };
+        if built.2 > INT_BOUND {
+            self.int_leaf(cols)
+        } else {
+            built
         }
     }
 
+    /// A text expression no longer than [`TEXT_BOUND`].
     fn text_expr(&mut self, cols: &[ColInfo], depth: u32) -> Ex {
-        let texts: Vec<&ColInfo> = cols.iter().filter(|c| c.ty == Ty::Text).collect();
         if depth == 0 || self.rng.chance(35) {
-            if !texts.is_empty() && self.rng.chance(60) {
-                let c = texts[self.rng.below(texts.len() as u64) as usize];
-                return (c.name.clone(), true);
-            }
-            return (self.text_atom(), true);
+            return self.text_leaf(cols);
         }
-        match self.rng.below(5) {
+        let built: Ex = match self.rng.below(5) {
             0..=1 => {
                 let e = self.text_expr(cols, depth - 1);
                 let name = if self.rng.chance(50) {
@@ -380,20 +487,26 @@ impl Generator {
                     "lower"
                 };
                 let f = self.kw(name);
-                (format!("{f}({})", e.0), true)
+                (format!("{f}({})", e.0), 0, e.2)
             }
             2..=3 => {
                 let l = self.text_expr(cols, depth - 1);
                 let r = self.text_expr(cols, depth - 1);
+                let bound = l.2 + r.2;
                 let (l, r) = (self.wrap(l, 60), self.wrap(r, 60));
-                (format!("{l} || {r}"), false)
+                (format!("{l} || {r}"), 1, bound)
             }
             _ => {
                 let a = self.text_expr(cols, depth - 1);
                 let b = self.text_expr(cols, depth - 1);
                 let f = self.kw("coalesce");
-                (format!("{f}({}, {})", a.0, b.0), true)
+                (format!("{f}({}, {})", a.0, b.0), 0, a.2.max(b.2))
             }
+        };
+        if built.2 > TEXT_BOUND {
+            self.text_leaf(cols)
+        } else {
+            built
         }
     }
 
@@ -408,9 +521,9 @@ impl Generator {
             let n = self.seen[&c.name].len();
             let lit = self.seen[&c.name][self.rng.below(n as u64) as usize].clone();
             let op = *self.rng.pick(&["=", "=", "<>", "<", "<=", ">", ">="]);
-            return (format!("{} {op} {lit}", c.name), false);
+            return (format!("{} {op} {lit}", c.name), 5, 1);
         }
-        let mut out = (String::new(), false);
+        let mut out = (String::new(), 5, 1);
         for _ in 0..4 {
             let op = *self.rng.pick(&["=", "<>", "!=", "<", "<=", ">", ">="]);
             let (l, r) = if self.rng.chance(60) {
@@ -419,7 +532,7 @@ impl Generator {
                 (self.text_expr(cols, 1), self.text_expr(cols, 1))
             };
             let (l, r) = (self.wrap(l, 60), self.wrap(r, 60));
-            out = (format!("{l} {op} {r}"), false);
+            out = (format!("{l} {op} {r}"), 5, 1);
             if cols.is_empty() || Self::mentions_col(&out.0, cols) {
                 break;
             }
@@ -430,7 +543,7 @@ impl Generator {
     fn bool_expr(&mut self, cols: &[ColInfo], depth: u32) -> Ex {
         if depth == 0 || self.rng.chance(50) {
             return if self.rng.chance(25) {
-                let mut e = (String::new(), true);
+                let mut e = (String::new(), 0, 0);
                 for _ in 0..4 {
                     e = if self.rng.chance(50) {
                         self.int_expr(cols, 1)
@@ -449,7 +562,7 @@ impl Generator {
                     String::new()
                 };
                 let null = self.kw("NULL");
-                (format!("{e} {is} {not}{null}"), false)
+                (format!("{e} {is} {not}{null}"), 5, 1)
             } else {
                 self.comparison(cols)
             };
@@ -461,12 +574,12 @@ impl Generator {
                 let (l, r) = (self.wrap(l, 70), self.wrap(r, 70));
                 let name = if self.rng.chance(50) { "AND" } else { "OR" };
                 let op = self.kw(name);
-                (format!("{l} {op} {r}"), false)
+                (format!("{l} {op} {r}"), 5, 1)
             }
             3 => {
                 let b = self.bool_expr(cols, depth - 1);
                 let not = self.kw("NOT");
-                (format!("{not} ({})", b.0), false)
+                (format!("{not} ({})", b.0), 5, 1)
             }
             _ => self.comparison(cols),
         }
@@ -477,6 +590,18 @@ impl Generator {
     /// One INSERT cell for column `c`; non-NULL literals are remembered.
     fn cell(&mut self, c: &ColInfo) -> String {
         let lit = self.cell_inner(c);
+        match c.ty {
+            Ty::Integer => {
+                if let Ok(v) = lit.parse::<i64>() {
+                    self.bump(&c.name, u128::from(v.unsigned_abs()));
+                }
+            }
+            Ty::Text => {
+                if lit != "NULL" {
+                    self.bump(&c.name, lit.len() as u128);
+                }
+            }
+        }
         if lit != "NULL" {
             let seen = self.seen.entry(c.name.clone()).or_default();
             if seen.len() >= 16 {
@@ -711,6 +836,9 @@ impl Generator {
         if let (Some(t), true) = (swap_ty, self.rng.chance(20)) {
             let pair: Vec<&ColInfo> = targets.iter().copied().filter(|c| c.ty == t).collect();
             let (a, b) = (&pair[0].name, &pair[1].name);
+            let both = self.bound_of(a).max(self.bound_of(b));
+            self.bump(a, both);
+            self.bump(b, both);
             sets.push(format!("{a} = {b}"));
             sets.push(format!("{b} = {a}"));
         } else {
@@ -725,17 +853,19 @@ impl Generator {
                 let rhs = if c.unique {
                     self.cell(c)
                 } else {
-                    let mut rhs = String::new();
+                    let mut rhs: Ex = (String::new(), 0, 0);
                     for _ in 0..4 {
                         rhs = match c.ty {
-                            Ty::Integer => self.int_expr(&cols, 2).0,
-                            Ty::Text => self.text_expr(&cols, 2).0,
+                            Ty::Integer => self.int_expr(&cols, 2),
+                            Ty::Text => self.text_expr(&cols, 2),
                         };
-                        if Self::mentions_col(&rhs, &cols) {
+                        if Self::mentions_col(&rhs.0, &cols) {
                             break;
                         }
                     }
-                    rhs
+                    // The column may now hold anything the expression can.
+                    self.bump(&c.name, rhs.2);
+                    rhs.0
                 };
                 sets.push(format!("{} = {rhs}", c.name));
             }
@@ -1334,5 +1464,42 @@ mod tests {
         let mut srng = Rng::new(seed ^ 0x5C4E_3A00_0000_0002);
         let table_count = 3 + srng.below(3) as usize;
         schema::generate(seed, table_count, 5)
+    }
+
+    /// Dropped parentheses must never change the parse tree the bounds were
+    /// computed for (the 5 * (num * NULL) -> `5 * num * NULL` overflow).
+    #[test]
+    fn bare_operands_never_reassociate() {
+        let mut g = Generator::new(1, schema::generate(1, 3, 4), Profile::through(3));
+        // A looser child always keeps its parentheses.
+        assert_eq!(g.wrap_arith(("a + b".into(), 3, 0), 2, false, 0), "(a + b)");
+        // So does a right operand of the same level.
+        assert_eq!(g.wrap_arith(("b - c".into(), 3, 0), 3, true, 0), "(b - c)");
+        // A left operand of the same level, or a tighter child, may go bare.
+        assert_eq!(g.wrap_arith(("a - b".into(), 3, 0), 3, false, 0), "a - b");
+        assert_eq!(g.wrap_arith(("b * c".into(), 2, 0), 3, true, 0), "b * c");
+        // Atoms are never wrapped.
+        assert_eq!(g.wrap_arith(("x".into(), 0, 0), 3, true, 100), "x");
+    }
+
+    /// Bounds keep the workload overflow-free, including columns that hold
+    /// i64::MAX (the `INT_BOUND` boundary): no script may produce an
+    /// overflow discard, and no expression may be built past the bound.
+    #[test]
+    fn workload_never_overflows() {
+        let p = Profile::through(3);
+        let mut with_max = 0;
+        for seed in 0..400u64 {
+            let s = build_script(seed, &p, 150);
+            assert_eq!(s.discarded, 0, "seed {seed}: overflow discards");
+            assert!(s.unknown.is_empty());
+            with_max += usize::from(
+                s.setup
+                    .iter()
+                    .chain(&s.steps)
+                    .any(|c| c.stmt.sql.contains("9223372036854775807")),
+            );
+        }
+        assert!(with_max > 5, "i64::MAX never exercised ({with_max})");
     }
 }

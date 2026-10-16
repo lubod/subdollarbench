@@ -855,7 +855,7 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("unknown task"), "{err:#}");
         // Staging happened before the refusal.
-        assert!(cdir.join("s0").is_dir());
+        assert!(cdir.join("s0_full").is_dir());
         assert!(cdir.join("status.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

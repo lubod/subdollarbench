@@ -480,9 +480,26 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   <=3% constant WHEREs, every dialect error class probed. Dialect gaps the
   generator exposed are now in the spec (precedence verified against
   SQLite by brute force, backslash is literal, tab whitespace, no keyword
-  identifiers). **Remaining**: socket client + pipelining (5c tail),
-  `shrink` (delta-debugged repro for repair feedback), the oracle-vs-oracle
-  100k-statement gate, mutant toy engines, profile lite subsets.
+  identifiers).
+  **Part 3 landed** (5d-5e): `run.rs` (`Candidate` trait + `run_script`;
+  the seam the TCP client will implement), `shrink.rs` (ddmin over whole
+  statements, every trial re-graded on a fresh oracle + fresh candidate;
+  renders the model-facing bug report), and test-only `toy.rs`: a second,
+  independent implementation of the stage 0-3 dialect written from the
+  spec, with 26 planted bugs. Gates: the clean toy agrees with SQLite on
+  every generated script (120 seeds x 4 profiles, plus a 3000-seed soak,
+  ~900k statements, `--ignored`); every mutant is caught in >=25% of
+  scripts (most in >90%); a 100k-statement memory-vs-file oracle gate; and
+  shrink reduces real failures to <=5-6 statements. The toy found two
+  generator soundness bugs the oracle could not see: SQLite silently
+  promotes an overflowing intermediate to REAL (a comparison hides it), and
+  dropped parentheses re-associated `5 * (x * NULL)` into an overflow.
+  Fix: every expression and column carries a conservative magnitude/length
+  bound (ints <= i64::MAX, text <= 48), parentheses are only dropped when
+  the printed text parses to the generated tree, and explicit bare
+  left-associative chains test associativity. Result: 0 overflow discards
+  in 30k statements. **Remaining**: socket client + pipelining, profile
+  lite subsets, then M6.
 - [ ] M6. Reference adapter (sqlite3-backed, text protocol) + live proof
   for stages 0-3 through the pipeline, then one cheap-model cell.
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->

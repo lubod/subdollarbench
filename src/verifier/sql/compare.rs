@@ -62,6 +62,50 @@ fn describe_expected(o: &OracleOutcome) -> String {
     }
 }
 
+/// The exact bytes a correct server sends for `expected`, for repair
+/// feedback ("this is what you should have answered").
+pub fn render_expected(expected: &OracleOutcome) -> String {
+    match expected {
+        OracleOutcome::Affected(n) => format!("OK {n}"),
+        OracleOutcome::Error(c) => format!("ERR {}", c.token()),
+        OracleOutcome::Rows { headers, rows } => {
+            let mut out = format!("ROWS {}\n{}\n", headers.len(), headers.join("\t"));
+            for r in rows {
+                out.push_str(&wire_row(r).join("\t"));
+                out.push('\n');
+            }
+            out.push_str(&format!("END {}", rows.len()));
+            out
+        }
+        OracleOutcome::Discard(r) => format!("(discarded: {r})"),
+        OracleOutcome::Unknown(m) => format!("(unknown: {m})"),
+    }
+}
+
+/// What the candidate actually sent, in the same shape as
+/// [`render_expected`].
+pub fn render_response(got: &Result<Response, String>) -> String {
+    match got {
+        Err(e) => format!("(no usable response: {e})"),
+        Ok(Response::Ok(n)) => format!("OK {n}"),
+        Ok(Response::Err { class, .. }) => format!("ERR {class}"),
+        Ok(Response::Rows {
+            ncols,
+            headers,
+            rows,
+            end_count,
+        }) => {
+            let mut out = format!("ROWS {ncols}\n{}\n", headers.join("\t"));
+            for r in rows {
+                out.push_str(&r.join("\t"));
+                out.push('\n');
+            }
+            out.push_str(&format!("END {end_count}"));
+            out
+        }
+    }
+}
+
 fn wire_row(row: &[Value]) -> Vec<String> {
     row.iter().map(encode_value).collect()
 }

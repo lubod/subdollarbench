@@ -373,6 +373,10 @@ impl Oracle {
     /// compare in-memory against on-disk semantics).
     pub fn new_file(path: &std::path::Path) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open sqlite file: {e}"))?;
+        // A reference twin, never a durable store: skip fsync so a 100k
+        // statement gate runs in seconds.
+        conn.execute_batch("PRAGMA synchronous=OFF;")
+            .map_err(|e| format!("pragma: {e}"))?;
         Self::from_conn(conn)
     }
 
