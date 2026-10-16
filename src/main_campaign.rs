@@ -262,6 +262,7 @@ pub async fn run(
                 prompt_path: attempt.prompt_path.clone(),
                 budget_usd: attempt.budget_usd,
                 max_turns: attempt.max_turns,
+                lite_profile: attempt.lite_profile.clone(),
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -316,6 +317,9 @@ struct StageJob {
     prompt_path: std::path::PathBuf,
     budget_usd: f64,
     max_turns: u32,
+    /// Feature flags of the lite variant (`LiteSpec.profile`), empty for a
+    /// full attempt.
+    lite_profile: Vec<String>,
     rollback_first: bool,
 }
 
@@ -456,6 +460,7 @@ async fn run_one_stage(
             prompt_path: job.prompt_path.clone(),
             continuity: stage.id > 0,
             accepted_stages: stage.acceptance.stages_for(&lc.spec.task).to_vec(),
+            lite_profile: job.lite_profile.clone(),
             spec_md,
         }),
         baseline_rps,
@@ -872,6 +877,7 @@ mod tests {
             prompt_path: lc.prompt_path(&stage),
             budget_usd: stage.budget_usd,
             max_turns: stage.max_turns,
+            lite_profile: Vec::new(),
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));

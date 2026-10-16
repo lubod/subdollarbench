@@ -113,7 +113,16 @@
       "tier": 2,
       "needs": [
         4
-      ]
+      ],
+      "lite": {
+        "prompt": "stages/5_crash_lite/prompt.md",
+        "profile": [
+          "crash-acked-only"
+        ],
+        "budget_usd": 0.09,
+        "max_turns": 22,
+        "weight": 0.4
+      }
     }
   ]
 }

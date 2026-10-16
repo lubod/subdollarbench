@@ -220,6 +220,10 @@ pub struct CampaignStageConfig {
     /// (every stage after genesis).
     pub continuity: bool,
     pub accepted_stages: Vec<u32>,
+    /// Feature flags of the lite variant this attempt grades (empty for a
+    /// full attempt). Opaque strings; the task's verifier interprets them
+    /// (sdb-sql: `crash-acked-only` narrows stage 5's crash ladder).
+    pub lite_profile: Vec<String>,
     /// sdb-sql: the harness-owned `SPEC.md`, written into the workspace
     /// after the pipeline prepares it (a genesis workspace is wiped first,
     /// so the campaign runner cannot write it beforehand).
@@ -479,6 +483,9 @@ pub struct StageAttempt<'a> {
     pub prompt_path: std::path::PathBuf,
     pub budget_usd: f64,
     pub max_turns: u32,
+    /// Feature flags of the lite variant (`LiteSpec.profile`), empty for a
+    /// full attempt: the verifier uses them to grade the lite suite.
+    pub lite_profile: Vec<String>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
     /// True when the workspace/data must be rolled back to the last green
@@ -703,6 +710,7 @@ where
             prompt_path: lc.prompt_path(stage),
             budget_usd: stage.budget_usd,
             max_turns: stage.max_turns,
+            lite_profile: Vec::new(),
             weight: 1.0,
             rollback_first: dirty,
         };
@@ -750,6 +758,7 @@ where
                 prompt_path: lc.root.join(&lite.prompt),
                 budget_usd: lite.budget_usd,
                 max_turns: lite.max_turns,
+                lite_profile: lite.profile.clone(),
                 weight: lite.weight,
                 rollback_first: true,
             };

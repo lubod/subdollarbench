@@ -74,6 +74,7 @@ fn crash_ladder(
     extras: &crate::sandbox::docker::CandidateRunExtras,
     data: &Path,
     verifier_seed: &str,
+    lite: bool,
     logger: &Arc<dyn PipelineLogger>,
 ) -> Result<(), String> {
     use crate::verifier::sql::crash;
@@ -98,46 +99,54 @@ fn crash_ladder(
     crash::check_acked_rows(&addr, t, &acked_table, acked).map_err(|e| format!("(a) {e}"))?;
     logger.log(&format!("  [CRASH] {acked} acked rows survived a SIGKILL"));
 
-    // (b) a bulk UPDATE killed mid-flight is all or nothing.
-    {
-        let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
-        crash::bulk_update_and_kill(
-            &addr,
-            t,
-            &bulk_table,
-            crash::BULK_ROWS,
-            crash::BULK_CHUNK,
-            &mut kill,
-        )
-        .map_err(|e| format!("(b) {e}"))?;
-    }
-    restart()?;
-    crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
-        .map_err(|e| format!("(b) {e}"))?;
-    logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
-
-    // (c) a torn tail: a partial trailing record may cost the newest
-    // statement, never an older committed row.
-    crash::append_row(&addr, t, &acked_table, acked).map_err(|e| format!("(c) {e}"))?;
-    let cut = crash::torn_tail(data, 256).map_err(|e| format!("(c) {e}"))?;
-    if cut == 0 {
-        logger.log("  [CRASH] no newest file to tear (skipped)");
+    if lite {
+        // Lite stage 5 (proposal): acked rows survive kill -9; torn tails
+        // and mid-statement atomicity are not required.
+        logger.log("  [CRASH] lite variant: acked rows and restarts only");
     } else {
+        // (b) a bulk UPDATE killed mid-flight is all or nothing.
+        {
+            let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+            crash::bulk_update_and_kill(
+                &addr,
+                t,
+                &bulk_table,
+                crash::BULK_ROWS,
+                crash::BULK_CHUNK,
+                &mut kill,
+            )
+            .map_err(|e| format!("(b) {e}"))?;
+        }
         restart()?;
-        crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
-            .map_err(|e| format!("(c) {e}"))?;
         crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
-            .map_err(|e| format!("(c) {e}"))?;
-        logger.log(&format!(
-            "  [CRASH] {cut} torn bytes: every older row intact"
-        ));
+            .map_err(|e| format!("(b) {e}"))?;
+        logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
+
+        // (c) a torn tail: a partial trailing record may cost the newest
+        // statement, never an older committed row.
+        crash::append_row(&addr, t, &acked_table, acked).map_err(|e| format!("(c) {e}"))?;
+        let cut = crash::torn_tail(data, 256).map_err(|e| format!("(c) {e}"))?;
+        if cut == 0 {
+            logger.log("  [CRASH] no newest file to tear (skipped)");
+        } else {
+            restart()?;
+            crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
+                .map_err(|e| format!("(c) {e}"))?;
+            crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
+                .map_err(|e| format!("(c) {e}"))?;
+            logger.log(&format!(
+                "  [CRASH] {cut} torn bytes: every older row intact"
+            ));
+        }
     }
 
     // (d) a second restart changes nothing.
     restart()?;
     crash::check_acked_prefix(&addr, t, &acked_table, acked, 1).map_err(|e| format!("(d) {e}"))?;
-    crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
-        .map_err(|e| format!("(d) {e}"))?;
+    if !lite {
+        crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
+            .map_err(|e| format!("(d) {e}"))?;
+    }
     logger.log("  [CRASH] a double restart changed nothing");
     Ok(())
 }
@@ -1089,6 +1098,7 @@ impl BenchmarkPipeline {
         worker: u8,
         logger: &'a Arc<dyn PipelineLogger>,
         accepted: Option<&'a [u32]>,
+        lite_profile: &'a [String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = VerificationOutcome> + Send + 'a>> {
         Box::pin(async move {
             logger
@@ -2908,6 +2918,7 @@ impl BenchmarkPipeline {
                             // the container, so it runs here.
                             if wanted.contains(&5) {
                                 if let Some(data) = &sql_data {
+                                    let lite = lite_profile.iter().any(|p| p == "crash-acked-only");
                                     if let Err(e) = crash_ladder(
                                         sandbox,
                                         workdir,
@@ -2915,6 +2926,7 @@ impl BenchmarkPipeline {
                                         &extras,
                                         data,
                                         verifier_seed,
+                                        lite,
                                         logger,
                                     ) {
                                         logger.log(&format!("  [CRASH] FAILED: {e}"));
@@ -3599,6 +3611,11 @@ impl BenchmarkPipeline {
                 .campaign_stage
                 .as_ref()
                 .map(|c| c.accepted_stages.as_slice()),
+            config
+                .campaign_stage
+                .as_ref()
+                .map(|c| c.lite_profile.as_slice())
+                .unwrap_or(&[]),
         )
         .await;
         // The repair agent needs the references again (it probes exact
@@ -3782,6 +3799,11 @@ impl BenchmarkPipeline {
                             .campaign_stage
                             .as_ref()
                             .map(|c| c.accepted_stages.as_slice()),
+                        config
+                            .campaign_stage
+                            .as_ref()
+                            .map(|c| c.lite_profile.as_slice())
+                            .unwrap_or(&[]),
                     )
                     .await;
 
@@ -6797,6 +6819,7 @@ main()
             worker,
             &logger,
             None,
+            &[],
         )
         .await;
         assert!(
@@ -6863,6 +6886,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -6916,6 +6940,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![14, 15, 16],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -6966,6 +6991,7 @@ main()
             prompt_path,
             continuity: false,
             accepted_stages: vec![1],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7012,6 +7038,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 6, 7, 8, 9],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7065,6 +7092,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7119,6 +7147,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7175,6 +7204,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3],
+            lite_profile: Vec::new(),
             spec_md: Some("# SPEC.md fixture\n".to_string()),
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7230,6 +7260,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7282,6 +7313,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4, 5],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7309,6 +7341,60 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Stage 5's lite variant (proposal: acked rows survive kill -9; no
+    /// torn tail or mid-statement atomicity) runs the narrowed ladder: the
+    /// reference passes and the bulk/torn checks do not run.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage5_lite_live() {
+        let worker = 98u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlcrashlite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-5 lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlcrashlite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 5,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5],
+            lite_profile: vec!["crash-acked-only".to_string()],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-5 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 5: Crash safety -> PASS",
+            "[CRASH] lite variant: acked rows and restarts only",
+            "[CRASH] 40 acked rows survived a SIGKILL",
+            "[CRASH] a double restart changed nothing",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        for absent in [
+            "[CRASH] the killed bulk UPDATE was all-or-nothing",
+            "torn bytes",
+        ] {
+            assert!(
+                !logger.contains(absent),
+                "the lite variant must not run {absent:?}"
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (6, 6)
+        );
+        cleanup_covtest_network("sqlcrashlite");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A sentinel whose data is gone fails the stage that wrote it
     /// (regression class `upgrade`): the check runs before the suite and
     /// the stage result is overridden even though the suite itself passes.
@@ -7333,6 +7419,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7385,6 +7472,7 @@ main()
             prompt_path,
             continuity: true,
             accepted_stages: vec![0],
+            lite_profile: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7466,6 +7554,7 @@ main()
             97,
             &logger,
             None,
+            &[],
         )
         .await;
         assert_eq!(outcome.pass_rate, 0.0);
@@ -7485,6 +7574,7 @@ main()
             97,
             &logger2,
             None,
+            &[],
         )
         .await;
         assert_eq!(outcome2.pass_rate, 0.0);

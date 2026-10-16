@@ -624,13 +624,18 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   crash test SIGKILLs and restarts a real process. Gates: stage-5 live
   proof under Docker (6/6, all four [CRASH] lines), sentinel for stage 5
   written, `differential_supported` reaches 5.
-  **Remaining for ticket 5**: the lite variant (the proposal gives stage
-  5 one: acked rows survive, no torn tail/mid-statement atomicity). The
-  pipeline has no variant-aware grading yet, so a declared lite would be
-  judged by the full suite — variant-aware grading (`job.variant` into
-  `CampaignStageConfig`) is the prerequisite for the first lite (stages
-  5, 8, 11, 19), then the lite prompt. A cell for tickets 0-5 is also
-  outstanding.
+  **Stage-5 lite landed (2026-10-16)**: `LiteSpec.profile` now reaches the
+  verifier (`StageAttempt.lite_profile` -> `StageJob` ->
+  `CampaignStageConfig.lite_profile` -> `run_verification`, opaque flags);
+  the sql arm maps `crash-acked-only` to the narrowed crash ladder (acked
+  rows + double restart; no bulk-update or torn-tail checks), and the
+  campaign declares `stages/5_crash_lite/prompt.md` (weight 0.4, 60% of
+  the stage's budget/turns). Gate: a lite live proof (6/6, only the
+  acked/restart [CRASH] lines run). **Remaining**: the proposal's
+  cumulative-variant rule — after a lite pass, later tickets' suites must
+  keep the lite profile for that stage, which needs the rollup's
+  per-stage variants passed into the pipeline (like `accepted`); a cell
+  for tickets 0-5 is also outstanding.
   **Review fixes landed (REVIEW.md, 2026-10-16)**: the http health probes
   are bounded again; the sql shrink runs on throwaway stores (the real
   `sql-data` survives for ticket 4) and the driver waits for a
