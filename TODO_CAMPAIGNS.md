@@ -808,8 +808,29 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   statement 73: the oracle takes 3 rows, the toy errors), which needs one
   more debugging round before the shape can be graded; (b) the ticket
   declaration + prompt, `differential_supported(10)`, the 20/20 bar
-  through 10, a stage-10 live proof and the RULES bump. **Next**: finish
-  ticket 10, then ticket 11 (indexes + perf gate).
+  through 10, a stage-10 live proof and the RULES bump.
+  **Ticket 10 completed (2026-10-16)**: the remaining divergence was a
+  *generator* issue, not the toy's: SQLite's INTEGER PRIMARY KEY
+  auto-assignment uses "largest rowid so far + 1" and never looks ahead at
+  the statement's later explicit values, so a *mixed* multi-row insert
+  (some NULL keys, some explicit) makes the outcome depend on the key
+  assignment order. The generator now picks one mode per statement (all
+  explicit or all NULL) and `INSERT ... SELECT` copies the source column's
+  value bounds to the target (a SUM over the target could overflow past
+  its stale bound) and never yields a NULL key. The toy also short-circuits
+  `LIMIT 0` before evaluating aggregates, as SQLite does. With those
+  three fixes the agreement gate is green over stage 10 including
+  `INSERT ... SELECT` (120 seeds x 11 profiles). Gates: `differential_supported`
+  reaches 10, the campaign declares ticket 10 (tier 3, needs 7, no lite),
+  the 20/20 bar runs through stage 10 (220 stage runs), a stage-10 live
+  proof passes (11/11), RULES 2026-10-16.12. **Next**: ticket 11 (indexes
+  + perf gate): the D side needs `CREATE [UNIQUE] INDEX`/`DROP INDEX` in
+  the generator and the toy (unique enforcement on insert/update,
+  duplicate-index-name and missing-column errors, index survival in the
+  reference), and the S side is a perf gate (200k rows, 500 point lookups
+  on an indexed column vs an unindexed copy: p50 < 5 ms and >= 10x
+  faster, ranges only in the full variant), with the lite profile
+  `index-equality-only`.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

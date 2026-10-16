@@ -7831,6 +7831,57 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// sdb-sql stage 10 live proof (eval-only, no model): the reference
+    /// passes the subquery suite under Docker — scalar subqueries,
+    /// `[NOT] IN (subquery)`/`IN (list)`, correlated `[NOT] EXISTS` and
+    /// `INSERT ... SELECT` — plus everything 0-9 again.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage10_subqueries_live() {
+        let worker = 79u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlsub");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-10 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlsub");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 10,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=10).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..10).collect(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-10 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 10: Subqueries -> PASS",
+            "Stage 9: Constraints -> PASS",
+            "[UPGRADE] sentinel for stage 10 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (11, 11)
+        );
+        cleanup_covtest_network("sqlsub");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// sdb-sql stage 9 live proof (eval-only, no model): the reference
     /// passes the constraint suite under Docker — constrained DDL, key
     /// auto-assignment, defaults, UNIQUE/NOT NULL and foreign keys

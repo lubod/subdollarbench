@@ -802,9 +802,31 @@ impl Generator {
         } else {
             chosen = cols.clone();
         }
+        // An INTEGER PRIMARY KEY is either explicit in *every* row of the
+        // statement or NULL/omitted in every row: SQLite's auto-assign is
+        // "largest rowid so far + 1" (it does not look ahead to the
+        // statement's later explicit values), so a mixed statement would
+        // make a collision depend on the rowid-assignment order — and the
+        // graded contract must not depend on that.
+        let pk_col = chosen
+            .iter()
+            .position(|c| c.pk && c.ty == Ty::Integer && self.profile.constraints);
+        let pk_explicit = pk_col.is_some() && self.rng.chance(50);
         let mut rows = Vec::new();
         for _ in 0..rows_n {
-            let cells: Vec<String> = chosen.iter().map(|c| self.cell(c)).collect();
+            let cells: Vec<String> = chosen
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    if Some(i) == pk_col && !pk_explicit {
+                        let b = self.bound_of(&c.name);
+                        self.bump(&c.name, b.saturating_add(1));
+                        "NULL".to_string()
+                    } else {
+                        self.cell(c)
+                    }
+                })
+                .collect();
             rows.push(format!("({})", cells.join(", ")));
         }
         // Every insert (seed or step, accepted or rejected) counts towards
@@ -1681,10 +1703,19 @@ impl Generator {
             parts.push(format!("{w} {}", conds.join(&format!(" {and} "))));
         }
         let sql = self.join(parts);
-        // The target can grow by as much as the source holds.
+        // The target can grow by as much as the source holds, and each
+        // target column can hold anything its source column held (the
+        // bounds drive the SUM overflow guard).
         let grown = self.rows.get(&sname).copied().unwrap_or(2);
         let bound = self.rows.entry(tname).or_insert(0);
         *bound = bound.saturating_add(grown);
+        for (i, c) in tcols.iter().enumerate() {
+            let src = &items[i];
+            if src != "NULL" {
+                let b = self.bound_of(src);
+                self.bump(&c.name, b);
+            }
+        }
         self.stmt(sql, Kind::Insert, false)
     }
 
@@ -2057,11 +2088,7 @@ impl Generator {
             return self.inside_transaction();
         }
         let w_insert = 24u64;
-        // `INSERT ... SELECT`: the shape works and is unit-tested, but the
-        // generated form still interacts with SQLite's rowid assignment in
-        // a way the agreement gate has not pinned down yet, so the weight
-        // stays 0 until it is (TODO ticket 10).
-        let w_insert_select = 0u64;
+        let w_insert_select = if self.profile.subqueries { 12 } else { 0 };
         let w_select = 40u64;
         let w_update = if self.profile.update { 14 } else { 0 };
         let w_delete = if self.profile.delete { 6 } else { 0 };

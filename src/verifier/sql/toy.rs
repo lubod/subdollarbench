@@ -2217,6 +2217,11 @@ impl Toy {
             keys.push((i, *desc));
         }
         let mut out_rows: Vec<Vec<V>> = Vec::new();
+        // `LIMIT 0` returns nothing and evaluates no row (SQLite does the
+        // same), so an expression that would error is not reached.
+        if sel.limit == Some(0) && self.fault != Some(Fault::LimitPlusOne) {
+            return Ok((headers, Vec::new()));
+        }
         let aggregates = outputs.iter().any(|(_, i)| match i {
             Item::Agg(_) => true,
             Item::Expr(e) => contains_agg(e),
