@@ -161,7 +161,9 @@ pub struct Generator {
     /// can be anchored on values that really exist.
     seen: HashMap<String, Vec<String>>,
     /// Per column: the largest magnitude (INTEGER) or length (TEXT) any
-    /// value of it can have, over everything generated so far. Conservative:
+    /// value of it can have. Seeded from the schema's `DEFAULT`s (a column
+    /// omitted from every explicit insert still holds its default) and
+    /// bumped by every generated literal and assignment. Conservative:
     /// a generated statement counts even if the oracle later rejects it.
     bounds: HashMap<String, u128>,
 }
@@ -170,13 +172,28 @@ const TEXT_ALPHABET: &[u8] = b"abcdefghXYZ0123456789_-";
 
 impl Generator {
     pub fn new(seed: u64, schema: Schema, profile: Profile) -> Self {
+        // A column that is never explicitly written still holds its
+        // DEFAULT, so the bound has to start there or the overflow and
+        // TEXT_BOUND reasoning is wrong from the first read.
+        let mut bounds: HashMap<String, u128> = HashMap::new();
+        for t in &schema.tables {
+            for c in &t.columns {
+                if let Some(d) = &c.default {
+                    let b = match d {
+                        schema::DefaultVal::Int(v) => u128::from(v.unsigned_abs()),
+                        schema::DefaultVal::Text(s) => s.chars().count() as u128,
+                    };
+                    bounds.insert(c.name.clone(), b);
+                }
+            }
+        }
         Generator {
             rng: Rng::new(seed ^ 0xD1CE_5EED_0000_0001),
             schema,
             profile,
             uniq: 0,
             seen: HashMap::new(),
-            bounds: HashMap::new(),
+            bounds,
         }
     }
 
@@ -1485,21 +1502,131 @@ mod tests {
     /// Bounds keep the workload overflow-free, including columns that hold
     /// i64::MAX (the `INT_BOUND` boundary): no script may produce an
     /// overflow discard, and no expression may be built past the bound.
+    /// Stage 9 is included because that is where `DEFAULT`s exist — a
+    /// defaulted column the generator never writes explicitly still holds
+    /// its default value.
     #[test]
     fn workload_never_overflows() {
-        let p = Profile::through(3);
         let mut with_max = 0;
-        for seed in 0..400u64 {
-            let s = build_script(seed, &p, 150);
-            assert_eq!(s.discarded, 0, "seed {seed}: overflow discards");
-            assert!(s.unknown.is_empty());
-            with_max += usize::from(
-                s.setup
-                    .iter()
-                    .chain(&s.steps)
-                    .any(|c| c.stmt.sql.contains("9223372036854775807")),
-            );
+        for (last, seeds) in [(3u32, 400u64), (9, 200)] {
+            let p = Profile::through(last);
+            for seed in 0..seeds {
+                let s = build_script(seed, &p, 150);
+                assert_eq!(s.discarded, 0, "stage {last} seed {seed}: overflow discards");
+                assert!(s.unknown.is_empty());
+                with_max += usize::from(
+                    s.setup
+                        .iter()
+                        .chain(&s.steps)
+                        .any(|c| c.stmt.sql.contains("9223372036854775807")),
+                );
+            }
         }
         assert!(with_max > 5, "i64::MAX never exercised ({with_max})");
+    }
+
+    /// A column's bound starts at its `DEFAULT`: a column that is never
+    /// explicitly written still holds the default value.
+    #[test]
+    fn defaults_seed_the_column_bounds() {
+        use crate::verifier::sql::schema::{Column, DefaultVal};
+        let schema = Schema {
+            tables: vec![Table {
+                name: "t".into(),
+                columns: vec![
+                    Column {
+                        name: "id".into(),
+                        ty: Ty::Integer,
+                        primary_key: true,
+                        unique: false,
+                        not_null: false,
+                        default: None,
+                    },
+                    Column {
+                        name: "n".into(),
+                        ty: Ty::Integer,
+                        primary_key: false,
+                        unique: false,
+                        not_null: false,
+                        default: Some(DefaultVal::Int(-9)),
+                    },
+                    Column {
+                        name: "s".into(),
+                        ty: Ty::Text,
+                        primary_key: false,
+                        unique: false,
+                        not_null: false,
+                        default: Some(DefaultVal::Text("d123".into())),
+                    },
+                ],
+            }],
+        };
+        let g = Generator::new(1, schema, Profile::through(9));
+        assert_eq!(g.bound_of("n"), 9, "|DEFAULT -9| must seed the int bound");
+        assert_eq!(
+            g.bound_of("s"),
+            4,
+            "the DEFAULT text's length must seed the text bound"
+        );
+    }
+
+    /// The bound must cover a `DEFAULT`: with a hand-built schema whose
+    /// default is `i64::MAX`, a stage-9 script generated before the bound
+    /// was seeded produced overflow discards (`n + 72 * id`).
+    #[test]
+    fn large_defaults_do_not_overflow() {
+        use crate::verifier::sql::schema::{Column, DefaultVal};
+        let schema = Schema {
+            tables: vec![Table {
+                name: "t".into(),
+                columns: vec![
+                    Column {
+                        name: "id".into(),
+                        ty: Ty::Integer,
+                        primary_key: true,
+                        unique: false,
+                        not_null: false,
+                        default: None,
+                    },
+                    Column {
+                        name: "n".into(),
+                        ty: Ty::Integer,
+                        primary_key: false,
+                        unique: false,
+                        not_null: false,
+                        default: Some(DefaultVal::Int(i64::MAX)),
+                    },
+                ],
+            }],
+        };
+        for seed in 0..16u64 {
+            let mut g = Generator::new(seed, schema.clone(), Profile::through(9));
+            let oracle = Oracle::new().unwrap();
+            let mut stmts: Vec<Statement> = g
+                .setup_statements()
+                .into_iter()
+                .map(|sql| Statement {
+                    sql,
+                    kind: Kind::Create,
+                    ordered: false,
+                })
+                .collect();
+            for _ in 0..80 {
+                stmts.push(g.next_statement());
+            }
+            for st in &stmts {
+                let got = oracle.exec(&st.sql);
+                assert!(
+                    !got.is_discard(),
+                    "seed {seed}: overflow on {:?}: {got:?}",
+                    st.sql
+                );
+                assert!(
+                    !matches!(got, OracleOutcome::Unknown(_)),
+                    "seed {seed}: {:?}: {got:?}",
+                    st.sql
+                );
+            }
+        }
     }
 }

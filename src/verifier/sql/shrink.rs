@@ -30,11 +30,14 @@ pub struct Found {
 /// mismatch. Statements the oracle cannot grade (a discard or an unmapped
 /// message) are skipped, never sent: they fail atomically on the oracle, so
 /// both sides stay in step.
+///
+/// Panics when the in-memory oracle cannot be opened: a verifier-internal
+/// failure must not be indistinguishable from "the sequence passes".
 pub fn first_failure(
     stmts: &[Statement],
     make: &mut dyn FnMut() -> Box<dyn Candidate>,
 ) -> Option<Found> {
-    let oracle = Oracle::new().ok()?;
+    let oracle = Oracle::new().expect("in-memory oracle");
     let mut cand = make();
     for (index, st) in stmts.iter().enumerate() {
         let expected = oracle.exec(&st.sql);

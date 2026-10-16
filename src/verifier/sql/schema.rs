@@ -248,16 +248,6 @@ impl Schema {
     pub fn table(&self, idx: usize) -> &Table {
         &self.tables[idx % self.tables.len()]
     }
-
-    /// Columns that are not the INTEGER PRIMARY KEY rowid alias (safe to
-    /// target in generated INSERT/UPDATE statements).
-    pub fn insertable_columns(table: &Table) -> Vec<&Column> {
-        table
-            .columns
-            .iter()
-            .filter(|c| !(c.primary_key && c.ty == Ty::Integer))
-            .collect()
-    }
 }
 
 #[cfg(test)]

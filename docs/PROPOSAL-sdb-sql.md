@@ -187,7 +187,8 @@ failure modes exercised, constraints, "when done: create
 `/workspace/READY`"). Hidden acceptance below.
 
 **0. Genesis.** D with profile {create, insert, select}. Header names
-checked exactly. Errors: `no_table`, `exists`, `arity`, `syntax`, `type`.
+checked exactly. Errors: `no_table`, `no_column`, `exists`, `arity`,
+`syntax`, `type`.
 S: 8 interleaved clients see each other's committed rows; garbage bytes,
 an unterminated line and a 2 MiB line do not kill the server, and a fresh
 connection still answers.

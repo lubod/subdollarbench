@@ -193,21 +193,26 @@ pub struct Oracle {
 }
 
 /// Blank out single-quoted literals (`''` escapes a quote) so keyword and
-/// punctuation scans never see text inside a string default.
+/// punctuation scans never see text inside a string default. The mask is
+/// byte-for-byte the same length as the input: every byte inside a quoted
+/// literal becomes an ASCII space, so an index computed on the mask is a
+/// valid byte offset in the original even when a literal contains
+/// multi-byte characters.
 fn mask_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = Vec::with_capacity(s.len());
     let mut in_q = false;
-    for ch in s.chars() {
-        if ch == '\'' {
-            in_q = !in_q;
-            out.push(ch);
-        } else if in_q {
-            out.push(' ');
-        } else {
-            out.push(ch);
+    for b in s.bytes() {
+        match b {
+            b'\'' => {
+                in_q = !in_q;
+                out.push(b);
+            }
+            _ if in_q => out.push(b' '),
+            _ => out.push(b),
         }
     }
-    out
+    // Bytes outside quotes are unchanged; inside they became ASCII spaces.
+    String::from_utf8(out).expect("masked bytes are valid UTF-8")
 }
 
 /// Byte offset of the `)` matching the `(` at `open` (quote-aware).
@@ -800,6 +805,26 @@ mod tests {
         match o.exec("SELECT s FROM d") {
             OracleOutcome::Rows { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Text("a,b".into())]])
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Multi-byte text inside a quoted default must not shift the mask: the
+    /// opening/closing paren offsets are computed on the masked copy and
+    /// used to slice the original, so a mask that changed byte lengths
+    /// either panicked or produced a corrupted statement.
+    #[test]
+    fn ddl_translation_survives_multibyte_quoted_text() {
+        let t = translate_ddl("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT DEFAULT 'éé')");
+        assert!(t.ends_with(" STRICT"), "{t}");
+        assert!(t.contains("'éé'"), "{t}");
+        let o = oracle();
+        assert_eq!(o.exec(&t), OracleOutcome::Affected(0));
+        o.exec("INSERT INTO t (id) VALUES (1)");
+        match o.exec("SELECT s FROM t") {
+            OracleOutcome::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("éé".into())]])
             }
             other => panic!("{other:?}"),
         }
