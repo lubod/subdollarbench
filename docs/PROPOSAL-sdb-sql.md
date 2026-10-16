@@ -215,9 +215,14 @@ are compared.
 acks, SIGKILL at a random ack count; after restart every acked row exists
 and no un-acked statement half-applied. (b) An `UPDATE` touching 50k rows
 is killed mid-flight: after restart it is all or nothing. (c) The harness
-truncates the last bytes of the newest data file: startup recovers every
-committed statement. (d) Two restarts in a row change nothing.
-Reuses the wal/AOF kill harness and ack accounting.
+kills the server, then cuts a few hundred bytes from the tail of the file
+the last commit grew (a small partial trailing record — no real design can
+recover from losing a whole flushed commit): startup recovers every
+committed statement, the newest one excepted. (d) Two restarts in a row
+change nothing. The ladder runs against a throwaway copy of the store so
+the persistent one stays small.
+Reuses the wal/AOF kill harness and ack accounting. Lite: acked rows
+survive kill -9 only.
 
 **6. Transactions.** D runs whole transactions per session, including
 `ROLLBACK`, errors inside a transaction (the statement fails, the

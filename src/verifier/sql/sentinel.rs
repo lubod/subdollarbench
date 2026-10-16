@@ -133,10 +133,20 @@ pub fn check(addr: &str, timeout: Duration, sent: &Sentinel) -> Result<(), Strin
 }
 
 fn check_with(c: &mut TcpCandidate, sent: &Sentinel) -> Result<(), String> {
-    for q in &sent.queries {
-        let got = c
-            .exec(&q.sql)
-            .map_err(|e| format!("unreachable: {:?}: {e}", q.sql))?;
+    for (answered, q) in sent.queries.iter().enumerate() {
+        let got = c.exec(&q.sql).map_err(|e| {
+            // An answer, then a broken connection, is a regression — not
+            // "the suite will fail it anyway". Only a store that never
+            // answered is "unreachable".
+            if answered == 0 {
+                format!("unreachable: {:?}: {e}", q.sql)
+            } else {
+                format!(
+                    "drift: transport error after {answered} answered read(s): {:?}: {e}",
+                    q.sql
+                )
+            }
+        })?;
         let frame = frame(&Ok(got))?;
         if frame != q.expected {
             return Err(format!(
@@ -240,6 +250,41 @@ mod tests {
         let (addr, _db) = oracle_server();
         let err = check(&addr.to_string(), Duration::from_secs(5), &sent).unwrap_err();
         assert!(err.starts_with("drift:"), "{err}");
+    }
+
+    /// A store that answers the first read and then breaks is *drifting*,
+    /// not "not checkable": swallowing it as unreachable used to hide the
+    /// regression behind the new tables' suite.
+    #[test]
+    fn check_after_an_answer_is_drift_not_unreachable() {
+        let sent = build(16, 4).unwrap();
+        assert!(
+            sent.queries.len() >= 2,
+            "the fixture needs two reads to answer one and break on the next"
+        );
+        let expected = sent.queries[0].expected.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(sock) = stream else { break };
+                let expected = expected.clone();
+                std::thread::spawn(move || {
+                    let mut sock = sock;
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    if matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                        // The first read answers exactly as recorded...
+                        let _ = sock.write_all(format!("{expected}\n").as_bytes());
+                    }
+                    // ...then the connection vanishes: the next read is
+                    // unanswered on a store that demonstrably answered.
+                });
+            }
+        });
+        let err = check(&addr, Duration::from_secs(5), &sent).unwrap_err();
+        assert!(err.starts_with("drift:"), "{err}");
+        assert!(err.contains("after 1 answered read"), "{err}");
     }
 
     #[test]

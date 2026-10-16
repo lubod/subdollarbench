@@ -895,6 +895,26 @@ impl SandboxManager {
         }
     }
 
+    /// Graceful stop: SIGTERM, up to `timeout_secs` to flush, then SIGKILL
+    /// and remove. The ticket-4 contract ("the harness stops the server
+    /// cleanly; you have a few seconds to flush"); ticket 5's ladder uses
+    /// [`Self::kill_candidate`] instead.
+    pub fn stop_candidate_gracefully(&self, timeout_secs: u64) -> Result<()> {
+        let name = self.candidate_container_name();
+        let out = Command::new("docker")
+            .args(["stop", "-t", &timeout_secs.to_string(), &name])
+            .output()?;
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "docker stop failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
     /// Restart a killed candidate container.
     pub fn restart_candidate(&self) -> Result<()> {
         let out = Command::new("docker")
@@ -1427,26 +1447,27 @@ impl SandboxManager {
         )
     }
 
-    /// True when the image declares an ENTRYPOINT (its CMD is then
-    /// replaced by appended argv, which is the sdb-sql launch contract).
-    /// `null`/`[]` from `docker image inspect` mean CMD-only.
-    fn image_has_entrypoint(image: &str) -> bool {
+    /// The image's CMD as argv (`docker image inspect --format '{{json
+    /// .Config.Cmd}}'`), empty when the image has none (an ENTRYPOINT-only
+    /// image: the launch args then become its argv). Reading the *effective*
+    /// CMD matters because it may be inherited from the base image (e.g.
+    /// node's `["node"]` under its entrypoint).
+    fn image_cmd(image: &str) -> Vec<String> {
         let out = Command::new("docker")
             .args([
                 "image",
                 "inspect",
                 image,
                 "--format",
-                "{{json .Config.Entrypoint}}",
+                "{{json .Config.Cmd}}",
             ])
             .output();
         match out {
             Ok(o) if o.status.success() => {
                 let body = String::from_utf8_lossy(&o.stdout);
-                let t = body.trim();
-                !(t.is_empty() || t == "null" || t == "[]")
+                serde_json::from_str::<Vec<String>>(body.trim()).unwrap_or_default()
             }
-            _ => false,
+            _ => Vec::new(),
         }
     }
 
@@ -1537,20 +1558,18 @@ impl SandboxManager {
                         port_udp.clone(),
                         image_tag.clone(),
                     ]);
-                    // `docker run <image> <args>` REPLACES the image's
-                    // CMD; only an ENTRYPOINT image receives them safely.
-                    // CMD-only images keep their own command and read
-                    // SDB_PORT / SDB_DATA_DIR instead (appending would exec
-                    // "--port" and die).
-                    if extras.launch_args.is_empty() {
-                        // nothing to pass
-                    } else if Self::image_has_entrypoint(&image_tag) {
-                        args.extend(extras.launch_args.iter().cloned());
-                    } else {
-                        info!(
-                            "candidate image {image_tag} uses CMD; launch args are not appended \
-                             (it must read SDB_PORT/SDB_DATA_DIR)"
-                        );
+                    // `docker run <image> <argv>` runs `argv` *instead of*
+                    // the image's CMD, so pass the effective CMD followed by
+                    // the launch flags: an exec-form CMD (or a shell-form
+                    // one, which ignores trailing argv) receives them beside
+                    // its own command, and an ENTRYPOINT-only image gets
+                    // them as argv. Appending to Entrypoint instead would
+                    // replace an *inherited* CMD (node:20's entrypoint would
+                    // run with no `node`).
+                    let mut argv = Self::image_cmd(&image_tag);
+                    argv.extend(extras.launch_args.iter().cloned());
+                    if !argv.is_empty() {
+                        args.extend(argv);
                     }
                     let run_res = Command::new("docker").args(&args).output();
                     match run_res {
@@ -2700,57 +2719,144 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    /// `docker run <image> <args>` replaces CMD: launch args may only be
-    /// appended to ENTRYPOINT images. A CMD-only image keeps its command
-    /// (the regression would exec "--port" and the container would die).
+    /// The launch contract with an inherited-entrypoint base (the node:20
+    /// shape): the harness appends `--port`/`--data` to the image's *CMD*,
+    /// never replacing it — appending to the Entrypoint would drop an
+    /// inherited CMD like node's `["node"]`. A shell-form CMD sees the
+    /// flags as positional args, an ENTRYPOINT-only image as its argv.
     #[test]
-    fn test_launch_args_respect_entrypoint_vs_cmd() {
+    fn test_launch_args_append_to_the_image_cmd() {
         use super::CandidateRunExtras;
         let sm = SandboxManager::with_id("entrypoint-test");
         let _guard = RunGuard::new(SandboxManager::with_id("entrypoint-test"));
         sm.cleanup();
         let base = std::env::temp_dir().join(format!("test_entrypoint_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let cmd_dir = base.join("cmd");
-        let entry_dir = base.join("entry");
-        std::fs::create_dir_all(&cmd_dir).unwrap();
-        std::fs::create_dir_all(&entry_dir).unwrap();
+        let entry_cmd = base.join("entry_cmd");
+        let entry_only = base.join("entry_only");
+        std::fs::create_dir_all(&entry_cmd).unwrap();
+        std::fs::create_dir_all(&entry_only).unwrap();
         std::fs::write(
-            cmd_dir.join("Dockerfile"),
-            "FROM subdollar-sandbox\nCMD [\"sleep\", \"300\"]\n",
+            entry_cmd.join("Dockerfile"),
+            "FROM subdollar-sandbox\n\
+             ENTRYPOINT [\"/bin/sh\",\"-c\"]\n\
+             CMD [\"echo ARGV \\\"$@\\\"; exec sleep 300\", \"sh\"]\n",
         )
         .unwrap();
         std::fs::write(
-            entry_dir.join("Dockerfile"),
+            entry_only.join("Dockerfile"),
             "FROM subdollar-sandbox\nENTRYPOINT [\"sleep\"]\n",
         )
         .unwrap();
+        let name = sm.candidate_container_name();
+        let logs = |name: &str| -> String {
+            let out = Command::new("docker").args(["logs", name]).output();
+            match out {
+                Ok(o) => format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+                Err(_) => String::new(),
+            }
+        };
+        let running = |name: &str| -> bool {
+            Command::new("docker")
+                .args(["inspect", name, "--format", "{{.State.Running}}"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+                .unwrap_or(false)
+        };
+        // ENTRYPOINT + CMD: the flags must arrive as the CMD's argv. The
+        // old behaviour replaced the CMD with them and `sh` died on
+        // "--port".
         let extras = CandidateRunExtras {
+            launch_args: vec![
+                "--port".to_string(),
+                "5480".to_string(),
+                "--data".to_string(),
+                "/sdb-data".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&entry_cmd, free_port(), &extras)
+            .is_ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && !logs(&name).contains("ARGV --port 5480 --data /sdb-data")
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let out = logs(&name);
+        assert!(
+            out.contains("ARGV --port 5480 --data /sdb-data"),
+            "the image CMD must receive the launch flags: {out:?}"
+        );
+        assert!(running(&name), "the entrypoint+CMD container must stay up");
+        sm.cleanup();
+        // ENTRYPOINT only: the flags are its argv (`sleep 300`).
+        let one = CandidateRunExtras {
             launch_args: vec!["300".to_string()],
             ..Default::default()
         };
-        for (label, dir) in [("cmd", &cmd_dir), ("entry", &entry_dir)] {
-            assert!(
-                sm.start_candidate_in_docker_with(dir, free_port(), &extras)
-                    .is_ok(),
-                "{label}: launch failed"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            let name = sm.candidate_container_name();
-            let out = Command::new("docker")
-                .args(["inspect", &name, "--format", "{{.State.Running}}"])
-                .output()
-                .unwrap();
-            let running = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            assert_eq!(
-                running,
-                "true",
-                "{label}: container must stay up (stderr {})",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
+        assert!(sm
+            .start_candidate_in_docker_with(&entry_only, free_port(), &one)
+            .is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(running(&name), "the entrypoint-only container must stay up");
         sm.cleanup();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// SIGTERM reaches the candidate on a graceful stop (ticket 4's
+    /// "a few seconds to flush" contract); `stop_candidate` is `rm -f`, so
+    /// only the graceful stop may produce the flush marker.
+    #[test]
+    fn test_graceful_stop_lets_the_candidate_flush() {
+        use super::CandidateRunExtras;
+        let sm = SandboxManager::with_id("graceful-stop-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("graceful-stop-test"));
+        sm.cleanup();
+        let work = std::env::temp_dir().join(format!("test_graceful_{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("test_graceful_data_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            work.join("start.sh"),
+            "#!/bin/bash\ntrap 'echo bye > /sdb-data/flushed.txt; exit 0' TERM\n\
+             while true; do sleep 0.2; done\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                work.join("start.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+        let extras = CandidateRunExtras {
+            binds: vec![(data.display().to_string(), "/sdb-data".to_string())],
+            ..Default::default()
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&work, free_port(), &extras)
+            .is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(sm.stop_candidate_gracefully(5).is_ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !data.join("flushed.txt").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(
+            data.join("flushed.txt").exists(),
+            "SIGTERM must reach the candidate before it is removed"
+        );
+        sm.cleanup();
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

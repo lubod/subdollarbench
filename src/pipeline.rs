@@ -46,14 +46,24 @@ fn sql_data_dir(workdir: &Path, campaign: bool) -> PathBuf {
 /// answers one protocol-level probe. `Err` means the harness could not get
 /// it back up (or it stayed silent); for a model candidate that is a
 /// failure, so callers grade it accordingly.
+///
+/// `graceful` sends SIGTERM and gives the server a few seconds to flush
+/// (the ticket-4 clean-restart contract); `false` is `rm -f`, i.e. SIGKILL,
+/// which is what ticket 5's ladder and a shrink reset want.
 fn restart_candidate(
     instance_id: &str,
     workdir: &Path,
     port: u16,
     extras: &crate::sandbox::docker::CandidateRunExtras,
+    graceful: bool,
 ) -> Result<(), String> {
     let sb = crate::sandbox::docker::SandboxManager::with_id(instance_id);
-    sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
+    if graceful {
+        sb.stop_candidate_gracefully(5)
+            .map_err(|e| format!("stop: {e}"))?;
+    } else {
+        sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
+    }
     sb.start_candidate_in_docker_with(workdir, port, extras)
         .map_err(|e| format!("start: {e}"))?;
     crate::verifier::sql::driver::wait_until_answering(
@@ -66,6 +76,12 @@ fn restart_candidate(
 /// SIGKILL, a mid-flight bulk UPDATE is all-or-nothing, a torn newest data
 /// file recovers every committed statement, and a second restart changes
 /// nothing (docs/PROPOSAL-sdb-sql.md, "5. Crash safety").
+///
+/// The ladder writes hundreds of thousands of rows, so it runs against a
+/// throwaway copy of the store and restarts back onto the real one at the
+/// end: the store the next ticket reads stays small (and recovery fast),
+/// and a torn file is never torn in it. The copy is taken from a quiesced
+/// store (the candidate is killed first).
 #[allow(clippy::too_many_arguments)]
 fn crash_ladder(
     sandbox: &crate::sandbox::docker::SandboxManager,
@@ -82,72 +98,161 @@ fn crash_ladder(
     let t = std::time::Duration::from_secs(20);
     let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 5) ^ 0x5E27_1E10_0000_0005;
     let acked_table = format!("c{ns:x}_acked");
-    let bulk_table = format!("c{ns:x}_bulk");
-    let restart = || -> Result<(), String> {
-        restart_candidate(&sandbox.instance_id, workdir, port, extras).map_err(|e| {
+    let mut bulk_table = String::new();
+    let mut rows = 0usize;
+    let mut victims = 0usize;
+
+    let scratch = data.with_file_name(format!(
+        "{}-crash",
+        data.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    let _ = sandbox.kill_candidate();
+    let _ = std::fs::remove_dir_all(&scratch);
+    crash::copy_tree(data, &scratch).map_err(|e| format!("scratch copy: {e}"))?;
+    let mut scratch_extras = extras.clone();
+    let real_src = data.display().to_string();
+    for b in scratch_extras.binds.iter_mut() {
+        if b.0 == real_src {
+            b.0 = scratch.display().to_string();
+        }
+    }
+    let restart = |e: &crate::sandbox::docker::CandidateRunExtras| -> Result<(), String> {
+        restart_candidate(&sandbox.instance_id, workdir, port, e, false).map_err(|e| {
             logger.log(&format!("  [CRASH] restart failed: {e}"));
             e
         })
     };
+    restart(&scratch_extras)?;
+    logger.log(&format!(
+        "  [CRASH] ladder runs on a scratch copy of the store ({})",
+        scratch.display()
+    ));
 
-    // (a) acked rows survive SIGKILL; unacked ones may not exist.
-    let acked = {
+    // (a) acked rows survive SIGKILL. One more INSERT is sent and never
+    // read; if its answer arrived before the kill, the row is owed too.
+    let (acked, in_flight_owed) = {
         let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
-        crash::ack_kill(&addr, t, &acked_table, 40, &mut kill).map_err(|e| format!("(a) {e}"))?
+        let out = crash::ack_kill(&addr, t, &acked_table, 40, &mut kill)
+            .map_err(|e| format!("(a) {e}"))?;
+        (out.acked, out.completed)
     };
-    restart()?;
-    crash::check_acked_rows(&addr, t, &acked_table, acked).map_err(|e| format!("(a) {e}"))?;
-    logger.log(&format!("  [CRASH] {acked} acked rows survived a SIGKILL"));
+    restart(&scratch_extras)?;
+    if in_flight_owed {
+        // The statement completed and was answered: it must be there.
+        crash::check_acked_rows(&addr, t, &acked_table, acked + 1)
+            .map_err(|e| format!("(a) {e}"))?;
+        logger.log(&format!(
+            "  [CRASH] {acked} acked rows (and the in-flight one, which answered first) survived a SIGKILL"
+        ));
+    } else {
+        crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
+            .map_err(|e| format!("(a) {e}"))?;
+        logger.log(&format!("  [CRASH] {acked} acked rows survived a SIGKILL"));
+    }
 
     if lite {
         // Lite stage 5 (proposal): acked rows survive kill -9; torn tails
         // and mid-statement atomicity are not required.
         logger.log("  [CRASH] lite variant: acked rows and restarts only");
     } else {
-        // (b) a bulk UPDATE killed mid-flight is all or nothing.
-        {
-            let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
-            crash::bulk_update_and_kill(
-                &addr,
-                t,
-                &bulk_table,
-                crash::BULK_ROWS,
-                crash::BULK_CHUNK,
-                &mut kill,
-            )
-            .map_err(|e| format!("(b) {e}"))?;
+        // (b) a bulk UPDATE killed mid-flight is all or nothing. If the
+        // answer arrives before the kill lands the server finished the
+        // update, so that rep proved nothing: retry with a bigger table.
+        let mut in_flight = false;
+        rows = crash::BULK_ROWS;
+        for attempt in 0..3 {
+            bulk_table = format!("c{ns:x}_bulk{attempt}");
+            let killed = {
+                let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+                crash::bulk_update_and_kill(
+                    &addr,
+                    t,
+                    &bulk_table,
+                    rows,
+                    crash::BULK_CHUNK,
+                    &mut kill,
+                )
+                .map_err(|e| format!("(b) {e}"))?
+            };
+            restart(&scratch_extras)?;
+            in_flight = killed;
+            if in_flight {
+                break;
+            }
+            logger.log(&format!(
+                "  [CRASH] the {rows}-row bulk UPDATE answered before the kill; retrying bigger"
+            ));
+            rows *= 2;
         }
-        restart()?;
-        crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
-            .map_err(|e| format!("(b) {e}"))?;
+        if !in_flight {
+            logger.log(
+                "  [WARN] the bulk UPDATE kept answering before the kill; that check was \
+                 weaker this run",
+            );
+        }
+        crash::check_uniform(&addr, t, &bulk_table, rows).map_err(|e| format!("(b) {e}"))?;
         logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
 
-        // (c) a torn tail: a partial trailing record may cost the newest
-        // statement, never an older committed row.
-        crash::append_row(&addr, t, &acked_table, acked).map_err(|e| format!("(c) {e}"))?;
-        let cut = crash::torn_tail(data, 256).map_err(|e| format!("(c) {e}"))?;
-        if cut == 0 {
-            logger.log("  [CRASH] no newest file to tear (skipped)");
-        } else {
-            restart()?;
-            crash::check_acked_prefix(&addr, t, &acked_table, acked, 1)
+        // (c) a torn tail. Kill first: a running server may rewrite the
+        // file. Then cut into the file the victim commit touched: a partial
+        // trailing record may cost the newest statement, never an older
+        // committed row. A commit that lands on a WAL checkpoint rewrites
+        // in place and grows nothing (or nothing tearable), so retry with
+        // another victim instead of skipping.
+        let mut torn: Option<(std::path::PathBuf, u64)> = None;
+        for attempt in 0..3 {
+            let before = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
+            crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
                 .map_err(|e| format!("(c) {e}"))?;
-            crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
-                .map_err(|e| format!("(c) {e}"))?;
-            logger.log(&format!(
-                "  [CRASH] {cut} torn bytes: every older row intact"
-            ));
+            victims += 1;
+            let _ = sandbox.kill_candidate();
+            if let Some(path) =
+                crash::changed_file(&scratch, &before).map_err(|e| format!("(c) {e}"))?
+            {
+                let cut = crash::torn_tail(&path, 256).map_err(|e| format!("(c) {e}"))?;
+                if cut > 0 {
+                    torn = Some((path, cut));
+                    break;
+                }
+            }
+            // Nothing changed (or nothing tearable): bring the store back
+            // and try one more commit.
+            restart(&scratch_extras)?;
         }
+        let Some((path, cut)) = torn else {
+            return Err(
+                "(c) three acked INSERTs changed no file: commits never reached the store"
+                    .to_string(),
+            );
+        };
+        logger.log(&format!(
+            "  [CRASH] (c) torn tail: {cut} bytes off {}",
+            path.display()
+        ));
+        restart(&scratch_extras)?;
+        crash::check_acked_prefix(&addr, t, &acked_table, acked, 1 + victims)
+            .map_err(|e| format!("(c) {e}"))?;
+        crash::check_uniform(&addr, t, &bulk_table, rows).map_err(|e| format!("(c) {e}"))?;
+        logger.log(&format!(
+            "  [CRASH] {cut} torn bytes from {}: every older row intact",
+            path.display()
+        ));
     }
 
     // (d) a second restart changes nothing.
-    restart()?;
-    crash::check_acked_prefix(&addr, t, &acked_table, acked, 1).map_err(|e| format!("(d) {e}"))?;
+    restart(&scratch_extras)?;
+    crash::check_acked_prefix(&addr, t, &acked_table, acked, 1 + victims)
+        .map_err(|e| format!("(d) {e}"))?;
     if !lite {
-        crash::check_uniform(&addr, t, &bulk_table, crash::BULK_ROWS)
-            .map_err(|e| format!("(d) {e}"))?;
+        crash::check_uniform(&addr, t, &bulk_table, rows).map_err(|e| format!("(d) {e}"))?;
     }
     logger.log("  [CRASH] a double restart changed nothing");
+
+    // Back onto the real store; the rest of the campaign must see it.
+    restart(extras)?;
+    let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
 }
 
@@ -1099,6 +1204,7 @@ impl BenchmarkPipeline {
         logger: &'a Arc<dyn PipelineLogger>,
         accepted: Option<&'a [u32]>,
         lite_profile: &'a [String],
+        passed_lite: &'a [(u32, Vec<String>)],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = VerificationOutcome> + Send + 'a>> {
         Box::pin(async move {
             logger
@@ -2792,10 +2898,21 @@ impl BenchmarkPipeline {
                             let instance_id = sandbox.instance_id.clone();
                             let reset_dir = workdir.to_path_buf();
                             let real_extras = extras.clone();
+                            // Per instance: two verifications in the same
+                            // campaign directory (or two campaigns sharing a
+                            // workspace) must not share trial stores.
+                            let shrink_tag: String = instance_id
+                                .chars()
+                                .filter(|c| c.is_ascii_alphanumeric())
+                                .collect();
                             let shrink_root = sql_data
                                 .as_ref()
-                                .map(|d| d.with_file_name("sql-shrink"))
-                                .unwrap_or_else(|| std::env::temp_dir().join("sdb-sql-shrink"));
+                                .map(|d| d.with_file_name(format!("sql-shrink-{shrink_tag}")))
+                                .unwrap_or_else(|| {
+                                    std::env::temp_dir()
+                                        .join(format!("sdb-sql-shrink-{shrink_tag}"))
+                                });
+                            let shrink_root_keep = shrink_root.clone();
                             let mut trial = 0u32;
                             let mut reset = move || -> Result<(), String> {
                                 trial += 1;
@@ -2809,7 +2926,13 @@ impl BenchmarkPipeline {
                                 // Non-conforming candidates may still use the
                                 // workspace store; wipe it too.
                                 let _ = std::fs::remove_dir_all(reset_dir.join("data"));
-                                restart_candidate(&instance_id, &reset_dir, port, &trial_extras)
+                                restart_candidate(
+                                    &instance_id,
+                                    &reset_dir,
+                                    port,
+                                    &trial_extras,
+                                    false,
+                                )
                             };
                             // Stage 4+'s persistence scenario restarts the
                             // candidate *keeping* its store.
@@ -2822,6 +2945,7 @@ impl BenchmarkPipeline {
                                     &restart_dir,
                                     port,
                                     &restart_extras,
+                                    true,
                                 )
                             };
                             let run = tokio::task::spawn_blocking(move || {
@@ -2840,15 +2964,23 @@ impl BenchmarkPipeline {
                                 // The shrink left the candidate on a
                                 // throwaway bind; put it back on the real
                                 // store.
-                                if let Err(e) =
-                                    restart_candidate(&sandbox.instance_id, workdir, port, &extras)
-                                {
+                                if let Err(e) = restart_candidate(
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                    false,
+                                ) {
                                     logger.log(&format!(
                                         "[SETUP] Warning: could not restore the candidate after \
                                          the shrink: {e}"
                                     ));
                                 }
                             }
+                            // The trial stores are throwaway. The campaign
+                            // clean-up would get them too, but a long run
+                            // should not hold every trial's rows.
+                            let _ = std::fs::remove_dir_all(&shrink_root_keep);
                             let st = match run {
                                 Ok(Ok(out)) if out.passed => {
                                     logger.log(&format!(
@@ -2918,7 +3050,19 @@ impl BenchmarkPipeline {
                             // the container, so it runs here.
                             if wanted.contains(&5) {
                                 if let Some(data) = &sql_data {
-                                    let lite = lite_profile.iter().any(|p| p == "crash-acked-only");
+                                    // Stage 5's variant comes from this
+                                    // attempt when stage 5 *is* the current
+                                    // ticket, else from the pass that earned
+                                    // it: ticket 6+ must not demand a full
+                                    // crash ladder if the model won stage 5
+                                    // on the lite variant.
+                                    let lite = if wanted.iter().copied().max() == Some(5) {
+                                        lite_profile.iter().any(|p| p == "crash-acked-only")
+                                    } else {
+                                        passed_lite.iter().any(|(s, p)| {
+                                            *s == 5 && p.iter().any(|f| f == "crash-acked-only")
+                                        })
+                                    };
                                     if let Err(e) = crash_ladder(
                                         sandbox,
                                         workdir,
@@ -2930,7 +3074,7 @@ impl BenchmarkPipeline {
                                         logger,
                                     ) {
                                         logger.log(&format!("  [CRASH] FAILED: {e}"));
-                                        late_failure = Some((5, format!("crash safety: {e}")));
+                                        late_failure = Some((5, format!("[crash] {e}")));
                                     }
                                 }
                             }
@@ -2954,7 +3098,13 @@ impl BenchmarkPipeline {
                                     let mut kill =
                                         || sandbox.kill_candidate().map_err(|e| e.to_string());
                                     let mut restart = || {
-                                        restart_candidate(&sandbox.instance_id, workdir, port, &extras)
+                                        restart_candidate(
+                                            &sandbox.instance_id,
+                                            workdir,
+                                            port,
+                                            &extras,
+                                            false,
+                                        )
                                     };
                                     crate::verifier::sql::txn::kill_with_open_transaction(
                                         &addr,
@@ -2970,19 +3120,22 @@ impl BenchmarkPipeline {
                                     ),
                                     Err(e) => {
                                         logger.log(&format!("  [TXN] FAILED: {e}"));
-                                        late_failure = Some((6, format!("transactions: {e}")));
+                                        late_failure = Some((6, format!("[txn] {e}")));
                                     }
                                 }
                             }
                         }
                         if let Some((lost, why)) = late_failure {
-                            // A late check failed (upgrade drift or the crash
-                            // ladder): the stage that owns the broken
-                            // contract goes red.
+                            // A late check failed: the stage that owns the
+                            // broken contract goes red, tagged with what
+                            // broke (upgrade drift, crash safety, or
+                            // transactions) so a report can group it.
                             let reason = if why.starts_with('[') {
                                 why
-                            } else {
+                            } else if why.starts_with("drift:") {
                                 format!("[upgrade] {why}")
+                            } else {
+                                format!("[late] {why}")
                             };
                             if let Some(st) = stages.iter_mut().find(|s| s.stage == lost) {
                                 st.passed = false;
@@ -3026,12 +3179,32 @@ impl BenchmarkPipeline {
                                         Ok(s) => {
                                             let path = dir.join(format!("sentinel-{top}.json"));
                                             match crate::verifier::sql::sentinel::save(&path, &s) {
-                                                Ok(()) => logger.log(&format!(
-                                                    "  [UPGRADE] sentinel for stage {top} written: \
-                                                     {} writes, {} reads",
-                                                    s.writes.len(),
-                                                    s.queries.len()
-                                                )),
+                                                Ok(()) => {
+                                                    logger.log(&format!(
+                                                        "  [UPGRADE] sentinel for stage {top} \
+                                                         written: {} writes, {} reads",
+                                                        s.writes.len(),
+                                                        s.queries.len()
+                                                    ));
+                                                    // A candidate may flush on
+                                                    // SIGTERM (ticket 4's
+                                                    // contract) and the sandbox
+                                                    // tear-down is `rm -f`: give
+                                                    // it a clean stop now that
+                                                    // this store is the one the
+                                                    // next ticket reads.
+                                                    let sb =
+                                                        crate::sandbox::docker::SandboxManager::with_id(
+                                                            &sandbox.instance_id,
+                                                        );
+                                                    if let Err(e) = sb.stop_candidate_gracefully(5)
+                                                    {
+                                                        logger.log(&format!(
+                                                            "[WARN] graceful flush after the \
+                                                             sentinel failed: {e}"
+                                                        ));
+                                                    }
+                                                }
                                                 Err(e) => logger.log(&format!(
                                                     "[WARN] sentinel not saved: {e}"
                                                 )),
@@ -3656,6 +3829,11 @@ impl BenchmarkPipeline {
                 .as_ref()
                 .map(|c| c.lite_profile.as_slice())
                 .unwrap_or(&[]),
+            config
+                .campaign_stage
+                .as_ref()
+                .map(|c| c.passed_lite.as_slice())
+                .unwrap_or(&[]),
         )
         .await;
         // The repair agent needs the references again (it probes exact
@@ -3843,6 +4021,11 @@ impl BenchmarkPipeline {
                             .campaign_stage
                             .as_ref()
                             .map(|c| c.lite_profile.as_slice())
+                            .unwrap_or(&[]),
+                        config
+                            .campaign_stage
+                            .as_ref()
+                            .map(|c| c.passed_lite.as_slice())
                             .unwrap_or(&[]),
                     )
                     .await;
@@ -4615,6 +4798,10 @@ mod tests {
     impl RecordingLogger {
         fn contains(&self, needle: &str) -> bool {
             self.0.lock().unwrap().iter().any(|l| l.contains(needle))
+        }
+
+        fn text(&self) -> String {
+            self.0.lock().unwrap().join("\n")
         }
     }
 
@@ -6860,6 +7047,7 @@ main()
             &logger,
             None,
             &[],
+            &[],
         )
         .await;
         assert!(
@@ -6927,6 +7115,7 @@ main()
             continuity: true,
             accepted_stages: vec![1, 2, 3],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -6981,6 +7170,7 @@ main()
             continuity: true,
             accepted_stages: vec![14, 15, 16],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7032,6 +7222,7 @@ main()
             continuity: false,
             accepted_stages: vec![1],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7079,6 +7270,7 @@ main()
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 6, 7, 8, 9],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7133,6 +7325,7 @@ main()
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7188,6 +7381,7 @@ main()
             continuity: true,
             accepted_stages: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7245,6 +7439,7 @@ main()
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: Some("# SPEC.md fixture\n".to_string()),
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7301,6 +7496,7 @@ main()
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7354,6 +7550,7 @@ main()
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4, 5],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7367,11 +7564,15 @@ main()
         );
         for needle in [
             "Stage 5: Crash safety -> PASS",
-            "[CRASH] 40 acked rows survived a SIGKILL",
+            "[CRASH] 40 acked rows",
             "[CRASH] the killed bulk UPDATE was all-or-nothing",
             "[CRASH] a double restart changed nothing",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
         }
         assert_eq!(
             (out.manifest.passed_stages, out.manifest.total_stages),
@@ -7403,6 +7604,7 @@ main()
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4, 5],
             lite_profile: vec!["crash-acked-only".to_string()],
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7413,7 +7615,7 @@ main()
         for needle in [
             "Stage 5: Crash safety -> PASS",
             "[CRASH] lite variant: acked rows and restarts only",
-            "[CRASH] 40 acked rows survived a SIGKILL",
+            "[CRASH] 40 acked rows",
             "[CRASH] a double restart changed nothing",
         ] {
             assert!(logger.contains(needle), "missing {needle:?}");
@@ -7432,6 +7634,61 @@ main()
             (6, 6)
         );
         cleanup_covtest_network("sqlcrashlite");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A stage-6 ticket after the model won stage 5 on the lite variant:
+    /// the suite keeps grading stage 5 lite (the full crash ladder would
+    /// demand work ticket 5 never asked for) while stage 6 runs in full.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage6_after_lite_stage5() {
+        let worker = 85u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqltxnlite5");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-6 fixture after lite stage 5").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqltxnlite5");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 6,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0, 1, 2, 3, 4, 5, 6],
+            lite_profile: Vec::new(),
+            passed_lite: vec![(5, vec!["crash-acked-only".to_string()])],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-6 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 5: Crash safety -> PASS",
+            "Stage 6: Transactions -> PASS",
+            "[CRASH] lite variant: acked rows and restarts only",
+            "[TXN] a kill with an open transaction discarded it",
+        ] {
+            assert!(logger.contains(needle), "missing {needle:?}");
+        }
+        for absent in [
+            "[CRASH] the killed bulk UPDATE was all-or-nothing",
+            "torn bytes",
+        ] {
+            assert!(
+                !logger.contains(absent),
+                "stage 5 must stay lite in a later ticket: {absent:?}"
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (7, 7)
+        );
+        cleanup_covtest_network("sqltxnlite5");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -7458,6 +7715,7 @@ main()
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4, 5, 6],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7506,6 +7764,7 @@ main()
             continuity: true,
             accepted_stages: vec![0, 1, 2, 3, 4],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7559,6 +7818,7 @@ main()
             continuity: true,
             accepted_stages: vec![0],
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             spec_md: None,
         });
         let logger = Arc::new(RecordingLogger::default());
@@ -7593,11 +7853,9 @@ main()
         assert!(trials > 0, "the shrink never ran: {line}");
         assert!(statements <= 8, "repro not minimized: {line}");
 
-        // Throwaway stores live next to the real one; each trial wrote its
-        // own marker, and the real store saw only the initial start plus the
-        // post-shrink restore.
-        let shrink = dir.join("sql-shrink");
-        assert!(shrink.join("t1").is_dir(), "trial 1 store missing");
+        // Throwaway stores live next to the real one, keyed per instance and
+        // cleaned once the stage is graded; the real store saw only the
+        // initial start plus the post-shrink restore, never a trial's rows.
         let markers = |p: &Path| -> usize {
             fs::read_dir(p)
                 .map(|it| {
@@ -7613,7 +7871,18 @@ main()
             (1..=2).contains(&real_markers),
             "the real store was written by {real_markers} starts (expected initial + restore)"
         );
-        assert_eq!(markers(&shrink.join("t1")), 1, "trial 1 marker");
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .map(|it| {
+                it.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("sql-shrink"))
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "shrink stores must not accumulate: {leftovers:?}"
+        );
 
         cleanup_covtest_network("sqlshrink");
         let _ = fs::remove_dir_all(&dir);
@@ -7641,6 +7910,7 @@ main()
             &logger,
             None,
             &[],
+            &[],
         )
         .await;
         assert_eq!(outcome.pass_rate, 0.0);
@@ -7660,6 +7930,7 @@ main()
             97,
             &logger2,
             None,
+            &[],
             &[],
         )
         .await;

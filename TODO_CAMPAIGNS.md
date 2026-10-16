@@ -657,7 +657,33 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   reference passes both against a real process; the campaign declares
   ticket 6 (tier 2, acceptance [0..6], no lite per the proposal). Gates:
   20/20 at every stage 0-6, a stage-6 live proof (7/7, both `[TXN]`
-  lines, sentinel written). **Next**: ticket 7 (aggregates), which starts
+  lines, sentinel written).
+  **Round-2 review fixes landed (REVIEW.md, 2026-10-16)**: restarts that
+  model a clean stop are SIGTERM (`stop_candidate_gracefully`, used by
+  ticket 4's restart and the post-sentinel flush) while ladder/shrink
+  restarts stay SIGKILL; the crash kills now land mid-statement (send-only
+  + a probe that says whether the never-read statement answered, and when
+  it did the row is owed exactly); the bulk UPDATE retries with a bigger
+  table until the kill lands in flight; (c)'s torn tail kills first, tears
+  the *log* file the victim commit touched (never the database; SQLite's
+  `-shm` skipped, WAL preferred by name), retries when a checkpoint
+  rewrote in place, and the reference keeps a long-lived connection so its
+  WAL survives between harness connections; the ladder runs on a scratch
+  copy of the store (the persistent one stays small); stage 6's isolation
+  probe tolerates a global-lock candidate (bounded async read, released by
+  COMMIT/ROLLBACK, busy retried); each stage's lite variant is remembered
+  per ladder (`passed_lite`) so ticket 6+ keeps grading stage 5 lite; late
+  failures carry `[crash]`/`[txn]`/`[upgrade]` classes; a sentinel
+  transport error *after* the store answered is drift, not "not
+  checkable"; the campaign snapshot/copy never follows symlinks or FIFOs
+  and includes the sentinel chain; in-transaction scripts now mix SELECTs
+  and statement-level errors; the toy models SQLite 3.46's statement
+  journal (a type error keeps earlier `VALUES` rows inside a transaction,
+  rolls back in autocommit) and the reference emulates the autocommit
+  case on the host's 3.45; Docker launches append `--port`/`--data` to the
+  image's *CMD* (inherited entrypoints keep their command); shrink stores
+  are per-instance and cleaned after the stage; plus a 20x bar for the
+  ladder and txn checks. **Next**: ticket 7 (aggregates), which starts
   tier 3.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,

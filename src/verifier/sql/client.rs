@@ -45,6 +45,37 @@ impl TcpCandidate {
     }
 }
 
+impl TcpCandidate {
+    /// Write one statement line **without reading** its response. The crash
+    /// probes need the kill to land while the statement is in flight, which
+    /// `exec` would defeat (it blocks until the answer).
+    pub fn send(&mut self, sql: &str) -> Result<(), String> {
+        debug_assert!(
+            !sql.contains('\n') && !sql.contains('\r'),
+            "one statement per line: {sql:?}"
+        );
+        let stream = self.reader.get_mut();
+        stream
+            .write_all(sql.as_bytes())
+            .and_then(|()| stream.write_all(b"\n"))
+            .map_err(|e| format!("write: {e}"))
+    }
+
+    /// Read one response without sending anything (the in-flight probe).
+    pub fn recv(&mut self) -> Result<Response, String> {
+        read_response(&mut self.reader)
+    }
+
+    /// The read timeout for subsequent reads; the in-flight probe wants a
+    /// very short one.
+    pub fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| format!("set read timeout: {e}"))
+    }
+}
+
 impl Candidate for TcpCandidate {
     fn exec(&mut self, sql: &str) -> Result<Response, String> {
         // The protocol is one statement per line; the generator never

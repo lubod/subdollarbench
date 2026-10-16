@@ -13,10 +13,11 @@ hard-coded, and the schema is different every run.
 
 - **Entrypoint**: an executable `./start.sh`, or a `Dockerfile`.
   `./start.sh` is started as `./start.sh --port <p> --data <dir>`, and the
-  defaults must still work when nothing is passed. A `Dockerfile` receives
-  those arguments **only when it declares an `ENTRYPOINT`**; a `CMD`-only
-  image is started with no arguments, so read `SDB_PORT` / `SDB_DATA_DIR`
-  (both are exported) or fall back to the defaults.
+  defaults must still work when nothing is passed. A `Dockerfile` image is
+  started with **its own `CMD` followed by `--port <p> --data <dir>`**, so
+  put the server in an exec-form `CMD` (or an `ENTRYPOINT` with no `CMD`)
+  and the flags arrive as argv. `SDB_PORT` / `SDB_DATA_DIR` are exported
+  too, as a fallback.
 - **Port**: listen on **`0.0.0.0:5480`** by default; honor `--port <p>`.
 - **Data directory**: `./data` by default; honor `--data <dir>`. The
   harness owns that directory and restarts the server on it between

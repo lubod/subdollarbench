@@ -1109,7 +1109,16 @@ impl Toy {
         let tbl = self.tables.get_mut(name).ok_or(ErrClass::NoTable)?;
         match failure {
             Some(c) => {
-                if self.fault == Some(Fault::InsertNotAtomic) {
+                // Verified against SQLite 3.46 (the oracle's version): in
+                // *autocommit* a type violation rolls the whole statement
+                // back, but inside an explicit transaction the rows an
+                // earlier `VALUES` inserted stay (they only go away with
+                // the transaction). Constraint violations roll back either
+                // way. The `InsertNotAtomic` mutant keeps them for any
+                // class, in autocommit included.
+                if (c == ErrClass::Type && self.txn.is_some())
+                    || self.fault == Some(Fault::InsertNotAtomic)
+                {
                     tbl.rows.extend(built);
                 }
                 Err(c)

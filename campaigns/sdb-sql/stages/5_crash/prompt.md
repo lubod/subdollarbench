@@ -18,11 +18,14 @@ The cumulative suite still runs (tickets 0-4), plus:
    the column is uniformly old or uniformly new — never a mixture, and no
    row may disappear.
 3. **A torn tail recovers.** The last bytes of your newest data file may be
-   missing (a partial trailing record, as after a power cut). On startup you
+   missing (a small partial trailing record — a few hundred bytes cut from
+   the region your last commit grew, as after a power cut). On startup you
    must recover every statement committed *before* the damaged tail; the
    single most recent statement is allowed to be lost, older ones are not.
    Refusing to start, or losing older rows, fails.
 4. **Two restarts in a row change nothing.**
+5. **A restart is serving again within 20 seconds** for a store the size
+   this campaign produces (tens of thousands of rows).
 
 ## What "acked" means for you
 

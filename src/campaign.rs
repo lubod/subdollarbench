@@ -224,6 +224,9 @@ pub struct CampaignStageConfig {
     /// full attempt). Opaque strings; the task's verifier interprets them
     /// (sdb-sql: `crash-acked-only` narrows stage 5's crash ladder).
     pub lite_profile: Vec<String>,
+    /// Lite profile of every earlier stage this ladder passed on a lite
+    /// variant, by stage (empty for a full run). See [`StageAttempt`].
+    pub passed_lite: Vec<(u32, Vec<String>)>,
     /// sdb-sql: the harness-owned `SPEC.md`, written into the workspace
     /// after the pipeline prepares it (a genesis workspace is wiped first,
     /// so the campaign runner cannot write it beforehand).
@@ -486,6 +489,11 @@ pub struct StageAttempt<'a> {
     /// Feature flags of the lite variant (`LiteSpec.profile`), empty for a
     /// full attempt: the verifier uses them to grade the lite suite.
     pub lite_profile: Vec<String>,
+    /// Lite profile of every *earlier* stage this ladder passed on a lite
+    /// variant, by stage: a later ticket's suite must keep grading those
+    /// stages at the variant the model actually passed, or it would demand
+    /// work that ticket-5-lite never asked for.
+    pub passed_lite: Vec<(u32, Vec<String>)>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
     /// True when the workspace/data must be rolled back to the last green
@@ -645,6 +653,9 @@ where
     // Ladder bookkeeping (continue mode): per-stage outcome + whether the
     // last attempt left the workspace dirty (needs a rollback first).
     let mut outcomes: HashMap<u32, LadderOutcome> = HashMap::new();
+    // Which stages passed on a lite variant (stage -> profile).
+    let mut liters: std::collections::BTreeMap<u32, Vec<String>> =
+        std::collections::BTreeMap::new();
     let mut dirty = false;
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
@@ -711,6 +722,7 @@ where
             budget_usd: stage.budget_usd,
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
+            passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
             weight: 1.0,
             rollback_first: dirty,
         };
@@ -742,6 +754,7 @@ where
         );
         if out.passed {
             outcomes.insert(stage.id, LadderOutcome::Full);
+            liters.remove(&stage.id);
             reached = Some(stage.id);
             dirty = false;
         } else if fault {
@@ -759,6 +772,7 @@ where
                 budget_usd: lite.budget_usd,
                 max_turns: lite.max_turns,
                 lite_profile: lite.profile.clone(),
+                passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
                 weight: lite.weight,
                 rollback_first: true,
             };
@@ -790,6 +804,7 @@ where
             );
             if out2.passed {
                 outcomes.insert(stage.id, LadderOutcome::Lite);
+                liters.insert(stage.id, lite.profile.clone());
                 if reached.map(|r| stage.id > r).unwrap_or(true) {
                     reached = Some(stage.id);
                 }
@@ -1656,6 +1671,7 @@ mod tests {
             wall_min: None,
         };
         let seen = std::cell::RefCell::new(Vec::<(u32, StageVariant, bool)>::new());
+        let passed_lite = std::cell::RefCell::new(Vec::<Vec<(u32, Vec<String>)>>::new());
         let rollup = run_campaign(
             &lc,
             &opts,
@@ -1664,6 +1680,7 @@ mod tests {
                 let variant = attempt.variant;
                 seen.borrow_mut()
                     .push((id, variant, attempt.rollback_first));
+                passed_lite.borrow_mut().push(attempt.passed_lite.clone());
                 let passed = match (id, variant) {
                     (0, StageVariant::Full) => true,
                     (1, StageVariant::Full) => false,
@@ -1694,6 +1711,21 @@ mod tests {
             ],
             "attempt order/rollback flags"
         );
+        // The lite pass of stage 1 is carried into every later attempt, so
+        // a later ticket's verifier keeps grading stage 1 at the variant
+        // the model actually passed (finding: a lite stage-5 pass used to
+        // make ticket 6 unwinnable).
+        let prof = vec![(1u32, vec!["inner_join".to_string()])];
+        let carried = passed_lite.into_inner();
+        assert_eq!(carried[0], vec![], "nothing lite before the pass");
+        assert_eq!(carried[1], vec![], "the full attempt carries nothing");
+        assert_eq!(
+            carried[2],
+            vec![],
+            "the lite attempt itself carries nothing"
+        );
+        assert_eq!(carried[3], prof, "the stage-2 attempt keeps stage 1 lite");
+        assert_eq!(carried[4], prof, "the stage-4 attempt keeps stage 1 lite");
         // Records: 0 full pass, 1 full fail + 1 lite pass, 2 failed,
         // 3 skipped, 4 full pass.
         let by_id: Vec<(u32, &str, bool, f64)> = rollup

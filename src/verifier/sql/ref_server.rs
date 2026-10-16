@@ -175,7 +175,28 @@ def encode_cell(v):
 def answer(conn, sql):
     cur = conn.cursor()
     before = conn.total_changes
-    cur.execute(translate_ddl(sql))
+    # SQLite changed here between 3.45 and 3.46 (the grader's bundled
+    # version): outside an explicit transaction a failed statement is
+    # rolled back whole, but inside one the rows a multi-row VALUES already
+    # inserted stay until the transaction ends. The host's 3.45 keeps them
+    # in both cases, so an autocommit savepoint emulates the grader.
+    guard = None
+    if (not conn.in_transaction
+            and re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.I)):
+        guard = "sdb_stmt"
+        conn.execute("SAVEPOINT sdb_stmt")
+    try:
+        cur.execute(translate_ddl(sql))
+    except Exception:
+        if guard:
+            try:
+                conn.execute("ROLLBACK TO %s" % guard)
+                conn.execute("RELEASE %s" % guard)
+            except Exception:
+                pass
+        raise
+    if guard:
+        conn.execute("RELEASE %s" % guard)
     # ALTER TABLE on a STRICT table runs a nested check query and so has a
     # description; it is still DDL (same rule as the Rust oracle).
     if cur.description is not None and not re.match(r"\s*ALTER\b", sql, re.I):
@@ -246,6 +267,13 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
     srv.listen(128)
+    # One long-lived connection: SQLite checkpoints and *deletes* the WAL
+    # file when the last connection closes, and the crash ladder needs a
+    # log that survives between harness connections so it can tear its
+    # tail. The keeper holds the database open without any transaction.
+    keeper = sqlite3.connect(db_path, isolation_level=None)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("PRAGMA synchronous=FULL")
     print("sdb-sql reference listening on %d (db %s)" % (port, db_path), flush=True)
     while True:
         conn, _ = srv.accept()
@@ -365,6 +393,130 @@ mod tests {
         guard
     }
 
+    /// The suite's 20/20 bar does not cover the ladder and the transaction
+    /// checks (the pipeline runs those itself). Run them 20 times against
+    /// one host process too, with a smaller bulk table: the point is
+    /// flakiness, not size — the Docker live proofs use the real 50k.
+    #[test]
+    fn reference_passes_the_crash_and_txn_checks_twenty_times() {
+        use super::super::crash;
+        use super::super::driver::wait_until_answering;
+        use super::super::txn;
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let t = Duration::from_secs(10);
+        for rep in 0..20u32 {
+            let out = {
+                let mut kill = || {
+                    proc.kill();
+                    Ok(())
+                };
+                crash::ack_kill(&addr, t, &format!("r{rep}_a"), 20, &mut kill).expect("ack_kill")
+            };
+            let acked = out.acked;
+            proc.restart().unwrap();
+            wait_until_answering(&addr, t).expect("answers after a SIGKILL");
+            if out.completed {
+                crash::check_acked_rows(&addr, t, &format!("r{rep}_a"), acked + 1)
+                    .expect("answered in-flight row survived");
+            } else {
+                crash::check_acked_prefix(&addr, t, &format!("r{rep}_a"), acked, 1)
+                    .expect("acked prefix");
+            }
+
+            {
+                let mut kill = || {
+                    proc.kill();
+                    Ok(())
+                };
+                crash::bulk_update_and_kill(&addr, t, &format!("r{rep}_b"), 2_000, 500, &mut kill)
+                    .expect("bulk update");
+            }
+            proc.restart().unwrap();
+            wait_until_answering(&addr, t).expect("answers after the killed update");
+            crash::check_uniform(&addr, t, &format!("r{rep}_b"), 2_000).expect("uniform");
+
+            let before = crash::snapshot_files(&proc.data).expect("stamps");
+            crash::append_row(&addr, t, &format!("r{rep}_a"), acked + 1).expect("victim");
+            proc.kill();
+            let victim = crash::changed_file(&proc.data, &before)
+                .expect("changed")
+                .expect("the victim commit wrote something");
+            let cut = crash::torn_tail(&victim, 256).expect("torn tail");
+            assert!(cut > 0, "rep {rep}: nothing to tear");
+            proc.restart().unwrap();
+            wait_until_answering(&addr, t).expect("answers after a torn tail");
+            crash::check_acked_prefix(&addr, t, &format!("r{rep}_a"), acked, 2)
+                .expect("after a torn tail");
+
+            txn::isolation(&addr, t, &format!("r{rep}_iso")).expect("isolation");
+            {
+                // Two callbacks share the one process.
+                let proc = std::cell::RefCell::new(&mut proc);
+                let mut kill = || {
+                    proc.borrow_mut().kill();
+                    Ok(())
+                };
+                let mut restart = || {
+                    proc.borrow_mut().restart()?;
+                    wait_until_answering(&addr, t)
+                };
+                txn::kill_with_open_transaction(
+                    &addr,
+                    t,
+                    &format!("r{rep}_txn"),
+                    &mut kill,
+                    &mut restart,
+                )
+                .expect("kill with a transaction open");
+            }
+        }
+    }
+
+    /// The grader's bundled SQLite (3.46) rolls a failed multi-row INSERT
+    /// back whole in autocommit, but keeps the rows it inserted before the
+    /// failure inside an explicit transaction. The reference runs on the
+    /// host's older SQLite (3.45), so it emulates the autocommit case.
+    #[test]
+    fn reference_multi_row_type_failure_matches_the_grader() {
+        use super::super::client::TcpCandidate;
+        use super::super::run::Candidate;
+        use super::super::wire::Response;
+        let port = free_port();
+        let proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let mut c = TcpCandidate::connect(&addr, Duration::from_secs(10)).unwrap();
+        c.exec("CREATE TABLE quirk (a INTEGER, b INTEGER)").unwrap();
+        match c
+            .exec("INSERT INTO quirk VALUES (1, 1), ('zz', 2)")
+            .unwrap()
+        {
+            Response::Err { .. } => {}
+            other => panic!("expected a type error, got {other:?}"),
+        }
+        match c.exec("SELECT * FROM quirk").unwrap() {
+            Response::Rows { rows, .. } => {
+                assert!(rows.is_empty(), "autocommit kept partial rows: {rows:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+        c.exec("BEGIN").unwrap();
+        assert!(matches!(
+            c.exec("INSERT INTO quirk VALUES (2, 2), ('zz', 3)")
+                .unwrap(),
+            Response::Err { .. }
+        ));
+        match c.exec("SELECT * FROM quirk").unwrap() {
+            Response::Rows { rows, .. } => {
+                assert_eq!(rows.len(), 1, "inside a transaction: {rows:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+        c.exec("ROLLBACK").unwrap();
+        drop(proc);
+    }
+
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
     /// against the reference, through stage 6 (transaction scripts). All
     /// runs share one server process, so this also proves stage scripts
@@ -411,18 +563,26 @@ mod tests {
         let addr = format!("127.0.0.1:{port}");
         let t = Duration::from_secs(10);
 
-        // (a) Acked rows survive a SIGKILL; unacked ones may not exist.
-        let acked = {
+        // (a) Acked rows survive a SIGKILL; only the one statement that was
+        // still in flight when the kill landed may be missing.
+        let out = {
             let mut kill = || {
                 proc.kill();
                 Ok(())
             };
             crash::ack_kill(&addr, t, "crash_acked", 40, &mut kill).expect("ack_kill")
         };
+        let acked = out.acked;
         assert_eq!(acked, 40);
         proc.restart().unwrap();
         wait_until_answering(&addr, t).expect("answers after the SIGKILL");
-        crash::check_acked_rows(&addr, t, "crash_acked", acked).expect("acked rows survived");
+        if out.completed {
+            crash::check_acked_rows(&addr, t, "crash_acked", acked + 1)
+                .expect("the answered in-flight row survived");
+        } else {
+            crash::check_acked_prefix(&addr, t, "crash_acked", acked, 1)
+                .expect("acked rows survived");
+        }
 
         // (b) A bulk UPDATE killed mid-flight is all or nothing.
         {
@@ -437,21 +597,26 @@ mod tests {
         wait_until_answering(&addr, t).expect("answers after the killed update");
         crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("all-or-nothing");
 
-        // (c) A torn tail (a partial trailing record): the newest statement
-        // may be lost, every older committed row must survive.
-        crash::append_row(&addr, t, "crash_acked", acked).expect("victim row");
-        let cut = crash::torn_tail(&proc.data, 256).expect("torn tail");
+        // (c) A torn tail (a partial trailing record): kill first, cut the
+        // file the victim commit touched, and require every older row.
+        let before = crash::snapshot_files(&proc.data).expect("store stamps");
+        crash::append_row(&addr, t, "crash_acked", acked + 1).expect("victim row");
+        proc.kill();
+        let victim = crash::changed_file(&proc.data, &before)
+            .expect("changed file")
+            .expect("the victim commit wrote something");
+        let cut = crash::torn_tail(&victim, 256).expect("torn tail");
         assert!(cut > 0, "the store must have a newest file to tear");
         proc.restart().unwrap();
         wait_until_answering(&addr, t).expect("answers after a torn tail");
-        crash::check_acked_prefix(&addr, t, "crash_acked", acked, 1)
+        crash::check_acked_prefix(&addr, t, "crash_acked", acked, 2)
             .expect("data after a torn tail");
         crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("bulk after a torn tail");
 
         // (d) A second restart changes nothing.
         proc.restart().unwrap();
         wait_until_answering(&addr, t).expect("answers after two restarts");
-        crash::check_acked_prefix(&addr, t, "crash_acked", acked, 1).expect("double restart");
+        crash::check_acked_prefix(&addr, t, "crash_acked", acked, 2).expect("double restart");
         crash::check_uniform(&addr, t, "crash_bulk", 2_000).expect("double restart");
     }
 

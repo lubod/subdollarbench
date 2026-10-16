@@ -946,9 +946,10 @@ impl Generator {
         if self.profile.where_clause {
             menu.push(8);
         }
-        if self.profile.txn {
-            // Outside a transaction these are `ERR txn` (the generator never
-            // calls probe() with one open).
+        if self.profile.txn && !self.txn_open {
+            // Outside a transaction these are `ERR txn`. Inside one a bare
+            // COMMIT/ROLLBACK *succeeds* (it ends it), so it is not a
+            // statement-level probe there.
             menu.extend([11, 12]);
         }
         let which = *self.rng.pick(&menu);
@@ -1076,30 +1077,52 @@ impl Generator {
         self.stmt(sql, Kind::Txn, false)
     }
 
-    /// One statement of an open transaction: usually a DML body statement,
-    /// sometimes a committing close, rarely a nested `BEGIN` error probe
-    /// (the transaction keeps running, as SQLite does).
+    /// One statement of an open transaction: the same mixed workload as
+    /// outside it (SELECTs see the transaction's own writes), sometimes a
+    /// committing close, sometimes a statement-level error probe or a
+    /// nested `BEGIN` — both must leave the transaction running, as SQLite
+    /// does.
     fn inside_transaction(&mut self) -> Statement {
-        let roll = self.rng.below(100);
-        if roll < 25 {
-            self.close_transaction_now()
-        } else if roll < 30 {
-            let sql = self.kw("BEGIN");
-            self.stmt(sql, Kind::Probe, false)
-        } else {
-            match self.rng.below(3) {
-                0 => {
-                    let ti = self.pick_table();
-                    self.insert_into(ti)
-                }
-                1 if self.profile.update => self.update_stmt(),
-                2 if self.profile.delete => self.delete_stmt(),
-                _ => {
-                    let ti = self.pick_table();
-                    self.insert_into(ti)
-                }
-            }
+        let w_insert = 20u64;
+        let w_select = 30u64;
+        let w_update = if self.profile.update { 10 } else { 0 };
+        let w_delete = if self.profile.delete { 6 } else { 0 };
+        let w_close = 20u64;
+        let w_probe = 9u64;
+        let w_begin = 5u64;
+        let total = w_insert + w_select + w_update + w_delete + w_close + w_probe + w_begin;
+        let mut roll = self.rng.below(total);
+        if roll < w_close {
+            return self.close_transaction_now();
         }
+        roll -= w_close;
+        if roll < w_begin {
+            let sql = self.kw("BEGIN");
+            return self.stmt(sql, Kind::Probe, false);
+        }
+        roll -= w_begin;
+        if roll < w_probe {
+            return self.probe();
+        }
+        roll -= w_probe;
+        if roll < w_insert {
+            let ti = self.pick_table();
+            return self.insert_into(ti);
+        }
+        roll -= w_insert;
+        if roll < w_select {
+            return self.select_stmt();
+        }
+        roll -= w_select;
+        if roll < w_update {
+            return self.update_stmt();
+        }
+        roll -= w_update;
+        if roll < w_delete {
+            return self.delete_stmt();
+        }
+        let ti = self.pick_table();
+        self.insert_into(ti)
     }
 
     /// A statement that ends an open transaction (`COMMIT` mostly, sometimes
@@ -1423,6 +1446,47 @@ mod tests {
         assert!(
             scripts_with_txn * 4 >= total_scripts * 3,
             "only {scripts_with_txn}/{total_scripts} scripts ran a transaction"
+        );
+
+        // Inside transactions the workload is mixed, not DML-only: SELECTs
+        // must run (they see the transaction's own uncommitted writes) and
+        // a statement-level error must be able to happen without killing
+        // the transaction (a nested BEGIN, a missing column, a type
+        // mismatch).
+        let (mut tx_selects, mut tx_errors) = (0usize, 0usize);
+        for seed in 100..160u64 {
+            let s = build_script(seed, &p, 150);
+            let mut open = false;
+            for c in s.setup.iter().chain(&s.steps) {
+                let sql = c.stmt.sql.to_lowercase();
+                if c.stmt.kind == Kind::Txn && sql.contains("begin") {
+                    open = true;
+                    continue;
+                }
+                if !open {
+                    continue;
+                }
+                if c.stmt.kind == Kind::Txn && (sql.contains("commit") || sql.contains("rollback"))
+                {
+                    open = false;
+                    continue;
+                }
+                if sql.starts_with("select") {
+                    tx_selects += 1;
+                }
+                if matches!(c.expected, OracleOutcome::Error(_)) {
+                    tx_errors += 1;
+                }
+            }
+            assert!(!open, "seed {seed}: a script ended inside a transaction");
+        }
+        assert!(
+            tx_selects >= 20,
+            "no SELECTs inside transactions: {tx_selects}"
+        );
+        assert!(
+            tx_errors >= 5,
+            "no error-class statements inside transactions: {tx_errors}"
         );
     }
 

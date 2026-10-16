@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use colored::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use subdollarbench::campaign::{
@@ -263,6 +263,7 @@ pub async fn run(
                 budget_usd: attempt.budget_usd,
                 max_turns: attempt.max_turns,
                 lite_profile: attempt.lite_profile.clone(),
+                passed_lite: attempt.passed_lite.clone(),
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -320,22 +321,36 @@ struct StageJob {
     /// Feature flags of the lite variant (`LiteSpec.profile`), empty for a
     /// full attempt.
     lite_profile: Vec<String>,
+    /// Lite profile of earlier stages this ladder passed on a lite variant.
+    passed_lite: Vec<(u32, Vec<String>)>,
     rollback_first: bool,
 }
 
-/// Recursively copy `src` onto `dst` (created if needed).
-fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), &to)?;
-        }
-    }
+/// Copy a candidate-owned store tree: regular files and directories only.
+/// Symlinks are never followed (a link to a host file must not leak into a
+/// snapshot) and FIFOs/devices are skipped instead of blocking the copy.
+fn copy_store(src: &Path, dst: &Path) -> Result<()> {
+    subdollarbench::verifier::sql::crash::copy_tree(src, dst).map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
+}
+
+/// Every `sentinel-<stage>.json` directly under `dir`.
+fn sentinel_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| {
+                    let n = n.to_string_lossy();
+                    n.starts_with("sentinel-") && n.ends_with(".json")
+                })
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 async fn rollback_workspace(workdir: &Path, commit: &str) -> Result<()> {
@@ -399,14 +414,41 @@ async fn run_one_stage(
     if lc.spec.task == "sql" {
         let data = cdir.join("sql-data");
         let snap = cdir.join("sql-data.snap");
+        let sent_snap = cdir.join("sql-sentinels.snap");
         if job.rollback_first && snap.is_dir() {
             let _ = std::fs::remove_dir_all(&data);
-            copy_dir(&snap, &data).context("restore the sdb-sql store snapshot")?;
-            println!("  [ROLLBACK] sdb-sql store restored from its snapshot");
+            match copy_store(&snap, &data) {
+                Ok(()) => println!("  [ROLLBACK] sdb-sql store restored from its snapshot"),
+                Err(e) => println!("  [WARN] could not restore the sdb-sql store snapshot: {e}"),
+            }
+            // The sentinel chain describes the state this attempt is about
+            // to start from: restoring the store without it would leave
+            // later tickets checking reads against data the rollback
+            // removed.
+            for f in sentinel_files(cdir) {
+                let _ = std::fs::remove_file(&f);
+            }
+            for f in sentinel_files(&sent_snap) {
+                if let Some(name) = f.file_name() {
+                    let _ = std::fs::copy(&f, cdir.join(name));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&sent_snap);
         }
         if data.is_dir() {
             let _ = std::fs::remove_dir_all(&snap);
-            copy_dir(&data, &snap).context("snapshot the sdb-sql store")?;
+            if let Err(e) = copy_store(&data, &snap) {
+                // A store the harness cannot even copy costs the rollback
+                // protection, not the campaign: never abort here.
+                println!("  [WARN] could not snapshot the sdb-sql store: {e}");
+            }
+            let _ = std::fs::remove_dir_all(&sent_snap);
+            let _ = std::fs::create_dir_all(&sent_snap);
+            for f in sentinel_files(cdir) {
+                if let Some(name) = f.file_name() {
+                    let _ = std::fs::copy(&f, sent_snap.join(name));
+                }
+            }
         }
     }
     // sdb-sql: the harness-owned contract so far. The pipeline writes it
@@ -461,6 +503,7 @@ async fn run_one_stage(
             continuity: stage.id > 0,
             accepted_stages: stage.acceptance.stages_for(&lc.spec.task).to_vec(),
             lite_profile: job.lite_profile.clone(),
+            passed_lite: job.passed_lite.clone(),
             spec_md,
         }),
         baseline_rps,
@@ -878,6 +921,7 @@ mod tests {
             budget_usd: stage.budget_usd,
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
