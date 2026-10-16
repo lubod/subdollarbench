@@ -1427,6 +1427,29 @@ impl SandboxManager {
         )
     }
 
+    /// True when the image declares an ENTRYPOINT (its CMD is then
+    /// replaced by appended argv, which is the sdb-sql launch contract).
+    /// `null`/`[]` from `docker image inspect` mean CMD-only.
+    fn image_has_entrypoint(image: &str) -> bool {
+        let out = Command::new("docker")
+            .args([
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{json .Config.Entrypoint}}",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let body = String::from_utf8_lossy(&o.stdout);
+                let t = body.trim();
+                !(t.is_empty() || t == "null" || t == "[]")
+            }
+            _ => false,
+        }
+    }
+
     fn candidate_extras_args(extras: &CandidateRunExtras) -> Vec<String> {
         let mut out = Vec::new();
         for t in &extras.tmpfs {
@@ -1514,7 +1537,21 @@ impl SandboxManager {
                         port_udp.clone(),
                         image_tag.clone(),
                     ]);
-                    args.extend(extras.launch_args.iter().cloned());
+                    // `docker run <image> <args>` REPLACES the image's
+                    // CMD; only an ENTRYPOINT image receives them safely.
+                    // CMD-only images keep their own command and read
+                    // SDB_PORT / SDB_DATA_DIR instead (appending would exec
+                    // "--port" and die).
+                    if extras.launch_args.is_empty() {
+                        // nothing to pass
+                    } else if Self::image_has_entrypoint(&image_tag) {
+                        args.extend(extras.launch_args.iter().cloned());
+                    } else {
+                        info!(
+                            "candidate image {image_tag} uses CMD; launch args are not appended \
+                             (it must read SDB_PORT/SDB_DATA_DIR)"
+                        );
+                    }
                     let run_res = Command::new("docker").args(&args).output();
                     match run_res {
                         Ok(run_out) if run_out.status.success() => {}
@@ -2661,6 +2698,59 @@ mod tests {
         sm.cleanup();
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// `docker run <image> <args>` replaces CMD: launch args may only be
+    /// appended to ENTRYPOINT images. A CMD-only image keeps its command
+    /// (the regression would exec "--port" and the container would die).
+    #[test]
+    fn test_launch_args_respect_entrypoint_vs_cmd() {
+        use super::CandidateRunExtras;
+        let sm = SandboxManager::with_id("entrypoint-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("entrypoint-test"));
+        sm.cleanup();
+        let base = std::env::temp_dir().join(format!("test_entrypoint_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cmd_dir = base.join("cmd");
+        let entry_dir = base.join("entry");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::create_dir_all(&entry_dir).unwrap();
+        std::fs::write(
+            cmd_dir.join("Dockerfile"),
+            "FROM subdollar-sandbox\nCMD [\"sleep\", \"300\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            entry_dir.join("Dockerfile"),
+            "FROM subdollar-sandbox\nENTRYPOINT [\"sleep\"]\n",
+        )
+        .unwrap();
+        let extras = CandidateRunExtras {
+            launch_args: vec!["300".to_string()],
+            ..Default::default()
+        };
+        for (label, dir) in [("cmd", &cmd_dir), ("entry", &entry_dir)] {
+            assert!(
+                sm.start_candidate_in_docker_with(dir, free_port(), &extras)
+                    .is_ok(),
+                "{label}: launch failed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let name = sm.candidate_container_name();
+            let out = Command::new("docker")
+                .args(["inspect", &name, "--format", "{{.State.Running}}"])
+                .output()
+                .unwrap();
+            let running = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(
+                running,
+                "true",
+                "{label}: container must stay up (stderr {})",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        sm.cleanup();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

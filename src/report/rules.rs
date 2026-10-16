@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-16.7`: http stages 9/10 — a TCP accept after the 128MB-capped
+///   restart is not readiness (the pipeline now waits up to 20s for an
+///   actual HTTP answer before grading, as the pre-verification setup
+///   already did), and the hardening stage's health probes no longer reuse
+///   pooled keep-alive connections, which the candidate's own idle reclaim
+///   could close between probes. Timing only: a candidate that never serves
+///   still fails. The sdb-sql campaign also gained its real launch contract
+///   (`--port`/`--data`, a harness-owned data directory) and an
+///   embedded-SQL scanner that covers JVM/.NET/PHP and no longer flags
+///   inline prose; that task is not on the board yet.
 /// - `2026-10-15.6`: operator decisions — (1) the proxy prompts now note
 ///   that the container's `http_proxy`/`https_proxy` env vars make tools
 ///   like curl route through an egress proxy (raw sockets are unaffected;
@@ -405,7 +415,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-15.6";
+pub const RULES_VERSION: &str = "2026-10-16.7";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

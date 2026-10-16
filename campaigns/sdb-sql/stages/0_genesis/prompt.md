@@ -11,14 +11,16 @@ hard-coded, and the schema is different every run.
 
 ## Launch contract (fixed for the whole campaign)
 
-- **Entrypoint**: an executable `./start.sh`, or a `Dockerfile` whose
-  entrypoint accepts the same flags. The harness may start it with **no
-  arguments**, so the defaults must work.
-- **Port**: listen on **`0.0.0.0:5480`** by default; honor `--port <p>`
-  (and `-p <p>`) when passed.
+- **Entrypoint**: an executable `./start.sh`, or a `Dockerfile`.
+  `./start.sh` is started as `./start.sh --port <p> --data <dir>`, and the
+  defaults must still work when nothing is passed. A `Dockerfile` receives
+  those arguments **only when it declares an `ENTRYPOINT`**; a `CMD`-only
+  image is started with no arguments, so read `SDB_PORT` / `SDB_DATA_DIR`
+  (both are exported) or fall back to the defaults.
+- **Port**: listen on **`0.0.0.0:5480`** by default; honor `--port <p>`.
 - **Data directory**: `./data` by default; honor `--data <dir>`. The
-  harness restarts the server in the same workspace between tickets, so
-  anything you persist must survive.
+  harness owns that directory and restarts the server on it between
+  tickets, so anything you persist must survive.
 - The server runs in a minimal Linux sandbox with python3, node, go and
   rust available. Foreground process, one listener.
 

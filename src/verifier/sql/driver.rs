@@ -95,6 +95,27 @@ pub struct StageOutcome {
     pub detail: String,
 }
 
+/// Wait until the candidate answers one probe statement at the protocol
+/// level. A published port is not readiness: docker's proxy accepts while
+/// the server inside is still starting (or just after it died), and the
+/// first real write then gets a reset — the exact failure that made the
+/// shrink reset untrusted (review finding 2). Any parseable answer counts,
+/// including an error class: stage-0 candidates may reject `SELECT 1`.
+pub fn wait_until_answering(addr: &str, timeout: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(mut c) = TcpCandidate::connect(addr, Duration::from_secs(2)) {
+            if c.exec("SELECT 1").is_ok() {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("candidate at {addr} never answered a probe"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// A candidate whose connection could not be established: every statement
 /// is a transport error, so `shrink` treats trials as "does not reproduce"
 /// instead of aborting the minimizer when the server dies mid-shrink.
@@ -164,6 +185,13 @@ pub fn run_stage(
         repro: None,
         detail,
     };
+    if let Err(e) = wait_until_answering(addr, timeout * 3) {
+        return Ok(failed(
+            0,
+            MismatchKind::Protocol,
+            format!("server unreachable ({e})"),
+        ));
+    }
     let mut cand = match TcpCandidate::connect(addr, timeout) {
         Ok(c) => c,
         Err(e) => {

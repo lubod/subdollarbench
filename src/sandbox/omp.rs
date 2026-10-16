@@ -1977,6 +1977,7 @@ Content-Length: 0
                 r#"ANTI-CHEAT REQUIREMENT (STRICT):
 - Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources. This includes test and helper files: the scanner checks every file.
 - Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed.
+- Launch: `./start.sh --port <p> --data <dir>` must work (defaults: 5480, ./data). A Dockerfile gets those arguments only with `ENTRYPOINT`; a `CMD`-only image must read `SDB_PORT`/`SDB_DATA_DIR` or use the defaults.
 - Ground truth: a reference server speaking the same protocol runs at host `ref-sql`, port 5480 (`printf 'SELECT 1\n' | nc ref-sql 5480`). Compare against it while developing; it is not reachable while you are graded.
 - `SPEC.md` in the workspace holds the full contract so far (harness-owned, rewritten every ticket)."#,
             ),

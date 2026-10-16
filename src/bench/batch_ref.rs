@@ -802,20 +802,12 @@ mod tests {
         if let Some(http) = read_ref_history(&TaskType::Http) {
             assert_ne!(http.samples, h.samples);
         }
-        // The recorded median has to be able to flag a reading that sits
-        // INSIDE the historical envelope - the 5.9x movement happened entirely
-        // inside it, so an envelope test returns 0.0 for exactly the values
-        // this reader exists to catch.
+        // Ordering sanity only. The envelope's *width* depends on which host
+        // recorded the samples, and "both ends are >20% off the median" broke
+        // whenever the accumulated history clustered (this host, 2026-10-16:
+        // dev_max 0.13). The deviation semantics are pinned synthetically by
+        // `test_ref_history_deviation_is_distance_from_median`.
         assert_eq!(h.deviation(h.median), 0.0);
-        assert!(
-            h.deviation(h.max) > 0.2 && h.deviation(h.min) > 0.2,
-            "both ends of the recorded range must deviate from its median"
-        );
-        let midpoint = h.min + (h.max - h.min) / 2.0;
-        assert!(
-            h.deviation(midpoint) > 0.0,
-            "a value inside the envelope must still register if it is off-median"
-        );
     }
 
     // These history tests mutate SDB_REF_HISTORY (process-global) and must

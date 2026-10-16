@@ -25,19 +25,21 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
     ]
 }
 
-/// One raw `GET /` probe against a candidate: true when any HTTP response
-/// arrives (any status). A socket that accepts but never answers (a slow
-/// startup self-test, a wedged accept loop) does not count as ready.
-/// The harness-owned data directory for an sdb-sql candidate: a sibling of
-/// the workspace (the campaign directory for campaign runs), so it survives
-/// candidate restarts and stage rollbacks, and the harness can snapshot or
-/// upgrade-check it (docs/PROPOSAL-sdb-sql.md, "Upgrade check").
-fn sql_data_dir(workdir: &Path) -> PathBuf {
-    workdir
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(workdir)
-        .join("sql-data")
+/// The harness-owned data directory for an sdb-sql candidate. In a
+/// campaign it is a sibling of the workspace (the campaign directory), so
+/// it survives candidate restarts and stage rollbacks and the harness can
+/// snapshot or upgrade-check it (docs/PROPOSAL-sdb-sql.md, "Upgrade
+/// check"). A single-shot run gets a process-private temp directory, so
+/// unrelated runs sharing a parent never share one store.
+fn sql_data_dir(workdir: &Path, campaign: bool) -> PathBuf {
+    if campaign {
+        return workdir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(workdir)
+            .join("sql-data");
+    }
+    std::env::temp_dir().join(format!("sdb-sql-data-{}", std::process::id()))
 }
 
 /// `wait_for_port` only proves the socket accepts; under a loaded host the
@@ -51,6 +53,9 @@ async fn wait_until_serving(port: u16, timeout_secs: u64) {
     }
 }
 
+/// One raw `GET /` probe against a candidate: true when any HTTP response
+/// arrives (any status). A socket that accepts but never answers (a slow
+/// startup self-test, a wedged accept loop) does not count as ready.
 fn candidate_serves_http(port: u16) -> bool {
     use std::io::{Read, Write};
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -1067,10 +1072,11 @@ impl BenchmarkPipeline {
                     ports: extra_ports,
                     ..Default::default()
                 };
+                let mut sql_data: Option<PathBuf> = None;
                 if matches!(task, TaskType::Sql) {
                     // The launch contract becomes real: the harness passes
                     // --port/--data and owns the data directory.
-                    let data = sql_data_dir(workdir);
+                    let data = sql_data_dir(workdir, accepted.is_some());
                     if let Err(e) = fs::create_dir_all(&data) {
                         logger.log(&format!(
                             "[INFRA] could not create the sdb-sql data dir {}: {e}",
@@ -1091,6 +1097,13 @@ impl BenchmarkPipeline {
                             "--data".to_string(),
                             "/sdb-data".to_string(),
                         ];
+                        // Also visible to CMD-only Dockerfile images, which
+                        // are started without argv.
+                        extras.env.push(("SDB_PORT".to_string(), port.to_string()));
+                        extras
+                            .env
+                            .push(("SDB_DATA_DIR".to_string(), "/sdb-data".to_string()));
+                        sql_data = Some(data);
                     }
                 }
                 if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
@@ -2617,28 +2630,43 @@ impl BenchmarkPipeline {
                             let seed =
                                 crate::verifier::sql::driver::stage_seed(verifier_seed, stage);
                             // The shrink replay needs a fresh database: a
-                            // contract-following candidate keeps its store in
-                            // <workspace>/data, so wipe that and restart the
-                            // container (in-memory state included).
+                            // The shrink replay needs a *fresh* database, but
+                            // the real one is the candidate's persistent
+                            // store (ticket 4+) and must survive. Every trial
+                            // binds a throwaway directory instead; once the
+                            // stage is graded the candidate goes back on the
+                            // real store for the repair round and diagnostics.
                             let instance_id = sandbox.instance_id.clone();
+                            let restore_instance = sandbox.instance_id.clone();
                             let reset_dir = workdir.to_path_buf();
-                            let reset_extras = extras.clone();
+                            let real_extras = extras.clone();
+                            let restore_extras = extras.clone();
+                            let shrink_root = sql_data
+                                .as_ref()
+                                .map(|d| d.with_file_name("sql-shrink"))
+                                .unwrap_or_else(|| std::env::temp_dir().join("sdb-sql-shrink"));
+                            let mut trial = 0u32;
                             let mut reset = move || -> Result<(), String> {
+                                trial += 1;
+                                let dir = shrink_root.join(format!("t{trial}"));
+                                let _ = std::fs::remove_dir_all(&dir);
+                                std::fs::create_dir_all(&dir)
+                                    .map_err(|e| format!("shrink dir {}: {e}", dir.display()))?;
+                                let mut trial_extras = real_extras.clone();
+                                trial_extras.binds =
+                                    vec![(dir.display().to_string(), "/sdb-data".to_string())];
+                                // Non-conforming candidates may still use the
+                                // workspace store; wipe it too.
                                 let _ = std::fs::remove_dir_all(reset_dir.join("data"));
                                 let sb =
                                     crate::sandbox::docker::SandboxManager::with_id(&instance_id);
                                 sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
-                                sb.start_candidate_in_docker_with(&reset_dir, port, &reset_extras)
+                                sb.start_candidate_in_docker_with(&reset_dir, port, &trial_extras)
                                     .map_err(|e| format!("start: {e}"))?;
-                                let deadline =
-                                    std::time::Instant::now() + std::time::Duration::from_secs(20);
-                                while std::time::Instant::now() < deadline {
-                                    if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                                        return Ok(());
-                                    }
-                                    std::thread::sleep(std::time::Duration::from_millis(200));
-                                }
-                                Err("candidate did not reopen its port after a reset".to_string())
+                                crate::verifier::sql::driver::wait_until_answering(
+                                    &format!("127.0.0.1:{port}"),
+                                    std::time::Duration::from_secs(20),
+                                )
                             };
                             let run = tokio::task::spawn_blocking(move || {
                                 crate::verifier::sql::driver::run_stage(
@@ -2651,6 +2679,38 @@ impl BenchmarkPipeline {
                                 )
                             })
                             .await;
+                            if matches!(&run, Ok(Ok(out)) if !out.passed) {
+                                // The shrink left the candidate on a
+                                // throwaway bind; put it back on the real
+                                // store.
+                                let sb = crate::sandbox::docker::SandboxManager::with_id(
+                                    &restore_instance,
+                                );
+                                let _ = sb.stop_candidate();
+                                match sb.start_candidate_in_docker_with(
+                                    workdir,
+                                    port,
+                                    &restore_extras,
+                                ) {
+                                    Ok(()) => {
+                                        let deadline = std::time::Instant::now()
+                                            + std::time::Duration::from_secs(20);
+                                        while std::time::Instant::now() < deadline
+                                            && std::net::TcpStream::connect(("127.0.0.1", port))
+                                                .is_err()
+                                        {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                200,
+                                            ))
+                                            .await;
+                                        }
+                                    }
+                                    Err(e) => logger.log(&format!(
+                                        "[SETUP] Warning: could not restore the candidate after \
+                                         the shrink: {e}"
+                                    )),
+                                }
+                            }
                             let st = match run {
                                 Ok(Ok(out)) if out.passed => {
                                     logger.log(&format!(
@@ -2665,6 +2725,16 @@ impl BenchmarkPipeline {
                                     }
                                 }
                                 Ok(Ok(out)) => {
+                                    if let Some(repro) = &out.repro {
+                                        // Visible in the run log: a repro
+                                        // with 0 trials is the unminimized
+                                        // prefix (the reset was not trusted).
+                                        logger.log(&format!(
+                                            "    repro: {} statements ({} shrink trials)",
+                                            repro.statements.len(),
+                                            repro.checks
+                                        ));
+                                    }
                                     let mut err = out.detail.clone();
                                     if let Some(repro) = &out.repro {
                                         err.push('\n');
@@ -5686,6 +5756,74 @@ def main():
 main()
 "#;
 
+    /// A deliberately broken sdb-sql candidate (review finding 2's fixture):
+    /// it speaks the protocol and answers every statement `OK 0`, so the
+    /// first setup INSERT mismatches on its affected count. Every start
+    /// drops a marker file into its `--data` directory, so a test can tell
+    /// which store each instance wrote to. Stateless, so a replay from a
+    /// fresh store reproduces the failure exactly.
+    const ALWAYS_OK_SQL_PY: &str = r#"import os, socket, sys, threading, time
+
+
+def serve(conn):
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    f = conn.makefile("rwb")
+    try:
+        for _ in f:
+            f.write(b"OK 0\n")
+            f.flush()
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def main():
+    port = 5480
+    data = "/tmp"
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--port" and i + 1 < len(args):
+            port = int(args[i + 1])
+        elif a == "--data" and i + 1 < len(args):
+            data = args[i + 1]
+    try:
+        os.makedirs(data, exist_ok=True)
+        with open(os.path.join(data, "marker-%d.txt" % time.time_ns()), "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", port))
+    srv.listen(64)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=serve, args=(conn,), daemon=True).start()
+
+
+main()
+"#;
+
+    /// Write the always-OK sdb-sql mock into `dir`, listening on `port`.
+    fn write_always_ok_sql_mock(dir: &Path, port: u16) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("server.py"), ALWAYS_OK_SQL_PY).unwrap();
+        let start = format!(
+            "#!/bin/bash\nif [ $# -eq 0 ]; then set -- --port {port} --data /tmp; fi\n\
+             exec python3 -u /workspace/server.py \"$@\"\n"
+        );
+        fs::write(dir.join("start.sh"), start).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir.join("start.sh"), fs::Permissions::from_mode(0o755));
+        }
+    }
+
     /// Write the sdb-http reference server into `dir`, listening on `port`.
     fn write_http_mock(dir: &Path, port: u16) {
         fs::create_dir_all(dir).unwrap();
@@ -6847,6 +6985,90 @@ main()
             "# SPEC.md fixture\n"
         );
         cleanup_covtest_network("sqllive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Review finding 2: a failing sql stage must still get a *minimized*
+    /// repro. The shrink trials run on throwaway stores, so the replay is
+    /// trustworthy (with the old reset, the candidate's persistent store
+    /// answered `exists` and every report fell back to the unminimized
+    /// prefix). The real store must survive with only the initial and the
+    /// restore starts.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_shrink_uses_a_throwaway_store() {
+        let worker = 94u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlshrink");
+        let workdir = dir.join("workspace");
+        write_always_ok_sql_mock(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql shrink fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlshrink");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 0,
+            prompt_path,
+            continuity: true,
+            accepted_stages: vec![0],
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the shrink fixture run must complete");
+        assert!(
+            !out.infra_error,
+            "unexpected infra error: {:?}",
+            out.manifest.status
+        );
+        assert!(
+            logger.contains("Stage 0: Genesis: tables, insert, select -> FAIL"),
+            "the always-OK candidate must fail stage 0"
+        );
+
+        // The shrink logged its work: trials > 0 and a small repro.
+        let line = logger
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|l| l.contains("shrink trials"))
+            .cloned()
+            .expect("the sql arm must log the repro size");
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let statements: usize = toks[1].parse().expect("statement count");
+        let trials: usize = toks[3]
+            .trim_start_matches('(')
+            .parse()
+            .expect("trial count");
+        assert!(trials > 0, "the shrink never ran: {line}");
+        assert!(statements <= 8, "repro not minimized: {line}");
+
+        // Throwaway stores live next to the real one; each trial wrote its
+        // own marker, and the real store saw only the initial start plus the
+        // post-shrink restore.
+        let shrink = dir.join("sql-shrink");
+        assert!(shrink.join("t1").is_dir(), "trial 1 store missing");
+        let markers = |p: &Path| -> usize {
+            fs::read_dir(p)
+                .map(|it| {
+                    it.flatten()
+                        .filter(|e| e.file_name().to_string_lossy().starts_with("marker-"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let real = dir.join("sql-data");
+        let real_markers = markers(&real);
+        assert!(
+            (1..=2).contains(&real_markers),
+            "the real store was written by {real_markers} starts (expected initial + restore)"
+        );
+        assert_eq!(markers(&shrink.join("t1")), 1, "trial 1 marker");
+
+        cleanup_covtest_network("sqlshrink");
         let _ = fs::remove_dir_all(&dir);
     }
 

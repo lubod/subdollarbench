@@ -1376,11 +1376,16 @@ impl ComplianceChecker {
         let literals = Self::string_literals(&code);
         if ext == "py" {
             for m in SQL_PY_MODULES {
-                // Anchored to an import statement: a docstring or an inline
-                // comment may name a module without being one.
-                // `__import__('sqlite3')` stays covered by the exact
+                // A real import statement, wherever it starts: line start,
+                // after `;`/`:` (`x = 1; import m`, `if True: import m`),
+                // or later in a comma list (`import os, m`). A docstring or
+                // an inline comment may name a module without being one,
+                // and `__import__('sqlite3')` stays covered by the exact
                 // literal check below.
-                let pat = format!(r"(?m)^\s*(?:import|from)\s+{}\b", ::regex::escape(m));
+                let esc = ::regex::escape(m);
+                let pat = format!(
+                    r"(?m)(?:^|[;:])\s*(?:from\s+{esc}\b|import\s+(?:[A-Za-z_][\w.]*(?:\s+as\s+\w+)?\s*,\s*)*{esc}\b)"
+                );
                 if ::regex::Regex::new(&pat).unwrap().is_match(&code) {
                     return report(violations, format!("imports {m}"));
                 }
@@ -2235,6 +2240,15 @@ RUN apk add redis
                 b"module.exports = 1\n",
             ),
             ("server", b"\x7fELF\x00\x01junkSQLite format 3\0more"),
+            // Import forms that are not at the start of a line.
+            ("multi.py", b"import os, sqlite3\n"),
+            ("comma.py", b"import os,sqlite3 as s\n"),
+            (
+                "inline_try.py",
+                b"try: import sqlite3\nexcept ImportError:\n    pass\n",
+            ),
+            ("semi.py", b"x = 1; import sqlite3\n"),
+            ("inline_if.py", b"if True: import sqlite3\n"),
             // Ecosystems whose bundles the raw byte scan cannot see.
             ("srv.php", b"<?php\n$db = new PDO('sqlite:data.db');\n"),
             ("Db.cs", b"using Microsoft.Data.Sqlite;\nclass X {}\n"),

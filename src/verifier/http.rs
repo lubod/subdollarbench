@@ -29,6 +29,11 @@ impl HttpVerifier {
     fn fresh_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .pool_max_idle_per_host(0)
+            // The same bound as the shared client: these probes run while a
+            // stalled slow-loris connection is held, which is exactly when a
+            // broken candidate accepts and never answers. Without a timeout
+            // the verification would hang forever.
+            .timeout(Duration::from_secs(3))
             .build()
             .map_err(|e| format!("client: {e}"))
     }
@@ -1487,6 +1492,32 @@ mod tests {
             }
         });
         port
+    }
+
+    /// `fresh_client` must bound its requests: the stage-10 probes run
+    /// while a stalled slow-loris connection is held, so a candidate that
+    /// accepts but never answers has to time out, not hang the run.
+    #[tokio::test]
+    async fn test_fresh_client_bounds_a_silent_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept and never answer, keeping the socket open.
+            let _sock = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let started = std::time::Instant::now();
+        let resp = HttpVerifier::fresh_client()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await;
+        assert!(resp.is_err(), "a silent server must not answer");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the probe must time out in ~3s, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
