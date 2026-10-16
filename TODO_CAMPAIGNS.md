@@ -546,6 +546,14 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
     as affected, INSERT into a missing table answering `OK 2`, then a
     parser/semantics error), and the repro drift it shows is the old
     shrink bug.
+  - cell 5 (2026-10-16, tickets 0-4 ladder, after ticket 4 landed): FAIL
+    ticket 0 — the candidate answered `ERR arity` where the reference
+    answers `ERR syntax` for the truncated-statement probe
+    (`INSERT INTO t VALUES (1,`). Genuine candidate bug; the report is a
+    1-statement minimal repro after 10 shrink trials, i.e. the
+    throwaway-store shrink and the readiness probe work in a live cell.
+    $0.0134, 40 turns, reached none. (A first attempt aborted in the cell
+    script's stale-binary guard — a stale *marker*, fixed; no spend.)
   - cell 3 (fix validation, rebuilt release): **reached ticket 0** — s0
     PASS 1/1 ($0.0099, 28 turns), s1 FAIL 0/2 ($0.0086, 30 turns), total
     $0.0185. The candidate persists its store in `./data`, so both fixes
