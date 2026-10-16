@@ -585,6 +585,24 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
 - [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.
+  **M7b landed (2026-10-16)**: the sdb-sql launch contract is real —
+  `CandidateRunExtras.launch_args` appends `--port <p> --data /sdb-data`
+  to the candidate's argv (start.sh sandbox path and custom Dockerfile
+  both), and the pipeline binds a harness-owned data directory
+  (`<campaign dir>/sql-data`, a sibling of the workspace so it survives
+  restarts and stage rollbacks) to `/sdb-data`; the reference's
+  `start.sh` honors `"$@"` with baked defaults. A live sandbox test
+  proves the argv and the writable mount reach the container, and the sql
+  eval-only live proof runs on the new path. **Remaining for ticket 4**:
+  the sentinel dataset (write on a passing stage >= 4, re-verify before
+  the next ticket; `upgrade` regression class) and the data-dir
+  snapshot/restore alongside the workspace rollback, then the
+  persistence scenario, ticket prompt and cell.
+  **M7 plan**: 4 persistence (restart keeps data + upgrade check),
+  5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
+  double restart — reuse the sdb-kv machinery), 6 transactions
+  (BEGIN/COMMIT/ROLLBACK profile + txn probes + isolation/kill
+  scenarios), then tier 3+ in ladder order.
   Oracle gaps found by a 2026-10-16 probe of later-stage SQL (fix when
   the generator starts emitting them): unmapped messages "no such index",
   "duplicate column name", "there is already another table or index with

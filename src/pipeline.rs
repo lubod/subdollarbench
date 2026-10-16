@@ -28,6 +28,18 @@ fn worker_upstream_ports(worker: u8) -> [u16; 3] {
 /// One raw `GET /` probe against a candidate: true when any HTTP response
 /// arrives (any status). A socket that accepts but never answers (a slow
 /// startup self-test, a wedged accept loop) does not count as ready.
+/// The harness-owned data directory for an sdb-sql candidate: a sibling of
+/// the workspace (the campaign directory for campaign runs), so it survives
+/// candidate restarts and stage rollbacks, and the harness can snapshot or
+/// upgrade-check it (docs/PROPOSAL-sdb-sql.md, "Upgrade check").
+fn sql_data_dir(workdir: &Path) -> PathBuf {
+    workdir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(workdir)
+        .join("sql-data")
+}
+
 fn candidate_serves_http(port: u16) -> bool {
     use std::io::{Read, Write};
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -1040,10 +1052,36 @@ impl BenchmarkPipeline {
                         extra_ports.push(crate::web::server::worker_port(6395, worker));
                     }
                 }
-                let extras = crate::sandbox::docker::CandidateRunExtras {
+                let mut extras = crate::sandbox::docker::CandidateRunExtras {
                     ports: extra_ports,
                     ..Default::default()
                 };
+                if matches!(task, TaskType::Sql) {
+                    // The launch contract becomes real: the harness passes
+                    // --port/--data and owns the data directory.
+                    let data = sql_data_dir(workdir);
+                    if let Err(e) = fs::create_dir_all(&data) {
+                        logger.log(&format!(
+                            "[INFRA] could not create the sdb-sql data dir {}: {e}",
+                            data.display()
+                        ));
+                        infra_error = true;
+                    } else {
+                        logger.log(&format!(
+                            "[SETUP] sdb-sql data dir {} -> /sdb-data",
+                            data.display()
+                        ));
+                        extras
+                            .binds
+                            .push((data.display().to_string(), "/sdb-data".to_string()));
+                        extras.launch_args = vec![
+                            "--port".to_string(),
+                            port.to_string(),
+                            "--data".to_string(),
+                            "/sdb-data".to_string(),
+                        ];
+                    }
+                }
                 if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
                     if crate::sandbox::docker::SandboxManager::is_model_packaging_error(
                         &e.to_string(),
@@ -2571,17 +2609,14 @@ impl BenchmarkPipeline {
                             // container (in-memory state included).
                             let instance_id = sandbox.instance_id.clone();
                             let reset_dir = workdir.to_path_buf();
+                            let reset_extras = extras.clone();
                             let mut reset = move || -> Result<(), String> {
                                 let _ = std::fs::remove_dir_all(reset_dir.join("data"));
                                 let sb =
                                     crate::sandbox::docker::SandboxManager::with_id(&instance_id);
                                 sb.stop_candidate().map_err(|e| format!("stop: {e}"))?;
-                                sb.start_candidate_in_docker_with(
-                                    &reset_dir,
-                                    port,
-                                    &crate::sandbox::docker::CandidateRunExtras::default(),
-                                )
-                                .map_err(|e| format!("start: {e}"))?;
+                                sb.start_candidate_in_docker_with(&reset_dir, port, &reset_extras)
+                                    .map_err(|e| format!("start: {e}"))?;
                                 let deadline =
                                     std::time::Instant::now() + std::time::Duration::from_secs(20);
                                 while std::time::Instant::now() < deadline {

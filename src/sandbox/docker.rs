@@ -126,6 +126,11 @@ pub struct CandidateRunExtras {
     /// SDB_DATA_DIR=/data) so the harness can measure the on-disk footprint
     /// directly and keep it across candidate restarts.
     pub binds: Vec<(String, String)>,
+    /// Extra argv appended to the candidate's launch command (the sdb-sql
+    /// launch contract: `--port <p> --data <dir>`; the harness owns the
+    /// data directory so restarts and the upgrade check see the same
+    /// store). Values are harness-generated and shell-safe.
+    pub launch_args: Vec<String>,
 }
 
 impl Default for SandboxManager {
@@ -1417,6 +1422,7 @@ impl SandboxManager {
                 ports: Vec::new(),
                 memory: None,
                 binds: Vec::new(),
+                launch_args: Vec::new(),
             },
         )
     }
@@ -1508,6 +1514,7 @@ impl SandboxManager {
                         port_udp.clone(),
                         image_tag.clone(),
                     ]);
+                    args.extend(extras.launch_args.iter().cloned());
                     let run_res = Command::new("docker").args(&args).output();
                     match run_res {
                         Ok(run_out) if run_out.status.success() => {}
@@ -1543,7 +1550,22 @@ impl SandboxManager {
 
         // CASE B: Standard Sandbox with start.sh
         let mount_arg = format!("{}:/workspace", canonical_workdir.display());
-        let launch_cmd = "cd /workspace && if [ -f start.sh ]; then chmod +x start.sh && exec ./start.sh; elif [ -f main.py ]; then exec python3 main.py; elif [ -f app.py ]; then exec python3 app.py; elif [ -f server.py ]; then exec python3 server.py; elif [ -f main.go ]; then exec go run main.go; elif [ -f Cargo.toml ]; then exec cargo run --release; elif [ -f main.js ]; then exec node main.js; elif [ -f index.js ]; then exec node index.js; else chmod +x start.sh 2>/dev/null && exec ./start.sh; fi";
+        let extra = if extras.launch_args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", extras.launch_args.join(" "))
+        };
+        let launch_cmd = format!(
+            "cd /workspace && if [ -f start.sh ]; then chmod +x start.sh && exec ./start.sh{extra}; \
+             elif [ -f main.py ]; then exec python3 main.py{extra}; \
+             elif [ -f app.py ]; then exec python3 app.py{extra}; \
+             elif [ -f server.py ]; then exec python3 server.py{extra}; \
+             elif [ -f main.go ]; then exec go run main.go{extra}; \
+             elif [ -f Cargo.toml ]; then exec cargo run --release{extra}; \
+             elif [ -f main.js ]; then exec node main.js{extra}; \
+             elif [ -f index.js ]; then exec node index.js{extra}; \
+             else chmod +x start.sh 2>/dev/null && exec ./start.sh{extra}; fi"
+        );
         let mut args: Vec<String> = vec![
             "run".into(),
             "-d".into(),
@@ -1568,7 +1590,7 @@ impl SandboxManager {
             "subdollar-sandbox".into(),
             "/bin/bash".into(),
             "-c".into(),
-            launch_cmd.into(),
+            launch_cmd,
         ]);
         let out = Command::new("docker").args(&args).output()?;
         if !out.status.success() {
@@ -2326,6 +2348,7 @@ mod tests {
             ports: vec![8090],
             memory: Some("64m".to_string()),
             binds: vec![("/tmp/host-data".to_string(), "/data".to_string())],
+            launch_args: Vec::new(),
         };
         let args = SandboxManager::candidate_extras_args(&extras);
         assert!(args.windows(2).any(|w| w == ["--tmpfs", "/data:size=8m"]));
@@ -2576,6 +2599,68 @@ mod tests {
             stdout.contains("ROWS 1") && stdout.contains("END 1"),
             "expected a ROWS frame via ref-sql, got: {stdout:?}"
         );
+    }
+
+    /// The sdb-sql launch contract: `--port`/`--data` reach the candidate's
+    /// argv and the harness-owned bind mount is writable from the container
+    /// (proved by reading the file back on the host).
+    #[test]
+    fn test_candidate_launch_args_and_data_bind() {
+        use super::CandidateRunExtras;
+        let sm = SandboxManager::with_id("launch-args-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("launch-args-test"));
+        sm.cleanup();
+        let work = std::env::temp_dir().join(format!("test_launch_args_{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("test_launch_data_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            work.join("start.sh"),
+            "#!/bin/bash\nprintf '%s\\n' \"$@\" > /workspace/args.txt\n\
+             echo hi > /sdb-data/marker\nexec sleep 300\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                work.join("start.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+        let extras = CandidateRunExtras {
+            binds: vec![(data.display().to_string(), "/sdb-data".to_string())],
+            launch_args: vec![
+                "--port".to_string(),
+                "5480".to_string(),
+                "--data".to_string(),
+                "/sdb-data".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&work, free_port(), &extras)
+            .is_ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && !(work.join("args.txt").exists() && data.join("marker").exists())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let args = std::fs::read_to_string(work.join("args.txt")).unwrap_or_default();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec!["--port", "5480", "--data", "/sdb-data"],
+            "the candidate must receive the launch contract args"
+        );
+        assert!(
+            data.join("marker").exists(),
+            "the harness-owned data dir must be writable from the container"
+        );
+        sm.cleanup();
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -3189,6 +3274,7 @@ mod live_docker_cov_tests {
             ports: Vec::new(),
             memory: None,
             binds: Vec::new(),
+            launch_args: Vec::new(),
         };
         assert!(sm
             .start_candidate_in_docker_with(&ws, port, &extras)
@@ -3264,6 +3350,7 @@ mod live_docker_cov_tests {
             ],
             ports: vec![extra_port],
             memory: Some("128m".to_string()),
+            launch_args: Vec::new(),
             binds: vec![(
                 bind_host.to_string_lossy().to_string(),
                 "/bound".to_string(),

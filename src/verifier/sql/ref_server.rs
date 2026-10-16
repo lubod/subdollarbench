@@ -255,8 +255,12 @@ main()
 pub fn write_reference(dir: &std::path::Path, port: u16) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("sql_server.py"), SQL_REF_SERVER_PY)?;
+    // The launch contract passes `--port`/`--data`; a bare `./start.sh`
+    // falls back to the baked defaults.
     let start = format!(
-        "#!/bin/bash\nexec python3 -u /workspace/sql_server.py --port {port} --data /tmp\n"
+        "#!/bin/bash\n\
+         if [ $# -eq 0 ]; then set -- --port {port} --data /tmp; fi\n\
+         exec python3 -u /workspace/sql_server.py \"$@\"\n"
     );
     std::fs::write(dir.join("start.sh"), start)?;
     #[cfg(unix)]
