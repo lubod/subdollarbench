@@ -593,7 +593,7 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
     so the regression is real. Ticket 1's rewrite also dropped `--port`
     (always 5480); the harness never passes it, so that contract clause
     is unchecked.
-- [ ] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
+- [~] M7. Tiers 2-7 in order (storage/crash/transactions -> relational ->
   engine -> ops -> resilience -> distributed), each with a live proof and
   the 20/20 flake bar.
   **M7b landed (2026-10-16)**: the sdb-sql launch contract is real —
