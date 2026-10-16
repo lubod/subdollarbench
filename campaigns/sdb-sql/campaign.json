@@ -4,6 +4,7 @@
   "task": "sql",
   "title": "sdb-sql: a SQL database, verified differentially",
   "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition ships tickets 0-9 (query core, storage and transactions, relational features); later tickets land as their verifiers do.",
+  "ladder": "continue",
   "stages": [
     {
       "id": 0,

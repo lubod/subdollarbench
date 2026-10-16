@@ -1685,6 +1685,21 @@ mod tests {
         LoadedCampaign { spec, root: dir }
     }
 
+    /// The shipped sdb-sql campaign must run in `continue` mode: the
+    /// proposal's ladder continues after a failure (and `needs` decides
+    /// what is blocked). It shipped without the field once, silently
+    /// pass-stopping at the first red ticket and hiding the round-3
+    /// finding-1 fix from every cell.
+    #[test]
+    fn shipped_sdb_sql_campaign_continues() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        assert_eq!(
+            lc.spec.ladder,
+            LadderMode::Continue,
+            "campaigns/sdb-sql/campaign.json must declare \"ladder\": \"continue\""
+        );
+    }
+
     /// A stage that failed (full and lite) or was skipped contributes
     /// nothing to the later tickets' suites: the declared acceptance list
     /// is intersected with the passed stages. One failure must not sink
