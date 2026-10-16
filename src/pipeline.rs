@@ -3082,9 +3082,14 @@ impl BenchmarkPipeline {
                 }
             }
             TaskType::Sql => {
-                logger.log(
-                    "[SETUP] sdb-sql reference is verifier-side only (no ref-sql container yet).",
-                );
+                if let Err(e) = sandbox
+                    .start_reference_sql(crate::web::server::worker_port(5481, config.worker))
+                {
+                    logger.log(&format!(
+                        "[SETUP] Warning: reference SQL unavailable: {}",
+                        e
+                    ));
+                }
             }
             TaskType::Wal | TaskType::Pubsub | TaskType::Binproto | TaskType::Queue => {
                 logger.log("[SETUP] No reference container for this task (verifier-timed).");
