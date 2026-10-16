@@ -751,7 +751,30 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   3000-seed soak runs stage-9 scripts. A generator bounds bug the soak
   found (an auto-assigned key can exceed the column's recorded bound) is
   fixed. Gates: 20/20 through stage 9 (200 stage runs), a stage-9 live
-  proof (10/10), RULES 2026-10-16.10. **Next**: ticket 10 (subqueries).
+  proof (10/10), RULES 2026-10-16.10.
+  **Round-3 review fixes landed (REVIEW.md, 2026-10-16)**: the acceptance
+  list is now the *passed* stages plus the current ticket (a failed or
+  skipped stage contributes nothing; before, one storage failure sank
+  every later ticket), and the campaign/ladder carry the passed set
+  (`StageAttempt.passed`); the crash probes keep the socket open *through*
+  the kill and read it afterwards, so "the statement completed first" is
+  measured after the kill (an answered statement is owed: `check_uniform`
+  requires the new value then), and the (b) retry doubles to 400k rows;
+  a clean stop delivers SIGTERM to every process in the container
+  (`docker exec ... kill -s TERM -- -1`, since `docker stop` reaches PID 1
+  and a non-`exec` start.sh would swallow it); statement atomicity is
+  graded identically in autocommit and inside a transaction (the oracle
+  wraps every statement in a savepoint and the reference does the same, so
+  no SQLite statement-journal version quirk leaks into grading); aggregate
+  and join queries gate `ORDER BY`/`LIMIT` on ticket 2 (tickets 7/8 need
+  only 1, and without ticket 2 their frames compare as multisets); after a
+  torn tail every earlier acked victim is owed (`check_keys`: only the
+  newest may vanish); only `ERR busy` from the isolation peer is
+  retryable; the crash ladder always restores the real store and drops the
+  scratch copy; test temp dirs are guard-cleaned (TestDir/RefProc) and
+  stale reference staging dirs are swept; RULES 2026-10-16.11. **Next**:
+  a cell through tickets 0-9 (at least one failed ticket in the middle),
+  then ticket 10 (subqueries).
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

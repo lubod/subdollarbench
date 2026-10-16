@@ -13,7 +13,9 @@ every row written before the stop must still answer exactly the same.
   a directory that a previous ticket already wrote. Keep all state there;
   never wipe it on startup, and never keep the only copy in memory or in a
   scratch directory the harness does not own.
-- A clean stop is `SIGTERM`; you have a few seconds to flush. (Ticket 5 adds
+- A clean stop is `SIGTERM` (delivered to every process in the
+  container, so a non-`exec` `start.sh` still reaches the server); you
+  have a few seconds to flush. (Ticket 5 adds
   `SIGKILL`, torn writes and double restarts.)
 
 ## What the acceptance suite does
