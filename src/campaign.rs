@@ -288,13 +288,18 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
             );
         }
         let mut seen = HashSet::new();
+        // The sdb-sql ladder is 0-based (ticket 0 is genesis and the
+        // differential stages carry the same ids); every other suite
+        // numbers its stages from 1.
+        let min_stage = if spec.task == "sql" { 0 } else { 1 };
         for id in a {
-            if !(1..=max_stage).contains(id) {
+            if !(min_stage..=max_stage).contains(id) {
                 bail!(
-                    "campaign '{}': stage {} acceptance id {} out of range 1..={} (task '{}')",
+                    "campaign '{}': stage {} acceptance id {} out of range {}..={} (task '{}')",
                     spec.name,
                     s.id,
                     id,
+                    min_stage,
                     max_stage,
                     spec.task
                 );
@@ -1256,6 +1261,23 @@ mod tests {
         lc.spec.stages[2].acceptance.queue_stages = vec![1, 10];
         let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
         assert!(err.contains("out of range 1..=9"), "{err}");
+    }
+
+    #[test]
+    fn test_sql_acceptance_validation() {
+        let mut lc = fixture_campaign();
+        lc.spec.task = "sql".into();
+        // Empty sql acceptance fails closed.
+        assert!(validate_spec(&lc.spec, &lc.root).is_err());
+        // The sdb-sql ladder is 0-based: id 0 is valid.
+        lc.spec.stages[0].acceptance.sql_stages = vec![0];
+        lc.spec.stages[1].acceptance.sql_stages = vec![0, 1];
+        lc.spec.stages[2].acceptance.sql_stages = vec![0, 1, 2, 3];
+        assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+        // The ladder tops out at stage 21 (tickets 0-20).
+        lc.spec.stages[2].acceptance.sql_stages = vec![0, 22];
+        let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
+        assert!(err.contains("out of range 0..=21"), "{err}");
     }
 
     #[test]
