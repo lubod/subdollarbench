@@ -76,13 +76,15 @@ pub enum Fault {
     GroupByNullsSeparate,
     /// `LEFT JOIN` behaves like `INNER JOIN` (unmatched left rows vanish).
     LeftJoinIsInner,
+    /// `IN` skips NULL in the list instead of yielding NULL.
+    InNullIgnored,
     /// No constraint is enforced: NOT NULL/UNIQUE stay, no FK check, no
     /// INTEGER PRIMARY KEY auto-assignment.
     ConstraintIgnored,
 }
 
 impl Fault {
-    pub const ALL: [Fault; 30] = [
+    pub const ALL: [Fault; 31] = [
         Fault::NullsLast,
         Fault::UpdateSeesNewValues,
         Fault::FloorDivision,
@@ -113,6 +115,7 @@ impl Fault {
         Fault::GroupByNullsSeparate,
         Fault::LeftJoinIsInner,
         Fault::ConstraintIgnored,
+        Fault::InNullIgnored,
     ];
 }
 
@@ -255,6 +258,20 @@ enum Expr {
     Func(String, Vec<Expr>),
     /// An aggregate call: select-list items and `HAVING` only.
     Agg(Agg),
+    /// A scalar subquery: `(SELECT ...)`, one column, one row.
+    SubScalar(Box<Sel>),
+    /// `EXISTS (SELECT ...)`.
+    Exists(Box<Sel>),
+    /// `lhs IN (SELECT ...)`.
+    InSub {
+        lhs: Box<Expr>,
+        sel: Box<Sel>,
+    },
+    /// `lhs IN (literal, ...)`.
+    InList {
+        lhs: Box<Expr>,
+        list: Vec<Expr>,
+    },
 }
 
 /// One aggregate call. `COUNT` is the only one that takes `*`; the others
@@ -269,7 +286,7 @@ enum Agg {
 }
 
 /// A select-list item: a plain expression or an aggregate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Item {
     Expr(Expr),
     Agg(Agg),
@@ -281,7 +298,7 @@ enum Ty {
     Text,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 enum Items {
     Star,
     List(Vec<(Item, Option<String>)>),
@@ -300,7 +317,7 @@ struct Cons {
 
 /// One `FROM` item: the table and the name its references may be
 /// qualified by (the alias, or the table name when there is none).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct FromItem {
     table: String,
     qualifier: String,
@@ -316,7 +333,7 @@ enum JoinKind {
     Left,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 struct Sel {
     distinct: bool,
     items: Items,
@@ -334,6 +351,8 @@ struct Sel {
 #[derive(Debug)]
 enum Stmt {
     Create(String, Vec<(String, Ty)>, Vec<Cons>),
+    /// `INSERT INTO t [(cols)] SELECT ...`.
+    InsertSelect(String, Option<Vec<String>>, Box<Sel>),
     Insert(String, Option<Vec<String>>, Vec<Vec<Expr>>),
     Select(Sel),
     Update(String, Vec<(String, Expr)>, Option<Expr>),
@@ -547,6 +566,10 @@ impl P {
             }
             self.expect_sym(")")?;
             cols = Some(v);
+        }
+        if self.eat_kw("SELECT") {
+            let sel = self.select()?;
+            return Ok(Stmt::InsertSelect(table, cols, Box::new(sel)));
         }
         self.expect_kw("VALUES")?;
         let mut rows = Vec::new();
@@ -817,10 +840,44 @@ impl P {
     fn eq_level(&mut self) -> R<Expr> {
         let mut l = self.rel_level()?;
         loop {
-            let op = if self.eat_sym("=") {
-                Op::Eq
+            // `[NOT] IN (subquery | list)` is a comparison-level operator.
+            let neg_in = self.is_kw("NOT")
+                && matches!(self.toks.get(self.pos + 1), Some(Tok::Id(w)) if w.eq_ignore_ascii_case("IN"));
+            if neg_in || self.is_kw("IN") {
+                self.pos += if neg_in { 2 } else { 1 };
+                self.expect_sym("(")?;
+                let item = if matches!(self.peek(), Some(Tok::Id(w)) if w.eq_ignore_ascii_case("SELECT"))
+                {
+                    self.pos += 1;
+                    let sel = self.select()?;
+                    Expr::InSub {
+                        lhs: Box::new(l.clone()),
+                        sel: Box::new(sel),
+                    }
+                } else {
+                    let mut list = vec![self.expr()?];
+                    while self.eat_sym(",") {
+                        list.push(self.expr()?);
+                    }
+                    Expr::InList {
+                        lhs: Box::new(l.clone()),
+                        list,
+                    }
+                };
+                self.expect_sym(")")?;
+                l = if neg_in {
+                    Expr::Not(Box::new(item))
+                } else {
+                    item
+                };
+                continue;
+            }
+            if self.eat_sym("=") {
+                let r = self.rel_level()?;
+                l = Expr::Bin(Op::Eq, Box::new(l), Box::new(r));
             } else if self.eat_sym("<>") || self.eat_sym("!=") {
-                Op::Ne
+                let r = self.rel_level()?;
+                l = Expr::Bin(Op::Ne, Box::new(l), Box::new(r));
             } else if self.is_kw("IS") {
                 self.pos += 1;
                 let neg = self.eat_kw("NOT");
@@ -829,12 +886,9 @@ impl P {
                 }
                 self.pos += 1;
                 l = Expr::IsNull(Box::new(l), neg);
-                continue;
             } else {
                 return Ok(l);
-            };
-            let r = self.rel_level()?;
-            l = Expr::Bin(op, Box::new(l), Box::new(r));
+            }
         }
     }
 
@@ -921,6 +975,13 @@ impl P {
             }
             Some(Tok::Sym("(")) => {
                 self.pos += 1;
+                // `(SELECT ...)` is a scalar subquery.
+                if matches!(self.peek(), Some(Tok::Id(w)) if w.eq_ignore_ascii_case("SELECT")) {
+                    self.pos += 1;
+                    let sel = self.select()?;
+                    self.expect_sym(")")?;
+                    return Ok(Expr::SubScalar(Box::new(sel)));
+                }
                 let e = self.expr()?;
                 self.expect_sym(")")?;
                 Ok(e)
@@ -932,6 +993,16 @@ impl P {
                 }
                 if RESERVED.iter().any(|r| s.eq_ignore_ascii_case(r)) {
                     return Err(ErrClass::Syntax);
+                }
+                if s.eq_ignore_ascii_case("EXISTS")
+                    && matches!(self.toks.get(self.pos + 1), Some(Tok::Sym("(")))
+                {
+                    self.pos += 1;
+                    self.expect_sym("(")?;
+                    self.expect_kw("SELECT")?;
+                    let sel = self.select()?;
+                    self.expect_sym(")")?;
+                    return Ok(Expr::Exists(Box::new(sel)));
                 }
                 let agg_name = matches!(
                     s.to_ascii_lowercase().as_str(),
@@ -1070,223 +1141,462 @@ impl Names {
 struct Ctx<'a> {
     fault: Option<Fault>,
     names: &'a Names,
-    row: &'a [V],
+    /// `None` while validating statically (before any row exists).
+    row: Option<&'a [V]>,
     /// The aggregates computed for the current group (empty outside an
     /// aggregate query).
     aggs: &'a [(Agg, V)],
+    /// The enclosing query's scope, for correlated references.
+    outer: Option<&'a Ctx<'a>>,
 }
 
-fn eval(e: &Expr, cx: &Ctx) -> R<V> {
-    let two = cx.fault == Some(Fault::TwoValuedLogic);
-    Ok(match e {
-        Expr::Lit(v) => v.clone(),
-        Expr::Col(name) => {
-            let i = cx.names.resolve(name)?;
-            cx.row.get(i).cloned().ok_or(ErrClass::NoColumn)?
+impl<'a> Ctx<'a> {
+    /// A column reference: this scope first, then the enclosing ones (a
+    /// correlated reference reads the *outer* row).
+    fn col(&self, name: &str) -> R<V> {
+        match self.names.resolve(name) {
+            Ok(i) => match self.row {
+                Some(r) => r.get(i).cloned().ok_or(ErrClass::NoColumn),
+                None => Ok(V::Null),
+            },
+            Err(ErrClass::NoColumn) => match self.outer {
+                Some(o) => o.col(name),
+                None => Err(ErrClass::NoColumn),
+            },
+            Err(e) => Err(e),
         }
-        Expr::Neg(x) => match eval(x, cx)? {
-            V::Null => V::Null,
-            V::Int(i) => V::Int(i.checked_neg().ok_or(ErrClass::Limit)?),
-            V::Text(_) => return Err(ErrClass::Type),
-        },
-        Expr::Not(x) => match eval(x, cx)? {
-            V::Null if !two => V::Null,
-            v => V::Int(i64::from(!truthy(&v))),
-        },
-        Expr::IsNull(x, neg) => {
-            let n = matches!(eval(x, cx)?, V::Null);
-            V::Int(i64::from(n != *neg))
-        }
-        Expr::Func(name, args) => func(name, args, cx)?,
-        Expr::Agg(a) => cx
-            .aggs
-            .iter()
-            .find(|(k, _)| k == a)
-            .map(|(_, v)| v.clone())
-            .ok_or(ErrClass::Syntax)?,
-        Expr::Bin(op, l, r) => {
-            let (a, b) = (eval(l, cx)?, eval(r, cx)?);
-            bin(*op, a, b, cx.fault)?
-        }
-    })
-}
+    }
 
-fn bin(op: Op, a: V, b: V, fault: Option<Fault>) -> R<V> {
-    let two = fault == Some(Fault::TwoValuedLogic);
-    match op {
-        Op::And => {
-            let (ta, tb) = (truthy(&a), truthy(&b));
-            if two {
-                return Ok(V::Int(i64::from(ta && tb)));
-            }
-            let false_a = !matches!(a, V::Null) && !ta;
-            let false_b = !matches!(b, V::Null) && !tb;
-            Ok(if false_a || false_b {
-                V::Int(0)
-            } else if matches!(a, V::Null) || matches!(b, V::Null) {
-                V::Null
-            } else {
-                V::Int(1)
-            })
-        }
-        Op::Or => {
-            let (ta, tb) = (truthy(&a), truthy(&b));
-            if two {
-                return Ok(V::Int(i64::from(ta || tb)));
-            }
-            Ok(if ta || tb {
-                V::Int(1)
-            } else if matches!(a, V::Null) || matches!(b, V::Null) {
-                V::Null
-            } else {
-                V::Int(0)
-            })
-        }
-        Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
-            if matches!(a, V::Null) || matches!(b, V::Null) {
-                return Ok(if two { V::Int(0) } else { V::Null });
-            }
-            let o = cmp_vals(&a, &b);
-            let t = match op {
-                Op::Eq => o == Ordering::Equal,
-                Op::Ne => o != Ordering::Equal,
-                Op::Lt => o == Ordering::Less,
-                Op::Le => o != Ordering::Greater,
-                Op::Gt => o == Ordering::Greater,
-                _ => o != Ordering::Less,
-            };
-            Ok(V::Int(i64::from(t)))
-        }
-        Op::Cat => {
-            let empty = fault == Some(Fault::ConcatNullAsEmpty);
-            if !empty && (matches!(a, V::Null) || matches!(b, V::Null)) {
-                return Ok(V::Null);
-            }
-            Ok(V::Text(format!("{}{}", as_text(&a), as_text(&b))))
-        }
-        Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
-            if matches!(a, V::Null) || matches!(b, V::Null) {
-                return Ok(V::Null);
-            }
-            let (V::Int(x), V::Int(y)) = (a, b) else {
-                return Err(ErrClass::Type);
-            };
-            let lim = || ErrClass::Limit;
-            Ok(match op {
-                Op::Add => V::Int(x.checked_add(y).ok_or_else(lim)?),
-                Op::Sub => V::Int(x.checked_sub(y).ok_or_else(lim)?),
-                Op::Mul => V::Int(x.checked_mul(y).ok_or_else(lim)?),
-                Op::Div => {
-                    if y == 0 {
-                        return zero(fault);
-                    }
-                    let q = x.checked_div(y).ok_or_else(lim)?;
-                    let floor =
-                        fault == Some(Fault::FloorDivision) && x % y != 0 && ((x < 0) != (y < 0));
-                    V::Int(if floor { q - 1 } else { q })
-                }
-                _ => {
-                    if y == 0 {
-                        return zero(fault);
-                    }
-                    let r = x.checked_rem(y).ok_or_else(lim)?;
-                    let flip = fault == Some(Fault::ModuloSign) && r != 0 && ((r < 0) != (y < 0));
-                    V::Int(if flip { r + y } else { r })
-                }
-            })
+    /// Resolve without a row (static validation).
+    fn check(&self, name: &str) -> R<()> {
+        match self.names.resolve(name) {
+            Ok(_) => Ok(()),
+            Err(ErrClass::NoColumn) => match self.outer {
+                Some(o) => o.check(name),
+                None => Err(ErrClass::NoColumn),
+            },
+            Err(e) => Err(e),
         }
     }
 }
 
-fn zero(fault: Option<Fault>) -> R<V> {
-    if fault == Some(Fault::DivideByZeroErrors) {
-        Err(ErrClass::Limit)
+/// `x IN (values)`: true on a match; NULL when `x` is NULL or the list
+/// holds NULL and nothing matched; false otherwise.
+fn membership(v: V, vals: &[V], fault: Option<Fault>) -> V {
+    // `x IN (empty set)` is FALSE, even for a NULL `x` (the SQL rule).
+    if vals.is_empty() {
+        return V::Int(0);
+    }
+    if matches!(v, V::Null) {
+        return V::Null;
+    }
+    let mut saw_null = false;
+    for x in vals {
+        if matches!(x, V::Null) {
+            saw_null = true;
+            continue;
+        }
+        if cmp_vals(&v, x) == Ordering::Equal {
+            return V::Int(1);
+        }
+    }
+    if saw_null && fault != Some(Fault::InNullIgnored) {
+        V::Null
     } else {
-        Ok(V::Null)
+        V::Int(0)
     }
 }
 
-fn func(name: &str, args: &[Expr], cx: &Ctx) -> R<V> {
-    let want = match name {
-        "length" | "upper" | "lower" | "abs" => 1,
-        "coalesce" => 2,
-        _ => return Err(ErrClass::NoColumn),
-    };
-    if args.len() < want || (name != "coalesce" && args.len() != want) {
-        return Err(ErrClass::Arity);
+impl Toy {
+    /// Evaluate an expression. A method (not a free function): subqueries
+    /// run against the tables.
+    fn eval(&self, e: &Expr, cx: &Ctx) -> R<V> {
+        let two = cx.fault == Some(Fault::TwoValuedLogic);
+        Ok(match e {
+            Expr::Lit(v) => v.clone(),
+            Expr::Col(name) => cx.col(name)?,
+            Expr::Neg(x) => match self.eval(x, cx)? {
+                V::Null => V::Null,
+                V::Int(i) => V::Int(i.checked_neg().ok_or(ErrClass::Limit)?),
+                V::Text(_) => return Err(ErrClass::Type),
+            },
+            Expr::Not(x) => match self.eval(x, cx)? {
+                V::Null if !two => V::Null,
+                v => V::Int(i64::from(!truthy(&v))),
+            },
+            Expr::IsNull(x, neg) => {
+                let n = matches!(self.eval(x, cx)?, V::Null);
+                V::Int(i64::from(n != *neg))
+            }
+            Expr::Func(name, args) => self.func(name, args, cx)?,
+            Expr::Agg(a) => cx
+                .aggs
+                .iter()
+                .find(|(k, _)| k == a)
+                .map(|(_, v)| v.clone())
+                .ok_or(ErrClass::Syntax)?,
+            Expr::SubScalar(sel) => self.subquery_value(sel, cx)?,
+            Expr::Exists(sel) => {
+                let (_, rows) = self.run_sel(sel, Some(cx))?;
+                V::Int(i64::from(!rows.is_empty()))
+            }
+            Expr::InSub { lhs, sel } => {
+                let v = self.eval(lhs, cx)?;
+                let (headers, rows) = self.run_sel(sel, Some(cx))?;
+                if headers.len() != 1 {
+                    return Err(ErrClass::Arity);
+                }
+                let vals: Vec<V> = rows
+                    .into_iter()
+                    .filter_map(|r| r.into_iter().next())
+                    .collect();
+                membership(v, &vals, cx.fault)
+            }
+            Expr::InList { lhs, list } => {
+                let v = self.eval(lhs, cx)?;
+                let vals: Vec<V> = list.iter().map(|e| self.eval(e, cx)).collect::<R<_>>()?;
+                membership(v, &vals, cx.fault)
+            }
+            Expr::Bin(op, l, r) => {
+                let (a, b) = (self.eval(l, cx)?, self.eval(r, cx)?);
+                Self::bin(*op, a, b, cx.fault)?
+            }
+        })
     }
-    let vals: Vec<V> = args.iter().map(|a| eval(a, cx)).collect::<R<_>>()?;
-    Ok(match name {
-        "length" => match &vals[0] {
-            V::Null => V::Null,
-            v => {
-                let n = as_text(v).chars().count() as i64;
-                V::Int(if cx.fault == Some(Fault::LengthOffByOne) {
-                    n + 1
+
+    fn bin(op: Op, a: V, b: V, fault: Option<Fault>) -> R<V> {
+        let two = fault == Some(Fault::TwoValuedLogic);
+        match op {
+            Op::And => {
+                let (ta, tb) = (truthy(&a), truthy(&b));
+                if two {
+                    return Ok(V::Int(i64::from(ta && tb)));
+                }
+                let false_a = !matches!(a, V::Null) && !ta;
+                let false_b = !matches!(b, V::Null) && !tb;
+                Ok(if false_a || false_b {
+                    V::Int(0)
+                } else if matches!(a, V::Null) || matches!(b, V::Null) {
+                    V::Null
                 } else {
-                    n
+                    V::Int(1)
                 })
             }
-        },
-        "upper" => match &vals[0] {
-            V::Null => V::Null,
-            v => V::Text(as_text(v).to_ascii_uppercase()),
-        },
-        "lower" => match &vals[0] {
-            V::Null => V::Null,
-            v => V::Text(as_text(v).to_ascii_lowercase()),
-        },
-        "abs" => match &vals[0] {
-            V::Null => V::Null,
-            V::Int(i) => V::Int(i.checked_abs().ok_or(ErrClass::Limit)?),
-            V::Text(_) => return Err(ErrClass::Type),
-        },
-        _ => {
-            if cx.fault == Some(Fault::CoalesceFirstOnly) {
-                vals[0].clone()
-            } else {
-                vals.iter()
-                    .find(|v| !matches!(v, V::Null))
-                    .cloned()
-                    .unwrap_or(V::Null)
+            Op::Or => {
+                let (ta, tb) = (truthy(&a), truthy(&b));
+                if two {
+                    return Ok(V::Int(i64::from(ta || tb)));
+                }
+                Ok(if ta || tb {
+                    V::Int(1)
+                } else if matches!(a, V::Null) || matches!(b, V::Null) {
+                    V::Null
+                } else {
+                    V::Int(0)
+                })
+            }
+            Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
+                if matches!(a, V::Null) || matches!(b, V::Null) {
+                    return Ok(if two { V::Int(0) } else { V::Null });
+                }
+                let o = cmp_vals(&a, &b);
+                let t = match op {
+                    Op::Eq => o == Ordering::Equal,
+                    Op::Ne => o != Ordering::Equal,
+                    Op::Lt => o == Ordering::Less,
+                    Op::Le => o != Ordering::Greater,
+                    Op::Gt => o == Ordering::Greater,
+                    _ => o != Ordering::Less,
+                };
+                Ok(V::Int(i64::from(t)))
+            }
+            Op::Cat => {
+                let empty = fault == Some(Fault::ConcatNullAsEmpty);
+                if !empty && (matches!(a, V::Null) || matches!(b, V::Null)) {
+                    return Ok(V::Null);
+                }
+                Ok(V::Text(format!("{}{}", as_text(&a), as_text(&b))))
+            }
+            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
+                if matches!(a, V::Null) || matches!(b, V::Null) {
+                    return Ok(V::Null);
+                }
+                let (V::Int(x), V::Int(y)) = (a, b) else {
+                    return Err(ErrClass::Type);
+                };
+                let lim = || ErrClass::Limit;
+                Ok(match op {
+                    Op::Add => V::Int(x.checked_add(y).ok_or_else(lim)?),
+                    Op::Sub => V::Int(x.checked_sub(y).ok_or_else(lim)?),
+                    Op::Mul => V::Int(x.checked_mul(y).ok_or_else(lim)?),
+                    Op::Div => {
+                        if y == 0 {
+                            return Self::zero(fault);
+                        }
+                        let q = x.checked_div(y).ok_or_else(lim)?;
+                        let floor = fault == Some(Fault::FloorDivision)
+                            && x % y != 0
+                            && ((x < 0) != (y < 0));
+                        V::Int(if floor { q - 1 } else { q })
+                    }
+                    _ => {
+                        if y == 0 {
+                            return Self::zero(fault);
+                        }
+                        let r = x.checked_rem(y).ok_or_else(lim)?;
+                        let flip =
+                            fault == Some(Fault::ModuloSign) && r != 0 && ((r < 0) != (y < 0));
+                        V::Int(if flip { r + y } else { r })
+                    }
+                })
             }
         }
-    })
-}
+    }
 
-/// Every column an expression names must exist (checked at "prepare" time,
-/// so a missing column errors even when the table is empty).
-fn check_cols(e: &Expr, names: &Names) -> R<()> {
-    match e {
-        Expr::Lit(_) => Ok(()),
-        Expr::Col(n) => names.resolve(n).map(|_| ()),
-        Expr::Neg(x) | Expr::Not(x) | Expr::IsNull(x, _) => check_cols(x, names),
-        Expr::Bin(_, l, r) => {
-            check_cols(l, names)?;
-            check_cols(r, names)
+    fn zero(fault: Option<Fault>) -> R<V> {
+        if fault == Some(Fault::DivideByZeroErrors) {
+            Err(ErrClass::Limit)
+        } else {
+            Ok(V::Null)
         }
-        Expr::Func(name, args) => {
-            if matches!(name.as_str(), "count" | "sum" | "min" | "max") {
-                // A parse context that does not allow aggregates (WHERE,
-                // GROUP BY, an insert, ...): SQLite rejects the statement.
-                return Err(ErrClass::Syntax);
-            }
-            if !matches!(
-                name.as_str(),
-                "length" | "upper" | "lower" | "abs" | "coalesce"
-            ) {
-                return Err(ErrClass::NoColumn);
-            }
-            args.iter().try_for_each(|a| check_cols(a, names))
+    }
+
+    fn func(&self, name: &str, args: &[Expr], cx: &Ctx) -> R<V> {
+        let want = match name {
+            "length" | "upper" | "lower" | "abs" => 1,
+            "coalesce" => 2,
+            _ => return Err(ErrClass::NoColumn),
+        };
+        if args.len() < want || (name != "coalesce" && args.len() != want) {
+            return Err(ErrClass::Arity);
         }
-        Expr::Agg(a) => match a {
+        let vals: Vec<V> = args.iter().map(|a| self.eval(a, cx)).collect::<R<_>>()?;
+        Ok(match name {
+            "length" => match &vals[0] {
+                V::Null => V::Null,
+                v => {
+                    let n = as_text(v).chars().count() as i64;
+                    V::Int(if cx.fault == Some(Fault::LengthOffByOne) {
+                        n + 1
+                    } else {
+                        n
+                    })
+                }
+            },
+            "upper" => match &vals[0] {
+                V::Null => V::Null,
+                v => V::Text(as_text(v).to_ascii_uppercase()),
+            },
+            "lower" => match &vals[0] {
+                V::Null => V::Null,
+                v => V::Text(as_text(v).to_ascii_lowercase()),
+            },
+            "abs" => match &vals[0] {
+                V::Null => V::Null,
+                V::Int(i) => V::Int(i.checked_abs().ok_or(ErrClass::Limit)?),
+                V::Text(_) => return Err(ErrClass::Type),
+            },
+            _ => {
+                if cx.fault == Some(Fault::CoalesceFirstOnly) {
+                    vals[0].clone()
+                } else {
+                    vals.iter()
+                        .find(|v| !matches!(v, V::Null))
+                        .cloned()
+                        .unwrap_or(V::Null)
+                }
+            }
+        })
+    }
+
+    /// Every column an expression names must exist (checked at "prepare" time,
+    /// so a missing column errors even when the table is empty).
+    fn check_cols(&self, e: &Expr, cx: &Ctx) -> R<()> {
+        match e {
+            Expr::Lit(_) => Ok(()),
+            Expr::Col(n) => cx.check(n),
+            Expr::Neg(x) | Expr::Not(x) | Expr::IsNull(x, _) => self.check_cols(x, cx),
+            Expr::Bin(_, l, r) => {
+                self.check_cols(l, cx)?;
+                self.check_cols(r, cx)
+            }
+            Expr::Func(name, args) => {
+                if matches!(name.as_str(), "count" | "sum" | "min" | "max") {
+                    // A parse context that does not allow aggregates (WHERE,
+                    // GROUP BY, an insert, ...): SQLite rejects the statement.
+                    return Err(ErrClass::Syntax);
+                }
+                if !matches!(
+                    name.as_str(),
+                    "length" | "upper" | "lower" | "abs" | "coalesce"
+                ) {
+                    return Err(ErrClass::NoColumn);
+                }
+                args.iter().try_for_each(|a| self.check_cols(a, cx))
+            }
+            Expr::Agg(a) => self.check_agg(a, cx),
+            Expr::SubScalar(sel) => {
+                self.validate_sel(sel, cx)?;
+                self.check_sub_arity(sel)
+            }
+            Expr::Exists(sel) => self.validate_sel(sel, cx),
+            Expr::InSub { lhs, sel } => {
+                self.check_cols(lhs, cx)?;
+                self.validate_sel(sel, cx)?;
+                self.check_sub_arity(sel)
+            }
+            Expr::InList { lhs, list } => {
+                self.check_cols(lhs, cx)?;
+                list.iter().try_for_each(|e| self.check_cols(e, cx))
+            }
+        }
+    }
+
+    /// Some aggregate's argument columns.
+    fn check_agg(&self, a: &Agg, cx: &Ctx) -> R<()> {
+        match a {
             Agg::CountStar => Ok(()),
-            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => check_cols(x, names),
-        },
+            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => self.check_cols(x, cx),
+        }
+    }
+
+    /// Static validation of a (sub)query: tables exist, every column
+    /// reference resolves in this query or an enclosing one, and the
+    /// select-list arity rules hold for a scalar or `IN` subquery.
+    fn validate_sel(&self, sel: &Sel, cx: &Ctx) -> R<()> {
+        let names = self.names_of(&sel.from)?;
+        let inner = Ctx {
+            fault: cx.fault,
+            names: &names,
+            row: None,
+            aggs: &[],
+            outer: Some(cx),
+        };
+        for it in &sel.from {
+            if let Some(on) = &it.on {
+                self.check_cols(on, &inner)?;
+            }
+        }
+        if let Some(w) = &sel.wh {
+            self.check_cols(w, &inner)?;
+        }
+        for g in &sel.group {
+            self.check_cols(g, &inner)?;
+        }
+        if let Some(h) = &sel.having {
+            self.check_cols(h, &inner)?;
+        }
+        if let Items::List(items) = &sel.items {
+            for (item, _) in items {
+                match item {
+                    Item::Expr(e) => self.check_cols(e, &inner)?,
+                    Item::Agg(a) => self.check_agg(a, &inner)?,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A scalar or `IN` subquery must produce exactly one column: SQLite
+    /// rejects more at prepare time, whatever the rows.
+    fn check_sub_arity(&self, sel: &Sel) -> R<()> {
+        let n = match &sel.items {
+            Items::Star if sel.from.is_empty() => return Err(ErrClass::Syntax),
+            Items::Star => self.names_of(&sel.from)?.bare.len(),
+            Items::List(items) => items.len(),
+        };
+        if n != 1 {
+            return Err(ErrClass::Arity);
+        }
+        Ok(())
+    }
+
+    /// A scalar subquery's value: one column (else `ERR arity`), first row,
+    /// NULL when empty.
+    fn subquery_value(&self, sel: &Sel, cx: &Ctx) -> R<V> {
+        let (headers, rows) = self.run_sel(sel, Some(cx))?;
+        if headers.len() != 1 {
+            return Err(ErrClass::Arity);
+        }
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .unwrap_or(V::Null))
+    }
+
+    /// One aggregate over a group's rows. NULLs are skipped (`COUNT` counts
+    /// non-NULLs, `SUM`/`MIN`/`MAX` ignore them) and `SUM` of nothing is NULL.
+    fn eval_agg(&self, a: &Agg, cx: &Ctx, rows: &[&Vec<V>]) -> R<V> {
+        let values = |expr: &Expr| -> R<Vec<V>> {
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let row_cx = Ctx {
+                    fault: cx.fault,
+                    names: cx.names,
+                    row: Some(r),
+                    aggs: &[],
+                    outer: cx.outer,
+                };
+                out.push(self.eval(expr, &row_cx)?);
+            }
+            Ok(out)
+        };
+        match a {
+            Agg::CountStar => Ok(V::Int(rows.len() as i64)),
+            Agg::Count(x) => {
+                let count_nulls = cx.fault == Some(Fault::AggregatesCountNulls);
+                let n = values(x)?
+                    .iter()
+                    .filter(|v| count_nulls || !matches!(v, V::Null))
+                    .count();
+                Ok(V::Int(n as i64))
+            }
+            Agg::Sum(x) => {
+                let vs = values(x)?;
+                let mut acc: i64 = 0;
+                let mut seen = false;
+                for v in &vs {
+                    match v {
+                        V::Null => {}
+                        V::Int(i) => {
+                            seen = true;
+                            acc = acc.checked_add(*i).ok_or(ErrClass::Limit)?;
+                        }
+                        V::Text(_) => return Err(ErrClass::Type),
+                    }
+                }
+                Ok(if seen { V::Int(acc) } else { V::Null })
+            }
+            Agg::Min(x) | Agg::Max(x) => {
+                let want_max = matches!(a, Agg::Max(_));
+                let mut best: Option<V> = None;
+                for v in values(x)? {
+                    if matches!(v, V::Null) {
+                        continue;
+                    }
+                    best = Some(match best {
+                        None => v,
+                        Some(b) => {
+                            let o = cmp_vals(&v, &b);
+                            if (want_max && o == Ordering::Greater)
+                                || (!want_max && o == Ordering::Less)
+                            {
+                                v
+                            } else {
+                                b
+                            }
+                        }
+                    });
+                }
+                Ok(best.unwrap_or(V::Null))
+            }
+        }
     }
 }
 
-/// Every aggregate call in an expression tree, once each.
+// ----- engine ----------------------------------------------------------------------
+
 fn collect_aggs(e: &Expr, out: &mut Vec<Agg>) {
     match e {
         Expr::Agg(a) => {
@@ -1304,7 +1614,14 @@ fn collect_aggs(e: &Expr, out: &mut Vec<Agg>) {
             collect_aggs(r, out);
         }
         Expr::Func(_, args) => args.iter().for_each(|a| collect_aggs(a, out)),
-        Expr::Lit(_) | Expr::Col(_) => {}
+        Expr::InList { lhs, list } => {
+            collect_aggs(lhs, out);
+            for e in list {
+                collect_aggs(e, out);
+            }
+        }
+        Expr::InSub { lhs, .. } => collect_aggs(lhs, out),
+        Expr::Lit(_) | Expr::Col(_) | Expr::SubScalar(_) | Expr::Exists(_) => {}
     }
 }
 
@@ -1313,76 +1630,6 @@ fn contains_agg(e: &Expr) -> bool {
     collect_aggs(e, &mut v);
     !v.is_empty()
 }
-
-/// One aggregate over a group's rows. NULLs are skipped (`COUNT` counts
-/// non-NULLs, `SUM`/`MIN`/`MAX` ignore them) and `SUM` of nothing is NULL.
-fn eval_agg(a: &Agg, names: &Names, rows: &[&Vec<V>], fault: Option<Fault>) -> R<V> {
-    let values = |expr: &Expr| -> R<Vec<V>> {
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let cx = Ctx {
-                fault,
-                names,
-                row: r,
-                aggs: &[],
-            };
-            out.push(eval(expr, &cx)?);
-        }
-        Ok(out)
-    };
-    match a {
-        Agg::CountStar => Ok(V::Int(rows.len() as i64)),
-        Agg::Count(x) => {
-            let count_nulls = fault == Some(Fault::AggregatesCountNulls);
-            let n = values(x)?
-                .iter()
-                .filter(|v| count_nulls || !matches!(v, V::Null))
-                .count();
-            Ok(V::Int(n as i64))
-        }
-        Agg::Sum(x) => {
-            let vs = values(x)?;
-            let mut acc: i64 = 0;
-            let mut seen = false;
-            for v in &vs {
-                match v {
-                    V::Null => {}
-                    V::Int(i) => {
-                        seen = true;
-                        acc = acc.checked_add(*i).ok_or(ErrClass::Limit)?;
-                    }
-                    V::Text(_) => return Err(ErrClass::Type),
-                }
-            }
-            Ok(if seen { V::Int(acc) } else { V::Null })
-        }
-        Agg::Min(x) | Agg::Max(x) => {
-            let want_max = matches!(a, Agg::Max(_));
-            let mut best: Option<V> = None;
-            for v in values(x)? {
-                if matches!(v, V::Null) {
-                    continue;
-                }
-                best = Some(match best {
-                    None => v,
-                    Some(b) => {
-                        let o = cmp_vals(&v, &b);
-                        if (want_max && o == Ordering::Greater)
-                            || (!want_max && o == Ordering::Less)
-                        {
-                            v
-                        } else {
-                            b
-                        }
-                    }
-                });
-            }
-            Ok(best.unwrap_or(V::Null))
-        }
-    }
-}
-
-// ----- engine ----------------------------------------------------------------------
 
 #[derive(Clone)]
 struct Tbl {
@@ -1617,6 +1864,7 @@ impl Toy {
             }
             Stmt::Insert(name, cols, rows) => self.insert(&name, cols, rows),
             Stmt::Select(sel) => self.select(sel),
+            Stmt::InsertSelect(name, cols, sel) => self.insert_select_exec(&name, cols, &sel),
             Stmt::Update(name, sets, wh) => self.update(&name, sets, wh),
             Stmt::Delete(name, wh) => self.delete(&name, wh),
             Stmt::Begin => {
@@ -1667,6 +1915,13 @@ impl Toy {
         // Values may not reference columns; omitted columns start at their
         // DEFAULT literal (or NULL).
         let none = Names::empty();
+        let ncx = Ctx {
+            fault: self.fault,
+            names: &none,
+            row: None,
+            aggs: &[],
+            outer: None,
+        };
         let defaults = self.insert_defaults(name)?;
         for row in &rows {
             let step = (|| -> R<Vec<V>> {
@@ -1675,16 +1930,8 @@ impl Toy {
                 }
                 let mut out = defaults.clone();
                 for (e, &ti) in row.iter().zip(&targets) {
-                    check_cols(e, &none)?;
-                    let v = eval(
-                        e,
-                        &Ctx {
-                            fault: self.fault,
-                            names: &none,
-                            row: &[],
-                            aggs: &[],
-                        },
-                    )?;
+                    self.check_cols(e, &ncx)?;
+                    let v = self.eval(e, &ncx)?;
                     out[ti] = self.coerce(v, schema[ti].1)?;
                 }
                 self.insert_row_checks(name, &mut out, &built)?;
@@ -1698,8 +1945,18 @@ impl Toy {
                 }
             }
         }
-        // Statement end: the FK checks see every new row (SQLite's
-        // immediate constraints fire here, after per-row type/UNIQUE).
+        self.apply_insert(name, built, failure)
+    }
+
+    /// The shared tail of `INSERT` and `INSERT ... SELECT`: the
+    /// statement-end FK checks, the dialect's atomicity rule, and the
+    /// apply.
+    fn apply_insert(
+        &mut self,
+        name: &str,
+        built: Vec<Vec<V>>,
+        mut failure: Option<ErrClass>,
+    ) -> R<Response> {
         if failure.is_none() {
             if let Err(c) = self.fk_checks(name, &built.iter().collect::<Vec<_>>()) {
                 failure = Some(c);
@@ -1727,19 +1984,60 @@ impl Toy {
         }
     }
 
-    fn keep(&self, wh: &Option<Expr>, names: &Names, row: &[V], aggs: &[(Agg, V)]) -> R<bool> {
+    /// `INSERT INTO t [(cols)] SELECT ...`: the select's rows go through
+    /// the same per-row constraints as `VALUES`.
+    fn insert_select_exec(
+        &mut self,
+        name: &str,
+        cols: Option<Vec<String>>,
+        sel: &Sel,
+    ) -> R<Response> {
+        let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
+        let schema = tbl.cols.clone();
+        let targets: Vec<usize> = match &cols {
+            None => (0..schema.len()).collect(),
+            Some(names) => names
+                .iter()
+                .map(|n| {
+                    schema
+                        .iter()
+                        .position(|(c, _)| c == n)
+                        .ok_or(ErrClass::NoColumn)
+                })
+                .collect::<R<_>>()?,
+        };
+        let (_, rows) = self.run_sel(sel, None)?;
+        let defaults = self.insert_defaults(name)?;
+        let mut built: Vec<Vec<V>> = Vec::new();
+        let mut failure: Option<ErrClass> = None;
+        for row in rows {
+            let step = (|| -> R<Vec<V>> {
+                if row.len() != targets.len() {
+                    return Err(ErrClass::Arity);
+                }
+                let mut out = defaults.clone();
+                for (v, &ti) in row.into_iter().zip(&targets) {
+                    out[ti] = self.coerce(v, schema[ti].1)?;
+                }
+                self.insert_row_checks(name, &mut out, &built)?;
+                Ok(out)
+            })();
+            match step {
+                Ok(r) => built.push(r),
+                Err(c) => {
+                    failure = Some(c);
+                    break;
+                }
+            }
+        }
+        self.apply_insert(name, built, failure)
+    }
+
+    fn keep(&self, wh: &Option<Expr>, cx: &Ctx) -> R<bool> {
         match wh {
             None => Ok(true),
             Some(e) => {
-                let v = eval(
-                    e,
-                    &Ctx {
-                        fault: self.fault,
-                        names,
-                        row,
-                        aggs,
-                    },
-                )?;
+                let v = self.eval(e, cx)?;
                 Ok(truthy(&v) || (self.fault == Some(Fault::WhereNullIsTrue) && v == V::Null))
             }
         }
@@ -1749,22 +2047,39 @@ impl Toy {
     /// evaluated on the row combined so far (a reference to a later item is
     /// `no_column`, which SQLite rejects too), and a NULL-padded row when a
     /// `LEFT JOIN` finds no match.
-    fn join_rows(&self, items: &[FromItem]) -> R<(Names, Vec<Vec<V>>)> {
+    /// The `Names` of a `FROM` list: table lookups and column ranges, no
+    /// rows (also used for static subquery validation).
+    fn names_of(&self, items: &[FromItem]) -> R<Names> {
         let mut bare: Vec<String> = Vec::new();
         let mut parts: Vec<(String, usize, usize)> = Vec::new();
-        let mut tables: Vec<&Tbl> = Vec::new();
         for it in items {
             let tbl = self.tables.get(&it.table).ok_or(ErrClass::NoTable)?;
             parts.push((it.qualifier.clone(), bare.len(), tbl.cols.len()));
             bare.extend(tbl.cols.iter().map(|(c, _)| c.clone()));
+        }
+        Ok(Names::of(bare, parts))
+    }
+
+    fn join_rows(&self, items: &[FromItem]) -> R<(Names, Vec<Vec<V>>)> {
+        let names = self.names_of(items)?;
+        let parts: Vec<(String, usize, usize)> = names.items.clone();
+        let mut tables: Vec<&Tbl> = Vec::new();
+        for it in items {
+            let tbl = self.tables.get(&it.table).ok_or(ErrClass::NoTable)?;
             tables.push(tbl);
         }
-        let names = Names::of(bare, parts.clone());
         // `ON` predicates are validated up front (SQLite rejects a missing
         // column at prepare time, even when no pair would be tested).
+        let vcx = Ctx {
+            fault: self.fault,
+            names: &names,
+            row: None,
+            aggs: &[],
+            outer: None,
+        };
         for it in items {
             if let Some(on) = &it.on {
-                check_cols(on, &names)?;
+                self.check_cols(on, &vcx)?;
             }
         }
         let mut rows: Vec<Vec<V>> = vec![Vec::new()];
@@ -1781,10 +2096,11 @@ impl Toy {
                         let cx = Ctx {
                             fault: self.fault,
                             names: &names,
-                            row: &combined,
+                            row: Some(&combined),
                             aggs: &[],
+                            outer: None,
                         };
-                        if !truthy(&eval(on, &cx)?) {
+                        if !truthy(&self.eval(on, &cx)?) {
                             continue;
                         }
                     }
@@ -1805,20 +2121,36 @@ impl Toy {
         Ok((names, rows))
     }
 
-    fn select(&self, sel: Sel) -> R<Response> {
+    /// Run a query and return its headers and rows (the shared path for
+    /// statements and subqueries; `outer` is the enclosing scope for
+    /// correlated references). Static validation runs first, so a bad
+    /// column errors even when the query would never evaluate it.
+    fn run_sel(&self, sel: &Sel, outer: Option<&Ctx>) -> R<(Vec<String>, Vec<Vec<V>>)> {
         let (names, rows): (Names, Vec<Vec<V>>) = if sel.from.is_empty() {
             (Names::empty(), vec![Vec::new()])
         } else {
             self.join_rows(&sel.from)?
         };
+        let vcx = Ctx {
+            fault: self.fault,
+            names: &names,
+            row: None,
+            aggs: &[],
+            outer,
+        };
+        for it in &sel.from {
+            if let Some(on) = &it.on {
+                self.check_cols(on, &vcx)?;
+            }
+        }
         if let Some(w) = &sel.wh {
-            check_cols(w, &names)?;
+            self.check_cols(w, &vcx)?;
         }
         for g in &sel.group {
-            check_cols(g, &names)?;
+            self.check_cols(g, &vcx)?;
         }
         if let Some(h) = &sel.having {
-            check_cols(h, &names)?;
+            self.check_cols(h, &vcx)?;
         }
         // Output columns: (header, item).
         let mut outputs: Vec<(String, Item)> = Vec::new();
@@ -1852,13 +2184,8 @@ impl Toy {
                         _ => "?".to_string(),
                     };
                     match item {
-                        Item::Expr(e) => check_cols(e, &names)?,
-                        Item::Agg(a) => match a {
-                            Agg::CountStar => {}
-                            Agg::Count(x) | Agg::Sum(x) | Agg::Min(x) | Agg::Max(x) => {
-                                check_cols(x, &names)?
-                            }
-                        },
+                        Item::Expr(e) => self.check_cols(e, &vcx)?,
+                        Item::Agg(a) => self.check_agg(a, &vcx)?,
                     }
                     outputs.push((header, item.clone()));
                 }
@@ -1900,16 +2227,21 @@ impl Toy {
             // scalar aggregate always yields exactly one row.
             let mut groups: Vec<(Vec<V>, Vec<&Vec<V>>)> = Vec::new();
             for row in &rows {
-                if !self.keep(&sel.wh, &names, row, &[])? {
-                    continue;
-                }
                 let cx = Ctx {
                     fault: self.fault,
                     names: &names,
-                    row,
+                    row: Some(row),
                     aggs: &[],
+                    outer,
                 };
-                let key: Vec<V> = sel.group.iter().map(|e| eval(e, &cx)).collect::<R<_>>()?;
+                if !self.keep(&sel.wh, &cx)? {
+                    continue;
+                }
+                let key: Vec<V> = sel
+                    .group
+                    .iter()
+                    .map(|e| self.eval(e, &cx))
+                    .collect::<R<_>>()?;
                 let separate = self.fault == Some(Fault::GroupByNullsSeparate);
                 let found = groups.iter_mut().find(|(k, _)| {
                     k.len() == key.len()
@@ -1944,17 +2276,25 @@ impl Toy {
             for (key, g_rows) in &groups {
                 let mut aggs: Vec<(Agg, V)> = Vec::with_capacity(all_aggs.len());
                 for a in &all_aggs {
-                    aggs.push((a.clone(), eval_agg(a, &names, g_rows, self.fault)?));
+                    let acx = Ctx {
+                        fault: self.fault,
+                        names: &names,
+                        row: None,
+                        aggs: &[],
+                        outer,
+                    };
+                    aggs.push((a.clone(), self.eval_agg(a, &acx, g_rows)?));
                 }
                 let basis: &[V] = g_rows.first().map(|r| r.as_slice()).unwrap_or(&null_row);
                 if let Some(h) = &sel.having {
-                    let v = eval(
+                    let v = self.eval(
                         h,
                         &Ctx {
                             fault: self.fault,
                             names: &names,
-                            row: basis,
+                            row: Some(basis),
                             aggs: &aggs,
+                            outer,
                         },
                     )?;
                     if !truthy(&v) {
@@ -1967,8 +2307,9 @@ impl Toy {
                     let cx = Ctx {
                         fault: self.fault,
                         names: &names,
-                        row: basis,
+                        row: Some(basis),
                         aggs: &aggs,
+                        outer,
                     };
                     match item {
                         Item::Agg(a) => o.push(
@@ -1979,26 +2320,27 @@ impl Toy {
                         ),
                         // An expression item in an aggregate query may
                         // itself contain aggregates (`COUNT(*) + 1`).
-                        Item::Expr(e) => o.push(eval(e, &cx)?),
+                        Item::Expr(e) => o.push(self.eval(e, &cx)?),
                     }
                 }
                 out_rows.push(o);
             }
         } else {
             for row in &rows {
-                if !self.keep(&sel.wh, &names, row, &[])? {
-                    continue;
-                }
                 let cx = Ctx {
                     fault: self.fault,
                     names: &names,
-                    row,
+                    row: Some(row),
                     aggs: &[],
+                    outer,
                 };
+                if !self.keep(&sel.wh, &cx)? {
+                    continue;
+                }
                 let mut o = Vec::with_capacity(outputs.len());
                 for (_, item) in &outputs {
                     match item {
-                        Item::Expr(e) => o.push(eval(e, &cx)?),
+                        Item::Expr(e) => o.push(self.eval(e, &cx)?),
                         Item::Agg(_) => unreachable!("aggregate mode caught above"),
                     }
                 }
@@ -2054,6 +2396,12 @@ impl Toy {
             let extra = i64::from(self.fault == Some(Fault::LimitPlusOne));
             rows_final.truncate((l + extra) as usize);
         }
+        Ok((headers, rows_final))
+    }
+
+    /// The statement path: run the query, then render it on the wire.
+    fn select(&self, sel: Sel) -> R<Response> {
+        let (headers, rows_final) = self.run_sel(&sel, None)?;
         let raw = self.fault == Some(Fault::NoWireEscaping);
         let enc = |v: &V| -> String {
             match v {
@@ -2079,21 +2427,35 @@ impl Toy {
         let cols = tbl.cols.clone();
         let rows = tbl.rows.clone();
         let mut targets = Vec::new();
+        let ucx = Ctx {
+            fault: self.fault,
+            names: &names,
+            row: None,
+            aggs: &[],
+            outer: None,
+        };
         for (c, e) in &sets {
             let i = cols
                 .iter()
                 .position(|(n, _)| n == c)
                 .ok_or(ErrClass::NoColumn)?;
-            check_cols(e, &names)?;
+            self.check_cols(e, &ucx)?;
             targets.push(i);
         }
         if let Some(w) = &wh {
-            check_cols(w, &names)?;
+            self.check_cols(w, &ucx)?;
         }
         let mut new_rows = rows.clone();
         let (mut matched, mut changed) = (0u64, 0u64);
         for (ri, row) in rows.iter().enumerate() {
-            if !self.keep(&wh, &names, row, &[])? {
+            let rcx = Ctx {
+                fault: self.fault,
+                names: &names,
+                row: Some(row),
+                aggs: &[],
+                outer: None,
+            };
+            if !self.keep(&wh, &rcx)? {
                 continue;
             }
             matched += 1;
@@ -2107,15 +2469,14 @@ impl Toy {
                 } else {
                     row
                 };
-                let v = eval(
-                    e,
-                    &Ctx {
-                        fault: self.fault,
-                        names: &names,
-                        row: basis,
-                        aggs: &[],
-                    },
-                )?;
+                let scx = Ctx {
+                    fault: self.fault,
+                    names: &names,
+                    row: Some(basis),
+                    aggs: &[],
+                    outer: None,
+                };
+                let v = self.eval(e, &scx)?;
                 updated[ti] = self.coerce(v, cols[ti].1)?;
             }
             self.update_row_checks(name, &updated, ri, &new_rows)?;
@@ -2140,13 +2501,27 @@ impl Toy {
         let tbl = self.tables.get(name).ok_or(ErrClass::NoTable)?;
         let names = Names::single(name, &tbl.cols);
         let rows = tbl.rows.clone();
+        let dcx = Ctx {
+            fault: self.fault,
+            names: &names,
+            row: None,
+            aggs: &[],
+            outer: None,
+        };
         if let Some(w) = &wh {
-            check_cols(w, &names)?;
+            self.check_cols(w, &dcx)?;
         }
         let mut kept = Vec::new();
         let mut deleted: Vec<Vec<V>> = Vec::new();
         for row in rows {
-            if self.keep(&wh, &names, &row, &[])? {
+            let rcx = Ctx {
+                fault: self.fault,
+                names: &names,
+                row: Some(&row),
+                aggs: &[],
+                outer: None,
+            };
+            if self.keep(&wh, &rcx)? {
                 deleted.push(row);
             } else {
                 kept.push(row);
@@ -2211,7 +2586,7 @@ mod tests {
     /// does not capture, not a candidate bug.
     #[test]
     fn clean_toy_agrees_with_the_oracle_on_every_script() {
-        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
             let p = Profile::through(last);
             for seed in 0..SEEDS {
                 let script = build_script(seed, &p, STEPS);
@@ -2371,6 +2746,97 @@ mod tests {
         assert!(constraint(t.exec("INSERT INTO tk VALUES (NULL, 2)")));
     }
 
+    /// Stage 10: scalar subqueries (aggregate-wrapped), `[NOT] IN
+    /// (subquery)` and `IN (list)` with the three-valued NULL rule,
+    /// `[NOT] EXISTS`, correlated references, and `INSERT ... SELECT`.
+    #[test]
+    fn subqueries_scalar_in_exists_and_insert_select() {
+        let mut t = Toy::new(None);
+        let ok0 = |r: Result<Response, String>| matches!(r, Ok(Response::Ok(0)));
+        let ok_n = |r: Result<Response, String>, n: u64| matches!(r, Ok(Response::Ok(m)) if m == n);
+        let rows = |r: Result<Response, String>| match r {
+            Ok(Response::Rows { rows, .. }) => rows,
+            other => panic!("expected rows: {other:?}"),
+        };
+        assert!(ok0(t.exec(
+            "CREATE TABLE p (id INTEGER PRIMARY KEY, v INTEGER, tag TEXT)"
+        )));
+        assert!(ok0(t.exec(
+            "CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER, w INTEGER)"
+        )));
+        assert!(ok_n(
+            t.exec("INSERT INTO p (id, v, tag) VALUES (1, 10, 'a'), (2, 20, 'b'), (3, NULL, 'a')"),
+            3
+        ));
+        assert!(ok_n(
+            t.exec("INSERT INTO c (pid, w) VALUES (1, 100), (2, 200)"),
+            2
+        ));
+        // A scalar subquery (aggregate-wrapped) in the select list.
+        assert_eq!(
+            rows(t.exec("SELECT v, (SELECT COUNT(*) FROM c) AS n FROM p ORDER BY v")),
+            vec![vec![r"\N", "2"], vec!["10", "2"], vec!["20", "2"]]
+        );
+        // Correlated scalar subquery.
+        assert_eq!(
+            rows(t.exec(
+                "SELECT id, (SELECT COUNT(*) FROM c WHERE c.pid = p.id) AS n FROM p ORDER BY id"
+            )),
+            vec![vec!["1", "1"], vec!["2", "1"], vec!["3", "0"]]
+        );
+        // IN (subquery), correlated.
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE id IN (SELECT pid FROM c) ORDER BY id")),
+            vec![vec!["1"], vec!["2"]]
+        );
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE id NOT IN (SELECT pid FROM c) ORDER BY id")),
+            vec![vec!["3"]]
+        );
+        // IN (list) with NULL: no match + a NULL in the list is NULL.
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE v IN (10, NULL) ORDER BY id")),
+            vec![vec!["1"]]
+        );
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE v NOT IN (10, NULL) ORDER BY id")),
+            Vec::<Vec<String>>::new()
+        );
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE v IS NULL ORDER BY id")),
+            vec![vec!["3"]]
+        );
+        // EXISTS / NOT EXISTS, correlated.
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE EXISTS (SELECT * FROM c WHERE c.pid = p.id)")),
+            vec![vec!["1"], vec!["2"]]
+        );
+        assert_eq!(
+            rows(t.exec("SELECT id FROM p WHERE NOT EXISTS (SELECT * FROM c WHERE c.pid = p.id)")),
+            vec![vec!["3"]]
+        );
+        // INSERT ... SELECT.
+        assert!(ok_n(
+            t.exec("INSERT INTO c (pid, w) SELECT id, 7 FROM p WHERE id = 3"),
+            1
+        ));
+        assert_eq!(rows(t.exec("SELECT COUNT(*) FROM c")), vec![vec!["3"]]);
+        // Errors: a missing table/column in a subquery is `no_table` /
+        // `no_column`, a two-column scalar subquery is `arity`.
+        assert!(matches!(
+            t.exec("SELECT (SELECT COUNT(*) FROM zz) FROM p"),
+            Ok(Response::Err { ref class, .. }) if class == "no_table"
+        ));
+        assert!(matches!(
+            t.exec("SELECT * FROM p WHERE id IN (SELECT zz FROM c)"),
+            Ok(Response::Err { ref class, .. }) if class == "no_column"
+        ));
+        assert!(matches!(
+            t.exec("SELECT (SELECT id, pid FROM c) FROM p"),
+            Ok(Response::Err { ref class, .. }) if class == "arity"
+        ));
+    }
+
     /// Every planted bug is caught, and caught OFTEN: a blind spot in the
     /// generator shows up here as a surviving or barely-caught mutant. A
     /// model with such a bug would otherwise pass several verifications in a
@@ -2382,9 +2848,9 @@ mod tests {
         // to stay above the floor reliably.
         const SCRIPTS: u64 = 60;
         const MIN_RATE_PCT: u64 = 25;
-        // Through stage 9: the aggregate, join and constraint mutants only
-        // fire when the profile generates those shapes.
-        let p = Profile::through(9);
+        // Through stage 10: the aggregate, join, constraint and subquery
+        // mutants only fire when the profile generates those shapes.
+        let p = Profile::through(10);
         let mut weak = Vec::new();
         let mut report = Vec::new();
         for fault in Fault::ALL {

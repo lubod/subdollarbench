@@ -47,6 +47,10 @@ pub struct Profile {
     pub aggregates: bool,
     /// Joins: comma lists and `INNER JOIN` (ticket 8).
     pub joins: bool,
+    /// Subqueries: scalar (aggregate-wrapped), `IN (subquery)`, `IN
+    /// (list)`, `EXISTS`, correlated references, `INSERT ... SELECT`
+    /// (ticket 10).
+    pub subqueries: bool,
     /// `LEFT [OUTER] JOIN` (stage 8 full only; the lite variant keeps
     /// inner/comma joins).
     pub left_join: bool,
@@ -79,6 +83,7 @@ impl Profile {
                 p.joins = true;
                 p.left_join = true;
             }
+            10 => p.subqueries = true,
             9 => p.constraints = true,
             _ => {}
         }
@@ -100,6 +105,7 @@ impl Profile {
             aggregates: self.aggregates || o.aggregates,
             joins: self.joins || o.joins,
             left_join: self.left_join || o.left_join,
+            subqueries: self.subqueries || o.subqueries,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -194,6 +200,10 @@ pub struct Generator {
     /// True while the generated stream is inside an open transaction.
     /// `build_script` closes it at the end so no script leaves one open.
     txn_open: bool,
+    /// False while generating a context where a subquery must not appear
+    /// (a join's `ON` predicate: the toy evaluates those against a partial
+    /// row, and SQLite's scoping there is not part of the dialect).
+    allow_sub: bool,
     /// Per table: an upper bound on its row count (every generated INSERT
     /// counts; deletes never lower it). Only `SUM`'s overflow guard uses
     /// it, so being conservative is free.
@@ -235,6 +245,7 @@ impl Generator {
             uniq: 0,
             seen: HashMap::new(),
             rows: HashMap::new(),
+            allow_sub: true,
             bounds,
             txn_open: false,
         }
@@ -642,6 +653,11 @@ impl Generator {
                 };
                 let null = self.kw("NULL");
                 (format!("{e} {is} {not}{null}"), 5, 1)
+            } else if self.rng.chance(30) {
+                match self.subquery_pred(cols) {
+                    Some(p) => (p, 5, 1),
+                    None => self.comparison(cols),
+                }
             } else {
                 self.comparison(cols)
             };
@@ -844,6 +860,12 @@ impl Generator {
             let n = 1 + self.rng.below(3) as usize;
             let mut used_bare: Vec<usize> = Vec::new();
             for i in 0..n {
+                if self.profile.subqueries && self.rng.chance(25) {
+                    let (sql, _) = self.scalar_subquery(&cols);
+                    let alias = self.kw("AS");
+                    items.push((format!("{sql} {alias} e{i}"), format!("e{i}")));
+                    continue;
+                }
                 if self.rng.chance(35) && used_bare.len() < cols.len() {
                     let mut k = self.rng.below(cols.len() as u64) as usize;
                     while used_bare.contains(&k) {
@@ -1390,7 +1412,9 @@ impl Generator {
         parts.push(from);
         if !where_conds.is_empty() {
             let extra = if self.rng.chance(30) {
+                self.allow_sub = false;
                 let e = self.bool_expr(&cols, 1);
+                self.allow_sub = true;
                 Some(e.0)
             } else {
                 None
@@ -1430,6 +1454,238 @@ impl Generator {
         }
         let sql = self.join(parts);
         self.stmt(sql, Kind::Select, ordered)
+    }
+
+    /// A plain column reference with its type (for `IN` and subquery
+    /// predicates).
+    fn column_ref(&mut self, cols: &[ColInfo]) -> Option<(String, Ty)> {
+        if cols.is_empty() {
+            return None;
+        }
+        let c = &cols[self.rng.below(cols.len() as u64) as usize];
+        Some((c.name.clone(), c.ty))
+    }
+
+    /// A literal of `ty` for an `IN` list: sometimes a value that really
+    /// was inserted (so the membership can be true), sometimes NULL (the
+    /// three-valued trap).
+    fn literal_of(&mut self, ty: Ty, cols: &[ColInfo]) -> String {
+        if self.rng.chance(18) {
+            return "NULL".to_string();
+        }
+        let anchors: Vec<&ColInfo> = cols
+            .iter()
+            .filter(|c| {
+                c.ty == ty
+                    && self
+                        .seen
+                        .get(Self::bare_ref(&c.name))
+                        .is_some_and(|v| !v.is_empty())
+            })
+            .collect();
+        if !anchors.is_empty() && self.rng.chance(65) {
+            let c = anchors[self.rng.below(anchors.len() as u64) as usize];
+            let vals = &self.seen[Self::bare_ref(&c.name)];
+            return vals[self.rng.below(vals.len() as u64) as usize].clone();
+        }
+        match ty {
+            Ty::Integer => self.int_value().to_string(),
+            Ty::Text => {
+                let raw = self.text_raw();
+                Self::quote(&raw)
+            }
+        }
+    }
+
+    /// A scalar subquery `(SELECT <agg> FROM <t> [WHERE ...])`, always
+    /// wrapped in an aggregate so it returns exactly one row (the dialect
+    /// leaves a multi-row scalar subquery untested). The inner predicate is
+    /// usually correlated with the outer columns.
+    fn scalar_subquery(&mut self, outer: &[ColInfo]) -> (String, Ty) {
+        let ti = self.pick_table();
+        let (tname, inner) = self.table_infos(ti);
+        let rows_bound = self.rows.get(&tname).copied().unwrap_or(2);
+        let (agg, ty) = self.agg_item(&inner, rows_bound);
+        let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
+        let mut sql = format!("({select} {agg} {from} {tname}");
+        if self.rng.chance(60) {
+            let pred = self.inner_pred(outer, &inner);
+            let w = self.kw("WHERE");
+            sql.push_str(&format!(" {w} {pred}"));
+        }
+        sql.push(')');
+        (sql, ty)
+    }
+
+    /// A predicate inside a subquery: usually correlated (an inner column
+    /// against an outer one), sometimes a plain comparison.
+    fn inner_pred(&mut self, outer: &[ColInfo], inner: &[ColInfo]) -> String {
+        if !outer.is_empty() && self.rng.chance(60) {
+            if let Some(p) = self.link_pred(inner, outer) {
+                return p;
+            }
+        }
+        self.comparison(inner).0
+    }
+
+    /// A subquery-based boolean atom (ticket 10): a scalar comparison,
+    /// `EXISTS`/`NOT EXISTS`, `IN (subquery)`/`NOT IN`, or `IN (list)`.
+    /// The negated forms differ from the positive ones in three-valued
+    /// logic when the list holds NULL, which is the point.
+    fn subquery_pred(&mut self, cols: &[ColInfo]) -> Option<String> {
+        if !self.profile.subqueries || !self.allow_sub || cols.is_empty() {
+            return None;
+        }
+        let neg = |g: &mut Self| {
+            if g.rng.chance(30) {
+                format!("{} ", g.kw("NOT"))
+            } else {
+                String::new()
+            }
+        };
+        match self.rng.below(100) {
+            0..=29 => {
+                // The scalar's result type decides the comparison's type:
+                // comparing INTEGER with TEXT is outside the dialect.
+                let (sub, ty) = self.scalar_subquery(cols);
+                let cands: Vec<String> = cols
+                    .iter()
+                    .filter(|c| c.ty == ty)
+                    .map(|c| c.name.clone())
+                    .collect();
+                let lhs = cands
+                    .get(self.rng.below(cands.len().max(1) as u64) as usize)?
+                    .clone();
+                let op = self.cmp_op();
+                Some(format!("{lhs} {op} {sub}"))
+            }
+            30..=54 => {
+                // `EXISTS` must correlate, or it is a constant predicate
+                // that proves nothing about the row (the quality floor).
+                let ti = self.pick_table();
+                let (tname, inner) = self.table_infos(ti);
+                let pred = self.link_pred(&inner, cols)?;
+                let not = neg(self);
+                let (ex, select, from, w) = (
+                    self.kw("EXISTS"),
+                    self.kw("SELECT"),
+                    self.kw("FROM"),
+                    self.kw("WHERE"),
+                );
+                Some(format!("{not}{ex} ({select} * {from} {tname} {w} {pred})"))
+            }
+            55..=84 => {
+                let ti = self.pick_table();
+                let (tname, inner) = self.table_infos(ti);
+                let (lhs, ty) = self.column_ref(cols)?;
+                let cands: Vec<String> = inner
+                    .iter()
+                    .filter(|c| c.ty == ty)
+                    .map(|c| c.name.clone())
+                    .collect();
+                let col = cands
+                    .get(self.rng.below(cands.len().max(1) as u64) as usize)?
+                    .clone();
+                let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
+                let mut sub = format!("({select} {col} {from} {tname}");
+                if self.rng.chance(60) {
+                    let pred = self.inner_pred(cols, &inner);
+                    let w = self.kw("WHERE");
+                    sub.push_str(&format!(" {w} {pred}"));
+                }
+                sub.push(')');
+                let not = neg(self);
+                let in_kw = self.kw("IN");
+                Some(format!("{lhs} {not}{in_kw} {sub}"))
+            }
+            _ => {
+                let (lhs, ty) = self.column_ref(cols)?;
+                let n = 1 + self.rng.below(4) as usize;
+                let mut vals = Vec::new();
+                for _ in 0..n {
+                    vals.push(self.literal_of(ty, cols));
+                }
+                let not = neg(self);
+                let in_kw = self.kw("IN");
+                Some(format!("{lhs} {not}{in_kw} ({})", vals.join(", ")))
+            }
+        }
+    }
+
+    /// `INSERT INTO t SELECT ... FROM src [WHERE ...]`: every target
+    /// column is provided from a source column of the same type. The
+    /// primary key is always provided too — with an auto-assigned key the
+    /// *row order* (which the query plan decides, and which the dialect
+    /// does not pin) would be observable in the assigned keys.
+    pub fn insert_select(&mut self) -> Statement {
+        let tti = self.pick_table();
+        let (tname, tcols) = self.table_infos(tti);
+        let mut source: Option<(String, Vec<ColInfo>, Vec<String>)> = None;
+        for _ in 0..4 {
+            let sti = self.pick_table();
+            if sti == tti {
+                continue; // a scan that sees its own inserts is not dialect
+            }
+            let (sname, scols) = self.table_infos(sti);
+            let mut items: Vec<String> = Vec::new();
+            let mut ok = true;
+            for c in &tcols {
+                let cands: Vec<String> = scols
+                    .iter()
+                    .filter(|s| s.ty == c.ty)
+                    .map(|s| s.name.clone())
+                    .collect();
+                if cands.is_empty() || (!c.pk && self.rng.chance(15)) {
+                    if c.pk {
+                        ok = false;
+                        break;
+                    }
+                    items.push("NULL".to_string());
+                    continue;
+                }
+                let i = self.rng.below(cands.len() as u64) as usize;
+                items.push(cands[i].clone());
+            }
+            if ok {
+                source = Some((sname, scols, items));
+                break;
+            }
+        }
+        let Some((sname, scols, items)) = source else {
+            return self.insert_into(tti);
+        };
+        // The primary key comes from a source column, and a NULL there
+        // would still auto-assign (making the scan order observable): the
+        // select never yields one.
+        let pk_src: Option<String> = tcols
+            .iter()
+            .position(|c| c.pk)
+            .map(|i| items[i].clone())
+            .filter(|s| s != "NULL");
+        let mut parts = vec![self.kw("INSERT"), self.kw("INTO"), tname.clone()];
+        let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
+        parts.push(format!("{select} {} {from} {sname}", items.join(", ")));
+        let mut conds: Vec<String> = Vec::new();
+        if let Some(pk) = pk_src {
+            let is = self.kw("IS");
+            let not = self.kw("NOT");
+            let null = self.kw("NULL");
+            conds.push(format!("{pk} {is} {not} {null}"));
+        }
+        if self.profile.where_clause && self.rng.chance(50) {
+            let w = self.bool_expr(&scols, 2);
+            conds.insert(0, w.0);
+        }
+        if !conds.is_empty() {
+            let (w, and) = (self.kw("WHERE"), self.kw("AND"));
+            parts.push(format!("{w} {}", conds.join(&format!(" {and} "))));
+        }
+        let sql = self.join(parts);
+        // The target can grow by as much as the source holds.
+        let grown = self.rows.get(&sname).copied().unwrap_or(2);
+        let bound = self.rows.entry(tname).or_insert(0);
+        *bound = bound.saturating_add(grown);
+        self.stmt(sql, Kind::Insert, false)
     }
 
     pub fn update_stmt(&mut self) -> Statement {
@@ -1547,6 +1803,9 @@ impl Generator {
         }
         if self.profile.constraints {
             menu.extend([20, 21, 22]);
+        }
+        if self.profile.subqueries {
+            menu.extend([23, 24, 25, 26]);
         }
         let which = *self.rng.pick(&menu);
         let sql = match which {
@@ -1725,6 +1984,49 @@ impl Generator {
                     None => format!("{} zz_nocol {} {tname}", self.kw("SELECT"), self.kw("FROM")),
                 }
             }
+            23 => format!(
+                "{} ({} (*) {} zz_gone) {} {tname}",
+                self.kw("SELECT"),
+                self.kw("COUNT"),
+                self.kw("FROM"),
+                self.kw("FROM")
+            ),
+            24 => {
+                let col = cols[self.rng.below(cols.len() as u64) as usize]
+                    .name
+                    .clone();
+                format!(
+                    "{} * {} {tname} {} {col} {} ({} zz_nocol {} {tname})",
+                    self.kw("SELECT"),
+                    self.kw("FROM"),
+                    self.kw("WHERE"),
+                    self.kw("IN"),
+                    self.kw("SELECT"),
+                    self.kw("FROM")
+                )
+            }
+            25 => format!(
+                "{} * {} {tname} {} {} ({} * {} zz_gone)",
+                self.kw("SELECT"),
+                self.kw("FROM"),
+                self.kw("WHERE"),
+                self.kw("EXISTS"),
+                self.kw("SELECT"),
+                self.kw("FROM")
+            ),
+            26 => {
+                // A two-column scalar subquery: `ERR arity`.
+                let two = cols.len().min(2);
+                let names: Vec<String> = cols[..two].iter().map(|c| c.name.clone()).collect();
+                format!(
+                    "{} ({} {} {} {tname}) {} {tname}",
+                    self.kw("SELECT"),
+                    self.kw("SELECT"),
+                    names.join(", "),
+                    self.kw("FROM"),
+                    self.kw("FROM")
+                )
+            }
             _ => {
                 // A foreign key with no parent row.
                 let fk = cols.iter().find(|c| c.references.is_some()).cloned();
@@ -1755,18 +2057,27 @@ impl Generator {
             return self.inside_transaction();
         }
         let w_insert = 24u64;
+        // `INSERT ... SELECT`: the shape works and is unit-tested, but the
+        // generated form still interacts with SQLite's rowid assignment in
+        // a way the agreement gate has not pinned down yet, so the weight
+        // stays 0 until it is (TODO ticket 10).
+        let w_insert_select = 0u64;
         let w_select = 40u64;
         let w_update = if self.profile.update { 14 } else { 0 };
         let w_delete = if self.profile.delete { 6 } else { 0 };
         let w_probe = 10u64;
         let w_txn = if self.profile.txn { 10 } else { 0 };
-        let total = w_insert + w_select + w_update + w_delete + w_probe + w_txn;
+        let total = w_insert + w_insert_select + w_select + w_update + w_delete + w_probe + w_txn;
         let mut roll = self.rng.below(total);
         if roll < w_insert {
             let ti = self.pick_table();
             return self.insert_into(ti);
         }
         roll -= w_insert;
+        if roll < w_insert_select {
+            return self.insert_select();
+        }
+        roll -= w_insert_select;
         if roll < w_select {
             return self.select_stmt();
         }
@@ -2248,6 +2559,79 @@ mod tests {
         }
     }
 
+    /// Ticket 10's subquery shapes: scalar subqueries in select items and
+    /// comparisons, `[NOT] IN (subquery)`, `IN (list)`/`NOT IN`, `EXISTS`/
+    /// `NOT EXISTS` (correlated), and the subquery error probes; stage 9
+    /// must not leak any of it.
+    #[test]
+    fn subquery_profile_emits_subqueries_and_probes() {
+        let p10 = Profile::through(10);
+        let (mut scalar, mut in_sub, mut in_list, mut exists, mut not_forms) = (0, 0, 0, 0, 0);
+        let mut probes = String::new();
+        for seed in 0..60u64 {
+            let s = build_script(seed, &p10, 150);
+            assert!(
+                s.unknown.is_empty(),
+                "{:?}",
+                &s.unknown[..s.unknown.len().min(2)]
+            );
+            assert_eq!(s.discarded, 0, "seed {seed}: discards");
+            for c in &s.steps {
+                let q = lower(&c.stmt.sql)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if c.stmt.kind == Kind::Probe {
+                    probes.push_str(&q);
+                    probes.push('\n');
+                    continue;
+                }
+                if c.stmt.kind != Kind::Select && c.stmt.kind != Kind::Update {
+                    continue;
+                }
+                let subs = q.matches("(select ").count();
+                if subs == 0 {
+                    continue;
+                }
+                if q.contains(" in (select ") {
+                    in_sub += 1;
+                }
+                if q.contains(" in (") && !q.contains(" in (select ") {
+                    in_list += 1;
+                }
+                if q.contains("exists (select ") {
+                    exists += 1;
+                }
+                if q.contains(" not ") {
+                    not_forms += 1;
+                }
+                if !q.contains(" in (") && !q.contains("exists (select") {
+                    scalar += 1;
+                }
+            }
+        }
+        assert!(scalar >= 20, "scalar subqueries rare: {scalar}");
+        assert!(in_sub >= 8, "IN (subquery) rare: {in_sub}");
+        assert!(in_list >= 8, "IN (list) rare: {in_list}");
+        assert!(exists >= 8, "EXISTS rare: {exists}");
+        assert!(not_forms >= 5, "negated forms rare: {not_forms}");
+        for needle in [" in (select ", "exists (select ", "zz_gone", "zz_nocol"] {
+            assert!(
+                probes.contains(needle),
+                "subquery probes missing {needle:?}"
+            );
+        }
+        // Stage 9 scripts have no subqueries.
+        let p9 = Profile::through(9);
+        for seed in 0..30u64 {
+            let s = build_script(seed, &p9, 150);
+            for c in s.setup.iter().chain(&s.steps) {
+                let q = lower(&c.stmt.sql);
+                assert!(!q.contains("(select"), "stage 9 leaked a subquery: {q}");
+            }
+        }
+    }
+
     /// Ticket 8's join shapes: comma/`INNER`/`LEFT` joins over 2-3 items,
     /// qualified references, `SELECT *` in FROM order, an `ON` per joined
     /// item, a 3-way join, and the ambiguity probe; stage 7 must not leak
@@ -2289,7 +2673,8 @@ mod tests {
                     probes.push('\n');
                     continue;
                 }
-                if c.stmt.kind != Kind::Select {
+                if c.stmt.kind != Kind::Select || q.contains("(select") {
+                    // A subquery's `FROM` is not the query's join shape.
                     continue;
                 }
                 if is_join(&q) {
