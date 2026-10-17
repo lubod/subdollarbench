@@ -878,27 +878,31 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
 - [ ] M8. Retirement switch for the old tasks/campaigns, portal labels,
   README rewrite; calibration run; grid on the new stamp.
 
-**Ticket 11 (indexes + perf gate) — increment reverted (2026-10-17)**: the
-increment (round-4 finding 3 + the index D side + the oracle "no such
-index" -> no_table mapping) broke the independent-agreement gate at
-**stage 10, seed 8, statement 120** (`INSERT INTO s8_cnt (s8_slot34)
-values (NULL)`: the oracle takes the row, the toy reports `constraint`, a
-*state* divergence from an earlier statement). The last verified green
-state is the round-4 commit `af62bf6`; revert commit `b946999` restores it
-and the increment is preserved in `git stash` for bisecting: the revert
-candidates are finding 3 (`pick_other_table`, which changes every stage-10
-script) and the toy's index editor (`insert_row_checks` /
-`update_row_checks` insertions); apply one at a time and run
-`cargo test --lib verifier::sql::toy::tests::clean_toy_agrees`.
-**Round-4 finding 3 is therefore open again** (its fix is in the stash).
-**Ticket 11 remaining**: the toy's index engine (parse `CREATE [UNIQUE]
-INDEX` / `DROP INDEX`, per-name registry, unique enforcement on
-INSERT/UPDATE, `already exists` / unknown-index errors), the perf gate
-(200k rows, 500 point lookups indexed vs unindexed: p50 < 5 ms, >= 10x
-faster; ranges full-only), `differential_supported(11)`, the campaign
-ticket + full/lite prompts (`index-equality-only`), the 20/20 bar through
-11, a live proof, the RULES bump — plus the stronger-model cell the
-round-4 review asks for before the perf gate.
+**Ticket 11 (indexes + perf gate) — landed (2026-10-17)**: the reverted
+increment was re-applied by hand on top of the round-5 fixes (the stash
+would have conflicted with them): the generator's `indexes` profile
+(stage 11) with `CREATE [UNIQUE] INDEX` / `DROP INDEX` interleaved with
+DML and three probes (missing table, missing column, missing index on
+`DROP`), the oracle/reference `no such index` -> `no_table` mapping,
+round-4 finding 3 (`pick_other_table`: a subquery's inner table is never
+the outer statement's — an overlap would bind every correlated name to
+the inner scope), the toy's index engine (parser + registry + UNIQUE
+enforcement on INSERT/UPDATE + a transactional snapshot + the
+`exists`/`no_table`/`no_column` classes), the perf gate (`perf.rs`: two
+200k-row tables, 500 alternating point lookups, p50 < 5 ms and >= 10x,
+range windows in the full variant only, and a restart between two rounds
+so a memory-only index fails), `differential_supported(11)` via
+`MAX_DIFFERENTIAL_STAGE = 11`, the campaign entry (tier 4, needs [3, 4],
+lite `index-equality-only`, $0.15 / 36 turns) and both prompts. Gates:
+the **stage-11 soak is 0/3000**, the agreement gate and the mutant sweep
+run through profile 11, 111 verifier tests, the **20/20 bar through
+stage 11**, the reference perf-gate test (full + lite + restart), two
+Docker live proofs (full 91s and lite 87s, both 12/12 with `[PERF]`
+lines), fmt and clippy clean; RULES `2026-10-17.14`. **Still open**: the
+stronger-model cell the round-4 review asks for (it was requested
+*before* the perf gate, which now exists); the round-4 finding-2
+fixture remainder (b)/(c)/(d) and finding-5 (`passed_stages` written but
+never read) still ride with ticket 12.
 
 **Round-5 review fixes landed (2026-10-17)**: bugs A/B/C from the
 stage-10 soak (111/3000 diverging seeds -> **0/3000**), verified by the

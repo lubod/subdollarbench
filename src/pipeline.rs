@@ -3225,6 +3225,53 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Stage 11's perf gate: an index must change
+                            // speed, not answers (docs/PROPOSAL-sdb-sql.md,
+                            // "11. Indexes"). Timing is not part of the
+                            // differential suite and a ratio is only honest
+                            // on an idle host, so it runs here, under the
+                            // bench lock, once every stage passed.
+                            if late_failure.is_none() && wanted.contains(&11) {
+                                let lite = if wanted.iter().copied().max() == Some(11) {
+                                    lite_profile.iter().any(|p| p == "index-equality-only")
+                                } else {
+                                    passed_lite.iter().any(|(s, p)| {
+                                        *s == 11 && p.iter().any(|f| f == "index-equality-only")
+                                    })
+                                };
+                                let addr = format!("127.0.0.1:{port}");
+                                let lock = crate::bench::acquire_bench_lock();
+                                if !lock.is_owned() {
+                                    logger
+                                        .log("  [PERF] bench lock busy: the numbers may be noisy");
+                                }
+                                let ns =
+                                    crate::verifier::sql::driver::stage_seed(verifier_seed, 11)
+                                        ^ 0x5E27_1E10_0000_0011;
+                                let t = std::time::Duration::from_secs(30);
+                                let mut restart = || {
+                                    restart_candidate(
+                                        &sandbox.instance_id,
+                                        workdir,
+                                        port,
+                                        &extras,
+                                        false,
+                                    )
+                                };
+                                match crate::verifier::sql::perf::perf_gate(
+                                    &addr,
+                                    t,
+                                    ns,
+                                    lite,
+                                    Some(&mut restart),
+                                ) {
+                                    Ok(report) => logger.log(&format!("  [PERF] {report}")),
+                                    Err(e) => {
+                                        logger.log(&format!("  [PERF] FAILED: {e}"));
+                                        late_failure = Some((11, format!("[perf] {e}")));
+                                    }
+                                }
+                            }
                         }
                         if let Some((lost, why)) = late_failure {
                             // A late check failed: the stage that owns the
@@ -7882,6 +7929,58 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// sdb-sql stage-11 live proof (eval-only, no model): the reference
+    /// server driven through the real pipeline with acceptance [0..11],
+    /// including the perf gate (two 200k-row tables, an indexed copy, 500
+    /// alternating lookups, a restart, and the measured ratios).
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage11_indexes_live() {
+        let worker = 88u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlidx");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-11 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlidx");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 11,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=11).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..11).collect(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-11 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 11: Indexes + perf gate -> PASS",
+            "[PERF] point p50",
+            "after restart",
+            "[UPGRADE] sentinel for stage 11 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (12, 12)
+        );
+        cleanup_covtest_network("sqlidx");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// sdb-sql stage 10 live proof (eval-only, no model): the reference
     /// passes the subquery suite under Docker — scalar subqueries,
     /// `[NOT] IN (subquery)`/`IN (list)`, correlated `[NOT] EXISTS` and
@@ -8032,6 +8131,57 @@ main()
             (9, 9)
         );
         cleanup_covtest_network("sqljoin");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Stage 11's lite variant through the pipeline: the attempt carries
+    /// `index-equality-only`, so the perf gate drops its range round and
+    /// only the equality point lookups are gated.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage11_lite_live() {
+        let worker = 87u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let dir = covtest_dir("sqlidxlite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-11 lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlidxlite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 11,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=11).collect(),
+            lite_profile: vec!["index-equality-only".to_string()],
+            passed_lite: Vec::new(),
+            passed_stages: (0..11).collect(),
+            spec_md: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-11 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in ["Stage 11: Indexes + perf gate -> PASS", "[PERF] point p50"] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert!(
+            !logger.contains("range p50"),
+            "the lite gate must not measure ranges; log:\n{}",
+            logger.text()
+        );
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (12, 12)
+        );
+        cleanup_covtest_network("sqlidxlite");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -51,6 +51,8 @@ pub struct Profile {
     /// (list)`, `EXISTS`, correlated references, `INSERT ... SELECT`
     /// (ticket 10).
     pub subqueries: bool,
+    /// `CREATE [UNIQUE] INDEX` / `DROP INDEX` (ticket 11).
+    pub indexes: bool,
     /// `LEFT [OUTER] JOIN` (stage 8 full only; the lite variant keeps
     /// inner/comma joins).
     pub left_join: bool,
@@ -84,6 +86,7 @@ impl Profile {
                 p.left_join = true;
             }
             10 => p.subqueries = true,
+            11 => p.indexes = true,
             9 => p.constraints = true,
             _ => {}
         }
@@ -106,6 +109,7 @@ impl Profile {
             joins: self.joins || o.joins,
             left_join: self.left_join || o.left_join,
             subqueries: self.subqueries || o.subqueries,
+            indexes: self.indexes || o.indexes,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -123,6 +127,9 @@ impl Profile {
         if flags.iter().any(|f| f == "join-inner-only") {
             self.left_join = false;
         }
+        // `index-equality-only` (stage 11 lite) has no grammar to narrow:
+        // the generator has no range-specific index shapes. The flag only
+        // tells the perf gate to skip its range round.
     }
 
     /// Stages `0..=last`.
@@ -204,6 +211,9 @@ pub struct Generator {
     /// (a join's `ON` predicate: the toy evaluates those against a partial
     /// row, and SQLite's scoping there is not part of the dialect).
     allow_sub: bool,
+    /// Live indexes `(name, table, column, unique)`, so a `DROP` can name
+    /// one and a `UNIQUE` one can be treated like a unique column.
+    indexes: Vec<(String, String, String, bool)>,
     /// Per table: an upper bound on its row count (every generated INSERT
     /// counts; deletes never lower it). Only `SUM`'s overflow guard uses
     /// it, so being conservative is free.
@@ -245,6 +255,7 @@ impl Generator {
             uniq: 0,
             seen: HashMap::new(),
             rows: HashMap::new(),
+            indexes: Vec::new(),
             allow_sub: true,
             bounds,
             txn_open: false,
@@ -973,6 +984,48 @@ impl Generator {
         }
         let sql = self.join(parts);
         self.stmt(sql, Kind::Select, ordered)
+    }
+
+    /// `CREATE [UNIQUE] INDEX` / `DROP INDEX` (ticket 11): shuffled over
+    /// the tables' columns, interleaved with DML; a live index may be
+    /// dropped again. An index is a physical structure — no answer may
+    /// change because of one.
+    pub fn index_stmt(&mut self) -> Statement {
+        if !self.indexes.is_empty() && self.rng.chance(35) {
+            let i = self.rng.below(self.indexes.len() as u64) as usize;
+            let (name, _, _, _) = self.indexes.remove(i);
+            let (drop, index) = (self.kw("DROP"), self.kw("INDEX"));
+            return self.stmt(format!("{drop} {index} {name}"), Kind::Create, false);
+        }
+        let ti = self.pick_table();
+        let (tname, cols) = self.table_infos(ti);
+        let col = cols[self.rng.below(cols.len() as u64) as usize]
+            .name
+            .clone();
+        let name = format!("{tname}_ix{}", self.uniq);
+        self.uniq += 1;
+        let unique = self.rng.chance(30);
+        let (create, index) = (self.kw("CREATE"), self.kw("INDEX"));
+        let uniq = if unique {
+            format!(" {} ", self.kw("UNIQUE"))
+        } else {
+            " ".to_string()
+        };
+        let on = self.kw("ON");
+        let sql = format!("{create}{uniq}{index} {name} {on} {tname} ({col})");
+        self.indexes.push((name, tname, col, unique));
+        self.stmt(sql, Kind::Create, false)
+    }
+
+    /// True when a live UNIQUE index covers `tname (col)`. Such a column
+    /// must be treated exactly like a `UNIQUE` column: a multi-row
+    /// expression assignment would make scan order observable (SQLite
+    /// checks per row in rowid order), and scan order is not in the
+    /// dialect.
+    fn unique_indexed(&self, tname: &str, col: &str) -> bool {
+        self.indexes
+            .iter()
+            .any(|(_, t, c, u)| *u && t == tname && c == col)
     }
 
     /// A comparison operator, for `HAVING` predicates.
@@ -1741,7 +1794,13 @@ impl Generator {
         // A swap into a UNIQUE column would depend on scan order (SQLite
         // checks per row in rowid order, a candidate may check in
         // insertion order), so unique columns stay out of the swap.
-        let same_ty = |t: Ty| targets.iter().filter(|c| c.ty == t && !c.unique).count() >= 2;
+        let same_ty = |t: Ty| {
+            targets
+                .iter()
+                .filter(|c| c.ty == t && !c.unique && !self.unique_indexed(&tname, &c.name))
+                .count()
+                >= 2
+        };
         let swap_ty = if same_ty(Ty::Integer) {
             Some(Ty::Integer)
         } else if same_ty(Ty::Text) {
@@ -1753,7 +1812,7 @@ impl Generator {
             let pair: Vec<&ColInfo> = targets
                 .iter()
                 .copied()
-                .filter(|c| c.ty == t && !c.unique)
+                .filter(|c| c.ty == t && !c.unique && !self.unique_indexed(&tname, &c.name))
                 .collect();
             let (a, b) = (&pair[0].name, &pair[1].name);
             let both = self.bound_of(a).max(self.bound_of(b));
@@ -1770,7 +1829,7 @@ impl Generator {
             }
             for &i in idx.iter().take(n) {
                 let c = targets[i];
-                let rhs = if c.unique {
+                let rhs = if c.unique || self.unique_indexed(&tname, &c.name) {
                     self.cell(c)
                 } else {
                     let mut rhs: Ex = (String::new(), 0, 0);
@@ -1857,6 +1916,9 @@ impl Generator {
         }
         if self.profile.subqueries {
             menu.extend([23, 24, 25, 26]);
+        }
+        if self.profile.indexes {
+            menu.extend([27, 28, 29]);
         }
         let which = *self.rng.pick(&menu);
         let sql = match which {
@@ -2078,6 +2140,23 @@ impl Generator {
                     self.kw("FROM")
                 )
             }
+            27 => format!(
+                "{} {} zz_ix {} zz_gone ({})",
+                self.kw("CREATE"),
+                self.kw("INDEX"),
+                self.kw("ON"),
+                cols[0].name
+            ),
+            28 => format!(
+                "{} {} zz_ix {} {tname} (zz_nocol)",
+                self.kw("CREATE"),
+                self.kw("INDEX"),
+                self.kw("ON")
+            ),
+            29 => {
+                let (drop, index) = (self.kw("DROP"), self.kw("INDEX"));
+                format!("{drop} {index} zz_gone")
+            }
             _ => {
                 // A foreign key with no parent row.
                 let fk = cols.iter().find(|c| c.references.is_some()).cloned();
@@ -2109,12 +2188,14 @@ impl Generator {
         }
         let w_insert = 24u64;
         let w_insert_select = if self.profile.subqueries { 12 } else { 0 };
+        let w_index = if self.profile.indexes { 8 } else { 0 };
         let w_select = 40u64;
         let w_update = if self.profile.update { 14 } else { 0 };
         let w_delete = if self.profile.delete { 6 } else { 0 };
         let w_probe = 10u64;
         let w_txn = if self.profile.txn { 10 } else { 0 };
-        let total = w_insert + w_insert_select + w_select + w_update + w_delete + w_probe + w_txn;
+        let total =
+            w_insert + w_insert_select + w_index + w_select + w_update + w_delete + w_probe + w_txn;
         let mut roll = self.rng.below(total);
         if roll < w_insert {
             let ti = self.pick_table();
@@ -2125,6 +2206,10 @@ impl Generator {
             return self.insert_select();
         }
         roll -= w_insert_select;
+        if roll < w_index {
+            return self.index_stmt();
+        }
+        roll -= w_index;
         if roll < w_select {
             return self.select_stmt();
         }

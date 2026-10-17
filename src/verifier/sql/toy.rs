@@ -351,6 +351,9 @@ struct Sel {
 #[derive(Debug)]
 enum Stmt {
     Create(String, Vec<(String, Ty)>, Vec<Cons>),
+    /// `CREATE [UNIQUE] INDEX name ON table (col)`; the flag is `UNIQUE`.
+    CreateIndex(String, String, String, bool),
+    DropIndex(String),
     /// `INSERT INTO t [(cols)] SELECT ...`.
     InsertSelect(String, Option<Vec<String>>, Box<Sel>),
     Insert(String, Option<Vec<String>>, Vec<Vec<Expr>>),
@@ -365,7 +368,8 @@ enum Stmt {
 const RESERVED: &[&str] = &[
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "FROM", "WHERE", "ORDER", "BY", "LIMIT",
     "OFFSET", "DISTINCT", "VALUES", "SET", "INTO", "AS", "AND", "OR", "NOT", "IS", "ASC", "DESC",
-    "TABLE", "JOIN", "INNER", "LEFT", "OUTER", "ON", "GROUP", "HAVING", "NULL",
+    "TABLE", "JOIN", "INNER", "LEFT", "OUTER", "ON", "GROUP", "HAVING", "NULL", "UNIQUE", "INDEX",
+    "DROP",
 ];
 
 // ----- parser ----------------------------------------------------------------
@@ -464,6 +468,9 @@ impl P {
             self.update()?
         } else if self.eat_kw("DELETE") {
             self.delete()?
+        } else if self.eat_kw("DROP") {
+            self.expect_kw("INDEX")?;
+            Stmt::DropIndex(self.ident()?)
         } else if self.eat_kw("BEGIN") {
             Stmt::Begin
         } else if self.eat_kw("COMMIT") {
@@ -482,6 +489,19 @@ impl P {
     }
 
     fn create(&mut self) -> R<Stmt> {
+        let unique = self.eat_kw("UNIQUE");
+        if self.eat_kw("INDEX") {
+            let name = self.ident()?;
+            self.expect_kw("ON")?;
+            let table = self.ident()?;
+            self.expect_sym("(")?;
+            let col = self.ident()?;
+            self.expect_sym(")")?;
+            return Ok(Stmt::CreateIndex(name, table, col, unique));
+        }
+        if unique {
+            return Err(ErrClass::Syntax);
+        }
         self.expect_kw("TABLE")?;
         let name = self.ident()?;
         self.expect_sym("(")?;
@@ -1631,6 +1651,9 @@ fn contains_agg(e: &Expr) -> bool {
     !v.is_empty()
 }
 
+/// The index registry: name -> (table, column, unique).
+type Indexes = BTreeMap<String, (String, String, bool)>;
+
 #[derive(Clone)]
 struct Tbl {
     cols: Vec<(String, Ty)>,
@@ -1640,8 +1663,11 @@ struct Tbl {
 
 pub struct Toy {
     tables: BTreeMap<String, Tbl>,
+    /// Live indexes (ticket 11). An index changes no answer; only a
+    /// UNIQUE one constrains.
+    indexes: Indexes,
     /// Snapshot taken at `BEGIN`; `Some` means a transaction is open.
-    txn: Option<BTreeMap<String, Tbl>>,
+    txn: Option<(BTreeMap<String, Tbl>, Indexes)>,
     fault: Option<Fault>,
 }
 
@@ -1649,6 +1675,7 @@ impl Toy {
     pub fn new(fault: Option<Fault>) -> Self {
         Toy {
             tables: BTreeMap::new(),
+            indexes: BTreeMap::new(),
             txn: None,
             fault,
         }
@@ -1663,6 +1690,41 @@ impl Toy {
             .iter()
             .map(|c| c.default.clone().unwrap_or(V::Null))
             .collect())
+    }
+
+    /// `CREATE [UNIQUE] INDEX name ON table (col)` (ticket 11). An index is
+    /// a named schema object: a duplicate name is `ERR exists`, an unknown
+    /// table or column is `no_table`/`no_column`, and a UNIQUE index over
+    /// already-duplicated values fails at creation like the column form.
+    fn create_index(&mut self, name: &str, table: &str, col: &str, unique: bool) -> R<Response> {
+        if self.indexes.contains_key(name) {
+            return Err(ErrClass::Exists);
+        }
+        let tbl = self.tables.get(table).ok_or(ErrClass::NoTable)?;
+        let ti = tbl
+            .cols
+            .iter()
+            .position(|(n, _)| n == col)
+            .ok_or(ErrClass::NoColumn)?;
+        if unique && self.fault != Some(Fault::ConstraintIgnored) {
+            let mut seen: Vec<&V> = Vec::new();
+            for r in &tbl.rows {
+                if let Some(v) = r.get(ti) {
+                    if matches!(v, V::Null) {
+                        continue;
+                    }
+                    if seen.iter().any(|s| cmp_vals(s, v) == Ordering::Equal) {
+                        return Err(ErrClass::Constraint);
+                    }
+                    seen.push(v);
+                }
+            }
+        }
+        self.indexes.insert(
+            name.to_string(),
+            (table.to_string(), col.to_string(), unique),
+        );
+        Ok(Response::Ok(0))
     }
 
     /// Constraints for one `INSERT` row (stage 9): `INTEGER PRIMARY KEY`
@@ -1715,6 +1777,27 @@ impl Toy {
                 })
             {
                 return Err(ErrClass::Constraint);
+            }
+        }
+        if !ignore {
+            for (table, col, unique) in self.indexes.values() {
+                if !*unique || table != name {
+                    continue;
+                }
+                let Some(ti) = tbl.cols.iter().position(|(n, _)| n == col) else {
+                    continue;
+                };
+                let Some(v) = out.get(ti) else { continue };
+                if matches!(v, V::Null) {
+                    continue;
+                }
+                if tbl.rows.iter().chain(built.iter()).any(|r| {
+                    r.get(ti)
+                        .map(|rv| cmp_vals(rv, v) == Ordering::Equal)
+                        .unwrap_or(false)
+                }) {
+                    return Err(ErrClass::Constraint);
+                }
             }
         }
         Ok(())
@@ -1782,6 +1865,26 @@ impl Toy {
                             .unwrap_or(false)
                 })
             {
+                return Err(ErrClass::Constraint);
+            }
+        }
+        for (table, col, unique) in self.indexes.values() {
+            if !*unique || table != name {
+                continue;
+            }
+            let Some(ti) = tbl.cols.iter().position(|(n, _)| n == col) else {
+                continue;
+            };
+            let Some(v) = out.get(ti) else { continue };
+            if matches!(v, V::Null) {
+                continue;
+            }
+            if rows.iter().enumerate().any(|(ri, r)| {
+                ri != row_at
+                    && r.get(ti)
+                        .map(|rv| cmp_vals(rv, v) == Ordering::Equal)
+                        .unwrap_or(false)
+            }) {
                 return Err(ErrClass::Constraint);
             }
         }
@@ -1871,6 +1974,15 @@ impl Toy {
                 );
                 Ok(Response::Ok(0))
             }
+            Stmt::CreateIndex(name, table, col, unique) => {
+                self.create_index(&name, &table, &col, unique)
+            }
+            Stmt::DropIndex(name) => {
+                if self.indexes.remove(&name).is_none() {
+                    return Err(ErrClass::NoTable);
+                }
+                Ok(Response::Ok(0))
+            }
             Stmt::Insert(name, cols, rows) => self.insert(&name, cols, rows),
             Stmt::Select(sel) => self.select(sel),
             Stmt::InsertSelect(name, cols, sel) => self.insert_select_exec(&name, cols, &sel),
@@ -1880,7 +1992,7 @@ impl Toy {
                 if self.txn.is_some() {
                     return Err(ErrClass::Txn);
                 }
-                self.txn = Some(self.tables.clone());
+                self.txn = Some((self.tables.clone(), self.indexes.clone()));
                 Ok(Response::Ok(0))
             }
             Stmt::Commit => {
@@ -1890,10 +2002,11 @@ impl Toy {
                 Ok(Response::Ok(0))
             }
             Stmt::Rollback => {
-                let Some(snapshot) = self.txn.take() else {
+                let Some((snapshot, indexes)) = self.txn.take() else {
                     return Err(ErrClass::Txn);
                 };
                 self.tables = snapshot;
+                self.indexes = indexes;
                 Ok(Response::Ok(0))
             }
         }
@@ -2600,7 +2713,7 @@ mod tests {
     /// does not capture, not a candidate bug.
     #[test]
     fn clean_toy_agrees_with_the_oracle_on_every_script() {
-        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+        for last in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
             let p = Profile::through(last);
             for seed in 0..SEEDS {
                 let script = build_script(seed, &p, STEPS);
@@ -2771,6 +2884,54 @@ mod tests {
         assert!(constraint(t.exec("INSERT INTO tk VALUES (NULL, 2)")));
     }
 
+    /// Stage 11: indexes are named schema objects; a UNIQUE one constrains
+    /// like the column form, and a failed create registers nothing.
+    #[test]
+    fn indexes_are_schema_objects_and_unique_indexes_constrain() {
+        let mut t = Toy::new(None);
+        let ok0 = |r: Result<Response, String>| matches!(r, Ok(Response::Ok(0)));
+        let ok_n = |r: Result<Response, String>, n: u64| matches!(r, Ok(Response::Ok(m)) if m == n);
+        let constraint = |r: Result<Response, String>| matches!(r, Ok(Response::Err { ref class, .. }) if class == "constraint");
+        let err = |r: Result<Response, String>, tok: &str| matches!(r, Ok(Response::Err { ref class, .. }) if class == tok);
+        assert!(ok0(t.exec(
+            "CREATE TABLE ix (k INTEGER PRIMARY KEY, v TEXT, w INTEGER)"
+        )));
+        assert!(ok_n(
+            t.exec("INSERT INTO ix (k, v, w) VALUES (1, 'a', 5), (2, 'a', 6)"),
+            2
+        ));
+        // A UNIQUE index over existing duplicates fails, and the failure
+        // does not register the name (SQLite lets the next create use it).
+        assert!(constraint(t.exec("CREATE UNIQUE INDEX ix_u ON ix (v)")));
+        assert!(ok0(t.exec("CREATE UNIQUE INDEX ix_u ON ix (w)")));
+        // The name is taken now.
+        assert!(err(t.exec("CREATE INDEX ix_u ON ix (w)"), "exists"));
+        // Unknown table and column.
+        assert!(err(t.exec("CREATE INDEX ix_x ON zz (w)"), "no_table"));
+        assert!(err(t.exec("CREATE INDEX ix_x ON ix (nope)"), "no_column"));
+        // DROP: once works, twice is no such index.
+        assert!(ok0(t.exec("DROP INDEX ix_u")));
+        assert!(err(t.exec("DROP INDEX ix_u"), "no_table"));
+        // The unique index constrains INSERT and UPDATE like the column
+        // form (SQLite verified: both rows getting the same value fails).
+        assert!(ok0(t.exec("CREATE UNIQUE INDEX ix_w ON ix (w)")));
+        assert!(constraint(
+            t.exec("INSERT INTO ix (k, v, w) VALUES (3, 'b', 5)")
+        ));
+        assert!(ok_n(
+            t.exec("INSERT INTO ix (k, v, w) VALUES (3, 'b', 7)"),
+            1
+        ));
+        assert!(constraint(t.exec("UPDATE ix SET w = 5 WHERE k IN (1, 2)")));
+        assert!(constraint(t.exec("UPDATE ix SET w = 8 WHERE k IN (1, 2)")));
+        assert!(ok_n(t.exec("UPDATE ix SET w = 9 WHERE k = 1"), 1));
+        // A transaction rolls the index registry back too.
+        assert!(ok0(t.exec("BEGIN")));
+        assert!(ok0(t.exec("CREATE INDEX ix_t ON ix (v)")));
+        assert!(ok0(t.exec("ROLLBACK")));
+        assert!(err(t.exec("DROP INDEX ix_t"), "no_table"));
+    }
+
     /// Stage 10: scalar subqueries (aggregate-wrapped), `[NOT] IN
     /// (subquery)` and `IN (list)` with the three-valued NULL rule,
     /// `[NOT] EXISTS`, correlated references, and `INSERT ... SELECT`.
@@ -2873,9 +3034,9 @@ mod tests {
         // to stay above the floor reliably.
         const SCRIPTS: u64 = 60;
         const MIN_RATE_PCT: u64 = 25;
-        // Through stage 10: the aggregate, join, constraint and subquery
-        // mutants only fire when the profile generates those shapes.
-        let p = Profile::through(10);
+        // Through stage 11: the aggregate, join, constraint, subquery and
+        // index mutants only fire when the profile generates those shapes.
+        let p = Profile::through(11);
         let mut weak = Vec::new();
         let mut report = Vec::new();
         for fault in Fault::ALL {

@@ -18,6 +18,7 @@ pub mod crash;
 pub mod driver;
 pub mod generator;
 pub mod oracle;
+pub mod perf;
 pub mod ref_server;
 pub mod run;
 pub mod scenarios;

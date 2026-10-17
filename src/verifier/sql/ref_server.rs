@@ -119,7 +119,7 @@ def translate_ddl(sql):
 
 
 def classify(msg):
-    if msg.startswith("no such table"):
+    if msg.startswith("no such table") or msg.startswith("no such index"):
         return "no_table"
     if (msg.startswith("no such column")
             or msg.startswith("no such function")
@@ -594,16 +594,18 @@ mod tests {
     }
 
     /// The flake bar (docs/PROPOSAL-sdb-sql.md): each stage passes 20/20
-    /// against the reference, through stage 10 (aggregate, join,
-    /// constraint and subquery scripts). All
+    /// against the reference, through stage 11 (aggregate, join,
+    /// constraint, subquery and index scripts). All
     /// runs share one server process, so this also proves stage scripts
-    /// never collide on schema names. Stages 7+ land here as they do.
+    /// never collide on schema names. Stage 11's *perf* half is timing,
+    /// not flakes, and lives in `reference_passes_the_stage11_perf_gate`
+    /// (a loaded host must not fail the flake bar).
     #[test]
     fn reference_passes_every_stage_twenty_times() {
         let port = free_port();
         let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=10u32 {
+        for stage in 0..=11u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);
@@ -627,6 +629,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Stage 11's perf gate against a real process: two 200k-row tables,
+    /// 500 alternating point lookups, a range round, and a restart between
+    /// the two point rounds. The host is shared, so the gate's own bounds
+    /// (5 ms p50, 10x) are the assertions; a healthy SQLite clears them by
+    /// an order of magnitude.
+    #[test]
+    fn reference_passes_the_stage11_perf_gate() {
+        use super::super::perf;
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let full = {
+            let mut restart = || proc.restart();
+            perf::perf_gate(
+                &addr,
+                Duration::from_secs(30),
+                0x5E11,
+                false,
+                Some(&mut restart),
+            )
+            .expect("the full perf gate")
+        };
+        assert!(full.contains("point p50"), "full report: {full}");
+        assert!(full.contains("range p50"), "full report: {full}");
+        assert!(full.contains("after restart"), "full report: {full}");
+        // Lite: equality only, no restart.
+        let lite =
+            perf::perf_gate(&addr, Duration::from_secs(30), 0x5E12, true, None).expect("lite gate");
+        assert!(!lite.contains("range"), "lite report: {lite}");
+        drop(proc);
     }
 
     /// Stage 5 against a real process: SIGKILL after acks, a mid-flight

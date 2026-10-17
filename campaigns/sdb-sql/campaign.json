@@ -258,6 +258,44 @@
       "needs": [
         7
       ]
+    },
+    {
+      "id": 11,
+      "type": "relational",
+      "title": "Indexes + perf gate",
+      "prompt": "stages/11_indexes/prompt.md",
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ]
+      },
+      "budget_usd": 0.15,
+      "max_turns": 36,
+      "tier": 4,
+      "needs": [
+        3,
+        4
+      ],
+      "lite": {
+        "prompt": "stages/11_indexes_lite/prompt.md",
+        "profile": [
+          "index-equality-only"
+        ],
+        "budget_usd": 0.09,
+        "max_turns": 18,
+        "weight": 0.4
+      }
     }
   ]
 }
