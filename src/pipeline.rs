@@ -292,9 +292,36 @@ fn crash_ladder(
             ));
         }
 
-        // (d) a second restart changes nothing.
+        // (d) a second restart changes nothing: the key set and the bulk
+        // column must be exactly what the last state-reading step saw.
+        let state_before_d =
+            crash::read_keys(&addr, t, &acked_table).map_err(|e| format!("(d) {e}"))?;
+        let value_before_d = if lite || value_after_b.is_empty() {
+            String::new()
+        } else {
+            crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
+                .map_err(|e| format!("(d) {e}"))?
+        };
         restart(&scratch_extras)?;
         crash::check_keys(&addr, t, &acked_table, &must, &maybe).map_err(|e| format!("(d) {e}"))?;
+        let state_after_d =
+            crash::read_keys(&addr, t, &acked_table).map_err(|e| format!("(d) {e}"))?;
+        if state_after_d != state_before_d {
+            return Err(format!(
+                "(d) the second restart changed the store: before {state_before_d:?}, after \
+                 {state_after_d:?}"
+            ));
+        }
+        if !value_before_d.is_empty() {
+            let after_d = crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
+                .map_err(|e| format!("(d) {e}"))?;
+            if after_d != value_before_d {
+                return Err(format!(
+                    "(d) the second restart changed the bulk column from {value_before_d} to \
+                     {after_d}"
+                ));
+            }
+        }
         if !lite {
             crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
                 .map_err(|e| format!("(d) {e}"))?;

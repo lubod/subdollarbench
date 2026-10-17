@@ -27,11 +27,16 @@ fn ok_n(got: Response, n: u64, what: &str) -> Result<(), String> {
 }
 
 /// The keys visible on a fresh connection, in order.
-fn visible_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<String>, String> {
-    let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+fn visible_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<String>, PeerErr> {
+    let mut c = TcpCandidate::connect(addr, timeout).map_err(|e| PeerErr::Other(e.to_string()))?;
+    let got = c
+        .exec(&format!("SELECT k FROM {table} ORDER BY k"))
+        .map_err(PeerErr::Other)?;
+    match got {
         Response::Rows { rows, .. } => Ok(rows.into_iter().flatten().collect()),
-        other => Err(format!("SELECT k answered {other:?}")),
+        // The *class* decides retryability, never the text.
+        Response::Err { class, .. } if class == "busy" => Err(PeerErr::Busy),
+        other => Err(PeerErr::Other(format!("SELECT k answered {other:?}"))),
     }
 }
 
@@ -48,7 +53,7 @@ enum PeerView {
     /// It did not answer within [`PEER_WINDOW`]: it is waiting for the
     /// transaction to end (a single global lock design; legal at stage 6,
     /// where a *non-blocking* reader is not required yet).
-    Blocked(std::sync::mpsc::Receiver<Result<Vec<String>, String>>),
+    Blocked(std::sync::mpsc::Receiver<Result<Vec<String>, PeerErr>>),
     /// It answered `ERR busy` (a lock rejection). The retry after the
     /// transaction ends must succeed.
     Errored,
@@ -69,28 +74,38 @@ fn peer_read(addr: &str, timeout: Duration, table: &str) -> PeerView {
     });
     match rx.recv_timeout(PEER_WINDOW) {
         Ok(Ok(keys)) => PeerView::Answered(keys),
-        Ok(Err(e)) if is_busy(&e) => PeerView::Errored,
-        Ok(Err(e)) => PeerView::Failed(e),
+        Ok(Err(PeerErr::Busy)) => PeerView::Errored,
+        Ok(Err(PeerErr::Other(e))) => PeerView::Failed(e),
         Err(_) => PeerView::Blocked(rx),
     }
 }
 
-/// Is this error string a `busy` response (the only retryable answer)?
-fn is_busy(e: &str) -> bool {
-    e.contains("class: \"busy\"")
+/// `visible_keys` for the synchronous reads: a busy answer is not special
+/// there, it is just an error string.
+fn keys_or_err(addr: &str, timeout: Duration, table: &str) -> Result<Vec<String>, String> {
+    visible_keys(addr, timeout, table).map_err(|e| match e {
+        PeerErr::Busy => "SELECT k answered ERR busy".to_string(),
+        PeerErr::Other(s) => s,
+    })
+}
+
+/// Why a peer read did not answer: only `Busy` is retryable.
+enum PeerErr {
+    Busy,
+    Other(String),
 }
 
 /// The keys of a blocked reader, after the transaction ended: the commit
 /// must release it. What it saw may be the pre-transaction snapshot or the
 /// post-commit state; anything else is a failure. Returns the keys it saw.
 fn released(
-    blocked: std::sync::mpsc::Receiver<Result<Vec<String>, String>>,
+    blocked: std::sync::mpsc::Receiver<Result<Vec<String>, PeerErr>>,
 ) -> Result<Option<Vec<String>>, String> {
     match blocked.recv_timeout(RELEASE_WINDOW) {
         Ok(Ok(keys)) => Ok(Some(keys)),
         // A busy answer after the release is retried with a fresh read.
-        Ok(Err(e)) if is_busy(&e) => Ok(None),
-        Ok(Err(e)) => Err(format!(
+        Ok(Err(PeerErr::Busy)) => Ok(None),
+        Ok(Err(PeerErr::Other(e))) => Err(format!(
             "the blocked reader failed after the transaction ended: {e}"
         )),
         Err(_) => Err("a reader was still blocked after the transaction ended".to_string()),
@@ -148,7 +163,7 @@ pub fn isolation(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
             }
         }
     }
-    let seen = visible_keys(addr, timeout, table)?;
+    let seen = keys_or_err(addr, timeout, table)?;
     if seen != vec!["0".to_string(), "1".to_string()] {
         return Err(format!("a committed row is missing: {seen:?}"));
     }
@@ -183,7 +198,7 @@ pub fn isolation(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
             }
         }
     }
-    let seen = visible_keys(addr, timeout, table)?;
+    let seen = keys_or_err(addr, timeout, table)?;
     if seen != vec!["0".to_string(), "1".to_string()] {
         return Err(format!("a rolled-back row survived: {seen:?}"));
     }
@@ -219,7 +234,7 @@ pub fn kill_with_open_transaction(
     // discarded by *recovery*, not by a clean client disconnect.
     kill()?;
     restart()?;
-    let seen = visible_keys(addr, timeout, table)?;
+    let seen = keys_or_err(addr, timeout, table)?;
     if seen != vec!["0".to_string()] {
         return Err(format!(
             "after a kill with an open transaction: {seen:?} (expected the committed row only)"

@@ -852,7 +852,18 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   passed_stages` is written but never read; log the `docker exec` stderr
   once — the latter is done in the finding-1 rewrite). REVIEW.md also
   asks for a cell with a stronger model before ticket 11, so tickets 4-10
-  get a real end-to-end run.
+  get a real end-to-end run. **Round-4 fixes completed (2026-10-17)**:
+  (2, rest) every (b) attempt's table is checked after its own restart and
+  (c) and (d) pin the bulk value and the *whole key set* (d saw before its
+  restart) — a second restart that changes anything fails; (a)'s in-flight
+  row upgrades from `maybe` to `must` once it is visible after the first
+  restart; (4) the isolation peer read now answers a typed
+  `PeerErr::{Busy, Other}` and only the `busy` *class* is retryable (no
+  string matching of a `Debug` rendering). **Still open**: (3) EXISTS/IN
+  subqueries whose inner table is the outer one are uncorrelated (re-pick
+  the inner table + the outer-column test) — rides with ticket 11; (5)
+  `CampaignStageConfig.passed_stages` (the stderr logging half is done).
+  The stronger-model cell before ticket 11 is still outstanding.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions
