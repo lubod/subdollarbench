@@ -1419,14 +1419,26 @@ pub(crate) async fn get_run_log(AxumPath(run_id): AxumPath<String>) -> Response 
 /// live `status.json` (the foreground CLI publishes it at ticket
 /// boundaries) and, once finished, the `campaign.json` rollup.
 /// Newest-first, capped.
-/// The ladder + stop reason for one campaign value, when its spec is
-/// loadable. Cached per call: one spec load per campaign name.
-fn campaign_ladder(
+/// The ladder, stop reason and board key for one campaign value, when its
+/// spec is loadable. A running cell without a rollup gets a stub, so it
+/// renders with its current ticket running and sorts first as its own
+/// group (round-8 findings 8 and 9). One spec load per campaign name.
+#[allow(clippy::type_complexity)]
+fn campaign_board_view(
     v: &serde_json::Value,
     specs: &mut std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>>,
-) -> Option<(Vec<crate::campaign::LadderEntry>, &'static str)> {
-    let rollup: crate::campaign::CampaignRollup =
-        serde_json::from_value(v.get("rollup")?.clone()).ok()?;
+    campaign_id: &str,
+) -> Option<(
+    Vec<crate::campaign::LadderEntry>,
+    String,
+    crate::campaign::BoardSortKey,
+)> {
+    let parsed: Option<crate::campaign::CampaignRollup> = v
+        .get("rollup")
+        .filter(|r| !r.is_null())
+        .and_then(|r| serde_json::from_value(r.clone()).ok());
+    let live = parsed.is_none();
+    let rollup = parsed.unwrap_or_else(|| crate::campaign::live_rollup_stub(campaign_id, v));
     let spec = specs
         .entry(rollup.name.clone())
         .or_insert_with(|| {
@@ -1435,8 +1447,16 @@ fn campaign_ladder(
                 .map(|lc| lc.spec)
         })
         .clone()?;
-    let ladder = crate::campaign::ladder(&spec, &rollup);
-    Some((ladder, crate::campaign::stop_reason(&rollup)))
+    let current = v["current_stage"].as_u64().map(|c| c as u32);
+    let ladder = crate::campaign::ladder(&spec, &rollup, current);
+    let mut key = crate::campaign::BoardSortKey::of(&rollup);
+    key.live = live;
+    let stop = if live || v["state"].as_str() == Some("running") {
+        String::new()
+    } else {
+        crate::campaign::stop_reason(&rollup).to_string()
+    };
+    Some((ladder, stop, key))
 }
 
 pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
@@ -1468,6 +1488,7 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             // A dead writer must not show "running" forever (round-7
             // finding 6).
             let derived = crate::campaign::effective_state(
+                &name,
                 v["state"].as_str().unwrap_or("unknown"),
                 v["updated_at"].as_str(),
             );
@@ -1481,9 +1502,10 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             v["id"] = serde_json::json!(name);
             // The full ladder (attempted and not) + the stop reason: one
             // derivation for the console and the board (gui-spec.md §5.3).
-            if let Some((ladder, stop)) = campaign_ladder(&v, &mut specs) {
+            if let Some((ladder, stop, key)) = campaign_board_view(&v, &mut specs, &name) {
                 v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
                 v["stop_reason"] = serde_json::json!(stop);
+                v["board_key"] = serde_json::to_value(key).unwrap_or_default();
             }
             out.push(v);
         }
@@ -1495,17 +1517,20 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             .cmp(a["id"].as_str().unwrap_or(""))
     });
     // The board order is the Rust comparator (no second ranking in JS).
-    out.sort_by(|a, b| {
-        let key = |v: &serde_json::Value| {
-            serde_json::from_value::<crate::campaign::CampaignRollup>(v["rollup"].clone())
-                .map(|r| crate::campaign::BoardSortKey::of(&r))
-                .ok()
-        };
-        match (key(a), key(b)) {
-            (Some(ka), Some(kb)) => crate::campaign::board_order(&ka, &kb),
-            _ => std::cmp::Ordering::Equal,
-        }
-    });
+    // The key was computed with the view above (a stub for live cells):
+    // a total order, live cells pinned first (round-8 finding 9).
+    let key = |v: &serde_json::Value| -> crate::campaign::BoardSortKey {
+        v.get("board_key")
+            .and_then(|k| serde_json::from_value(k.clone()).ok())
+            .unwrap_or(crate::campaign::BoardSortKey {
+                live: false,
+                current_rules: false,
+                points: 0.0,
+                per_dollar: None,
+                cost: 0.0,
+            })
+    };
+    out.sort_by(|a, b| crate::campaign::board_order(&key(a), &key(b)));
     out.truncate(50);
     Json(out)
 }
@@ -1598,17 +1623,13 @@ pub(crate) async fn start_campaign(
             .into_response();
     }
     let wall = if req.wall_min > 0 { req.wall_min } else { 120 };
-    let exe =
-        match std::env::current_exe() {
-            Ok(e) => e,
-            Err(e) => return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": format!("cannot resolve the engine binary: {e}")}),
-                ),
-            )
-                .into_response(),
-        };
+    let Some(exe) = crate::campaign::launcher_binary() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot resolve the engine binary"})),
+        )
+            .into_response();
+    };
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let log_path = RunArchiver::resolve_runs_dir().join(format!("campaign-launch-{ts}.log"));
     let log = std::fs::OpenOptions::new()
@@ -1623,34 +1644,24 @@ pub(crate) async fn start_campaign(
         )
             .into_response(),
     };
-    let budget_s = format!("{budget}");
-    let wall_s = wall.to_string();
-    let cmd = format!(
-        "campaign run --name sdb-sql --model {model} --effort {effort} \
-         --budget-usd {budget_s} --wall-min {wall_s} --timeout-min 20"
-    );
-    let spawned = std::process::Command::new(exe)
-        .args([
-            "campaign",
-            "run",
-            "--name",
-            "sdb-sql",
-            "--model",
-            &model,
-            "--effort",
-            &effort,
-            "--budget-usd",
-            &budget_s,
-            "--wall-min",
-            &wall_s,
-            "--timeout-min",
-            "20",
-        ])
+    let args = crate::campaign::launcher_args(&model, &effort, budget, wall);
+    let cmd = format!("subdollarbench {}", args.join(" "));
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(&args)
         .current_dir(crate::config::get_repo_root())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(out))
-        .stderr(std::process::Stdio::from(err))
-        .spawn();
+        .stderr(std::process::Stdio::from(err));
+    // Its own process group: restarting the console (or a service manager
+    // killing its group) must not take a two-hour campaign down with it
+    // (round-8 finding 3).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let spawned = command.spawn();
     match spawned {
         Ok(mut child) => {
             let pid = child.id();
@@ -1676,7 +1687,7 @@ pub(crate) async fn start_campaign(
             Json(serde_json::json!({
                 "started": true,
                 "pid": pid,
-                "cmd": format!("subdollarbench {cmd}"),
+                "cmd": cmd,
                 "log": log_path.display().to_string(),
             }))
             .into_response()
@@ -1709,6 +1720,7 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let state = crate::campaign::effective_state(
+        &clean,
         status
             .as_ref()
             .and_then(|s| s["state"].as_str())
@@ -1720,6 +1732,10 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
         status.as_ref().and_then(|s| s["updated_at"].as_str()),
     );
     let current_stage = status.as_ref().and_then(|s| s["current_stage"].as_u64());
+    // A running cell has no rollup until its first verdict lands; return a
+    // definition-shaped stub instead of 404, so the Run view can show the
+    // current ticket (round-8 finding 8).
+    let mut live = false;
     let mut rollup = match final_rollup {
         Some(r) => r,
         None => match status
@@ -1729,18 +1745,29 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
             .and_then(|r| serde_json::from_value::<crate::campaign::CampaignRollup>(r.clone()).ok())
         {
             Some(r) => r,
-            None => return (StatusCode::NOT_FOUND, "no rollup yet").into_response(),
+            None => {
+                live = true;
+                let v = status.clone().unwrap_or_else(|| serde_json::json!({}));
+                crate::campaign::live_rollup_stub(&clean, &v)
+            }
         },
     };
     // Old cells: derive rounds/failures from their manifests (marked
     // derived) so the Run view renders them too.
     crate::campaign::backfill_rounds(&mut rollup, &dir);
-    let stop = crate::campaign::stop_reason(&rollup);
+    let stop = if live || state == "running" {
+        // A running cell has no stop reason yet, even with a partial
+        // rollup: the Run header hides it for running cells anyway.
+        String::new()
+    } else {
+        crate::campaign::stop_reason(&rollup).to_string()
+    };
     let budget = rollup.budget_usd;
     let wall = rollup.wall_min;
+    let current = current_stage.map(|c| c as u32);
     let ladder = crate::campaign::load_campaign(&rollup.name)
         .ok()
-        .map(|lc| crate::campaign::ladder(&lc.spec, &rollup));
+        .map(|lc| crate::campaign::ladder(&lc.spec, &rollup, current));
     let mut body = serde_json::json!({
         "id": clean,
         "state": state,
@@ -1753,6 +1780,7 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
     if let Some(ladder) = ladder {
         body["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
     }
+    body["live_run"] = serde_json::json!(live);
     Json(body).into_response()
 }
 
@@ -1766,10 +1794,25 @@ pub(crate) struct CampaignLogQuery {
     kinds: Option<String>,
 }
 
+/// Strip the campaign log's `[HH:MM:SS] ` timestamp (every real line has
+/// one; the tag checks below must see the tag itself — round-8 finding 6).
+fn strip_log_ts(line: &str) -> &str {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix('[') {
+        if let Some((ts, rest)) = rest.split_once("] ") {
+            let b = ts.as_bytes();
+            if b.len() == 8 && b[2] == b':' && b[5] == b':' {
+                return rest.trim_start();
+            }
+        }
+    }
+    t
+}
+
 /// One log line's bucket for the Live view's filter chips (gui-spec.md
 /// §4.3). Unknown lines fall into `verifier` (pipeline output).
 pub(crate) fn log_kind(line: &str) -> &'static str {
-    let t = line.trim_start();
+    let t = strip_log_ts(line);
     if t.starts_with("[THOUGHT]")
         || t.starts_with("[RESPONSE]")
         || t.starts_with("[LIVE]")
@@ -1801,6 +1844,12 @@ pub(crate) fn log_kind(line: &str) -> &'static str {
         || t.contains("statements graded")
     {
         "verifier"
+    } else if t.starts_with("  >") || t.starts_with("> ") {
+        // Tool output folds under its [ACTION] (round-8 finding 6).
+        "tools"
+    } else if t.starts_with("  |") || t.starts_with("| ") {
+        // The re-logged prompt/report blocks are setup prose.
+        "setup"
     } else if t.starts_with("[UPGRADE]")
         || t.starts_with("[CRASH]")
         || t.starts_with("[TXN]")
@@ -3173,7 +3222,22 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Point this test process at an isolated runs dir, once (round-8
+    /// finding 1): the suite must never read, write or delete anything in
+    /// the real runs/ directory while a cell is live.
+    pub(crate) fn isolate_test_runs_dir() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("sdb_test_runs_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("SDB_RUNS_DIR", &dir);
+        });
+    }
+
     fn create_test_state() -> AppState {
+        isolate_test_runs_dir();
         let (log_sender, _) = broadcast::channel(100);
         AppState {
             log_sender,
@@ -5521,6 +5585,22 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
     fn test_campaign_log_kinds() {
         use super::log_kind;
         let cases = [
+            // Verbatim from cell 8's and the muse cell's live.log, with the
+            // real `[HH:MM:SS] ` timestamps (round-8 finding 6).
+            ("[11:07:20]   Stage 8: Joins -> FAIL ErrorClass: expected", "verdict"),
+            ("[11:17:46] [FEEDBACK] Round 1 test result: 2 of 6 stages passed (33.3%)", "verdict"),
+            ("[09:40:12] [THOUGHT] Let me start by understanding", "agent"),
+            ("[09:40:14] [LIVE] Turn 6/9 | Spent: $0.0035", "agent"),
+            ("[09:40:15] [ACTION] read", "tools"),
+            ("[09:40:16]   > [server.py#2381]", "tools"),
+            ("[09:40:17] [RESULT] read (OK)", "tools"),
+            ("[09:40:18] [SETUP] Waiting for server port 5480", "setup"),
+            ("[09:40:19]   | # Automated Verification Failure Report", "setup"),
+            ("[09:40:20] [VERIFY] Checking anti-cheat compliance", "verifier"),
+            ("[09:40:21]     159 statements graded (seed 11663210981208198265)", "verifier"),
+            ("[14:31:53] ─── ticket 0 [genesis] Genesis: tables, insert, select (acceptance [0], budget $0.20) ───", "verdict"),
+            ("[14:31:54] [TELEMETRY] turn=0 max_turns=28 spent=0.000000 tokens=0", "agent"),
+            // The pre-fix fixtures (no timestamps) still classify.
             ("  Stage 8: Joins -> FAIL ErrorClass: expected", "verdict"),
             ("[UPGRADE] sentinel from stage 4 verified", "verdict"),
             ("[PERF] point p50 0.2 ms scan vs 0.1 ms index", "verdict"),
@@ -5556,15 +5636,95 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
         for (line, want) in cases {
             assert_eq!(log_kind(line), want, "line: {line:?}");
         }
+        // A real live.log must yield both default chips (round-8 finding 6:
+        // the default Live view was blank because every line classified as
+        // verifier). Skips when no campaign log is on disk.
+        let runs = crate::config::get_repo_root().join("runs");
+        let real = std::fs::read_dir(&runs).ok().and_then(|rd| {
+            rd.flatten().find_map(|e| {
+                let p = e.path().join("live.log");
+                std::fs::read_to_string(&p)
+                    .ok()
+                    .filter(|t| t.lines().count() > 50)
+            })
+        });
+        match real {
+            Some(text) => {
+                let kinds: std::collections::HashSet<&str> = text.lines().map(log_kind).collect();
+                assert!(
+                    kinds.contains("verdict"),
+                    "a real live.log must have verdict lines"
+                );
+                assert!(
+                    kinds.contains("agent"),
+                    "a real live.log must have agent lines"
+                );
+            }
+            None => eprintln!("no live.log on disk; skipping the real-log kind check"),
+        }
     }
 
     /// gui-spec.md §5.4: the detail endpoint carries the full ladder
     /// (attempted, skipped and not-reached tickets) and backfills rounds
     /// and classified failures for a cell that predates them.
+    /// Serializes the two tests that exercise the campaign lock protocol:
+    /// they share the isolated runs dir, so they must not overlap.
+    static CAMPAIGN_LOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Round-8 finding 1: the suite points at an isolated runs dir, so a
+    /// server request never reads, writes or deletes anything in the real
+    /// runs/ directory — in particular a live cell's lock.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_server_never_touches_a_live_lock() {
+        let _serial = CAMPAIGN_LOCK_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let state = create_test_state();
+        let path = crate::campaign::campaign_lock_path();
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "tests must be isolated from the real runs dir: {path:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+        let lock = crate::campaign::CampaignLock::try_acquire_at(&path, "ut-guard").expect("lock");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let base = serve_test_app(state).await;
+        let client = authed_client();
+        // /api/status reports it and the POST refuses on it...
+        let body: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["campaign"]["campaign_id"], "ut-guard");
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "ut/m"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 409);
+        // ...without touching the file.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "the lock file must be byte-identical"
+        );
+        drop(lock);
+    }
+
     /// gui-spec.md §4.4: starting a campaign validates its input and
     /// refuses to overlap a busy engine (spawning happens only when idle).
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_start_campaign_validates_and_respects_busy_engine() {
+        let _serial = CAMPAIGN_LOCK_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // A live cell (a CLI campaign) legitimately owns the real lock, and
         // the validation path needs an idle engine: skip rather than fight
         // a campaign that is running.
@@ -5654,6 +5814,74 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
             .unwrap();
         assert!(body["campaign"].is_null(), "released lock reports null");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Round-8 finding 8: a running cell with no rollup yet answers the
+    /// detail endpoint with the campaign's ladder (its current ticket
+    /// running), not a 404.
+    #[tokio::test]
+    async fn test_campaign_detail_running_without_a_rollup() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let id = format!("campaign_sdb-sql_ut_live_{}", std::process::id());
+        let dir = crate::report::archive::RunArchiver::resolve_runs_dir().join(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("status.json"),
+            serde_json::json!({
+                "state": "running",
+                "current_stage": 5,
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "rollup": serde_json::Value::Null,
+                "started_at": "2026-10-17T14:31:53Z",
+                "wall_cap_min": 120,
+                "live": {
+                    "campaign": "sdb-sql", "model": "ut/live-model", "harness": "omp",
+                    "effort": "high", "campaign_budget": 0.75,
+                    "ticket": 5, "title": "Crash safety", "type": "resilience",
+                    "variant": "full", "round": 0, "phase": "agent", "turn": 3,
+                    "max_turns": 28, "ticket_spent": 0.01, "ticket_budget": 0.20
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let res = client
+            .get(format!("{base}/api/campaigns/{id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["live_run"], true);
+        assert_eq!(body["state"], "running");
+        assert_eq!(body["rollup"]["model"], "ut/live-model");
+        assert_eq!(body["budget_usd"], 0.75);
+        assert_eq!(body["stop_reason"], "");
+        let ladder = body["ladder"].as_array().expect("ladder");
+        assert_eq!(
+            ladder.iter().find(|e| e["id"] == 5).unwrap()["status"],
+            "running"
+        );
+        assert_eq!(
+            ladder.iter().find(|e| e["id"] == 0).unwrap()["status"],
+            "not_reached"
+        );
+        // The list endpoint pins it first, ahead of every finished cell.
+        let list: Vec<serde_json::Value> = client
+            .get(format!("{base}/api/campaigns"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            list.first().map(|c| c["id"].clone()),
+            Some(serde_json::json!(id.clone()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

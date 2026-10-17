@@ -1849,26 +1849,59 @@
       if (liveFollowing) el.scrollTop = el.scrollHeight;
     }
 
-    function liveStrip() {
+    /// The Live/Run header: the runner's live block (round-8 improvement
+    /// A) when present, else a timestamp-anchored scan of the stream.
+    function liveInfo() {
+      const cell = boardCache.find(c => c.id === liveRunId) || null;
+      const live = (cell && cell.live) || {};
+      const roll = cell ? (cell.rollup || {}) : {};
+      if (live.ticket == null && !live.phase && !live.turn) {
+        // Fallback for cells whose runner predates the live block: parse
+        // the stream (timestamps stripped: every real line carries one).
+        const strip = t => String(t || '').replace(/^\[\d\d:\d\d:\d\d\]\s*/, '');
+        let out = {};
+        for (let k = liveLines.length - 1; k >= 0 && out.ticket == null; k--) {
+          const t = strip(liveLines[k].text);
+          let m;
+          if (out.ticket == null && (m = t.match(/^─── ticket (\d+) \[([a-z]+)\]/))) { out.ticket = m[1]; out.type = m[2]; }
+          if (out.turn == null && (m = t.match(/^\[LIVE\] Turn (\d+)\/(\d+)/))) { out.turn = m[1]; out.max_turns = m[2]; }
+          if (out.ticket_spent == null && (m = t.match(/\bspent=([0-9.]+)/))) { out.ticket_spent = parseFloat(m[1]); }
+          if (out.round == null && (m = t.match(/Repair Round (\d+)\//))) { out.round = m[1]; }
+        }
+        return out;
+      }
+      return live;
+    }
+
+    function liveSummary(extra) {
+      const live = liveInfo();
+      const cell = boardCache.find(c => c.id === liveRunId) || null;
+      const roll = cell ? (cell.rollup || {}) : {};
+      const d = (currentRunDetail && currentRunDetail.id === liveRunId) ? currentRunDetail : null;
+      const cap = d ? d.budget_usd : roll.budget_usd;
+      const parts = [];
+      if (live.ticket != null) {
+        parts.push(`ticket ${live.ticket}${live.title ? ' ' + live.title : (live.type ? ' [' + live.type + ']' : '')}${live.variant ? ' (full)' : ''}`.replace('(full)', live.variant === 'full' ? '(full)' : live.variant === 'lite' ? '(lite)' : ''));
+      }
+      if (live.round) parts.push(`repair round ${live.round}`);
+      if (live.phase) parts.push(live.phase);
+      if (live.turn != null) parts.push(`turn ${live.turn}${live.max_turns ? '/' + live.max_turns : ''}`);
+      if (live.ticket_spent != null) parts.push(`ticket $${fmtMoney(live.ticket_spent)}${live.ticket_budget ? ' / $' + fmtMoney(live.ticket_budget) : ''}`);
+      const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
+      if (spent != null) parts.push(`campaign $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) : ''}`);
+      if (live.last_verdict && live.last_verdict.line) {
+        parts.push(`last check ${live.last_verdict.at || ''} ${String(live.last_verdict.line).slice(0, 120)}`);
+      }
+      if (live.last_activity_at) parts.push(`last activity ${live.last_activity_at}`);
+      if (extra && cell && cell.state) parts.push(cell.state);
+      return parts.join(' · ');
+    }
+
+    function renderLiveStrip() {
       const box = document.getElementById('liveStrip');
       if (!box) return;
-      const cell = boardCache.find(c => c.id === liveRunId) || null;
-      const r = cell ? (cell.rollup || {}) : {};
-      let turn = null, spent = null, ticket = null, variant = null, round = null;
-      for (let i = liveLines.length - 1; i >= 0 && (!turn || ticket == null); i--) {
-        const t = liveLines[i].text;
-        let m;
-        if (!turn && (m = t.match(/\[LIVE\] Turn (\d+)\/(\d+)/)) ) { turn = m[1] + '/' + m[2]; }
-        if (spent == null && (m = t.match(/spent=\$([0-9.]+)/))) { spent = m[1]; }
-        if (ticket == null && (m = t.match(/^─── ticket (\d+) \[([a-z]+)\]/))) { ticket = m[1]; variant = m[2]; }
-        if (round == null && (m = t.match(/Round (\d+)\/(\d+)/))) { round = m[1]; }
-      }
-      const cap = currentRunDetail && currentRunDetail.id === liveRunId ? currentRunDetail.budget_usd : null;
-      box.innerHTML = `<span class="hint">run <b>${escapeHtml(liveRunId || '—')}</b></span>`
-        + (ticket != null ? ` <span class="hint">· ticket ${escapeHtml(String(ticket))}${variant ? ' [' + escapeHtml(variant) + ']' : ''}</span>` : '')
-        + (round ? ` <span class="hint">· repair round ${escapeHtml(round)}</span>` : '')
-        + (turn ? ` <span class="hint">· turn ${escapeHtml(turn)}</span>` : '')
-        + (r.total_cost_usd != null ? ` <span class="hint">· $${fmtMoney(r.total_cost_usd)}${cap ? ' / $' + fmtMoney(cap) : ''} campaign</span>` : '');
+      const text = liveRunId ? liveSummary(true) : 'no run selected';
+      box.innerHTML = `<span class="hint">${escapeHtml(text || String(liveRunId || ''))}</span>`;
     }
 
     async function pollLive() {
@@ -1883,7 +1916,7 @@
         if (data.lines && data.lines.length) {
           liveLines = liveLines.concat(data.lines);
           if (liveLines.length > 1500) liveLines = liveLines.slice(-1500);
-          liveStrip();
+          renderLiveStrip();
           renderLiveStream();
         }
       } catch (e) { /* transient */ }
@@ -1934,6 +1967,7 @@
       fail: { color: 'var(--danger)', label: 'fail' },
       fault: { color: 'var(--text-muted)', label: 'fault', stripe: true },
       skipped: { color: 'var(--text-muted)', label: 'skipped' },
+      running: { color: 'var(--primary)', label: 'running' },
       not_reached: { color: 'transparent', label: 'not reached' },
     };
 
@@ -2126,8 +2160,12 @@
       }).join(' → ');
     }
 
-    function runTicketDetail(recs) {
-      if (!recs.length) return '<div class="hint">never attempted</div>';
+    function runTicketDetail(recs, running) {
+      if (!recs.length) {
+        return running
+          ? `<div class="hint">running · ${escapeHtml(liveSummary(false))}</div>`
+          : '<div class="hint">never attempted</div>';
+      }
       return recs.map(rec => {
         const rounds = rec.rounds || [];
         const roundRows = rounds.map(rd => `<div class="hint" style="margin-left:12px;">
@@ -2190,13 +2228,14 @@
           <td style="text-align:right;font-variant-numeric:tabular-nums;">${cost ? '$' + fmtMoney(cost) : '·'}</td>
           <td class="hint" style="max-width:380px;">${escapeHtml(cause)}</td>
         </tr>
-        <tr style="display:${expanded ? 'table-row' : 'none'};"><td colspan="6" style="background:#0b0f18;">${runTicketDetail(recs)}</td></tr>`;
+        <tr style="display:${expanded ? 'table-row' : 'none'};"><td colspan="6" style="background:#0b0f18;">${runTicketDetail(recs, e.status === 'running')}</td></tr>`;
       });
       body.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
           <div>
             <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(r.model || d.id)}</h2>
-            <div class="hint">${escapeHtml(r.harness || '')}${r.effort ? ' · effort ' + escapeHtml(r.effort) : ''} · rules ${escapeHtml(r.rules_version || '—')} · ${escapeHtml((r.started_at || '').slice(0, 16).replace('T', ' '))} → ${escapeHtml((r.finished_at || '').slice(0, 16).replace('T', ' '))} · ${escapeHtml(d.state || '')}${d.stop_reason ? ' · ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ' · <span style="color:var(--warning);">over budget</span>' : ''}${r.over_wall ? ' · <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            <div class="hint">${escapeHtml(r.harness || '')}${r.effort ? ' · effort ' + escapeHtml(r.effort) : ''} · rules ${escapeHtml(r.rules_version || '—')} · ${escapeHtml((r.started_at || '').slice(0, 16).replace('T', ' '))} → ${r.finished_at ? escapeHtml(r.finished_at.slice(0, 16).replace('T', ' ')) : 'running'} · ${escapeHtml(d.state || '')}${d.state === 'done' && d.stop_reason ? ' · ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ' · <span style="color:var(--warning);">over budget</span>' : ''}${r.over_wall ? ' · <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            ${d.live_run ? `<div class="hint" style="color:var(--primary);">${escapeHtml(liveSummary(false))}</div>` : ''}
           </div>
           <a href="#" onclick="event.preventDefault(); location.hash='board';" class="hint" style="color:var(--primary);">← Board</a>
         </div>

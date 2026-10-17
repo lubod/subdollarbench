@@ -2848,6 +2848,45 @@ mod tests {
         assert!(run_cli(cli_http).await.is_ok());
     }
 
+    /// Round-8 finding 2: the argv the console launcher spawns must be
+    /// accepted by the real clap definition (a stale argv once reached a
+    /// spawn and died in libtest's parser instead).
+    #[test]
+    fn launcher_argv_parses_as_the_campaign_run_command() {
+        let args = subdollarbench::campaign::launcher_args(
+            "openrouter/meta/muse-spark-1.3-contributor",
+            "high",
+            0.75,
+            120,
+        );
+        let cli = Cli::try_parse_from(
+            std::iter::once("subdollarbench").chain(args.iter().map(String::as_str)),
+        )
+        .expect("the launcher argv must parse");
+        match cli.command {
+            Commands::Campaign {
+                action:
+                    subdollarbench::config::CampaignAction::Run {
+                        name,
+                        model,
+                        effort,
+                        budget_usd,
+                        wall_min,
+                        timeout_min,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "sdb-sql");
+                assert_eq!(model, "openrouter/meta/muse-spark-1.3-contributor");
+                assert_eq!(effort, "high");
+                assert_eq!(budget_usd, 0.75);
+                assert_eq!(wall_min, Some(120));
+                assert_eq!(timeout_min, 20);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_main_cli_portal_export() {
         let temp_dir =

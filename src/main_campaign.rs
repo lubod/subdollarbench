@@ -26,6 +26,12 @@ use subdollarbench::report::RunArchiver;
 struct CampaignLogger {
     buf: Arc<Mutex<Vec<String>>>,
     live: std::path::PathBuf,
+    /// The campaign dir: the live status block is written here (round-8
+    /// improvement A).
+    cdir: std::path::PathBuf,
+    /// When the live block was last written; the throttle keeps a chatty
+    /// agent from rewriting status.json per line.
+    last_status: Mutex<std::time::Instant>,
 }
 
 impl PipelineLogger for CampaignLogger {
@@ -45,6 +51,35 @@ impl PipelineLogger for CampaignLogger {
                 let _ = writeln!(f, "[{ts}] {msg}");
             }
         }
+        // The live status block: merge-write at most every 5 s, plus
+        // immediately on a verdict or a phase change (round-8
+        // improvement A).
+        let due = {
+            let mut last = self.last_status.lock().unwrap_or_else(|e| e.into_inner());
+            let due = last.elapsed() >= std::time::Duration::from_secs(5);
+            if due {
+                *last = std::time::Instant::now();
+            }
+            due
+        };
+        let immediate = {
+            let _guard = STATUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let path = status_path(&self.cdir);
+            let mut v = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if v["live"].is_null() {
+                v["live"] = serde_json::json!({});
+            }
+            let immediate = apply_live_line(&mut v["live"], msg);
+            if immediate || due {
+                v["updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+                atomic_write_json(&path, &v);
+            }
+            immediate
+        };
+        let _ = immediate;
     }
 }
 
@@ -68,30 +103,141 @@ fn write_status(
     current_stage: Option<u32>,
     rollup: Option<&CampaignRollup>,
 ) {
-    let mut v = serde_json::json!({
-        "state": state,
-        "current_stage": current_stage,
-        "updated_at": chrono::Utc::now().to_rfc3339(),
+    update_status(cdir, |v| {
+        v["state"] = serde_json::json!(state);
+        v["current_stage"] = serde_json::json!(current_stage);
+        if let Some(r) = rollup {
+            v["rollup"] = serde_json::to_value(r).unwrap_or(serde_json::Value::Null);
+            // Mirror the campaign spend into the live block (round-8
+            // improvement A): the Run/Live views read one place.
+            if v["live"].is_null() {
+                v["live"] = serde_json::json!({});
+            }
+            v["live"]["campaign_spent"] = serde_json::json!(r.total_cost_usd);
+        }
     });
-    if let Some(r) = rollup {
-        v["rollup"] = serde_json::to_value(r).unwrap_or(serde_json::Value::Null);
+}
+
+/// One process-wide lock for the status.json read-modify-write: the
+/// campaign loop and the log-driven live updater both write it, and the
+/// GUI polls it (round-8 improvement A).
+static STATUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Merge-update status.json: a writer never drops what another one wrote.
+fn update_status(cdir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
+    let _guard = STATUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = status_path(cdir);
+    let mut v = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    f(&mut v);
+    v["updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    atomic_write_json(&path, &v);
+}
+
+/// Apply one log line to the live block; true when it is a verdict or a
+/// phase change worth an immediate status write (round-8 improvement A).
+fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
+    let t = msg.trim_start();
+    let now = chrono::Utc::now().format("%H:%M:%S").to_string();
+    live["last_activity_at"] = serde_json::json!(now);
+    let num = |s: &str, key: &str| -> Option<f64> {
+        s.split_whitespace()
+            .find_map(|w| w.strip_prefix(key))
+            .and_then(|v| v.parse::<f64>().ok())
+    };
+    if let Some(rest) = t.strip_prefix("[LIVE] Turn ") {
+        if let Some((turn, max)) = rest.split_once('/') {
+            let max = max.split_whitespace().next().unwrap_or("");
+            live["turn"] = serde_json::json!(turn.trim().parse::<u64>().unwrap_or(0));
+            live["max_turns"] = serde_json::json!(max.parse::<u64>().unwrap_or(0));
+        }
+        return false;
     }
-    atomic_write_json(&status_path(cdir), &v);
+    if let Some(rest) = t.strip_prefix("[TELEMETRY] ") {
+        if let Some(v) = num(rest, "turn=") {
+            live["turn"] = serde_json::json!(v as u64);
+        }
+        if let Some(v) = num(rest, "max_turns=") {
+            live["max_turns"] = serde_json::json!(v as u64);
+        }
+        if let Some(v) = num(rest, "spent=") {
+            live["ticket_spent"] = serde_json::json!(v);
+        }
+        return false;
+    }
+    if t.starts_with("─── ticket ") {
+        // ─── ticket N [type] TITLE (acceptance …, budget $X) ───
+        let rest = t.trim_start_matches("─── ticket ");
+        let (id_part, tail) = rest.split_once(" [").unwrap_or((rest, ""));
+        live["ticket"] = serde_json::json!(id_part.trim().parse::<u64>().unwrap_or(0));
+        if let Some((kind, tail)) = tail.split_once("] ") {
+            live["type"] = serde_json::json!(kind);
+            if let Some((title, rest)) = tail.split_once(" (acceptance") {
+                live["title"] = serde_json::json!(title.trim());
+                if let Some(budget) = rest.rsplit_once("budget $") {
+                    if let Ok(v) = budget.1.trim_end_matches(')').trim().parse::<f64>() {
+                        live["ticket_budget"] = serde_json::json!(v);
+                    }
+                }
+            }
+        }
+        live["round"] = serde_json::json!(0);
+        live["ticket_spent"] = serde_json::json!(0.0);
+        live["phase"] = serde_json::json!("agent");
+        return true;
+    }
+    if t.starts_with("[FEEDBACK] ━━━ Repair Round ") {
+        let rest = t.trim_start_matches("[FEEDBACK] ━━━ Repair Round ");
+        let round = rest.split('/').next().unwrap_or("1").trim();
+        live["round"] = serde_json::json!(round.parse::<u64>().unwrap_or(1));
+        live["phase"] = serde_json::json!("repair");
+        live["phase_started_at"] = serde_json::json!(now);
+        return true;
+    }
+    if t.starts_with("[FEEDBACK] Round ") {
+        // The round's verdict: "Round 1 test result: 2 of 6 stages passed".
+        live["last_verdict"] = serde_json::json!({"at": now, "passed": null, "line": t});
+        return true;
+    }
+    if t.starts_with("Stage ") && t.contains("-> ") {
+        let passed = t.contains("-> PASS");
+        live["last_verdict"] = serde_json::json!({"at": now, "passed": passed, "line": t});
+        live["phase"] = serde_json::json!("verifying");
+        return true;
+    }
+    if t.starts_with("[VERIFY]") || t.starts_with("[SETUP]") || t.starts_with("[DIAGNOSTICS]") {
+        live["phase"] = serde_json::json!("verifying");
+        return false;
+    }
+    if t.starts_with("[PERF]") {
+        live["phase"] = serde_json::json!("perf");
+        return true;
+    }
+    if t.starts_with("[CRASH]") {
+        live["phase"] = serde_json::json!("crash");
+        return true;
+    }
+    if (t.starts_with("[THOUGHT]") || t.starts_with("[ACTION]") || t.starts_with("[RESPONSE]"))
+        && live["phase"].as_str() != Some("agent")
+    {
+        live["phase"] = serde_json::json!("agent");
+        live["phase_started_at"] = serde_json::json!(now);
+        return true;
+    }
+    false
 }
 
 /// Mark the ticket as running without discarding the rollup written so far.
 fn bump_current_stage(cdir: &Path, stage: u32) {
-    let mut v = std::fs::read_to_string(status_path(cdir))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    v["state"] = serde_json::json!("running");
-    v["current_stage"] = serde_json::json!(stage);
-    v["updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-    if v.get("rollup").is_none() {
-        v["rollup"] = serde_json::Value::Null;
-    }
-    atomic_write_json(&status_path(cdir), &v);
+    update_status(cdir, |v| {
+        v["state"] = serde_json::json!("running");
+        v["current_stage"] = serde_json::json!(stage);
+        if v.get("rollup").is_none() {
+            v["rollup"] = serde_json::Value::Null;
+        }
+    });
 }
 
 pub fn list() -> Result<()> {
@@ -188,6 +334,24 @@ pub async fn run(
     let runs_dir = RunArchiver::resolve_runs_dir();
     let cdir = runs_dir.join(&campaign_id);
     std::fs::create_dir_all(&cdir)?;
+    // The campaign-level live fields (round-8 improvement A): every later
+    // status write merges into this document.
+    update_status(&cdir, |v| {
+        let started = v["started_at"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        v["started_at"] = serde_json::json!(started);
+        v["wall_cap_min"] = serde_json::json!(wall_min.unwrap_or(0));
+        v["live"] = serde_json::json!({
+            "campaign": lc.spec.name,
+            "model": model,
+            "harness": harness.to_string(),
+            "effort": effort,
+            "campaign_budget": budget_usd,
+            "campaign_spent": 0.0,
+        });
+    });
     let workdir = cdir.join("workspace");
 
     if let Some(src) = &workspace {
@@ -480,11 +644,43 @@ async fn run_one_stage(
     let stage_dir = cdir.join(format!("s{}_{variant_tag}", stage.id));
     std::fs::create_dir_all(&stage_dir)?;
     bump_current_stage(cdir, stage.id);
+    // The attempt's live block: what the Board, Run and Live views show
+    // while this ticket is in flight (round-8 improvement A).
+    let now = chrono::Utc::now().to_rfc3339();
+    update_status(cdir, |v| {
+        let campaign = v["live"]["campaign"].clone();
+        let model_l = v["live"]["model"].clone();
+        let harness_l = v["live"]["harness"].clone();
+        let effort_l = v["live"]["effort"].clone();
+        let budget_l = v["live"]["campaign_budget"].clone();
+        v["live"] = serde_json::json!({
+            "campaign": campaign,
+            "model": model_l,
+            "harness": harness_l,
+            "effort": effort_l,
+            "campaign_budget": budget_l,
+            "campaign_spent": v["live"]["campaign_spent"].clone(),
+            "ticket": stage.id,
+            "title": stage.title,
+            "type": stage.kind,
+            "variant": variant_tag,
+            "round": 0,
+            "phase": "agent",
+            "phase_started_at": now,
+            "turn": 0,
+            "max_turns": job.max_turns,
+            "ticket_spent": 0.0,
+            "ticket_budget": stage.budget_usd,
+            "last_activity_at": now,
+        });
+    });
 
     let buf = Arc::new(Mutex::new(Vec::<String>::new()));
     let logger: Arc<dyn PipelineLogger> = Arc::new(CampaignLogger {
         buf: buf.clone(),
         live: cdir.join("live.log"),
+        cdir: cdir.to_path_buf(),
+        last_status: Mutex::new(std::time::Instant::now()),
     });
     logger.log(&format!(
         "─── ticket {} [{}] {} (acceptance {:?}, budget ${:.2}) ───",
@@ -825,6 +1021,8 @@ mod tests {
         let logger = CampaignLogger {
             buf: buf.clone(),
             live: dir.join("live.log"),
+            cdir: dir.clone(),
+            last_status: Mutex::new(std::time::Instant::now()),
         };
         logger.log("ticket 0 started");
 

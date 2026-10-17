@@ -227,6 +227,14 @@ pub struct RunArchiver;
 
 impl RunArchiver {
     pub fn resolve_runs_dir() -> PathBuf {
+        // Tests (and tools) point this at a temp dir via SDB_RUNS_DIR: the
+        // real runs/ directory holds live cells whose locks and campaign
+        // dirs must never be touched (round-8 finding 1).
+        if let Ok(dir) = std::env::var("SDB_RUNS_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
         let root = crate::config::get_repo_root();
         let runs = root.join("runs");
         if runs.exists() {

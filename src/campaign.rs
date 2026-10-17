@@ -858,10 +858,35 @@ pub fn campaign_lock_path() -> std::path::PathBuf {
 pub struct LockInfo {
     pub pid: u32,
     pub campaign_id: String,
+    /// The holder's process start time from /proc/<pid>/stat (field 22).
+    /// A reused pid gets a different start time, so the lock goes stale
+    /// instead of pinning an unrelated process (round-8 finding 5). Zero
+    /// for locks written before the field existed.
+    #[serde(default)]
+    pub start_ticks: u64,
 }
 
-fn process_alive(pid: u32) -> bool {
-    pid != 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
+/// `/proc/<pid>/stat` field 22 (starttime in clock ticks), parsed after the
+/// last ')' because the comm field may contain spaces.
+fn process_start_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// A lock holder is live when its pid still has the *same* start time it
+/// had at acquisition. An old lock without the stamp falls back to a
+/// cmdline check: anything but a campaign process does not own it.
+fn holder_alive(info: &LockInfo) -> bool {
+    let Some(ticks) = process_start_ticks(info.pid) else {
+        return false;
+    };
+    if info.start_ticks == 0 {
+        return std::fs::read_to_string(format!("/proc/{}/cmdline", info.pid))
+            .map(|c| c.contains("campaign"))
+            .unwrap_or(false);
+    }
+    ticks == info.start_ticks
 }
 
 /// The live campaign-lock holder, if any. A dead holder's lock is ignored
@@ -874,7 +899,7 @@ pub fn live_lock_holder() -> Option<LockInfo> {
 pub fn live_lock_holder_at(path: &std::path::Path) -> Option<LockInfo> {
     let text = std::fs::read_to_string(path).ok()?;
     let info: LockInfo = serde_json::from_str(&text).ok()?;
-    process_alive(info.pid).then_some(info)
+    holder_alive(&info).then_some(info)
 }
 
 /// The lock guard: held for the whole campaign run; removed on drop.
@@ -908,6 +933,7 @@ impl CampaignLock {
                     let info = LockInfo {
                         pid: std::process::id(),
                         campaign_id: campaign_id.to_string(),
+                        start_ticks: process_start_ticks(std::process::id()).unwrap_or(0),
                     };
                     let _ =
                         f.write_all(serde_json::to_string(&info).unwrap_or_default().as_bytes());
@@ -916,8 +942,10 @@ impl CampaignLock {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(holder) = live_lock_holder_at(&path) {
                         return Err(format!(
-                            "campaign {} (pid {}) is already running",
-                            holder.campaign_id, holder.pid
+                            "campaign {} (pid {}) is already running — if that process is gone,                              delete {}",
+                            holder.campaign_id,
+                            holder.pid,
+                            path.display()
                         ));
                     }
                     // Stale lock: replace it.
@@ -941,8 +969,14 @@ impl Drop for CampaignLock {
 /// The state a cell is shown as (round-7 finding 6): a `running` status
 /// whose writer is gone (no live lock) and which has not been updated for
 /// 30 minutes is `stalled`, never running forever.
-pub fn effective_state(state: &str, updated_at: Option<&str>) -> String {
-    effective_state_with(state, updated_at, live_lock_holder().is_some())
+pub fn effective_state(campaign_id: &str, state: &str, updated_at: Option<&str>) -> String {
+    // Only *this* cell's lock keeps it running: another campaign holding
+    // the lock says nothing about a cell that died yesterday (round-8
+    // finding 4).
+    let lock_live = live_lock_holder()
+        .map(|h| h.campaign_id == campaign_id)
+        .unwrap_or(false);
+    effective_state_with(state, updated_at, lock_live)
 }
 
 /// The same derivation with the lock fact passed in, so a test is not at
@@ -1153,12 +1187,85 @@ pub struct LadderEntry {
     pub cause: Option<String>,
 }
 
+/// A rollup-shaped stub for a running cell that has no rollup yet (its
+/// first ticket is still in flight; round-8 finding 8). The live block the
+/// runner writes carries the model, harness, effort and budgets.
+pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRollup {
+    let live = &v["live"];
+    let s = |k: &str, fb: &str| live[k].as_str().unwrap_or(fb).to_string();
+    CampaignRollup {
+        campaign_id: campaign_id.to_string(),
+        name: s("campaign", "sdb-sql"),
+        model: s("model", "?"),
+        harness: s("harness", "omp"),
+        effort: s("effort", "high"),
+        task: "sql".to_string(),
+        started_at: v["started_at"].as_str().unwrap_or("").to_string(),
+        finished_at: String::new(),
+        stages: Vec::new(),
+        reached: None,
+        regression_free_tickets: 0,
+        total_cost_usd: live["campaign_spent"].as_f64().unwrap_or(0.0),
+        over_budget: false,
+        over_wall: false,
+        rules_version: crate::report::rules::RULES_VERSION.to_string(),
+        budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
+        wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
+        points: 0.0,
+        max_points: 0.0,
+    }
+}
+
+/// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
+/// test pins that the real clap definition accepts it (round-8 finding 2).
+pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) -> Vec<String> {
+    [
+        "campaign",
+        "run",
+        "--name",
+        "sdb-sql",
+        "--model",
+        model,
+        "--effort",
+        effort,
+        "--budget-usd",
+        &format!("{budget_usd}"),
+        "--wall-min",
+        &format!("{wall_min}"),
+        "--timeout-min",
+        "20",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The launcher's resolved binary: the repo's release build when present
+/// (a rebuilt binary's `/proc/self/exe` reads `… (deleted)` and spawning it
+/// fails), else the running executable with that suffix stripped.
+pub fn launcher_binary() -> Option<std::path::PathBuf> {
+    let release = crate::config::get_repo_root().join("target/release/subdollarbench");
+    if release.is_file() {
+        return Some(release);
+    }
+    std::env::current_exe().ok().map(|p| {
+        let s = p.to_string_lossy();
+        match s.strip_suffix(" (deleted)") {
+            Some(base) if std::path::Path::new(base).is_file() => std::path::PathBuf::from(base),
+            _ => p,
+        }
+    })
+}
+
 /// The board's ranking key (gui-spec.md §4.1): current rule sets first,
 /// then difficulty-weighted points, then points per dollar, then cheaper.
 /// ONE implementation for the console, the API and the public board —
 /// there must be no second ranking.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct BoardSortKey {
+    /// A running cell with no rollup yet: pinned first, in its own group,
+    /// so the comparator stays a total order (round-8 finding 9).
+    pub live: bool,
     pub current_rules: bool,
     pub points: f64,
     pub per_dollar: Option<f64>,
@@ -1169,6 +1276,7 @@ impl BoardSortKey {
     pub fn of(rollup: &CampaignRollup) -> Self {
         let current = rollup.rules_version == crate::report::rules::RULES_VERSION;
         Self {
+            live: false,
             current_rules: current,
             points: rollup.points,
             per_dollar: (rollup.total_cost_usd > 0.0)
@@ -1181,8 +1289,9 @@ impl BoardSortKey {
 /// The board order: current rules first, then points desc, then points per
 /// dollar desc, then cheaper.
 pub fn board_order(a: &BoardSortKey, b: &BoardSortKey) -> std::cmp::Ordering {
-    b.current_rules
-        .cmp(&a.current_rules)
+    b.live
+        .cmp(&a.live)
+        .then_with(|| b.current_rules.cmp(&a.current_rules))
         .then_with(|| {
             b.points
                 .partial_cmp(&a.points)
@@ -1216,7 +1325,11 @@ pub fn stop_reason(rollup: &CampaignRollup) -> &'static str {
 /// implementation for the console, the API and the public board
 /// (gui-spec.md §5.3). `needs` unmet -> `skipped`; a runnable but
 /// unattempted ticket -> `not reached` (with the stop reason).
-pub fn ladder(spec: &CampaignSpec, rollup: &CampaignRollup) -> Vec<LadderEntry> {
+pub fn ladder(
+    spec: &CampaignSpec,
+    rollup: &CampaignRollup,
+    current: Option<u32>,
+) -> Vec<LadderEntry> {
     let passed: Vec<u32> = rollup
         .stages
         .iter()
@@ -1260,6 +1373,17 @@ pub fn ladder(spec: &CampaignSpec, rollup: &CampaignRollup) -> Vec<LadderEntry> 
                     .as_ref()
                     .map(|f| f.line.clone())
                     .or_else(|| rec.git_stat.is_some().then(|| "failed".to_string())),
+            }
+        } else if current == Some(stage.id) {
+            // Attempted right now, no record yet: the Run view and the
+            // board show it as running (round-8 finding 8).
+            LadderEntry {
+                id: stage.id,
+                title: stage.title.clone(),
+                status: "running".to_string(),
+                variant: String::new(),
+                points: 0.0,
+                cause: None,
             }
         } else {
             let unmet: Vec<u32> = stage
@@ -2160,6 +2284,7 @@ mod tests {
     fn board_order_ranks_points_then_dollars() {
         use crate::report::rules::RULES_VERSION;
         let key = |rules: &str, points: f64, cost: f64| BoardSortKey {
+            live: false,
             current_rules: rules == RULES_VERSION,
             points,
             per_dollar: (cost > 0.0).then(|| points / cost),
@@ -2173,6 +2298,38 @@ mod tests {
         assert_eq!(board_order(&current, &cheaper), std::cmp::Ordering::Greater);
         assert_eq!(board_order(&current, &stale), std::cmp::Ordering::Less);
         assert_eq!(board_order(&current, &current), std::cmp::Ordering::Equal);
+    }
+
+    /// Round-8 finding 9: a rollup-less (live) cell is pinned first in its
+    /// own group and the comparator stays a total order — sorting must
+    /// never see it as "equal to everything".
+    #[test]
+    fn board_order_pins_live_cells_first() {
+        use crate::report::rules::RULES_VERSION;
+        let key = |live: bool, points: f64| BoardSortKey {
+            live,
+            current_rules: true,
+            points,
+            per_dollar: Some(points / 0.5),
+            cost: 0.5,
+        };
+        let live = key(true, 0.0);
+        let ranked = key(false, 5.8);
+        assert_eq!(board_order(&live, &ranked), std::cmp::Ordering::Less);
+        assert_eq!(board_order(&ranked, &live), std::cmp::Ordering::Greater);
+        // A whole list sorts with the live cell first, without panicking.
+        let mut cells = [key(false, 1.0), live, key(false, 5.8), key(false, 1.0)];
+        cells.sort_by(board_order);
+        assert!(cells[0].live, "live first");
+        assert_eq!(cells[1].points, 5.8, "then by points");
+        // The rules stamp is still a valid tiebreaker below points.
+        let mut stale = key(false, 5.8);
+        stale.current_rules = false;
+        assert_eq!(
+            board_order(&key(false, 5.8), &stale),
+            std::cmp::Ordering::Less
+        );
+        let _ = RULES_VERSION;
     }
 
     /// gui-spec.md §5.3: attempted, lite, failed, skipped and not-reached
@@ -2276,7 +2433,7 @@ mod tests {
         rollup.stages.push(record(1, true, "lite", "passed"));
         // Ticket 2 was attempted and failed.
         rollup.stages.push(record(2, false, "full", "failed"));
-        let entries = ladder(&spec, &rollup);
+        let entries = ladder(&spec, &rollup, None);
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].status, "pass");
         assert_eq!(entries[1].status, "lite");

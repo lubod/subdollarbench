@@ -1407,10 +1407,11 @@ impl PortalExporter {
                                     crate::campaign::load_campaign(&r.name).ok().map(|l| l.spec)
                                 })
                                 .as_ref()
-                                .map(|spec| crate::campaign::ladder(spec, r))
+                                .map(|spec| crate::campaign::ladder(spec, r, None))
                         })
                         .unwrap_or_default(),
                     key: crate::campaign::BoardSortKey {
+                        live: false,
                         current_rules: rules_v == crate::report::rules::RULES_VERSION,
                         points: points_v,
                         per_dollar: (cost_v > 0.0).then(|| points_v / cost_v),

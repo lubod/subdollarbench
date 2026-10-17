@@ -979,6 +979,36 @@ tail, the proxied campaign POST, the merged validation+lock+status
 test; full lib suite 876 green; the CLI refusal and the API 409 were
 verified live.
 
+**Round-8 review fixes landed (2026-10-17)**: (1, MEDIUM-HIGH) the suite
+no longer touches the real `runs/` directory: `resolve_runs_dir()` honours
+`SDB_RUNS_DIR` and every web/campaign test runs against an isolated temp
+dir (a guard test proves a live-looking lock is byte-identical after the
+requests; the two lock tests serialize on a test mutex). Verified while
+the muse cell held the real lock: it survived the suite untouched. (2) the
+launcher argv lives in `campaign::launcher_args` and a bin test parses it
+with the real `Cli`; the spawn target resolves the repo's release binary
+(a rebuilt binary's `/proc/self/exe` reads `… (deleted)`), and the two
+stale launch logs are gone. (3) the child gets its own process group
+(`process_group(0)`), so restarting the console cannot kill a campaign.
+(4) `effective_state` compares the lock's campaign id with the cell's,
+not "any lock". (5) the lock stores the holder's process start time
+(pid-reuse proof) and the 409 says how to clear a wedged lock.
+(6, HIGH) `log_kind` strips the real `[HH:MM:SS] ` timestamp and maps
+tool/prose continuations: the default Live chips went from **0 to 1493
+lines** on the muse cell's live.log, pinned by verbatim timestamped lines
+plus a real-log assertion. (7) the Live strip reads the runner's live
+block (or a timestamp-anchored fallback — verified against the real log:
+ticket/turn/spent/round all match) and the `$`-less `spent=` pattern is
+fixed. (8) `GET /api/campaigns/:id` answers 200 with the campaign's full
+ladder (the current ticket `running`) whenever the directory exists — no
+more "run not found" during ticket 0. (9) the board key is a total order
+with rollup-less live cells pinned first; ling 5.8 ranks above muse 4.0
+again and the sort cannot panic. Improvement A landed: the runner
+merge-writes a `live` block (ticket/title/type/variant/round/phase/
+turn/ticket-spent/verdict/last-activity) into status.json every 5 s and
+immediately on verdicts/phase changes; the Board/Run/Live headers read
+it (the strip falls back for pre-existing cells like the muse one).
+
 **gui-spec.md implemented (2026-10-17)**: the console is campaign-first.
 Phase 1 (`3f7dd2d`): manifests record one `CampaignRound` per
 verification (stage results, turns, cost estimate, candidate-log tail);
