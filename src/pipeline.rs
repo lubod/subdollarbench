@@ -172,6 +172,14 @@ fn crash_ladder(
             must.push(acked);
             maybe.clear();
         }
+        // The un-acked row may still have been committed: if it is visible
+        // after (a)'s restart, it is owed too.
+        if let Ok(keys) = crash::read_keys(&addr, t, &acked_table) {
+            if keys.contains(&acked) {
+                must.push(acked);
+                maybe.retain(|k| *k != acked);
+            }
+        }
 
         if lite {
             // Lite stage 5 (proposal): acked rows survive kill -9; torn tails

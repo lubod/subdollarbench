@@ -1690,7 +1690,16 @@ impl Toy {
                     })
                     .max()
                     .unwrap_or(0);
-                out[ti] = V::Int(maxv.saturating_add(1).max(1));
+                if maxv == i64::MAX {
+                    // SQLite would pick a *random* rowid here (its
+                    // allocation overflows): outside the dialect, so a
+                    // generator regression fails loudly instead of as a
+                    // constraint mismatch.
+                    return Err(ErrClass::Limit);
+                }
+                // SQLite assigns max+1 even when the max is negative
+                // (`unwrap_or(0)` above gives 1 on an empty table).
+                out[ti] = V::Int(maxv.saturating_add(1));
             }
             if matches!(out[ti], V::Null) {
                 if c.not_null || (c.pk && *ty == Ty::Text) {
@@ -2613,9 +2622,9 @@ mod tests {
     #[test]
     #[ignore]
     fn clean_toy_soak() {
-        // Through stage 9: the soak covers aggregates, joins and
-        // constraints too.
-        let p = Profile::through(9);
+        // Through the newest covered stage: the soak must never fall
+        // behind the generator again (ticket 10 shipped unsoaked).
+        let p = Profile::through(crate::verifier::sql::driver::MAX_DIFFERENTIAL_STAGE);
         for seed in 1000..4000u64 {
             let script = build_script(seed, &p, 300);
             let mut toy = Toy::new(None);
@@ -2743,6 +2752,17 @@ mod tests {
             "unreferenced parent"
         );
         assert_eq!(rows(t.exec("SELECT id FROM p")), vec![vec!["1"]]);
+        // A negative max key still gives max + 1 (SQLite verified): -39
+        // then NULL is -38, not 1.
+        assert!(ok0(
+            t.exec("CREATE TABLE neg (k INTEGER PRIMARY KEY, v TEXT)")
+        ));
+        assert!(ok_n(t.exec("INSERT INTO neg VALUES (-39, 'a')"), 1));
+        assert!(ok_n(t.exec("INSERT INTO neg (v) VALUES ('b')"), 1));
+        assert_eq!(
+            rows(t.exec("SELECT k FROM neg ORDER BY k")),
+            vec![vec!["-39"], vec!["-38"]]
+        );
         // A TEXT primary key is NOT NULL.
         assert!(ok0(
             t.exec("CREATE TABLE tk (k TEXT PRIMARY KEY, v INTEGER)")

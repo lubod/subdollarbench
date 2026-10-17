@@ -951,7 +951,10 @@ impl SandboxManager {
                 .args(["exec", &name, "sh", "-c", "kill -TERM -1"])
                 .output();
             if let Ok(out) = &rest {
-                if !out.status.success() {
+                // PID 1 may have exited on its signal already; that is the
+                // good case, not a warning.
+                let still_running = state("{{.State.Running}}").as_deref() == Some("true");
+                if !out.status.success() && still_running {
                     // Distroless/scratch images have no `sh`: PID 1 still
                     // got its signal, but the log should say so.
                     warn!(

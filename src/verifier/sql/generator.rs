@@ -1442,7 +1442,9 @@ impl Generator {
                 None
             };
             if let Some(e) = extra {
-                where_conds.push(e);
+                // Parenthesized: `link AND x OR y` would drop the link on
+                // the `y` branch.
+                where_conds.push(format!("({e})"));
             }
             let (w, and) = (self.kw("WHERE"), self.kw("AND"));
             parts.push(format!("{w} {}", where_conds.join(&format!(" {and} "))));
@@ -1693,10 +1695,21 @@ impl Generator {
             let not = self.kw("NOT");
             let null = self.kw("NULL");
             conds.push(format!("{pk} {is} {not} {null}"));
+            // An INTEGER key must stay far from i64::MAX: SQLite stops
+            // using max+1 there and picks a *random* rowid, which makes
+            // the expectation nondeterministic (and no candidate could
+            // reproduce it).
+            if tcols.iter().any(|c| c.pk && c.ty == Ty::Integer) {
+                conds.push(format!("{pk} < 4611686018427387904"));
+            }
         }
         if self.profile.where_clause && self.rng.chance(50) {
             let w = self.bool_expr(&scols, 2);
-            conds.insert(0, w.0);
+            // Parenthesized: `x OR y AND pk IS NOT NULL` would parse as
+            // `x OR (y AND ...)` and let the key guard be bypassed on the
+            // `x` branch (NULL keys auto-assign in scan order then, which
+            // the query plan decides).
+            conds.insert(0, format!("({})", w.0));
         }
         if !conds.is_empty() {
             let (w, and) = (self.kw("WHERE"), self.kw("AND"));
@@ -1725,7 +1738,10 @@ impl Generator {
         let targets: Vec<&ColInfo> = cols.iter().filter(|c| !c.pk).collect();
         let mut sets: Vec<String> = Vec::new();
         // The old-row semantics probe: `SET a = b, b = a` swaps.
-        let same_ty = |t: Ty| targets.iter().filter(|c| c.ty == t).count() >= 2;
+        // A swap into a UNIQUE column would depend on scan order (SQLite
+        // checks per row in rowid order, a candidate may check in
+        // insertion order), so unique columns stay out of the swap.
+        let same_ty = |t: Ty| targets.iter().filter(|c| c.ty == t && !c.unique).count() >= 2;
         let swap_ty = if same_ty(Ty::Integer) {
             Some(Ty::Integer)
         } else if same_ty(Ty::Text) {
@@ -1734,7 +1750,11 @@ impl Generator {
             None
         };
         if let (Some(t), true) = (swap_ty, self.rng.chance(20)) {
-            let pair: Vec<&ColInfo> = targets.iter().copied().filter(|c| c.ty == t).collect();
+            let pair: Vec<&ColInfo> = targets
+                .iter()
+                .copied()
+                .filter(|c| c.ty == t && !c.unique)
+                .collect();
             let (a, b) = (&pair[0].name, &pair[1].name);
             let both = self.bound_of(a).max(self.bound_of(b));
             self.bump(a, both);
@@ -2584,6 +2604,75 @@ mod tests {
             }
             assert!(selects > 100, "too few selects generated: {selects}");
         }
+    }
+
+    /// Every generated `INSERT ... SELECT` parenthesizes its user
+    /// predicate and caps an INTEGER key below 2^62: an unparenthesized
+    /// `x OR y` used to let the `pk IS NOT NULL` guard be bypassed (NULL
+    /// keys then auto-assign in scan order), and an i64::MAX key makes
+    /// SQLite pick *random* rowids.
+    #[test]
+    fn insert_select_parenthesizes_and_caps_integer_keys() {
+        let p = Profile::through(10);
+        let (mut stmts, mut capped) = (0usize, 0usize);
+        for seed in 0..200u64 {
+            let schema = s_schema(seed);
+            let s = build_script(seed, &p, 150);
+            for c in s.setup.iter().chain(&s.steps) {
+                let q = lower(&c.stmt.sql)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !q.starts_with("insert into") || !q.contains(" select ") {
+                    continue;
+                }
+                stmts += 1;
+                // No *top-level* `OR` may follow the WHERE: the user
+                // predicate is parenthesized precisely so the key guards
+                // always apply.
+                if let Some(at) = q.find(" where ") {
+                    let mut depth = 0i32;
+                    let rest: Vec<char> = q[at + 7..].chars().collect();
+                    for i in 0..rest.len() {
+                        match rest[i] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            ' ' if depth == 0
+                                && rest.get(i + 1..i + 4) == Some(&['o', 'r', ' ']) =>
+                            {
+                                panic!("top-level OR after WHERE: {q}");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let target = q
+                    .trim_start_matches("insert into ")
+                    .split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let int_key = schema
+                    .tables
+                    .iter()
+                    .find(|t| t.name == target)
+                    .map(|t| {
+                        t.columns
+                            .iter()
+                            .any(|c| c.primary_key && c.ty == Ty::Integer)
+                    })
+                    .unwrap_or(false);
+                if int_key {
+                    capped += 1;
+                    assert!(
+                        q.contains("< 4611686018427387904"),
+                        "INTEGER key not capped below 2^62: {q}"
+                    );
+                }
+            }
+        }
+        assert!(stmts >= 30, "too few insert-select statements: {stmts}");
+        assert!(capped >= 10, "too few INTEGER-key targets: {capped}");
     }
 
     /// Ticket 10's subquery shapes: scalar subqueries in select items and

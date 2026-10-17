@@ -54,8 +54,12 @@ pub fn stage_title(stage: u32) -> &'static str {
 /// Stages the differential verifier can run today (the scripted scenarios
 /// for later stages are not built yet). Stages 4-5 add no grammar; stage 6
 /// adds transactions.
+/// The highest stage whose suite the differential generator covers. The
+/// soak derives from it, so it cannot fall behind a ticket again.
+pub const MAX_DIFFERENTIAL_STAGE: u32 = 10;
+
 pub fn differential_supported(stage: u32) -> bool {
-    stage <= 10
+    stage <= MAX_DIFFERENTIAL_STAGE
 }
 
 /// A deterministic seed for (verification, stage): every verification of a

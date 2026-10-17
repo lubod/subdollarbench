@@ -900,6 +900,30 @@ ticket + full/lite prompts (`index-equality-only`), the 20/20 bar through
 11, a live proof, the RULES bump — plus the stronger-model cell the
 round-4 review asks for before the perf gate.
 
+**Round-5 review fixes landed (2026-10-17)**: bugs A/B/C from the
+stage-10 soak (111/3000 diverging seeds -> **0/3000**), verified by the
+soak itself: (A) the toy's `INTEGER PRIMARY KEY` auto-assign is now
+`max + 1` even for negative maxima (SQLite verified: -39 then NULL ->
+-38; the old `.max(1)` gave 1) and `i64::MAX` errors loudly; (B) an
+`INSERT ... SELECT` caps a copied INTEGER key below 2^62 (SQLite picks
+*random* rowids once the max is i64::MAX, so the expectation was
+nondeterministic); (C) its user predicate is parenthesized, so the
+`pk IS NOT NULL` guard cannot be bypassed by a top-level `OR` (NULL keys
+would auto-assign in query-plan order); (3) the `SET a = b, b = a` swap
+never touches a UNIQUE column (SQLite checks per row in rowid order, a
+candidate may check in insertion order: scan order is not dialect); (4)
+the (a) in-flight row is promoted from `maybe` to `must` once it is
+visible after the first restart (round 4 had claimed it); (5) the soak
+derives its depth from `driver::MAX_DIFFERENTIAL_STAGE`, so it cannot
+fall behind a ticket again, and "the soak is green through stage N" is a
+listed gate from here on; (6) RULES `2026-10-17.13`, the join-select
+conjunct is parenthesized, and the "could not signal the other
+processes" warning is skipped when PID 1 already exited. Gates: the
+stage-10 **soak is 0/3000**, the agreement gate and 109 verifier tests
+pass, fmt/clippy clean. **Next**: re-apply the ticket-11 WIP (`stash@{0}`)
+on top, re-enable round-4 finding 3, then the toy index engine + perf
+gate + campaign/proofs, and a stronger-model cell through tickets 4-10.
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the
