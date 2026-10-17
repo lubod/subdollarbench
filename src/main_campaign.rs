@@ -306,6 +306,16 @@ pub async fn run(
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
     print_rollup(&rollup);
     println!("rollup: {}", rollup_path.display());
+    // The public sdb-sql board reads these rollups: rebuild it now so a
+    // finished cell is never served as a mid-run snapshot (the engine
+    // rebuilds only on demand; a standalone `campaign run` writes the file
+    // directly).
+    let root = subdollarbench::config::get_repo_root();
+    let runs = subdollarbench::report::archive::RunArchiver::resolve_runs_dir();
+    let _ = subdollarbench::report::portal::PortalExporter::export_sql_board(
+        runs.to_str().unwrap_or("./runs"),
+        root.join("portal").to_str().unwrap_or("./portal"),
+    );
     Ok(())
 }
 

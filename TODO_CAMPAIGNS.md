@@ -789,6 +789,26 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
     $0.0504 total. The candidate regresses stage 0 on every rewrite
     (genuine: `expected ERR exists, got ERR syntax`), which is the ticket
     it should repair before climbing.
+  - cell 8 (2026-10-17, `ling-3.1-flash`, cap $0.75 / 120 min, round-4's
+    stronger model): **reached ticket 5** — the deepest run so far and the
+    first real end-to-end drive of tickets 4-8. s0 PASS 1/1, s1 PASS 2/2,
+    s2 FAIL 0/3 (regressions 0,1), s3 PASS 3/3, s4 PASS 4/4, s5 FAIL 0/5
+    full then **PASS 5/5 on the lite crash variant**, s6 FAIL 0/6, s7
+    FAIL 5/6 (aggregates almost), s8 FAIL 2/6 full + 0/6 lite. 5
+    regression-free tickets, $0.7722, tickets/$ 6.5, `over_budget` (the
+    final repair round crossed the cap; recorded, never a model verdict).
+    Notable: the full s8 attempt passed 5/6 (only Joins red) and lost it
+    in its *repair* round — the agent's last edit left `elif c == "*":`
+    without a body (`IndentationError`), the server never started and
+    every stage failed; the lite attempt repeated the pattern (5/6
+    initial, 0/6 repair). The s8 shrink repro printed `expected
+    no_table` where the stage failure said `no_column`: the 1-statement
+    repro runs on a fresh database where the FROM table no longer exists
+    — the documented coarse-kind limitation, not a verifier bug.
+    Harness gap found and fixed: the served board still showed the
+    mid-run snapshot ($0.4967) because nothing rebuilt it when the
+    campaign ended; the runner now refreshes the sdb-sql board when it
+    writes the final rollup.
   **Ticket 10, part 1 landed (2026-10-16)**: the `subqueries` profile and
   the toy's subquery engine — scalar subqueries in select items and
   comparisons (always aggregate-wrapped, result-type matched so no
