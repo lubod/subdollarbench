@@ -878,6 +878,28 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
 - [ ] M8. Retirement switch for the old tasks/campaigns, portal labels,
   README rewrite; calibration run; grid on the new stamp.
 
+**Ticket 11 (indexes + perf gate) — increment reverted (2026-10-17)**: the
+increment (round-4 finding 3 + the index D side + the oracle "no such
+index" -> no_table mapping) broke the independent-agreement gate at
+**stage 10, seed 8, statement 120** (`INSERT INTO s8_cnt (s8_slot34)
+values (NULL)`: the oracle takes the row, the toy reports `constraint`, a
+*state* divergence from an earlier statement). The last verified green
+state is the round-4 commit `af62bf6`; revert commit `b946999` restores it
+and the increment is preserved in `git stash` for bisecting: the revert
+candidates are finding 3 (`pick_other_table`, which changes every stage-10
+script) and the toy's index editor (`insert_row_checks` /
+`update_row_checks` insertions); apply one at a time and run
+`cargo test --lib verifier::sql::toy::tests::clean_toy_agrees`.
+**Round-4 finding 3 is therefore open again** (its fix is in the stash).
+**Ticket 11 remaining**: the toy's index engine (parse `CREATE [UNIQUE]
+INDEX` / `DROP INDEX`, per-name registry, unique enforcement on
+INSERT/UPDATE, `already exists` / unknown-index errors), the perf gate
+(200k rows, 500 point lookups indexed vs unindexed: p50 < 5 ms, >= 10x
+faster; ranges full-only), `differential_supported(11)`, the campaign
+ticket + full/lite prompts (`index-equality-only`), the 20/20 bar through
+11, a live proof, the RULES bump — plus the stronger-model cell the
+round-4 review asks for before the perf gate.
+
 ## Coverage campaign (operator requirement: bench code >= 80% lines)
 
 Measured 2026-10-14 (`cargo llvm-cov --all-targets --summary-only`, the
