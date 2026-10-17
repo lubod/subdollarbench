@@ -951,6 +951,34 @@ stronger-model cell the round-4 review asks for (it was requested
 fixture remainder (b)/(c)/(d) and finding-5 (`passed_stages` written but
 never read) still ride with ticket 12.
 
+**Round-7 review fixes landed (2026-10-17)**: (1, HIGH) the campaign
+launcher is now safe: `campaign run` itself takes a **campaign lock**
+(`runs/.campaign.lock`, `{pid, campaign_id}`, stale locks from dead
+holders replaced), so the CLI and the GUI cannot overlap; `POST
+/api/campaigns` is proxied like every other mutation, never touches
+`is_running`, refuses while the lock or a wave is live (409), validates
+the effort against the known values and caps the budget at $5 unless
+`confirm: true`; the engine's queue pump holds SQL jobs while the lock
+is live; the child is reaped with its exit status appended to
+`runs/campaign-launch-<ts>.log`, whose path comes back in the response;
+and `/api/status` reports the lock holder, so the 409 and the status
+agree. (2, MEDIUM) the perf gate compares **net work** over the
+round-trip floor (indexed work <= scan work / 10 or <= 0.05 ms) instead
+of allowing 2x the floor, so a constant per-statement overhead can no
+longer hide a missing index; a fake-engine test pins the sleep case and
+RULES moves to `2026-10-17.16`. (3) the regression cause no longer
+blames stages the verifier skipped: `broke ticket 0 (1,3,4,5 not run):
+…`. (4) per-round `$` renders as `≈$` with a "token estimate" tooltip
+(the attempt's effective cost stays the bill). (5) both cap flags are
+set when both were crossed at the same boundary, and the Run header
+says caps are checked between tickets. (6) a `running` cell whose
+writer is gone (no live lock, no update for 30 minutes) shows
+`stalled`, never "running" forever. Tests: campaign lock
+(refuse/replace/release), `effective_state`, the classifier's skipped
+tail, the proxied campaign POST, the merged validation+lock+status
+test; full lib suite 876 green; the CLI refusal and the API 409 were
+verified live.
+
 **gui-spec.md implemented (2026-10-17)**: the console is campaign-first.
 Phase 1 (`3f7dd2d`): manifests record one `CampaignRound` per
 verification (stage results, turns, cost estimate, candidate-log tail);

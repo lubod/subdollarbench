@@ -8,6 +8,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-17.16`: the perf gate compares *net work* over the
+///   round-trip floor (indexed work <= scan work / 10, or <= 0.05 ms
+///   absolute), so a constant per-statement overhead cannot lift the
+///   floor and hide a missing index.
 /// - `2026-10-17.15`: round-6 grading fixes — subquery inner tables are
 ///   never the outer statement's (round-4 finding 3 actually lands; a
 ///   same-table subquery binds every correlated name to the inner scope),
@@ -464,7 +468,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-17.15";
+pub const RULES_VERSION: &str = "2026-10-17.16";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

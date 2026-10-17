@@ -742,8 +742,19 @@ pub fn classify_failure(
             return Some(mk("no_start", Some(0), line));
         }
     }
-    // 3. regression: an earlier green ticket fails now.
-    let regressed: Vec<u32> = failed
+    // 3. regression: an earlier green ticket fails now. Results the
+    // verifier skipped ("skipped due to failure in earlier stages") only
+    // follow the real break; they are counted, not blamed (round-7
+    // finding 3: ticket 6 broke stage 0, not stages 0,1,3,4,5).
+    let is_skipped = |s: &crate::verifier::StageResult| {
+        s.error
+            .as_deref()
+            .map(|e| e.starts_with("skipped due to failure"))
+            .unwrap_or(false)
+    };
+    let real: Vec<&crate::verifier::StageResult> =
+        failed.iter().copied().filter(|s| !is_skipped(s)).collect();
+    let regressed: Vec<u32> = real
         .iter()
         .filter(|s| s.stage < stage_id && was_green.contains(&s.stage))
         .map(|s| s.stage)
@@ -754,14 +765,43 @@ pub fn classify_failure(
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        let what = first
+        let not_run: Vec<u32> = failed
+            .iter()
+            .copied()
+            .filter(|s| is_skipped(s) && s.stage < stage_id && was_green.contains(&s.stage))
+            .map(|s| s.stage)
+            .collect();
+        let what = real
+            .first()
+            .copied()
+            .or(first)
             .and_then(|s| s.error.as_deref())
             .map(|e| e.lines().next().unwrap_or("").trim().to_string())
             .unwrap_or_default();
-        let line = if what.is_empty() {
-            format!("broke tickets {list}")
+        let ticket = if regressed.len() == 1 {
+            "ticket"
         } else {
-            format!("broke tickets {list}: {what}")
+            "tickets"
+        };
+        let line = match (what.is_empty(), not_run.is_empty()) {
+            (false, false) => format!(
+                "broke {ticket} {list} ({} not run): {what}",
+                not_run
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            (false, true) => format!("broke {ticket} {list}: {what}"),
+            (true, false) => format!(
+                "broke {ticket} {list} ({} not run)",
+                not_run
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            (true, true) => format!("broke {ticket} {list}"),
         };
         return Some(mk("regression", stage, line));
     }
@@ -803,6 +843,123 @@ pub fn classify_failure(
         .map(|e| e.lines().next().unwrap_or("").trim().to_string())
         .unwrap_or_else(|| "failed".to_string());
     Some(mk("own_stage", own.map(|s| s.stage).or(stage), what))
+}
+
+/// The campaign lock (round-7 finding 1): one campaign at a time, whether
+/// started from the CLI (`scripts/sql-cell.sh`) or the console. A small
+/// JSON file holding `{pid, campaign_id}`; a lock whose holder is gone is
+/// stale and may be replaced. Every campaign path takes it, so the GUI,
+/// the queue and the CLI all agree on who is running.
+pub fn campaign_lock_path() -> std::path::PathBuf {
+    crate::report::archive::RunArchiver::resolve_runs_dir().join(".campaign.lock")
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LockInfo {
+    pub pid: u32,
+    pub campaign_id: String,
+}
+
+fn process_alive(pid: u32) -> bool {
+    pid != 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// The live campaign-lock holder, if any. A dead holder's lock is ignored
+/// (and will be replaced by the next `acquire`).
+pub fn live_lock_holder() -> Option<LockInfo> {
+    live_lock_holder_at(&campaign_lock_path())
+}
+
+/// The same check against an explicit path (tests use a temp file).
+pub fn live_lock_holder_at(path: &std::path::Path) -> Option<LockInfo> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let info: LockInfo = serde_json::from_str(&text).ok()?;
+    process_alive(info.pid).then_some(info)
+}
+
+/// The lock guard: held for the whole campaign run; removed on drop.
+#[derive(Debug)]
+pub struct CampaignLock {
+    path: std::path::PathBuf,
+    held: bool,
+}
+
+impl CampaignLock {
+    /// Take the lock for this process, or name the live holder.
+    pub fn acquire(campaign_id: &str) -> Result<CampaignLock, String> {
+        Self::try_acquire_at(&campaign_lock_path(), campaign_id)
+    }
+
+    /// The same acquisition against an explicit path (tests use a temp
+    /// file so parallel tests never touch the real lock).
+    pub fn try_acquire_at(
+        path: &std::path::Path,
+        campaign_id: &str,
+    ) -> Result<CampaignLock, String> {
+        let path = path.to_path_buf();
+        for _ in 0..3 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write as _;
+                    let info = LockInfo {
+                        pid: std::process::id(),
+                        campaign_id: campaign_id.to_string(),
+                    };
+                    let _ =
+                        f.write_all(serde_json::to_string(&info).unwrap_or_default().as_bytes());
+                    return Ok(CampaignLock { path, held: true });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Some(holder) = live_lock_holder_at(&path) {
+                        return Err(format!(
+                            "campaign {} (pid {}) is already running",
+                            holder.campaign_id, holder.pid
+                        ));
+                    }
+                    // Stale lock: replace it.
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => return Err(format!("cannot take the campaign lock: {e}")),
+            }
+        }
+        Err("cannot take the campaign lock (contended)".to_string())
+    }
+}
+
+impl Drop for CampaignLock {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The state a cell is shown as (round-7 finding 6): a `running` status
+/// whose writer is gone (no live lock) and which has not been updated for
+/// 30 minutes is `stalled`, never running forever.
+pub fn effective_state(state: &str, updated_at: Option<&str>) -> String {
+    effective_state_with(state, updated_at, live_lock_holder().is_some())
+}
+
+/// The same derivation with the lock fact passed in, so a test is not at
+/// the mercy of a real lock file.
+pub fn effective_state_with(state: &str, updated_at: Option<&str>, lock_live: bool) -> String {
+    if state != "running" {
+        return state.to_string();
+    }
+    let fresh = updated_at
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes() < 30)
+        .unwrap_or(false);
+    if fresh || lock_live {
+        "running".to_string()
+    } else {
+        "stalled".to_string()
+    }
 }
 
 /// Fill `rounds`/`failure` on records written before they were recorded
@@ -1280,21 +1437,21 @@ where
     };
 
     for stage in &lc.spec.stages {
-        if opts.budget_usd > 0.0 && total_cost >= opts.budget_usd {
-            rollup.over_budget = true;
+        // Caps are checked between tickets; both flags are set when both
+        // were crossed at the same boundary (round-7 finding 5; the stop
+        // reason stays budget-first).
+        let over_budget_now = opts.budget_usd > 0.0 && total_cost >= opts.budget_usd;
+        let over_wall_now = opts
+            .wall_min
+            .map(|m| m > 0 && wall_start.elapsed() >= std::time::Duration::from_secs(m * 60))
+            .unwrap_or(false);
+        if over_budget_now || over_wall_now {
+            rollup.over_budget |= over_budget_now;
+            rollup.over_wall |= over_wall_now;
             if let Some(cb) = on_stage {
                 cb(&rollup);
             }
             break;
-        }
-        if let Some(cap_min) = opts.wall_min {
-            if cap_min > 0 && wall_start.elapsed() >= std::time::Duration::from_secs(cap_min * 60) {
-                rollup.over_wall = true;
-                if let Some(cb) = on_stage {
-                    cb(&rollup);
-                }
-                break;
-            }
         }
         // `needs` gate (both modes; archived specs simply have no needs).
         // A need that failed, was skipped, or never recorded blocks the
@@ -1759,7 +1916,29 @@ mod tests {
         )
         .expect("classified");
         assert_eq!(reg.kind, "regression");
-        assert!(reg.line.starts_with("broke tickets 3"), "{}", reg.line);
+        assert!(reg.line.starts_with("broke ticket 3"), "{}", reg.line);
+        // Round-7 finding 3: stages the verifier skipped only follow the
+        // real break; they are counted, not blamed.
+        let skipped = classify_failure(
+            6,
+            &[0, 1, 3, 4, 5],
+            &[
+                result(0, false, Some("Kind: expected OK 0, got ERR syntax")),
+                result(1, false, Some("skipped due to failure in earlier stages")),
+                result(3, false, Some("skipped due to failure in earlier stages")),
+                result(4, false, Some("skipped due to failure in earlier stages")),
+                result(5, false, Some("skipped due to failure in earlier stages")),
+            ],
+            false,
+            false,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(skipped.kind, "regression");
+        assert_eq!(
+            skipped.line,
+            "broke ticket 0 (1,3,4,5 not run): Kind: expected OK 0, got ERR syntax"
+        );
         // late_check: the pipeline's own tag wins over own_stage.
         let late = classify_failure(
             13,
@@ -1920,8 +2099,59 @@ mod tests {
         assert!(rounds[0].failure.is_none());
         let f = rounds[1].failure.as_ref().expect("classified");
         assert_eq!(f.kind, "regression");
-        assert!(f.line.starts_with("broke tickets 3"), "{}", f.line);
+        assert!(f.line.starts_with("broke ticket 3"), "{}", f.line);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round-7 finding 1: the lock refuses a live holder, replaces a stale
+    /// one, and is released on drop.
+    #[test]
+    fn campaign_lock_refuses_live_holders_and_replaces_stale_ones() {
+        let dir = std::env::temp_dir().join(format!("campaign_lock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".campaign.lock");
+        let lock = CampaignLock::try_acquire_at(&path, "c1").expect("first acquire");
+        assert_eq!(
+            live_lock_holder_at(&path).map(|h| h.campaign_id),
+            Some("c1".to_string())
+        );
+        let err = CampaignLock::try_acquire_at(&path, "c2").unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        drop(lock);
+        assert!(live_lock_holder_at(&path).is_none(), "released on drop");
+        // A stale lock (dead pid) is replaced.
+        std::fs::write(
+            &path,
+            serde_json::json!({"pid": 999_999_999u32, "campaign_id": "dead"}).to_string(),
+        )
+        .unwrap();
+        assert!(live_lock_holder_at(&path).is_none(), "dead pid is stale");
+        let lock2 = CampaignLock::try_acquire_at(&path, "c3").expect("stale replaced");
+        assert_eq!(
+            live_lock_holder_at(&path).map(|h| h.campaign_id),
+            Some("c3".to_string())
+        );
+        drop(lock2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round-7 finding 6: a dead writer must not show "running" forever.
+    #[test]
+    fn effective_state_marks_stale_running_cells_stalled() {
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339();
+        assert_eq!(
+            effective_state_with("running", Some(&fresh), false),
+            "running"
+        );
+        assert_eq!(effective_state_with("running", Some(&old), true), "running");
+        assert_eq!(
+            effective_state_with("running", Some(&old), false),
+            "stalled"
+        );
+        assert_eq!(effective_state_with("done", Some(&old), false), "done");
+        assert_eq!(effective_state_with("running", None, false), "stalled");
     }
 
     /// gui-spec.md §4.1: the one ranking — current rules first, then

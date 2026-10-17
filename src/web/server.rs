@@ -161,6 +161,10 @@ pub struct StatusResponse {
     /// Billing circuit breaker: queue refuses new dispatch until resumed.
     #[serde(default)]
     pub queue_paused: bool,
+    /// The live campaign-lock holder (None = no campaign running); the
+    /// same fact POST /api/campaigns refuses on (round-7 finding 1).
+    #[serde(default)]
+    pub campaign: Option<serde_json::Value>,
     /// GUI-proxy mode (engine owns dispatch): /api/stream there is a
     /// one-shot snapshot, so the GUI must use the console poll as the live
     /// path and skip EventSource entirely.
@@ -202,6 +206,8 @@ pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
         db_fallback: state.db_fallback,
         queue_paused: state.queue_paused.load(Ordering::SeqCst),
         proxy: !state.engine_url.is_empty(),
+        campaign: crate::campaign::live_lock_holder()
+            .map(|h| serde_json::json!({"pid": h.pid, "campaign_id": h.campaign_id})),
     })
     .into_response()
 }
@@ -1459,6 +1465,13 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 .unwrap_or_else(
                     || serde_json::json!({"state": "unknown", "rollup": serde_json::Value::Null}),
                 );
+            // A dead writer must not show "running" forever (round-7
+            // finding 6).
+            let derived = crate::campaign::effective_state(
+                v["state"].as_str().unwrap_or("unknown"),
+                v["updated_at"].as_str(),
+            );
+            v["state"] = serde_json::json!(derived);
             if let Ok(t) = std::fs::read_to_string(dir.join("campaign.json")) {
                 if let Ok(r) = serde_json::from_str::<serde_json::Value>(&t) {
                     v["state"] = serde_json::json!("done");
@@ -1497,7 +1510,7 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
     Json(out)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub(crate) struct CampaignStartRequest {
     pub model: String,
     #[serde(default)]
@@ -1506,20 +1519,51 @@ pub(crate) struct CampaignStartRequest {
     pub wall_min: u64,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Budgets above $5 need an explicit confirmation (round-7 finding 1).
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 /// Start a campaign run (gui-spec.md §4.4): what `scripts/sql-cell.sh`
-/// runs, spawned from the engine. Refused while the engine is busy: a
-/// campaign owns the candidate's ports and store, so it must not overlap
-/// a wave (the runner itself enforces the budget and the ladder).
+/// runs, spawned from the engine. Round-7 finding 1: the POST is proxied
+/// to the engine, it never touches `is_running` (the campaign holds its
+/// own lock, which the CLI takes too), the child is reaped with its exit
+/// status logged, and its output goes to `runs/campaign-launch-<ts>.log`.
 pub(crate) async fn start_campaign(
     State(state): State<AppState>,
     Json(req): Json<CampaignStartRequest>,
 ) -> Response {
+    if let Some(proxied) = proxy_mutation(
+        &state,
+        "POST",
+        "/api/campaigns",
+        Some(serde_json::to_value(&req).unwrap_or_default()),
+    )
+    .await
+    {
+        let status = proxied.status();
+        let bytes = axum::body::to_bytes(proxied.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        return (status, String::from_utf8_lossy(&bytes).to_string()).into_response();
+    }
+    // One campaign at a time, whichever launcher took the lock.
+    if let Some(holder) = crate::campaign::live_lock_holder() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!(
+                    "campaign {} (pid {}) is already running",
+                    holder.campaign_id, holder.pid
+                )
+            })),
+        )
+            .into_response();
+    }
     if state.is_running.load(std::sync::atomic::Ordering::SeqCst) {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "engine busy: a run or campaign is in flight"})),
+            Json(serde_json::json!({"error": "engine busy: a run is in flight"})),
         )
             .into_response();
     }
@@ -1531,19 +1575,29 @@ pub(crate) async fn start_campaign(
         )
             .into_response();
     }
+    let effort = req.effort.unwrap_or_else(|| "high".to_string());
+    if !["minimal", "low", "medium", "high", "xhigh", "max", "off"].contains(&effort.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("unknown effort {effort:?}")})),
+        )
+            .into_response();
+    }
     let budget = if req.budget_usd > 0.0 {
         req.budget_usd
     } else {
         0.75
     };
+    if budget > 5.0 && !req.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "a budget above $5 needs confirm: true"
+            })),
+        )
+            .into_response();
+    }
     let wall = if req.wall_min > 0 { req.wall_min } else { 120 };
-    let effort = req.effort.unwrap_or_else(|| "high".to_string());
-    let budget_s = format!("{budget}");
-    let wall_s = wall.to_string();
-    let cmd = format!(
-        "campaign run --name sdb-sql --model {model} --effort {effort} \
-         --budget-usd {budget_s} --wall-min {wall_s} --timeout-min 20"
-    );
     let exe =
         match std::env::current_exe() {
             Ok(e) => e,
@@ -1555,6 +1609,26 @@ pub(crate) async fn start_campaign(
             )
                 .into_response(),
         };
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let log_path = RunArchiver::resolve_runs_dir().join(format!("campaign-launch-{ts}.log"));
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+    let (out, err) = match log.and_then(|f| f.try_clone().map(|c| (f, c))) {
+        Ok((a, b)) => (a, b),
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("cannot open {}: {e}", log_path.display())})),
+        )
+            .into_response(),
+    };
+    let budget_s = format!("{budget}");
+    let wall_s = wall.to_string();
+    let cmd = format!(
+        "campaign run --name sdb-sql --model {model} --effort {effort} \
+         --budget-usd {budget_s} --wall-min {wall_s} --timeout-min 20"
+    );
     let spawned = std::process::Command::new(exe)
         .args([
             "campaign",
@@ -1574,18 +1648,36 @@ pub(crate) async fn start_campaign(
         ])
         .current_dir(crate::config::get_repo_root())
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(out))
+        .stderr(std::process::Stdio::from(err))
         .spawn();
     match spawned {
-        Ok(child) => {
-            state
-                .is_running
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(mut child) => {
+            let pid = child.id();
+            let log_for_status = log_path.clone();
+            // Reap it: a campaign that dies immediately must leave a trace
+            // and its exit status in the launch log, never a silent
+            // {"started": true} (round-7 finding 1).
+            tokio::task::spawn_blocking(move || {
+                let status = child.wait();
+                let line = match status {
+                    Ok(s) => format!("\n[LAUNCHER] campaign exited: {s}\n"),
+                    Err(e) => format!("\n[LAUNCHER] campaign wait failed: {e}\n"),
+                };
+                eprintln!("[CAMPAIGN] {line}");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&log_for_status)
+                {
+                    use std::io::Write as _;
+                    let _ = f.write_all(line.as_bytes());
+                }
+            });
             Json(serde_json::json!({
                 "started": true,
-                "pid": child.id(),
+                "pid": pid,
                 "cmd": format!("subdollarbench {cmd}"),
+                "log": log_path.display().to_string(),
             }))
             .into_response()
         }
@@ -1616,15 +1708,17 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
     let status: Option<serde_json::Value> = std::fs::read_to_string(dir.join("status.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
-    let state = status
-        .as_ref()
-        .and_then(|s| s["state"].as_str())
-        .unwrap_or(if final_rollup.is_some() {
-            "done"
-        } else {
-            "unknown"
-        })
-        .to_string();
+    let state = crate::campaign::effective_state(
+        status
+            .as_ref()
+            .and_then(|s| s["state"].as_str())
+            .unwrap_or(if final_rollup.is_some() {
+                "done"
+            } else {
+                "unknown"
+            }),
+        status.as_ref().and_then(|s| s["updated_at"].as_str()),
+    );
     let current_stage = status.as_ref().and_then(|s| s["current_stage"].as_u64());
     let mut rollup = match final_rollup {
         Some(r) => r,
@@ -5379,6 +5473,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 400);
+        // An unknown effort is rejected, not passed through.
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "ut/m", "effort": "bogus"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        // A budget above $5 needs an explicit confirmation.
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "ut/m", "budget_usd": 9.0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        // Round-7 finding 1: a live campaign lock refuses a second start,
+        // and /api/status reports the very fact the 409 is based on. The
+        // lock is taken and released inside this test so no other test can
+        // race it.
+        let path = crate::campaign::campaign_lock_path();
+        let _ = std::fs::remove_file(&path);
+        let lock = crate::campaign::CampaignLock::try_acquire_at(&path, "ut-live").expect("lock");
+        let body: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["campaign"]["campaign_id"], "ut-live");
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "ut/m"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 409);
+        drop(lock);
+        let body: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(body["campaign"].is_null(), "released lock reports null");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -5951,6 +6095,12 @@ mod tests {
                 axum::routing::delete(|| async { "Removed qe1 from queue" }),
             )
             .route(
+                "/api/campaigns",
+                axum::routing::post(|Json(_b): Json<serde_json::Value>| async {
+                    Json(serde_json::json!({"proxied_campaign": true}))
+                }),
+            )
+            .route(
                 "/api/queue/pause",
                 axum::routing::post(|| async {
                     Json(serde_json::json!({"ok": true, "paused": true}))
@@ -6030,6 +6180,19 @@ mod tests {
             "1"
         );
         assert_eq!(res.text().await.unwrap(), "engine line");
+
+        // Round-7 finding 1: the campaign POST is proxied like the rest.
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "ut/m", "budget_usd": 0.1}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.unwrap()["proxied_campaign"],
+            true
+        );
 
         // Mutations forward and parse engine responses.
         let res = client

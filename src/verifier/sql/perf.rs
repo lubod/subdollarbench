@@ -4,10 +4,12 @@
 //! changes *speed*. Two identical tables, one indexed: the same point
 //! lookups alternate between the scan and the index, so drift in the host or
 //! the candidate moves both medians together. The index must stay under the
-//! p50 budget and either beat the scan by the ratio **or** sit at the
-//! round-trip floor: an indexed lookup can never be faster than one TCP
-//! round trip, and a compiled engine can scan 200k rows faster than ten of
-//! them, so a working index on a fast scan would otherwise fail. The full
+//! p50 budget and either beat the scan by the ratio **or** do less *net
+//! work* (median minus the measured round-trip floor) than the scan's tenth
+//! / the absolute slack: an indexed lookup can never be faster than one TCP
+//! round trip, a compiled engine can scan 200k rows faster than ten of
+//! them, and a constant per-statement overhead must not be able to hide a
+//! missing index. The full
 //! variant gates range predicates the same way; the lite variant
 //! ("equality lookups only") skips them. A restart between two measurement
 //! rounds pins the proposal's "indexes survive restart": a candidate that
@@ -40,10 +42,12 @@ pub const POINT_BUDGET_MS: f64 = 5.0;
 pub const RANGE_BUDGET_MS: f64 = 5.0;
 /// ... and at least this much faster than the scan's median.
 pub const MIN_SPEEDUP: f64 = 10.0;
-/// An indexed median within this multiple of the round-trip floor passes
-/// without the ratio: an index that is as fast as an empty query is an
-/// index, and the network, not the candidate, is the limit.
-pub const FLOOR_FACTOR: f64 = 2.0;
+/// The absolute slack (ms) that keeps a genuinely instant scan fair: an
+/// index whose net work (median minus the round-trip floor) is under this
+/// passes without the ratio. Comparing *work* instead of a multiple of the
+/// floor means a constant per-statement overhead cancels on both sides and
+/// cannot hide a missing index (round-7 finding 2).
+pub const ABS_SLACK_MS: f64 = 0.05;
 
 /// The gate's sizes, so the unit tests can run a fake engine cheaply.
 #[derive(Clone, Copy)]
@@ -90,15 +94,26 @@ impl Measured {
         self.scan / self.indexed.max(0.001)
     }
 
-    fn at_floor(&self) -> bool {
-        self.indexed <= FLOOR_FACTOR * self.floor
+    /// The net work over the round-trip floor: (scan, indexed).
+    fn work(&self) -> (f64, f64) {
+        (
+            (self.scan - self.floor).max(0.0),
+            (self.indexed - self.floor).max(0.0),
+        )
+    }
+
+    /// True when the index's net work is at most a tenth of the scan's, or
+    /// under the absolute slack (an instant index on an instant scan).
+    fn work_ok(&self) -> bool {
+        let (scan_work, idx_work) = self.work();
+        idx_work <= (scan_work / MIN_SPEEDUP).max(ABS_SLACK_MS)
     }
 
     /// The ratio, labelled when it passed on the floor rule instead.
     fn ratio_note(&self) -> String {
         if self.speedup() >= MIN_SPEEDUP {
             format!("{:.0}x", self.speedup())
-        } else if self.at_floor() {
+        } else if self.work_ok() {
             format!("{:.1}x, floor {:.2} ms", self.speedup(), self.floor)
         } else {
             format!("{:.1}x", self.speedup())
@@ -116,11 +131,13 @@ fn check(m: &Measured, what: &str, budget_ms: f64) -> Result<(), String> {
             m.speedup()
         ));
     }
-    if m.speedup() < MIN_SPEEDUP && !m.at_floor() {
+    if m.speedup() < MIN_SPEEDUP && !m.work_ok() {
+        let (scan_work, idx_work) = m.work();
         return Err(format!(
-            "{what}: indexed p50 {:.2} ms is only {:.1}x faster than the scan's \
-             {:.1} ms and above {FLOOR_FACTOR:.0}x the round-trip floor {:.2} ms \
-             (want {MIN_SPEEDUP:.0}x or <= {FLOOR_FACTOR:.0}x floor, budget {budget_ms:.0} ms)",
+            "{what}: indexed p50 {:.2} ms is only {:.1}x faster than the scan's {:.1} ms, and its \
+             net work {idx_work:.2} ms (after the {:.2} ms round-trip floor) is over the scan's \
+             {scan_work:.2} ms / {MIN_SPEEDUP:.0} and over the {ABS_SLACK_MS:.2} ms slack \
+             (budget {budget_ms:.0} ms)",
             m.indexed,
             m.speedup(),
             m.scan,
@@ -435,6 +452,28 @@ mod tests {
         )
         .expect("the floor rule keeps a fast scan passing");
         assert!(report.contains("floor"), "{report}");
+    }
+
+    /// Round-7 finding 2: a constant per-statement overhead lifts the
+    /// floor, and it must not lift the allowance with it. Scan and index
+    /// are equally slow here (no index at all); both pay 1 ms of overhead.
+    #[test]
+    fn a_missing_index_hidden_by_overhead_fails() {
+        let addr = fake_engine(
+            Duration::from_micros(1_500),
+            Duration::from_micros(1_500),
+            Duration::from_micros(1_000),
+        );
+        let err = perf_gate_with(
+            small_params(),
+            &addr.to_string(),
+            Duration::from_secs(5),
+            7,
+            true,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("slack") || err.contains("net work"), "{err}");
     }
 
     /// Without a working index the "indexed" side is as slow as the scan:

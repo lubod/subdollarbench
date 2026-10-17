@@ -1060,6 +1060,9 @@ pub fn pump_queue(state: &AppState) -> bool {
     let next = {
         let mut q = state.queue.lock().unwrap();
         let now_sel = now_rfc3339();
+        // A campaign owns the candidate ports: hold SQL jobs while its
+        // lock is live (round-7 finding 1).
+        let campaign_live = crate::campaign::live_lock_holder().is_some();
         let running_free = state
             .worker_runs
             .read()
@@ -1073,6 +1076,9 @@ pub fn pump_queue(state: &AppState) -> bool {
                     return false;
                 }
                 if let QueueKind::Run(ref r) = i.kind {
+                    if r.task == "sql" && campaign_live {
+                        return false;
+                    }
                     if r.model.ends_with(":free") && running_free >= 2 {
                         return false;
                     }

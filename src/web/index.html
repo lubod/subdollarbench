@@ -1950,6 +1950,10 @@
       if (c.state === 'running') {
         return `running${c.current_stage != null ? ` · ticket ${c.current_stage}` : ''}`;
       }
+      if (c.state === 'stalled') {
+        // The writer is gone (round-7 finding 6): never "running" forever.
+        return 'stalled';
+      }
       return `${c.state || '?'}${stop}`;
     }
 
@@ -2107,7 +2111,7 @@
       return recs.map(rec => {
         const rounds = rec.rounds || [];
         const roundRows = rounds.map(rd => `<div class="hint" style="margin-left:12px;">
-            round ${rd.round} · ${rd.passed_stages}/${rd.total_stages} · ${rd.turns ?? '?'} turns · $${fmtMoney(rd.cost_usd)} · ${fmtDurSec(rd.duration_seconds)}${rd.failure ? ' · ' + escapeHtml(rd.failure.kind) : ''}
+            round ${rd.round} · ${rd.passed_stages}/${rd.total_stages} · ${rd.turns ?? '?'} turns · <span title="token estimate for this round; the attempt's $ is the bill">≈$${fmtMoney(rd.cost_usd)}</span> · ${fmtDurSec(rd.duration_seconds)}${rd.failure ? ' · ' + escapeHtml(rd.failure.kind) : ''}
           </div>`).join('');
         const f = rec.failure;
         const fail = f ? `<div style="margin:6px 0;">
@@ -2177,7 +2181,7 @@
           <a href="#" onclick="event.preventDefault(); location.hash='board';" class="hint" style="color:var(--primary);">← Board</a>
         </div>
         <div style="position:relative;height:14px;border-radius:3px;overflow:hidden;background:#05070a;border:1px solid var(--border);display:flex;">${segs}${capMark}</div>
-        <div class="hint">$${fmtMoney(total)}${cap > 0 ? ` / $${fmtMoney(cap)} cap` : ''} · ${fmtDurSec(elapsed)} elapsed${d.wall_min ? ` (${d.wall_min} min wall cap)` : ''} · ${turns} turns · ${r.regression_free_tickets || 0} regression-free · reached ${r.reached == null ? '—' : 'ticket ' + r.reached}</div>
+        <div class="hint">$${fmtMoney(total)}${cap > 0 ? ` / $${fmtMoney(cap)} cap` : ''} · ${fmtDurSec(elapsed)} elapsed${d.wall_min ? ` (${d.wall_min} min wall cap)` : ''} · ${turns} turns · ${r.regression_free_tickets || 0} regression-free · reached ${r.reached == null ? '—' : 'ticket ' + r.reached}${(cap > 0 || d.wall_min) ? ' · caps are checked between tickets' : ''}</div>
         <div style="width:100%;overflow-x:auto;margin-top:8px;">
           <table class="responsive-runs-table"><thead><tr>
             <th>Ticket</th><th>First try</th><th>Lite</th>

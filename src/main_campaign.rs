@@ -181,6 +181,10 @@ pub async fn run(
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let model_tag = model.replace(['/', ':'], "_");
     let campaign_id = format!("campaign_{}_{}_{}", lc.spec.name, model_tag, ts);
+    // One campaign at a time, CLI or GUI: the lock covers every path and
+    // is released when this process ends (round-7 finding 1).
+    let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id)
+        .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
     let runs_dir = RunArchiver::resolve_runs_dir();
     let cdir = runs_dir.join(&campaign_id);
     std::fs::create_dir_all(&cdir)?;
