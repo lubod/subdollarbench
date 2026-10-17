@@ -81,7 +81,7 @@ pub async fn handle_regen_reviews(
         }
     }
     let summary = if rollup_only {
-        PortalExporter::export_rollup(&results_dir, &out, &base_url)?
+        PortalExporter::export_sql_board(&runs_dir, &out)?
     } else {
         PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?
     };

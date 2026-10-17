@@ -212,8 +212,15 @@ pub struct Generator {
     /// row, and SQLite's scoping there is not part of the dialect).
     allow_sub: bool,
     /// Live indexes `(name, table, column, unique)`, so a `DROP` can name
-    /// one and a `UNIQUE` one can be treated like a unique column.
+    /// one and a `UNIQUE` one can be treated like a unique column. A
+    /// *failed* `CREATE UNIQUE INDEX` over duplicates stays registered:
+    /// the generator cannot know the outcome, and over-approximating (the
+    /// column stays out of swaps until a `DROP` of that name) is safe.
     indexes: Vec<(String, String, String, bool)>,
+    /// The registry at the innermost `BEGIN`, restored by a `ROLLBACK`:
+    /// a rolled-back `DROP INDEX` must not leave the generator believing a
+    /// UNIQUE column is free (scan order is not dialect; round-5 finding 3).
+    txn_indexes: Option<Vec<(String, String, String, bool)>>,
     /// Per table: an upper bound on its row count (every generated INSERT
     /// counts; deletes never lower it). Only `SUM`'s overflow guard uses
     /// it, so being conservative is free.
@@ -256,6 +263,7 @@ impl Generator {
             seen: HashMap::new(),
             rows: HashMap::new(),
             indexes: Vec::new(),
+            txn_indexes: None,
             allow_sub: true,
             bounds,
             txn_open: false,
@@ -1574,13 +1582,40 @@ impl Generator {
         }
     }
 
+    /// An inner table for a subquery that is *not* the outer statement's
+    /// table. Column names are unique across tables, so an overlap means
+    /// the same table — and with the same table on both sides every name
+    /// binds to the inner scope, making the subquery silently
+    /// uncorrelated (the quality floor wants real correlation).
+    fn pick_other_table(&mut self, outer: &[ColInfo]) -> Option<(String, Vec<ColInfo>)> {
+        for _ in 0..4 {
+            let ti = self.pick_table();
+            let (t, cols) = self.table_infos(ti);
+            let overlaps = cols.iter().any(|c| {
+                outer
+                    .iter()
+                    .any(|o| Self::bare_ref(&o.name) == Self::bare_ref(&c.name))
+            });
+            if !overlaps {
+                return Some((t, cols));
+            }
+        }
+        None
+    }
+
     /// A scalar subquery `(SELECT <agg> FROM <t> [WHERE ...])`, always
     /// wrapped in an aggregate so it returns exactly one row (the dialect
     /// leaves a multi-row scalar subquery untested). The inner predicate is
     /// usually correlated with the outer columns.
     fn scalar_subquery(&mut self, outer: &[ColInfo]) -> (String, Ty) {
-        let ti = self.pick_table();
-        let (tname, inner) = self.table_infos(ti);
+        let Some((tname, inner)) = self.pick_other_table(outer) else {
+            // No other table: a plain aggregate with no predicate (it
+            // cannot correlate anyway).
+            let (t, cols) = self.table_infos(0);
+            let (agg, ty) = self.agg_item(&cols, 1);
+            let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
+            return (format!("({select} {agg} {from} {t})"), ty);
+        };
         let rows_bound = self.rows.get(&tname).copied().unwrap_or(2);
         let (agg, ty) = self.agg_item(&inner, rows_bound);
         let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
@@ -1638,9 +1673,10 @@ impl Generator {
             }
             30..=54 => {
                 // `EXISTS` must correlate, or it is a constant predicate
-                // that proves nothing about the row (the quality floor).
-                let ti = self.pick_table();
-                let (tname, inner) = self.table_infos(ti);
+                // that proves nothing about the row (the quality floor),
+                // which is also why the inner table may not be the outer
+                // one.
+                let (tname, inner) = self.pick_other_table(cols)?;
                 let pred = self.link_pred(&inner, cols)?;
                 let not = neg(self);
                 let (ex, select, from, w) = (
@@ -1652,8 +1688,7 @@ impl Generator {
                 Some(format!("{not}{ex} ({select} * {from} {tname} {w} {pred})"))
             }
             55..=84 => {
-                let ti = self.pick_table();
-                let (tname, inner) = self.table_infos(ti);
+                let (tname, inner) = self.pick_other_table(cols)?;
                 let (lhs, ty) = self.column_ref(cols)?;
                 let cands: Vec<String> = inner
                     .iter()
@@ -1996,8 +2031,18 @@ impl Generator {
                 self.kw("FROM"),
                 self.kw("WHERE")
             ),
-            11 => self.kw("COMMIT"),
-            12 => self.kw("ROLLBACK"),
+            11 => {
+                // A bare COMMIT with no transaction errors; if one is
+                // open it commits, so the snapshot is dropped.
+                self.txn_indexes = None;
+                self.kw("COMMIT")
+            }
+            12 => {
+                // A bare ROLLBACK rolls the open transaction back (or
+                // errors): the registry goes back with it.
+                self.rollback_indexes();
+                self.kw("ROLLBACK")
+            }
             13 => format!(
                 "{} {}(*) {} {tname} {} {} zz_nocol",
                 self.kw("SELECT"),
@@ -2226,6 +2271,9 @@ impl Generator {
             return self.probe();
         }
         self.txn_open = true;
+        // A `ROLLBACK` may undo index DDL emitted inside: snapshot here.
+        // (A nested `BEGIN` fails, so it never snapshots.)
+        self.txn_indexes = Some(self.indexes.clone());
         let sql = self.kw("BEGIN");
         self.stmt(sql, Kind::Txn, false)
     }
@@ -2243,7 +2291,11 @@ impl Generator {
         let w_close = 20u64;
         let w_probe = 9u64;
         let w_begin = 5u64;
-        let total = w_insert + w_select + w_update + w_delete + w_close + w_probe + w_begin;
+        // `CREATE INDEX` / `DROP INDEX` inside a transaction roll back
+        // with it (the ticket-11 prompt promises it, so it is graded).
+        let w_index = if self.profile.indexes { 8 } else { 0 };
+        let total =
+            w_insert + w_select + w_update + w_delete + w_close + w_probe + w_begin + w_index;
         let mut roll = self.rng.below(total);
         if roll < w_close {
             return self.close_transaction_now();
@@ -2258,6 +2310,10 @@ impl Generator {
             return self.probe();
         }
         roll -= w_probe;
+        if roll < w_index {
+            return self.index_stmt();
+        }
+        roll -= w_index;
         if roll < w_insert {
             let ti = self.pick_table();
             return self.insert_into(ti);
@@ -2287,8 +2343,21 @@ impl Generator {
         } else {
             "ROLLBACK"
         };
+        if kw == "ROLLBACK" {
+            self.rollback_indexes();
+        } else {
+            self.txn_indexes = None;
+        }
         let sql = self.kw(kw);
         self.stmt(sql, Kind::Txn, false)
+    }
+
+    /// A `ROLLBACK` undoes a created or dropped index too: restore the
+    /// registry snapshot taken at `BEGIN` (the toy does the same).
+    fn rollback_indexes(&mut self) {
+        if let Some(ix) = self.txn_indexes.take() {
+            self.indexes = ix;
+        }
     }
 
     /// Close an open transaction, if any, so a script never ends inside one.

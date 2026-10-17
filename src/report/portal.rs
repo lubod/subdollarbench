@@ -1186,16 +1186,28 @@ struct SqlBoardCell {
     reached: Option<u32>,
     /// Tickets passed without regressing an earlier ticket.
     regression_free: u32,
+    /// Difficulty-weighted points scored (the proposal's headline
+    /// numerator: tier x weight per pass, so skipping a hard ticket cannot
+    /// outrank passing it).
+    points: f64,
+    max_points: f64,
+    /// The grading rule set the cell ran under.
+    rules: String,
     cost: f64,
-    passed_tickets: usize,
-    attempts: usize,
     over_budget: bool,
+    over_wall: bool,
     updated: String,
 }
 
 impl SqlBoardCell {
-    /// The headline: regression-free tickets per dollar.
-    fn per_dollar(&self) -> Option<f64> {
+    /// The headline: points per campaign dollar.
+    fn points_per_dollar(&self) -> Option<f64> {
+        (self.cost > 0.0).then(|| self.points / self.cost)
+    }
+
+    /// The cost-efficiency column next to it: regression-free tickets per
+    /// dollar.
+    fn reg_free_per_dollar(&self) -> Option<f64> {
         (self.cost > 0.0).then(|| self.regression_free as f64 / self.cost)
     }
 }
@@ -1335,7 +1347,23 @@ impl PortalExporter {
                 {
                     continue;
                 }
-                let stages = rollup["stages"].as_array().cloned().unwrap_or_default();
+                // A cell whose stage runs were hidden or poisoned is not a
+                // measurement: never publish it.
+                let runs_path = Path::new(runs_dir);
+                let flagged = rollup["stages"]
+                    .as_array()
+                    .map(|ss| {
+                        ss.iter().any(|st| {
+                            st["run_id"]
+                                .as_str()
+                                .map(|rid| is_hidden(runs_path, rid) || is_poisoned(runs_path, rid))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                if flagged {
+                    continue;
+                }
                 cells.push(SqlBoardCell {
                     model: rollup["model"].as_str().unwrap_or("?").to_string(),
                     harness: rollup["harness"].as_str().unwrap_or("?").to_string(),
@@ -1343,13 +1371,12 @@ impl PortalExporter {
                     state,
                     reached: rollup["reached"].as_u64().map(|v| v as u32),
                     regression_free: rollup["regression_free_tickets"].as_u64().unwrap_or(0) as u32,
+                    points: rollup["points"].as_f64().unwrap_or(0.0),
+                    max_points: rollup["max_points"].as_f64().unwrap_or(0.0),
+                    rules: rollup["rules_version"].as_str().unwrap_or("").to_string(),
                     cost: rollup["total_cost_usd"].as_f64().unwrap_or(0.0),
-                    passed_tickets: stages
-                        .iter()
-                        .filter(|st| st["passed"].as_bool().unwrap_or(false))
-                        .count(),
-                    attempts: stages.len(),
                     over_budget: rollup["over_budget"].as_bool().unwrap_or(false),
+                    over_wall: rollup["over_wall"].as_bool().unwrap_or(false),
                     updated: rollup["finished_at"]
                         .as_str()
                         .or_else(|| rollup["started_at"].as_str())
@@ -1358,16 +1385,23 @@ impl PortalExporter {
                 });
             }
         }
-        // Ranked: reached ticket, then regression-free tickets per dollar,
-        // then the cheaper cell.
+        // Ranked by difficulty-weighted points (the proposal's headline),
+        // then points per dollar, then the cheaper cell. Cells from a
+        // different `RULES_VERSION` group below the current ones: grading
+        // changes make them incomparable.
+        let current = crate::report::rules::RULES_VERSION;
         cells.sort_by(|a, b| {
-            b.reached
-                .unwrap_or(0)
-                .cmp(&a.reached.unwrap_or(0))
+            (b.rules == current)
+                .cmp(&(a.rules == current))
                 .then_with(|| {
-                    b.per_dollar()
+                    b.points
+                        .partial_cmp(&a.points)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    b.points_per_dollar()
                         .unwrap_or(0.0)
-                        .partial_cmp(&a.per_dollar().unwrap_or(0.0))
+                        .partial_cmp(&a.points_per_dollar().unwrap_or(0.0))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .then_with(|| {
@@ -1396,6 +1430,7 @@ impl PortalExporter {
             .max()
             .map(|b| format!("ticket {b}"))
             .unwrap_or_else(|| "—".to_string());
+        let best_points = cells.iter().map(|c| c.points).fold(0.0f64, f64::max);
         let rf: u32 = cells.iter().map(|c| c.regression_free).sum();
         let spend: f64 = cells.iter().map(|c| c.cost).sum();
         let mut rows = String::new();
@@ -1404,8 +1439,12 @@ impl PortalExporter {
                 .reached
                 .map(|r| format!("ticket {r}"))
                 .unwrap_or_else(|| "—".to_string());
-            let pd = c
-                .per_dollar()
+            let ppd = c
+                .points_per_dollar()
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "—".to_string());
+            let rpd = c
+                .reg_free_per_dollar()
                 .map(|v| format!("{v:.1}"))
                 .unwrap_or_else(|| "—".to_string());
             let state = match c.state.as_str() {
@@ -1413,46 +1452,60 @@ impl PortalExporter {
                 "done" => "<span class=\"b ok\">done</span>".to_string(),
                 other => format!("<span class=\"b\">{}</span>", Self::esc(other)),
             };
-            let ob = if c.over_budget {
-                " · <span class=\"b warn\">over budget</span>"
+            let flags = {
+                let mut f = String::new();
+                if c.over_budget {
+                    f.push_str(" · <span class=\"b warn\">over budget</span>");
+                }
+                if c.over_wall {
+                    f.push_str(" · <span class=\"b warn\">over wall</span>");
+                }
+                f
+            };
+            let rules = if c.rules == crate::report::rules::RULES_VERSION {
+                format!("<span class=\"mut\">{}</span>", Self::esc(&c.rules))
+            } else if c.rules.is_empty() {
+                "<span class=\"b warn\">rules —</span>".to_string()
             } else {
-                ""
+                format!(
+                    "<span class=\"b warn\" title=\"graded under a different rule set\">stale {}</span>",
+                    Self::esc(&c.rules)
+                )
             };
             let updated = Self::esc(c.updated.get(..16).unwrap_or(&c.updated));
             rows.push_str(&format!(
-                "<tr><td class=\"num\">{}</td><td><b>{}</b><div class=\"mut\">{} · effort {}{ob}</div></td><td>{reached}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{pd}</td><td class=\"num\">{}/{}</td><td>{state}</td><td class=\"mut\">{updated}</td></tr>",
+                "<tr><td class=\"num\">{}</td><td><b>{}</b><div class=\"mut\">{} · effort {}{flags}</div></td><td>{reached}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {rules}</td><td class=\"num\">${:.4}</td><td class=\"num\">{ppd}</td><td class=\"num\">{rpd}</td><td>{state}</td><td class=\"mut\">{updated}</td></tr>",
                 i + 1,
                 Self::esc(&c.model),
                 Self::esc(&c.harness),
                 Self::esc(&c.effort),
                 c.regression_free,
-                c.passed_tickets,
+                c.points,
+                c.max_points as u32,
                 c.cost,
-                c.passed_tickets,
-                c.attempts,
             ));
         }
         let mut h = String::new();
         h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — sdb-sql campaign</title><style>");
         h.push_str(include_str!("portal_board.css"));
         h.push_str("</style></head><body><main>");
-        h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database in the sqlite file format, checked statement by statement against a reference. Ranked by the ticket a model reached, then by regression-free tickets per dollar.</div></div><div class=\"right\"><a href=\"/\">🚀 Benchmark Runner &amp; Console</a>");
+        h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database — its own on-disk format, checked statement by statement against SQLite. Ranked by difficulty-weighted points, then by points per dollar.</div></div><div class=\"right\"><a href=\"/\">🚀 Benchmark Runner &amp; Console</a>");
         h.push_str(&format!(
             "<div class=\"mut\">Updated {}</div></div></header>",
             Self::esc(&now)
         ));
         h.push_str(&format!(
-            "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Cells</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Best reached</div><div class=\"v\">{best}</div></div><div class=\"card\"><div class=\"k\">Regression-free tickets</div><div class=\"v\">{rf}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
+            "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Cells</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Best reached</div><div class=\"v\">{best}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{best_points:.1}</div></div><div class=\"card\"><div class=\"k\">Regression-free tickets</div><div class=\"v\">{rf}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
             cells.len()
         ));
-        h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Reached</th><th>Reg-free</th><th>Passed</th><th>Spend</th><th>Reg-free / $</th><th>Tickets</th><th>State</th><th>Updated</th></tr></thead><tbody>");
+        h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Reached</th><th>Reg-free</th><th>Points</th><th>Spend</th><th>Pts / $</th><th>Reg-free / $</th><th>State</th><th>Updated</th></tr></thead><tbody>");
         if rows.is_empty() {
             h.push_str("<tr><td colspan=\"10\" class=\"mut\">No sdb-sql campaign cells yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
         } else {
             h.push_str(&rows);
         }
         h.push_str("</tbody></table></div>");
-        h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Reached</b>: the highest ticket whose acceptance suite passed. The ladder continues past a failed ticket (the workspace rolls back), so this is the maximum passed id, not a contiguous prefix.</li><li><b>Regression-free tickets</b>: tickets passed without regressing an earlier ticket's suite. <b>Reg-free / $</b> is that count over the cell's effective spend (API + compute) — the cost headline.</li><li>Ranking: reached ticket desc, then reg-free per $ desc, then the cheaper cell. A cell with $0 spend cannot be ranked per dollar.</li><li><b>Retired 2026-10-17</b>: the pre-sdb-sql tasks (redis/http/pdf/wal/proxy/pubsub/binproto) and their campaigns are no longer part of the benchmark; only the sdb-sql ladder publishes.</li></ul></section>");
+        h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Points</b>: the campaign's difficulty-weighted score (each ticket contributes its tier x weight when it passes), so a cell that skips a hard ticket cannot outrank one that passed it. <b>Pts / $</b> divides by the cell's effective spend (API + compute).</li><li>Ranking: points desc, then points per $ desc, then the cheaper cell, with cells graded under a different RULES_VERSION grouped below the current ones (grading changes make them incomparable).</li><li><b>Reached</b> is the highest ticket whose suite passed; with the continue ladder this is a maximum, not a contiguous prefix. <b>Regression-free tickets</b> passed without regressing an earlier ticket's suite, and <b>Reg-free / $</b> is that count over the spend.</li><li>Cells whose stage runs were hidden or poisoned are never published; over-budget and over-wall cells are badged.</li><li><b>Retired 2026-10-17</b>: the pre-sdb-sql tasks (redis/http/pdf/wal/proxy/pubsub/binproto) and their campaigns are no longer part of the benchmark; only the sdb-sql ladder publishes.</li></ul></section>");
         h.push_str("</main></body></html>");
         h
     }
@@ -2823,110 +2876,156 @@ mod tests {
         assert!(!html.contains("runs/"));
     }
 
-    /// The sdb-sql board: reached ticket first, then regression-free
-    /// tickets per dollar; retired campaigns never publish; the live cell
-    /// (status.json only) is badged.
+    /// The sdb-sql board: ranked by difficulty-weighted points, cells from
+    /// a different RULES_VERSION grouped below the current ones, flagged
+    /// (poisoned/hidden) cells and retired campaigns never published, and
+    /// the live cell badged.
     #[test]
-    fn test_sql_board_ranks_reached_then_per_dollar() {
+    fn test_sql_board_ranks_points_and_groups_rules() {
+        use crate::report::rules::RULES_VERSION;
         let dir = std::env::temp_dir().join(format!("sql_board_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let runs = dir.join("runs");
         let out = dir.join("portal");
-        let cell =
-            |name: &str, model: &str, reached: Option<u32>, rf: u32, cost: f64, state: &str| {
-                let d = runs.join(name);
-                fs::create_dir_all(&d).unwrap();
-                let campaign = name.split('_').nth(1).unwrap_or("sdb-sql");
-                let rollup = serde_json::json!({
-                    "campaign_id": name,
-                    "name": campaign,
-                    "model": model,
-                    "harness": "omp",
-                    "effort": "high",
-                    "task": "sql",
-                    "started_at": "2026-10-17T09:00:00Z",
-                    "finished_at": "2026-10-17T10:00:00Z",
-                    "stages": [
-                        {"id": 0, "title": "t0", "passed": true},
-                        {"id": 1, "title": "t1", "passed": false}
-                    ],
-                    "reached": reached,
-                    "regression_free_tickets": rf,
-                    "total_cost_usd": cost,
-                    "over_budget": false,
-                    "points": 1.0,
-                    "max_points": 40.0
-                });
-                fs::write(
-                    d.join("status.json"),
-                    serde_json::json!({"state": state, "current_stage": 1, "rollup": rollup})
-                        .to_string(),
-                )
-                .unwrap();
-                if state == "done" {
-                    fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
-                }
-            };
+        #[allow(clippy::too_many_arguments)]
+        let cell = |name: &str,
+                    model: &str,
+                    reached: Option<u32>,
+                    rf: u32,
+                    points: f64,
+                    cost: f64,
+                    rules: &str,
+                    state: &str,
+                    run_id: &str| {
+            let d = runs.join(name);
+            fs::create_dir_all(&d).unwrap();
+            let campaign = name.split('_').nth(1).unwrap_or("sdb-sql");
+            let rollup = serde_json::json!({
+                "campaign_id": name,
+                "name": campaign,
+                "model": model,
+                "harness": "omp",
+                "effort": "high",
+                "task": "sql",
+                "started_at": "2026-10-17T09:00:00Z",
+                "finished_at": "2026-10-17T10:00:00Z",
+                "stages": [
+                    {"id": 0, "title": "t0", "passed": true, "run_id": run_id},
+                    {"id": 1, "title": "t1", "passed": false, "run_id": run_id}
+                ],
+                "reached": reached,
+                "regression_free_tickets": rf,
+                "points": points,
+                "max_points": 36.0,
+                "rules_version": rules,
+                "total_cost_usd": cost,
+                "over_budget": false,
+                "over_wall": false
+            });
+            fs::write(
+                d.join("status.json"),
+                serde_json::json!({"state": state, "current_stage": 1, "rollup": rollup})
+                    .to_string(),
+            )
+            .unwrap();
+            if state == "done" {
+                fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+            }
+        };
         cell(
             "campaign_sdb-sql_m1_20261017",
             "m1",
             Some(5),
             3,
+            10.0,
             0.30,
+            RULES_VERSION,
             "done",
+            "run_m1",
         );
         cell(
             "campaign_sdb-sql_m2_20261017",
             "m2",
             Some(5),
             2,
+            12.0,
             0.05,
+            RULES_VERSION,
             "done",
+            "run_m2",
         );
         cell(
             "campaign_sdb-sql_m3_20261017",
             "m3",
             Some(6),
             1,
+            20.0,
             0.90,
+            "2026-10-16.12",
             "done",
+            "run_m3",
         );
         cell(
             "campaign_sdb-sql_m4_20261017",
             "m4",
+            Some(7),
+            4,
+            30.0,
+            0.50,
+            RULES_VERSION,
+            "done",
+            "run_m4_poisoned",
+        );
+        cell(
+            "campaign_sdb-sql_m5_20261017",
+            "m5",
             None,
             0,
             0.0,
+            0.02,
+            RULES_VERSION,
             "running",
+            "run_m5",
         );
         cell(
             "campaign_sdb-kv_zzretired_20261017",
             "zz_retired_model",
             Some(9),
             9,
+            99.0,
             0.01,
+            RULES_VERSION,
             "done",
+            "run_retired",
         );
+        // m4's stage run was killed by infrastructure: never a measurement.
+        fs::create_dir_all(runs.join("run_m4_poisoned")).unwrap();
+        fs::write(runs.join("run_m4_poisoned").join(".poisoned"), "").unwrap();
 
         let summary =
             PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
                 .expect("sql board");
-        assert_eq!(summary.run_count, 4, "retired campaigns never publish");
+        assert_eq!(
+            summary.run_count, 4,
+            "poisoned and retired cells never publish"
+        );
         let html = fs::read_to_string(out.join("index.html")).unwrap();
         let pos = |m: &str| {
             html.find(m)
                 .unwrap_or_else(|| panic!("missing {m}: {html}"))
         };
-        // Reached first (m3 at ticket 6), then the better reg-free-per-$
-        // (m2 at 40/$ vs m1 at 10/$).
-        assert!(pos("m3") < pos("m2"), "reached first: {html}");
-        assert!(pos("m2") < pos("m1"), "per-dollar second: {html}");
+        // Current rules first: m2 (12 points), m1 (10), the running m5 (0);
+        // the stale 20-point m3 groups below them.
+        assert!(pos("m2") < pos("m1"), "points order: {html}");
+        assert!(pos("m1") < pos("m5"), "current before stale: {html}");
+        assert!(pos("m5") < pos("m3"), "stale rules grouped last: {html}");
+        assert!(!html.contains("m4"), "poisoned cell leaked: {html}");
         assert!(
             !html.contains("zz_retired_model"),
             "retired campaign leaked: {html}"
         );
+        assert!(html.contains("stale 2026-10-16.12"), "{html}");
         assert!(html.contains("RUNNING"), "the live cell is badged: {html}");
-        assert!(html.contains("Retired 2026-10-17"), "{html}");
         let _ = fs::remove_dir_all(&dir);
     }
 

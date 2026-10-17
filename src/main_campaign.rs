@@ -724,6 +724,7 @@ mod tests {
     ) -> CampaignRollup {
         CampaignRollup {
             over_wall: false,
+            rules_version: subdollarbench::report::rules::RULES_VERSION.to_string(),
             points: 0.0,
             max_points: 0.0,
             campaign_id: "campaign_fixture".to_string(),

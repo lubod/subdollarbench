@@ -2,9 +2,8 @@
 
 The benchmark's one remaining task: build a SQL **database server** from
 scratch — raw TCP sockets, standard library only, no embedded SQL engine
-and no SQL parser library — that stores its data in the sqlite file
-format and answers a text protocol that is checked **statement by
-statement against a reference**.
+and no SQL parser library — with its own on-disk format, answering a text
+protocol that is checked **statement by statement against SQLite**.
 
 This task runs as a **campaign**: `campaigns/sdb-sql/` holds the ticket
 ladder (stages 0-20, tiers 1-7). Each ticket carries its own graded

@@ -601,6 +601,10 @@ pub struct CampaignRollup {
     /// Optional wall-clock cap reached before the ladder finished.
     #[serde(default)]
     pub over_wall: bool,
+    /// The grading rule set this cell was measured under (cells from
+    /// different versions never rank on one board).
+    #[serde(default)]
+    pub rules_version: String,
     /// Difficulty-weighted points actually scored (tier x weight per pass).
     #[serde(default)]
     pub points: f64,
@@ -700,6 +704,7 @@ where
         total_cost_usd: 0.0,
         over_budget: false,
         over_wall: false,
+        rules_version: crate::report::rules::RULES_VERSION.to_string(),
         points: 0.0,
         max_points: max_points(&lc.spec.stages),
     };

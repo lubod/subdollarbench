@@ -175,7 +175,7 @@ fn crash_ladder(
         // The un-acked row may still have been committed: if it is visible
         // after (a)'s restart, it is owed too.
         if let Ok(keys) = crash::read_keys(&addr, t, &acked_table) {
-            if keys.contains(&acked) {
+            if keys.contains(&acked) && !must.contains(&acked) {
                 must.push(acked);
                 maybe.retain(|k| *k != acked);
             }
@@ -3230,7 +3230,14 @@ impl BenchmarkPipeline {
                             // "11. Indexes"). Timing is not part of the
                             // differential suite and a ratio is only honest
                             // on an idle host, so it runs here, under the
-                            // bench lock, once every stage passed.
+                            // bench lock, once every stage passed. The gate
+                            // writes two 200k-row tables and the dialect has
+                            // no DROP TABLE, so it runs on a *fresh scratch
+                            // store* (the crash-ladder pattern without the
+                            // copy): the real store never pays for them on
+                            // later tickets, and the mid-gate restart is the
+                            // ticket-4 graceful one (SIGKILL is ticket 5's
+                            // contract, and ticket 11 needs only [3, 4]).
                             if late_failure.is_none() && wanted.contains(&11) {
                                 let lite = if wanted.iter().copied().max() == Some(11) {
                                     lite_profile.iter().any(|p| p == "index-equality-only")
@@ -3249,26 +3256,71 @@ impl BenchmarkPipeline {
                                     crate::verifier::sql::driver::stage_seed(verifier_seed, 11)
                                         ^ 0x5E27_1E10_0000_0011;
                                 let t = std::time::Duration::from_secs(30);
-                                let mut restart = || {
-                                    restart_candidate(
-                                        &sandbox.instance_id,
-                                        workdir,
-                                        port,
-                                        &extras,
-                                        false,
-                                    )
+                                let run = |e: &crate::sandbox::docker::CandidateRunExtras| {
+                                    restart_candidate(&sandbox.instance_id, workdir, port, e, true)
                                 };
-                                match crate::verifier::sql::perf::perf_gate(
-                                    &addr,
-                                    t,
-                                    ns,
-                                    lite,
-                                    Some(&mut restart),
-                                ) {
+                                let scratch = sql_data.as_ref().map(|data| {
+                                    data.with_file_name(format!(
+                                        "{}-perf",
+                                        data.file_name()
+                                            .map(|n| n.to_string_lossy())
+                                            .unwrap_or_default()
+                                    ))
+                                });
+                                let scratch_extras = scratch.as_ref().map(|scratch| {
+                                    let mut e = extras.clone();
+                                    let real_src = sql_data
+                                        .as_ref()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    for b in e.binds.iter_mut() {
+                                        if b.0 == real_src {
+                                            b.0 = scratch.display().to_string();
+                                        }
+                                    }
+                                    e
+                                });
+                                let body: Result<String, String> = (|| {
+                                    if let Some(scratch) = &scratch {
+                                        let _ = std::fs::remove_dir_all(scratch);
+                                        std::fs::create_dir_all(scratch)
+                                            .map_err(|e| format!("scratch store: {e}"))?;
+                                        run(scratch_extras.as_ref().expect("extras"))?;
+                                        logger.log(&format!(
+                                            "  [PERF] gate runs on a fresh scratch store ({})",
+                                            scratch.display()
+                                        ));
+                                    }
+                                    let e = scratch_extras.as_ref().unwrap_or(&extras);
+                                    let mut restart = || run(e);
+                                    crate::verifier::sql::perf::perf_gate(
+                                        &addr,
+                                        t,
+                                        ns,
+                                        lite,
+                                        Some(&mut restart),
+                                    )
+                                })(
+                                );
+                                // Always back onto the real store, then
+                                // drop the scratch copy.
+                                let restored = run(&extras);
+                                if let Some(scratch) = &scratch {
+                                    let _ = std::fs::remove_dir_all(scratch);
+                                }
+                                match body {
                                     Ok(report) => logger.log(&format!("  [PERF] {report}")),
                                     Err(e) => {
                                         logger.log(&format!("  [PERF] FAILED: {e}"));
                                         late_failure = Some((11, format!("[perf] {e}")));
+                                    }
+                                }
+                                if let Err(e) = restored {
+                                    logger.log(&format!(
+                                        "  [PERF] FAILED: back on the real store: {e}"
+                                    ));
+                                    if late_failure.is_none() {
+                                        late_failure = Some((11, format!("[perf] restart: {e}")));
                                     }
                                 }
                             }
@@ -7963,6 +8015,7 @@ main()
         assert!(!out.infra_error, "{:?}", out.manifest.status);
         for needle in [
             "Stage 11: Indexes + perf gate -> PASS",
+            "[PERF] gate runs on a fresh scratch store",
             "[PERF] point p50",
             "after restart",
             "[UPGRADE] sentinel for stage 11 written",

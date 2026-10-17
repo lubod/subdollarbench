@@ -411,10 +411,9 @@ pub fn run_repair(results_dir: &Path, runs_dir: &Path, apply: bool) -> Result<Re
     let pruned = prune_stale_runs(&canon_runs, apply)?;
     // Refresh the static portal when anything changed on disk.
     if apply && (!consolidated.is_empty() || !remerged.is_empty()) {
-        let _ = PortalExporter::export_rollup(
-            canon_results.to_str().unwrap_or("./results"),
+        let _ = PortalExporter::export_sql_board(
+            canon_runs.to_str().unwrap_or("./runs"),
             root.join("portal").to_str().unwrap_or("./portal"),
-            "",
         );
     }
     Ok(RepairReport {

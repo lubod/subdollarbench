@@ -927,6 +927,37 @@ stronger-model cell the round-4 review asks for (it was requested
 fixture remainder (b)/(c)/(d) and finding-5 (`passed_stages` written but
 never read) still ride with ticket 12.
 
+**Round-6 review fixes landed (2026-10-17)**: (1) `pick_other_table`
+actually landed this time — a subquery's inner table is never the outer
+statement's, in the scalar, `EXISTS` and `IN (subquery)` arms, verified
+by grep (4 sites) and by the agreement gate; the stash's `allow_sub =
+false` was not needed (soak 0/3000). (2) The perf gate runs on a fresh
+**scratch store** (the crash-ladder pattern without the copy) and
+restores the real store afterwards, so its two 200k-row tables never
+touch a candidate's own data; the mid-gate restart is the ticket-4
+*graceful* one (SIGKILL is ticket 5's contract). (3) The gate measures a
+round-trip **floor** on a one-row table on the same connection and
+accepts an index at <= 2x it without the 10x ratio, so a compiled engine
+with a fast scan is not punished for the network; pinned by two
+fake-engine unit tests (fast scan passes, slow index still fails). (4)
+The public board ranks by **difficulty-weighted points** (the proposal's
+headline), then points per $, then cheaper; reached and regression-free
+stay as columns, rollups carry `rules_version` and stale-rule cells group
+below current ones, and cells whose stage runs are poisoned or hidden are
+never published. (5) `repair --apply` and the review command route
+through the sdb-sql board instead of overwriting `portal/` with the
+legacy leaderboard. (6) `inside_transaction` can emit index DDL and the
+generator snapshots its index registry at `BEGIN` and restores it on
+`ROLLBACK` (a rolled-back `DROP INDEX` must not free a UNIQUE column for
+swaps); re-soaked, 0/3000. Nits: the (a) promotion no longer pushes
+`acked` twice, the registry comment records that a failed `CREATE UNIQUE
+INDEX` stays registered (conservative), and the prompt/board no longer
+say "sqlite file format". Gates: agreement gate + mutants through 11,
+soak 0/3000, perf unit tests, the reference perf test, the 20/20 bar, and
+both stage-11 Docker live proofs (the full one now asserts the scratch
+line). RULES `2026-10-17.15`; the `.14` entry was corrected to say what
+it actually graded.
+
 **Round-5 review fixes landed (2026-10-17)**: bugs A/B/C from the
 stage-10 soak (111/3000 diverging seeds -> **0/3000**), verified by the
 soak itself: (A) the toy's `INTEGER PRIMARY KEY` auto-assign is now
