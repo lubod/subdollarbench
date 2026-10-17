@@ -832,7 +832,8 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   faster, ranges only in the full variant), with the lite profile
   `index-equality-only`.
   **Ticket 11 landed (2026-10-17)**: see the ticket-11 record below — the
-  generator's index D side plus round-4 finding 3 (`pick_other_table`),
+  generator's index D side plus round-4 finding 3 (claimed there, but the
+  real `pick_other_table` port landed only with round-6's `.15`),
   the toy's independent index engine, the perf gate (`perf.rs`, under the
   bench lock, restart included), `differential_supported(11)`, the
   campaign ticket (tier 4, needs [3, 4], lite `index-equality-only`) and
@@ -893,7 +894,8 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   `sql`; `/api/campaigns` lists only the active campaign
   (`campaign::ACTIVE_CAMPAIGNS = ["sdb-sql"]`); the served portal is a
   new sdb-sql campaign board (`PortalExporter::export_sql_board`, ranked
-  by reached ticket then regression-free tickets per $) and the stale
+  by difficulty-weighted points, then points per $, with reached and
+  regression-free shown; round-6 finding 4) and the stale
   root-owned `portal/runs/` tree of legacy per-run pages is gone (the
   silent `remove_dir_all` failure now logs). `tasks/sql/prompt.md` feeds
   the spec editor. Retired tasks remain runnable from the CLI — their
@@ -907,9 +909,11 @@ would have conflicted with them): the generator's `indexes` profile
 (stage 11) with `CREATE [UNIQUE] INDEX` / `DROP INDEX` interleaved with
 DML and three probes (missing table, missing column, missing index on
 `DROP`), the oracle/reference `no such index` -> `no_table` mapping,
-round-4 finding 3 (`pick_other_table`: a subquery's inner table is never
-the outer statement's — an overlap would bind every correlated name to
-the inner scope), the toy's index engine (parser + registry + UNIQUE
+round-4 finding 3 — only *claimed* here: the code still called
+`pick_table` in the three subquery arms until round-6 finding 1 landed
+the real port with `.15` (`pick_other_table`: a subquery's inner table is
+never the outer statement's — an overlap would bind every correlated
+name to the inner scope) — the toy's index engine (parser + registry + UNIQUE
 enforcement on INSERT/UPDATE + a transactional snapshot + the
 `exists`/`no_table`/`no_column` classes), the perf gate (`perf.rs`: two
 200k-row tables, 500 alternating point lookups, p50 < 5 ms and >= 10x,

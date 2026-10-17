@@ -8,13 +8,23 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-17.15`: round-6 grading fixes — subquery inner tables are
+///   never the outer statement's (round-4 finding 3 actually lands; a
+///   same-table subquery binds every correlated name to the inner scope),
+///   `CREATE INDEX` / `DROP INDEX` may appear inside a transaction and a
+///   rolled-back index is gone for the generator too, the perf gate runs
+///   on a scratch store, restarts gracefully (ticket 4's contract, not
+///   SIGKILL) and accepts an index at the round-trip floor (<= 2x an
+///   empty query) without the 10x ratio, and campaign rollups carry the
+///   rule set they were graded under.
 /// - `2026-10-17.14`: sdb-sql ticket 11 (indexes + perf gate) —
 ///   `CREATE [UNIQUE] INDEX` / `DROP INDEX` enter the graded DDL with the
 ///   schema-object error classes, a UNIQUE index constrains like the
-///   column form, indexes change no answer and survive restart, subquery
-///   inner tables are never the outer statement's (round-4 finding 3),
-///   and the perf gate (200k rows, 500 point lookups, p50 < 5 ms and
-///   >= 10x, ranges full-only, a restart in the middle) enters grading.
+///   column form, indexes change no answer and survive restart, and the
+///   perf gate (200k rows, 500 point lookups, p50 < 5 ms and >= 10x,
+///   ranges full-only, a restart in the middle) enters grading. (Its
+///   message also claimed round-4 finding 3; the code did not have it
+///   until `.15` — the entries below are what actually graded.)
 /// - `2026-10-17.13`: round-4/5 grading fixes — SIGTERM reaches PID 1 and
 ///   every other process, every crash-ladder (b) attempt is pinned and
 ///   (c)/(d) must not change the state they saw, the isolation peer's
@@ -454,7 +464,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-17.14";
+pub const RULES_VERSION: &str = "2026-10-17.15";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
