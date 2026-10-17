@@ -1338,6 +1338,26 @@
     let activeFamily = 'all';
     let currentInspectRun = null;
     let inspectCrumbTrail = [];
+
+    /// The inspector's breadcrumb trail. The explorer drill-down is retired
+    /// (gui-spec.md §3); this renders the trail when the container exists
+    /// and is a no-op otherwise.
+    function renderCrumbs() {
+      const el = document.getElementById('modalCrumbs');
+      if (!el) return;
+      el.innerHTML = inspectCrumbTrail
+        .map((id, i) => {
+          const label = escapeHtml(String(id).split('_').slice(-2).join('_'));
+          const last = i === inspectCrumbTrail.length - 1;
+          return last
+            ? `<span>${label}</span>`
+            : `<a href="#" onclick="event.preventDefault(); inspectTrial('${escapeHtml(id)}'); return false;" style="color:var(--primary);">${label}</a> \u203a `;
+        })
+        .join('');
+    }
+
+    /// The retired matrix explorer's exit hook (kept for its callers).
+    function exitExplorerMode() {}
     // Explorer (matrix drill-down) context: {model, effort, harness, task, trialId}
     function inspectTrial(runId) {
       const cur = inspectCrumbTrail.length ? inspectCrumbTrail[inspectCrumbTrail.length - 1] : null;
@@ -2245,6 +2265,35 @@
       return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     }
 
+    // The Admin tab's run banner and the elapsed timer read this; the Live
+    // view parses the campaign stream itself (gui-spec.md §4.3). The tab
+    // cleanup removed the old declaration with the single-run console, and
+    // `checkActiveRun` (a 3 s poller) kept writing it.
+    let liveTelemetry = {
+      isRunning: false,
+      startedAtMs: null,
+      timerInterval: null,
+      turns: 0,
+      maxTurns: 0,
+      spent: 0,
+      tokens: 0,
+      subrun: 1,
+      totalSubruns: 1,
+      durationSecs: null,
+    };
+
+    /// Refresh the per-worker elapsed labels (the old console's one-second
+    /// tick; the worker cards still render on the Admin tab).
+    function tickWorkerElapsed() {
+      document.querySelectorAll('.wElapsed').forEach(el => {
+        const started = el.dataset ? el.dataset.started : null;
+        if (!started) return;
+        const t = Date.parse(started);
+        if (!isFinite(t)) return;
+        el.textContent = formatElapsed(Math.max(0, (Date.now() - t) / 1000));
+      });
+    }
+
     function updateTelemetryDisplay() {
       const elapsedEl = document.getElementById('liveMetricElapsed');
       const subrunEl = document.getElementById('liveMetricSubrun');
@@ -2436,8 +2485,12 @@
     // The retired single-run console's renderers are gone (gui-spec.md §3):
     // the Live view reads the campaign log stream instead. These stubs keep
     // the run-control callers valid.
+    let activeEventSource = null;
     function clearConsole() {}
     function appendLog() {}
+    /// The retired console's per-worker tabs: the containers went with the
+    /// old panel (gui-spec.md §3), so this is a no-op kept for its caller.
+    function renderConsoleWorkerTabs() {}
 
     function sanitizeHtml(html) {
       if (!html) return '';
@@ -2941,7 +2994,6 @@
 
     async function loadInspectedRun(runId, opts) {
       openRunInspectorModal();
-      exitExplorerMode();
       renderCrumbs();
       document.getElementById('modalInspectRunId').textContent = runId;
       document.getElementById('modalInspectCodeViewer').textContent = 'Loading manifest and files...';

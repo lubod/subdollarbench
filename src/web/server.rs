@@ -5033,6 +5033,88 @@ mod tests {
         }
     }
 
+    /// The DOM stubs the console boot smoke needs: every element is a
+    /// benign object, fetch answers the read endpoints, timers are inert.
+    const GUI_SMOKE_HARNESS: &str = r#"
+const fs = require('fs');
+const path = require('path');
+const dir = __dirname;
+function makeEl() {
+  return {
+    style: {}, dataset: {}, children: [], value: '', textContent: '', innerHTML: '',
+    classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
+    appendChild(){}, removeChild(){}, remove(){}, addEventListener(){}, removeEventListener(){},
+    querySelector(){ return makeEl(); }, querySelectorAll(){ return []; },
+    setAttribute(){}, getAttribute(){ return null; }, focus(){}, click(){}, insertBefore(){},
+    scrollTo(){}, closest(){ return null; }, contains(){ return false; },
+    getBoundingClientRect(){ return { top:0,left:0,width:0,height:0,bottom:0,right:0 }; },
+    open(){}, close(){}, reset(){}, submit(){},
+  };
+}
+const store = {};
+global.localStorage = { getItem: k => (k in store ? store[k] : null), setItem: (k,v)=>{store[k]=String(v);}, removeItem: k=>{delete store[k];} };
+global.document = {
+  getElementById(){ return makeEl(); }, querySelector(){ return makeEl(); }, querySelectorAll(){ return []; },
+  createElement(){ return makeEl(); }, addEventListener(){}, body: makeEl(), documentElement: makeEl(), cookie: '',
+};
+global.addEventListener = () => {};
+global.removeEventListener = () => {};
+global.window = global;
+global.location = { hash: '#board', href: 'http://x/', pathname: '/', search: '' };
+global.navigator = { userAgent: 'node' };
+global.EventSource = class { constructor(){} close(){} addEventListener(){} };
+global.setInterval = () => 0;
+global.clearInterval = () => {};
+global.alert = () => {};
+global.confirm = () => true;
+global.scrollTo = () => {};
+global.fetch = async (url) => {
+  const u = String(url || '');
+  let body = { is_running: false, workers: {} };
+  if (u.includes('/api/campaigns') && !u.includes('/log')) body = [];
+  else if (u.includes('/api/queue') || u.includes('/api/runs') || u.includes('/api/models')) body = [];
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => body, text: async () => '' };
+};
+process.on('unhandledRejection', e => { console.log('UNHANDLED:', e && e.message ? e.message : e); process.exit(1); });
+try {
+  eval(fs.readFileSync(path.join(dir, 'shared.js'), 'utf8'));
+  eval(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'));
+} catch (e) { console.log('EVAL FAILED:', e.message); process.exit(1); }
+const calls = [
+  ['checkActiveRun'], ['refreshQueue'], ['refreshBoard'], ['loadRulesVersion'], ['applyHash'],
+  ['checkBreaker'], ['fetchOmpStatus'], ['fetchOpencodeStatus'], ['fetchIntegrity'],
+  ['updateTelemetryDisplay'], ['tickWorkerElapsed'], ['renderRunningSetup', null],
+  ['renderWorkerCards', {}], ['inspectRun', 'ut_run'], ['loadPrompt', 'sql'],
+];
+for (const [name, ...args] of calls) {
+  let fn;
+  try { fn = eval(name); } catch (e) { console.log('UNDEFINED:', name); process.exit(1); }
+  if (typeof fn !== 'function') { console.log('NOT A FUNCTION:', name); process.exit(1); }
+  try {
+    const r = fn(...args);
+    if (r && typeof r.then === 'function') {
+      r.catch(e => { console.log('ASYNC FAILED', name, e.message); process.exit(1); });
+    }
+  } catch (e) { console.log('CALL FAILED', name, e.message); process.exit(1); }
+}
+// The running branch of the status poller too (telemetry, worker tabs,
+// elapsed timers): a wave must not surface a different set of references.
+global.fetch = async (url) => ({
+  ok: true, status: 200, headers: { get: () => null },
+  json: async () => (String(url || '').includes('/api/status') ? {
+    is_running: true,
+    workers: { 'q1_w0': { run_id: 'r1', model: 'ut/m', task: 'sql', effort: 'high', started_at: '2026-10-17T09:00:00Z', turns: 3, cost_usd: 0.01, tokens: 100, subrun: 1, total_subruns: 1 } },
+    current_run: { run_id: 'r1', model: 'ut/m', task: 'sql', effort: 'high', started_at: '2026-10-17T09:00:00Z', turns: 3, max_turns: 10, cost_usd: 0.01, tokens: 100, subrun: 1, total_subruns: 1 },
+  } : (String(url || '').includes('/api/campaigns') && !String(url || '').includes('/log') ? [] : [])),
+  text: async () => '',
+});
+try {
+  const r = checkActiveRun();
+  if (r && typeof r.then === 'function') r.catch(e => { console.log('RUNNING BRANCH FAILED:', e.message); process.exit(1); });
+} catch (e) { console.log('RUNNING BRANCH CALL FAILED:', e.message); process.exit(1); }
+setTimeout(() => { console.log('smoke OK'); }, 300);
+"#;
+
     // ---------------------------------------------------------------------
     // Coverage additions: idle/synthetic-state route tests.
     //
@@ -5391,6 +5473,48 @@ mod tests {
         assert_eq!(res.status(), 404);
     }
 
+    /// The console is inline JS: a dangling reference left behind by a
+    /// cleanup (round-7: `liveTelemetry`, `tickWorkerElapsed`) only shows up
+    /// in a browser, where it repeats on every poll. This evaluates
+    /// shared.js + the inline script under a DOM stub, runs the boot path
+    /// and the 4 s pollers, and fails on any ReferenceError. Skipped when
+    /// node is absent.
+    #[test]
+    fn test_gui_console_boots_under_a_dom_stub() {
+        let html = include_str!("index.html");
+        let mut scripts = Vec::new();
+        let mut rest = html;
+        while let Some(s) = rest.find("<script>") {
+            let body = &rest[s + "<script>".len()..];
+            if let Some(e) = body.find("</script>") {
+                scripts.push(&body[..e]);
+                rest = &body[e + "</script>".len()..];
+            } else {
+                break;
+            }
+        }
+        assert_eq!(scripts.len(), 1, "index.html must hold one inline script");
+        let dir = std::env::temp_dir().join(format!("gui_smoke_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shared.js"), include_str!("shared.js")).unwrap();
+        std::fs::write(dir.join("app.js"), scripts[0]).unwrap();
+        std::fs::write(dir.join("harness.js"), GUI_SMOKE_HARNESS).unwrap();
+        let out = std::process::Command::new("node")
+            .arg(dir.join("harness.js"))
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
+        match out {
+            Ok(o) => assert!(
+                o.status.success() && String::from_utf8_lossy(&o.stdout).contains("smoke OK"),
+                "console boot smoke failed:\n{}\n{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(_) => eprintln!("node not found; skipping GUI boot smoke"),
+        }
+    }
+
     /// gui-spec.md §4.3: every log line falls into one of the Live view's
     /// chips; representative cell-8 lines pin the mapping.
     #[test]
@@ -5441,6 +5565,13 @@ mod tests {
     /// refuses to overlap a busy engine (spawning happens only when idle).
     #[tokio::test]
     async fn test_start_campaign_validates_and_respects_busy_engine() {
+        // A live cell (a CLI campaign) legitimately owns the real lock, and
+        // the validation path needs an idle engine: skip rather than fight
+        // a campaign that is running.
+        if crate::campaign::live_lock_holder().is_some() {
+            eprintln!("skip: a campaign is running (the lock is live)");
+            return;
+        }
         let state = create_test_state();
         state
             .is_running
