@@ -831,6 +831,17 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   on an indexed column vs an unindexed copy: p50 < 5 ms and >= 10x
   faster, ranges only in the full variant), with the lite profile
   `index-equality-only`.
+  **Ticket 11 landed (2026-10-17)**: see the ticket-11 record below — the
+  generator's index D side plus round-4 finding 3 (`pick_other_table`),
+  the toy's independent index engine, the perf gate (`perf.rs`, under the
+  bench lock, restart included), `differential_supported(11)`, the
+  campaign ticket (tier 4, needs [3, 4], lite `index-equality-only`) and
+  both prompts. Gates: the stage-11 soak is 0/3000, the agreement gate and
+  the mutant sweep run through profile 11, and the 20/20 bar now covers
+  12 stages x 20 runs (240 stage runs); two Docker live proofs pass
+  (full 91 s, lite 87 s, both 12/12 with `[PERF]` lines). RULES
+  `2026-10-17.14`. Tier 2 is now fully implemented on the harness side
+  (tickets 3-4 landed, 5-6 landed, 7-11 landed).
   **Round-4 review (REVIEW.md, 2026-10-17)**: finding 1 (HIGH) fixed — the
   graceful stop signalled every process *except* PID 1 (`kill(-1)` skips
   init), so an `exec`'d server (the recommended form) got one second from
