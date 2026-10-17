@@ -102,9 +102,7 @@ pub fn classify(message: &str) -> Option<ErrClass> {
     let m = message;
     let starts = |p: &str| m.starts_with(p);
     let contains = |p: &str| m.contains(p);
-    if starts("no such table") || starts("no such index") {
-        // An index is a schema object like a table: the dialect has no
-        // separate class for it.
+    if starts("no such table") {
         return Some(ErrClass::NoTable);
     }
     if starts("no such column") || starts("no such function") || contains("has no column named") {

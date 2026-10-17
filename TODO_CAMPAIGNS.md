@@ -864,24 +864,6 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   the inner table + the outer-column test) — rides with ticket 11; (5)
   `CampaignStageConfig.passed_stages` (the stderr logging half is done).
   The stronger-model cell before ticket 11 is still outstanding.
-  **Ticket 11, part 1 landed (2026-10-17)**: (3) subquery inner tables are
-  now drawn from tables other than the outer statement's (column names are
-  unique across tables, so an overlap means the same table — which would
-  bind every name to the inner scope and make `EXISTS`/`IN`/scalar
-  subqueries silently uncorrelated); (4)/(5) done as noted. Index D side:
-  the `indexes` profile (stage 11), `CREATE [UNIQUE] INDEX name ON
-  t(col)` / `DROP INDEX name` statements shuffled over the tables'
-  columns with a live-index registry, three index error probes (missing
-  table/column, unknown index), and the oracle/reference mapping for
-  "no such index" -> no_table. **Pending for the completion commit**: the
-  toy's index engine (parse the two statements, a per-name registry,
-  enforce unique indexes on INSERT/UPDATE, `index ... already exists` and
-  missing-index errors, agreement-gate profile 11), the perf gate (200k
-  rows, 500 point lookups on an indexed column vs an unindexed copy:
-  p50 < 5 ms and >= 10x faster; ranges full-only), `differential_supported(11)`,
-  the campaign ticket + lite prompt (`index-equality-only`), the 20/20 bar
-  through 11, a live proof and the RULES bump. The stronger-model cell
-  before ticket 11 is still outstanding.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

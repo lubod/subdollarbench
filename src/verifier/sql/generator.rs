@@ -51,8 +51,6 @@ pub struct Profile {
     /// (list)`, `EXISTS`, correlated references, `INSERT ... SELECT`
     /// (ticket 10).
     pub subqueries: bool,
-    /// `CREATE [UNIQUE] INDEX` / `DROP INDEX` (ticket 11).
-    pub indexes: bool,
     /// `LEFT [OUTER] JOIN` (stage 8 full only; the lite variant keeps
     /// inner/comma joins).
     pub left_join: bool,
@@ -86,7 +84,6 @@ impl Profile {
                 p.left_join = true;
             }
             10 => p.subqueries = true,
-            11 => p.indexes = true,
             9 => p.constraints = true,
             _ => {}
         }
@@ -109,7 +106,6 @@ impl Profile {
             joins: self.joins || o.joins,
             left_join: self.left_join || o.left_join,
             subqueries: self.subqueries || o.subqueries,
-            indexes: self.indexes || o.indexes,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -208,8 +204,6 @@ pub struct Generator {
     /// (a join's `ON` predicate: the toy evaluates those against a partial
     /// row, and SQLite's scoping there is not part of the dialect).
     allow_sub: bool,
-    /// Live indexes `(name, table, column)`, so a `DROP` can name one.
-    indexes: Vec<(String, String, String)>,
     /// Per table: an upper bound on its row count (every generated INSERT
     /// counts; deletes never lower it). Only `SUM`'s overflow guard uses
     /// it, so being conservative is free.
@@ -251,7 +245,6 @@ impl Generator {
             uniq: 0,
             seen: HashMap::new(),
             rows: HashMap::new(),
-            indexes: Vec::new(),
             allow_sub: true,
             bounds,
             txn_open: false,
@@ -982,37 +975,6 @@ impl Generator {
         self.stmt(sql, Kind::Select, ordered)
     }
 
-    /// `CREATE [UNIQUE] INDEX` / `DROP INDEX` (ticket 11): shuffled over
-    /// the tables' columns, interleaved with DML; a live index may be
-    /// dropped again. Indexes are a physical structure — no answer may
-    /// change because of one.
-    pub fn index_stmt(&mut self) -> Statement {
-        if !self.indexes.is_empty() && self.rng.chance(35) {
-            let i = self.rng.below(self.indexes.len() as u64) as usize;
-            let (name, _, _) = self.indexes.remove(i);
-            let (drop, index) = (self.kw("DROP"), self.kw("INDEX"));
-            return self.stmt(format!("{drop} {index} {name}"), Kind::Create, false);
-        }
-        let ti = self.pick_table();
-        let (tname, cols) = self.table_infos(ti);
-        let col = cols[self.rng.below(cols.len() as u64) as usize]
-            .name
-            .clone();
-        let name = format!("{tname}_ix{}", self.uniq);
-        self.uniq += 1;
-        let unique = self.rng.chance(30);
-        let (create, index) = (self.kw("CREATE"), self.kw("INDEX"));
-        let uniq = if unique {
-            format!(" {} ", self.kw("UNIQUE"))
-        } else {
-            " ".to_string()
-        };
-        let on = self.kw("ON");
-        let sql = format!("{create}{uniq}{index} {name} {on} {tname} ({col})");
-        self.indexes.push((name, tname, col));
-        self.stmt(sql, Kind::Create, false)
-    }
-
     /// A comparison operator, for `HAVING` predicates.
     fn cmp_op(&mut self) -> String {
         ["=", "<>", "<", "<=", ">", ">="][self.rng.below(6) as usize].to_string()
@@ -1516,27 +1478,6 @@ impl Generator {
         self.stmt(sql, Kind::Select, ordered)
     }
 
-    /// An inner table for a subquery that is *not* the outer statement's
-    /// table. Column names are unique across tables, so an overlap means
-    /// the same table — and with the same table on both sides every name
-    /// binds to the inner scope, making the subquery silently
-    /// uncorrelated (the quality floor wants real correlation).
-    fn pick_other_table(&mut self, outer: &[ColInfo]) -> Option<(String, Vec<ColInfo>)> {
-        for _ in 0..4 {
-            let ti = self.pick_table();
-            let (t, cols) = self.table_infos(ti);
-            let overlaps = cols.iter().any(|c| {
-                outer
-                    .iter()
-                    .any(|o| Self::bare_ref(&o.name) == Self::bare_ref(&c.name))
-            });
-            if !overlaps {
-                return Some((t, cols));
-            }
-        }
-        None
-    }
-
     /// A plain column reference with its type (for `IN` and subquery
     /// predicates).
     fn column_ref(&mut self, cols: &[ColInfo]) -> Option<(String, Ty)> {
@@ -1583,14 +1524,8 @@ impl Generator {
     /// leaves a multi-row scalar subquery untested). The inner predicate is
     /// usually correlated with the outer columns.
     fn scalar_subquery(&mut self, outer: &[ColInfo]) -> (String, Ty) {
-        let Some((tname, inner)) = self.pick_other_table(outer) else {
-            // No other table: a plain aggregate with no predicate (it
-            // cannot correlate anyway).
-            let (t, cols) = self.table_infos(0);
-            let (agg, ty) = self.agg_item(&cols, 1);
-            let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
-            return (format!("({select} {agg} {from} {t})"), ty);
-        };
+        let ti = self.pick_table();
+        let (tname, inner) = self.table_infos(ti);
         let rows_bound = self.rows.get(&tname).copied().unwrap_or(2);
         let (agg, ty) = self.agg_item(&inner, rows_bound);
         let (select, from) = (self.kw("SELECT"), self.kw("FROM"));
@@ -1648,10 +1583,9 @@ impl Generator {
             }
             30..=54 => {
                 // `EXISTS` must correlate, or it is a constant predicate
-                // that proves nothing about the row (the quality floor),
-                // which is also why the inner table may not be the outer
-                // one.
-                let (tname, inner) = self.pick_other_table(cols)?;
+                // that proves nothing about the row (the quality floor).
+                let ti = self.pick_table();
+                let (tname, inner) = self.table_infos(ti);
                 let pred = self.link_pred(&inner, cols)?;
                 let not = neg(self);
                 let (ex, select, from, w) = (
@@ -1663,7 +1597,8 @@ impl Generator {
                 Some(format!("{not}{ex} ({select} * {from} {tname} {w} {pred})"))
             }
             55..=84 => {
-                let (tname, inner) = self.pick_other_table(cols)?;
+                let ti = self.pick_table();
+                let (tname, inner) = self.table_infos(ti);
                 let (lhs, ty) = self.column_ref(cols)?;
                 let cands: Vec<String> = inner
                     .iter()
@@ -1903,9 +1838,6 @@ impl Generator {
         if self.profile.subqueries {
             menu.extend([23, 24, 25, 26]);
         }
-        if self.profile.indexes {
-            menu.extend([27, 28, 29]);
-        }
         let which = *self.rng.pick(&menu);
         let sql = match which {
             0 => format!("{} * {} zz_gone", self.kw("SELECT"), self.kw("FROM")),
@@ -2126,23 +2058,6 @@ impl Generator {
                     self.kw("FROM")
                 )
             }
-            27 => format!(
-                "{} {} zz_ix {} zz_gone ({})",
-                self.kw("CREATE"),
-                self.kw("INDEX"),
-                self.kw("ON"),
-                cols[0].name
-            ),
-            28 => format!(
-                "{} {} zz_ix {} {tname} (zz_nocol)",
-                self.kw("CREATE"),
-                self.kw("INDEX"),
-                self.kw("ON")
-            ),
-            29 => {
-                let (drop, index) = (self.kw("DROP"), self.kw("INDEX"));
-                format!("{drop} {index} zz_gone")
-            }
             _ => {
                 // A foreign key with no parent row.
                 let fk = cols.iter().find(|c| c.references.is_some()).cloned();
@@ -2174,14 +2089,12 @@ impl Generator {
         }
         let w_insert = 24u64;
         let w_insert_select = if self.profile.subqueries { 12 } else { 0 };
-        let w_index = if self.profile.indexes { 8 } else { 0 };
         let w_select = 40u64;
         let w_update = if self.profile.update { 14 } else { 0 };
         let w_delete = if self.profile.delete { 6 } else { 0 };
         let w_probe = 10u64;
         let w_txn = if self.profile.txn { 10 } else { 0 };
-        let total =
-            w_insert + w_insert_select + w_index + w_select + w_update + w_delete + w_probe + w_txn;
+        let total = w_insert + w_insert_select + w_select + w_update + w_delete + w_probe + w_txn;
         let mut roll = self.rng.below(total);
         if roll < w_insert {
             let ti = self.pick_table();
@@ -2192,10 +2105,6 @@ impl Generator {
             return self.insert_select();
         }
         roll -= w_insert_select;
-        if roll < w_index {
-            return self.index_stmt();
-        }
-        roll -= w_index;
         if roll < w_select {
             return self.select_stmt();
         }
