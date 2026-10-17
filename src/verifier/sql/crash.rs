@@ -257,8 +257,9 @@ pub fn check_uniform(
     table: &str,
     rows: usize,
     owed: bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
+    let value;
     match c.exec(&format!("SELECT DISTINCT c FROM {table} ORDER BY c"))? {
         Response::Rows { rows: distinct, .. } => {
             if distinct.len() != 1 {
@@ -267,7 +268,7 @@ pub fn check_uniform(
                     distinct.len()
                 ));
             }
-            let value = distinct
+            value = distinct
                 .into_iter()
                 .next()
                 .and_then(|r| r.into_iter().next())
@@ -286,8 +287,24 @@ pub fn check_uniform(
             if all.len() != rows {
                 return Err(format!("{} of {rows} rows survived the kill", all.len()));
             }
-            Ok(())
+            Ok(value)
         }
+        other => Err(format!("SELECT k answered {other:?}")),
+    }
+}
+
+/// The keys present in `table`, ascending.
+pub fn read_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<usize>, String> {
+    let mut c = TcpCandidate::connect(addr, timeout)?;
+    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+        Response::Rows { rows, .. } => rows
+            .iter()
+            .flatten()
+            .map(|v| {
+                v.parse::<usize>()
+                    .map_err(|_| format!("key {v:?} is not a number"))
+            })
+            .collect(),
         other => Err(format!("SELECT k answered {other:?}")),
     }
 }

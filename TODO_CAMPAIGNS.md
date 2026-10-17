@@ -831,6 +831,28 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   on an indexed column vs an unindexed copy: p50 < 5 ms and >= 10x
   faster, ranges only in the full variant), with the lite profile
   `index-equality-only`.
+  **Round-4 review (REVIEW.md, 2026-10-17)**: finding 1 (HIGH) fixed — the
+  graceful stop signalled every process *except* PID 1 (`kill(-1)` skips
+  init), so an `exec`'d server (the recommended form) got one second from
+  `docker stop -t 1` after a wasted 5 s wait; now `docker kill -s TERM`
+  reaches PID 1 with no shell in the image, the other processes get
+  `kill -TERM -1` (the spelling dash and busybox both accept), and the
+  whole timeout is theirs to flush. Pinned by an exec-form PID-1 fixture
+  whose handler sleeps 2 s (the old code lost the marker) plus the
+  existing non-exec one. Finding 2 (MEDIUM) partly fixed: every (b)
+  attempt's table is now checked right after its own restart (an answered
+  update is owed), and (c) requires the bulk value (b) read — a torn tail
+  may cost the newest victim, never an update committed before it.
+  **Still open from round 4 (ride with ticket 11)**: (2, rest) (d) must
+  also require the key set and bulk value it saw before; (3) `EXISTS`/`IN`
+  subqueries whose inner table is the outer one are effectively
+  uncorrelated (re-pick the inner table, and optionally add a same-table
+  aliased corrlation); (4) `is_busy` string-matches a `Debug` rendering
+  (make the peer error typed); (5) NITs (`CampaignStageConfig.
+  passed_stages` is written but never read; log the `docker exec` stderr
+  once — the latter is done in the finding-1 rewrite). REVIEW.md also
+  asks for a cell with a stronger model before ticket 11, so tickets 4-10
+  get a real end-to-end run.
   **M7 plan**: 4 persistence (restart keeps data + upgrade check),
   5 crash safety (SIGKILL after acks, mid-statement kill, torn tail,
   double restart — reuse the sdb-kv machinery), 6 transactions

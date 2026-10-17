@@ -937,10 +937,31 @@ impl SandboxManager {
             return Ok(()); // already gone
         };
         if running == "true" {
-            let _ = Command::new("docker")
-                // `--` so dash's `kill` reads `-1` as a target, not an option.
-                .args(["exec", &name, "sh", "-c", "kill -s TERM -- -1"])
+            // PID 1 first: an `exec`'d server *is* PID 1, and `kill(-1)`
+            // never signals it (kill(2)), so `docker stop -t 1`'s single
+            // second was all it got. `docker kill` reaches PID 1 without
+            // needing a shell in the image, then the rest of the
+            // processes get their own SIGTERM (`kill -TERM -1` is the
+            // spelling dash and busybox both accept). The whole
+            // `timeout_secs` is theirs to flush.
+            let pid1 = Command::new("docker")
+                .args(["kill", "-s", "TERM", &name])
                 .output();
+            let rest = Command::new("docker")
+                .args(["exec", &name, "sh", "-c", "kill -TERM -1"])
+                .output();
+            if let Ok(out) = &rest {
+                if !out.status.success() {
+                    // Distroless/scratch images have no `sh`: PID 1 still
+                    // got its signal, but the log should say so.
+                    warn!(
+                        "graceful stop: could not signal the other processes ({}); \
+                         PID 1 was signalled",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+            }
+            let _ = pid1;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
             while std::time::Instant::now() < deadline
                 && state("{{.State.Running}}").as_deref() == Some("true")
@@ -2763,6 +2784,74 @@ mod tests {
         assert!(
             data.join("marker").exists(),
             "the harness-owned data dir must be writable from the container"
+        );
+        sm.cleanup();
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The recommended `exec` form: the server *is* PID 1, so `kill(-1)`
+    /// never reaches it (`docker stop -t 1` gave it a single second after
+    /// a wasted 5 s wait). The graceful stop must signal PID 1 directly,
+    /// then give it the whole timeout to flush.
+    #[test]
+    fn test_graceful_stop_reaches_an_exec_pid1_server() {
+        use super::CandidateRunExtras;
+        let sm = SandboxManager::with_id("exec-stop-test");
+        let _guard = RunGuard::new(SandboxManager::with_id("exec-stop-test"));
+        sm.cleanup();
+        let work = std::env::temp_dir().join(format!("test_exec_{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("test_exec_data_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            work.join("trap_server.py"),
+            r#"import signal, sys, time
+
+def bye(signum, frame):
+    time.sleep(2)  # a slow flush, well over `docker stop -t 1`
+    open('/sdb-data/flushed.txt', 'w').write('bye')
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, bye)
+while True:
+    time.sleep(0.2)
+"#,
+        )
+        .unwrap();
+        // The recommended form: `exec`, so python is PID 1.
+        std::fs::write(
+            work.join("start.sh"),
+            "#!/bin/bash\nexec python3 /workspace/trap_server.py\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                work.join("start.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+        let extras = CandidateRunExtras {
+            binds: vec![(data.display().to_string(), "/sdb-data".to_string())],
+            ..Default::default()
+        };
+        assert!(sm
+            .start_candidate_in_docker_with(&work, free_port(), &extras)
+            .is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let started = std::time::Instant::now();
+        assert!(sm.stop_candidate_gracefully(10).is_ok());
+        let took = started.elapsed();
+        assert!(
+            data.join("flushed.txt").exists(),
+            "PID 1 must receive SIGTERM and get its time to flush"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(6),
+            "the stop waited the deadline ({took:?}) instead of the signal"
         );
         sm.cleanup();
         let _ = std::fs::remove_dir_all(&work);

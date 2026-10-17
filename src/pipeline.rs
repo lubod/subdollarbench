@@ -103,6 +103,9 @@ fn crash_ladder(
     let mut bulk_rows = 0usize;
     let mut victims = 0usize;
     let mut owed = false;
+    // The bulk column's value right after (b) pinned it; (c) and (d) must
+    // not change it.
+    let mut value_after_b = String::new();
     // Keys the tear may not cost (`must`) and those it may (`maybe`).
     let mut must: Vec<usize> = Vec::new();
     let mut maybe: Vec<usize> = Vec::new();
@@ -201,6 +204,11 @@ fn crash_ladder(
                     .map_err(|e| format!("(b) {e}"))?
                 };
                 restart(&scratch_extras)?;
+                // Every attempt's table is pinned right after its own
+                // restart: an answered update is owed (owed = true), a
+                // mid-statement kill leaves either value.
+                value_after_b = crash::check_uniform(&addr, t, &bulk_table, rows, owed)
+                    .map_err(|e| format!("(b) {e}"))?;
                 if !owed {
                     break;
                 }
@@ -215,8 +223,10 @@ fn crash_ladder(
                  check is weaker this run (the acked update is still required)",
                 );
             }
-            crash::check_uniform(&addr, t, &bulk_table, bulk_rows, owed)
-                .map_err(|e| format!("(b) {e}"))?;
+            if value_after_b.is_empty() {
+                value_after_b = crash::check_uniform(&addr, t, &bulk_table, bulk_rows, owed)
+                    .map_err(|e| format!("(b) {e}"))?;
+            }
             logger.log("  [CRASH] the killed bulk UPDATE was all-or-nothing");
 
             // (c) a torn tail. Kill first: a running server may rewrite the
@@ -268,8 +278,14 @@ fn crash_ladder(
                 .map_err(|e| format!("(c) {e}"))?;
             // The torn tail may cost the newest statement, so a uniform old
             // value is fine here.
-            crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
+            let after_c = crash::check_uniform(&addr, t, &bulk_table, bulk_rows, false)
                 .map_err(|e| format!("(c) {e}"))?;
+            if after_c != value_after_b {
+                return Err(format!(
+                    "(c) the bulk column changed from {value_after_b} (read after (b)) to \
+                     {after_c} across the tear: a committed update was lost"
+                ));
+            }
             logger.log(&format!(
                 "  [CRASH] {cut} torn bytes from {}: every older row intact",
                 path.display()
