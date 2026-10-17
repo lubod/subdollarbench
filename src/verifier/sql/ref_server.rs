@@ -119,7 +119,7 @@ def translate_ddl(sql):
 
 
 def classify(msg):
-    if msg.startswith("no such table"):
+    if msg.startswith("no such table") or msg.startswith("no such index"):
         return "no_table"
     if (msg.startswith("no such column")
             or msg.startswith("no such function")
