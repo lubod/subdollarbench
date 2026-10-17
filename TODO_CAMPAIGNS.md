@@ -951,6 +951,39 @@ stronger-model cell the round-4 review asks for (it was requested
 fixture remainder (b)/(c)/(d) and finding-5 (`passed_stages` written but
 never read) still ride with ticket 12.
 
+**gui-spec.md implemented (2026-10-17)**: the console is campaign-first.
+Phase 1 (`3f7dd2d`): manifests record one `CampaignRound` per
+verification (stage results, turns, cost estimate, candidate-log tail);
+`StageRecord` carries `rounds` + the §5.2 classified `failure`
+(fault / no_start / regression / late_check / own_stage / agent); the
+ladder (§5.3) and `stop_reason` live in one Rust function; the rollup
+records its caps; `GET /api/campaigns` carries each cell's ladder and
+stop reason, `GET /api/campaigns/:id` the full detail with backfilled
+rounds (lenient manifest read + per-round scores recovered from the
+stage console log, stderr evidence included), and the log endpoint grew
+`?after=` byte offsets and `?kinds=` filtering. Phases 2-6: the console
+is four tabs — **Board** (the default: one row per campaign cell with a
+status-coloured ladder mini-strip, model/harness/effort grouping with
+`×N runs`, a rules-version filter with an "older rule sets" divider,
+stop-reason states), **Run** (header, spend bar with the cap marker, the
+full ladder table with per-round scores and `⚠` regressions, one-line
+causes that expand to the full verifier error and stderr tail, links to
+the run console), **Live** (filter chips, 4 s incremental `?after=`
+polling, prompt/report block collapsing, follow toggle), and **Admin**
+(a campaign launcher posting to `POST /api/campaigns` — spawns what
+scripts/sql-cell.sh runs and refuses a busy engine with 409; the
+single-run launcher moved behind "Advanced — single run (not a
+campaign)"). The retired Leaderboard/Models/Tasks/Matrix/Runs/Console
+and Campaigns-list panels and their JS are gone; one ranking
+(`campaign::board_order`: current rules, points, points/$, cheaper)
+serves the API, the console and the public portal, which also renders
+the shared ladder strip. Acceptance checked against cell 8: ticket 7
+`0/6 → 5/6`, ticket 8 full `5/6 → 2/6` (regression), lite `5/6 → 0/6`
+with `server didn't start: server.py:101: IndentationError…`, tickets
+9/11 `not reached: budget cap`, 10 `skipped: needs 7`; the console JS
+passes `node --check`, the served page carries no retired-task names,
+and the full lib suite is 873 green.
+
 **Round-6 review fixes landed (2026-10-17)**: (1) `pick_other_table`
 actually landed this time — a subquery's inner table is never the outer
 statement's, in the scalar, `EXISTS` and `IN (subquery)` arms, verified

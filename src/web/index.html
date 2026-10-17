@@ -1053,29 +1053,25 @@
       <!-- Main Display Tabs -->
       <main class="card" id="appMain" style="display:none;">
         <div class="tabs">
-          <button class="tab active" data-tab="setup" onclick="switchTab('setup')">⚙️ Setup</button>
-          <button class="tab" data-tab="console" onclick="switchTab('console')">Live Console</button>
-          <button class="tab" data-tab="traceability" onclick="switchTab('traceability')">Traceability & Runs</button>
-          <button class="tab" data-tab="leaderboard" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
-          <button class="tab" data-tab="models" onclick="switchTab('models')">Models</button>
-          <button class="tab" data-tab="tasks" onclick="switchTab('tasks')">Tasks</button>
-          <button class="tab" data-tab="matrix" onclick="switchTab('matrix')">Matrix</button>
-          <button class="tab" data-tab="campaigns" onclick="switchTab('campaigns')">🧪 Campaigns</button>
+          <button class="tab active" data-tab="board" onclick="switchTab('board')">Board</button>
+          <button class="tab" data-tab="run" onclick="switchTab('run')">Run</button>
+          <button class="tab" data-tab="live" onclick="switchTab('live')">Live</button>
+          <button class="tab" data-tab="admin" onclick="switchTab('admin')">Admin</button>
         </div>
-      <div id="tab-campaigns" style="display: none; flex-direction: column; gap: 16px;">
-        <h2 style="margin:0;">🧪 Campaigns <span class="hint" style="font-weight:normal;">ordered tickets on one living workspace · cost-first</span></h2>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <button class="btn" onclick="refreshCampaigns()">Refresh</button>
-          <span class="hint">Polls every 4s while this tab is open. Click a campaign to tail its console.</span>
-        </div>
-        <div id="campaignsList"><div class="hint">Loading…</div></div>
-        <h3 style="margin:0;">Console <span id="campaignLogTitle" class="hint" style="font-weight:normal;"></span></h3>
-        <pre id="campaignLog" style="max-height:440px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:.75rem;white-space:pre-wrap;margin:0;">select a campaign above</pre>
+      <div id="tab-board" style="flex-direction: column; gap: 16px;">
+        <div id="boardHead" style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;"></div>
+        <div id="boardBody" style="width:100%; overflow-x:auto;"></div>
       </div>
-        <!-- Setup Tab Panel (was sidebar) -->
-      <div id="tab-setup" style="flex-direction: column; gap: 16px;">
+      <div id="tab-run" style="display: none; flex-direction: column; gap: 16px;">
+        <div id="runBody"><div class="hint">Select a run on the Board.</div></div>
+      </div>
+      <div id="tab-live" style="display: none; flex-direction: column; gap: 16px;">
+        <div id="liveBody"><div class="hint">Open a run to follow it live.</div></div>
+      </div>
+      <!-- Admin Tab Panel (launcher and housekeeping) -->
+      <div id="tab-admin" style="display: none; flex-direction: column; gap: 16px;">
         <h2>
-          <span>⚙️ Benchmark Setup</span>
+          <span>Admin</span>
           <span id="modelCountBadge" class="badge badge-pass" style="font-size: 0.7rem;">Loading models...</span>
         </h2>
 
@@ -1139,6 +1135,31 @@
           <div id="selectedPricePill" class="price-pill" style="display: none; margin-top: 4px;"></div>
         </div>
 
+        <!-- Campaign launcher (gui-spec.md §4.4): what scripts/sql-cell.sh runs -->
+        <div class="form-group" id="campaignLauncher" style="border:1px solid var(--border);border-radius:8px;padding:12px;">
+          <label>
+            <span><b>Start an sdb-sql campaign</b></span>
+            <span class="hint">the ticket ladder on one living workspace — the same run as <code>scripts/sql-cell.sh</code>; the model comes from the picker above (or type one here)</span>
+          </label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
+            <div><span class="hint">Model (overrides the picker)</span><br>
+              <input type="text" id="campaignModel" placeholder="openrouter/vendor/model" style="min-width:280px;" /></div>
+            <div><span class="hint">Budget $</span><br>
+              <input type="number" id="campaignBudget" value="0.75" step="0.05" min="0.05" style="width:100px;" /></div>
+            <div><span class="hint">Wall min</span><br>
+              <input type="number" id="campaignWall" value="120" min="5" style="width:100px;" /></div>
+            <div><span class="hint">Effort</span><br>
+              <select id="campaignEffort">
+                <option value="high" selected>high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+              </select></div>
+            <button class="btn" onclick="startCampaign()">Start campaign</button>
+          </div>
+          <div id="campaignCmd" class="hint" style="margin-top:8px;"></div>
+          <div id="campaignStartMsg" class="hint"></div>
+        </div>
+
         <!-- Review Judge Model -->
         <div class="form-group">
           <label for="reviewModel">Review Judge Model (end-of-run code review)</label>
@@ -1182,6 +1203,9 @@
           <span class="hint">Ranks never mix harnesses: compare within one harness.</span>
         </div>
 
+        <details class="form-group" id="singleRunSection">
+          <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;">Advanced — single run <span class="hint">(not a campaign; does not appear on the board)</span></summary>
+          <div style="display:flex;flex-direction:column;gap:16px;margin-top:10px;">
         <!-- Task Selection -->
         <div class="form-group">
           <label for="task">Benchmark Task</label>
@@ -1288,6 +1312,8 @@
             <span>＋</span> Queue
           </button>
         </div>
+          </div>
+        </details>
         <div style="margin-top: 10px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="font-weight: 600;">Run Queue <span id="queueCount" class="badge">0</span></label>
@@ -1300,518 +1326,19 @@
 
 
 
-        <!-- Tab 1: Terminal Console -->
-        <div id="tab-console" class="console-container" style="display: none;">
-          <div id="currentRunCard" style="display: none; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
-              <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">● Current run</div>
-              <button class="btn btn-danger" id="stopBtnConsole" onclick="stopRun()" style="padding: 4px 12px; font-size: 0.75rem; font-weight: 600;">🛑 Stop run</button>
-            </div>
-            <div id="workerCards" style="display: none; gap: 8px; flex-wrap: wrap; margin-top: 6px;"></div>
-          <div id="runningSetupBar" class="hint" style="margin-top: 6px; font-size: 0.78rem;"></div>
-          </div>
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <span class="hint">Real-time execution log from OMP, Docker, and Test Harness</span>
-              <span id="consolePulseBadge" class="badge" style="background: rgba(46,160,67,0.15); color: #3fb950; border: 1px solid rgba(46,160,67,0.3); font-size: 0.72rem; display: inline-flex; align-items: center; gap: 5px;">
-                <span style="width: 7px; height: 7px; border-radius: 50%; background: #3fb950; display: inline-block;"></span>
-                <span id="consolePulseText">Live Sync Active</span>
-              </span>
-              <span id="consoleSubrunBadge" class="badge" style="display: none; background: rgba(240,136,62,0.15); color: #f0883e; border: 1px solid rgba(240,136,62,0.3); font-size: 0.72rem; font-weight: 700;">Subrun 1/3</span>
-            </div>
-          <div id="consoleWorkerTabs" style="display: none; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
-            <span class="hint" style="font-size: 0.72rem;">worker:</span>
-          </div>
-            <div style="display: flex; gap: 10px; align-items: center;">
-              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Toggle preview of written code and tool arguments">
-                <input type="checkbox" id="codeDetailsCheck" checked onchange="toggleCodeDetails(this.checked)"> Code Details
-              </label>
-              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;">
-                <input type="checkbox" id="autoRefreshCheck" checked onchange="toggleAutoRefresh(this.checked)"> Auto-Refresh (2s)
-              </label>
-              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;">
-                <input type="checkbox" id="autoScrollCheck" checked> Auto-Scroll
-              </label>
-              <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" id="logsToggleBtn" onclick="toggleLogsVisible()" title="Show/hide the raw log stream">🧾 Show logs</button>
-              <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" onclick="manualRefreshConsole()">🔄 Refresh</button>
-              <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" onclick="clearConsole()">Clear</button>
-            </div>
-          </div>
-
-          <!-- Live Telemetry Status Bar (Elapsed, Subrun, Turns, Spent, Tokens) -->
-          <div id="liveTelemetryBar" style="display: flex; gap: 14px; align-items: center; background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 9px 15px; flex-wrap: wrap; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);">
-            <div style="display: flex; align-items: center; gap: 7px;">
-              <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">⏱️ Elapsed</span>
-              <span id="liveMetricElapsed" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #58a6ff; font-size: 1.05rem;">00:00</span>
-            </div>
-            <div style="width: 1px; height: 18px; background: var(--border);"></div>
-            <div id="liveMetricSubrunWrapper" style="display: flex; align-items: center; gap: 7px;">
-              <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">🔁 Subrun</span>
-              <span id="liveMetricSubrun" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #f0883e; font-size: 1.05rem;">-</span>
-            </div>
-            <div style="width: 1px; height: 18px; background: var(--border);"></div>
-            <div style="display: flex; align-items: center; gap: 7px;">
-              <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">🔄 Turns</span>
-              <span id="liveMetricTurns" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #e3b341; font-size: 1.05rem;">0 / 100</span>
-            </div>
-            <div style="width: 1px; height: 18px; background: var(--border);"></div>
-            <div style="display: flex; align-items: center; gap: 7px;">
-              <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">💰 Current Spent</span>
-              <span id="liveMetricSpent" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #3fb950; font-size: 1.05rem;">$0.0000</span>
-            </div>
-            <div style="width: 1px; height: 18px; background: var(--border);"></div>
-            <div style="display: flex; align-items: center; gap: 7px;">
-              <span style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">⚡ Tokens</span>
-              <span id="liveMetricTokens" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #bc8cff; font-size: 1.05rem;">0</span>
-            </div>
-            <div id="liveMetricStatusWrapper" style="margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 0.78rem;">
-              <span id="liveMetricStatusDot" style="width: 9px; height: 9px; border-radius: 50%; background: #484f58; display: inline-block;"></span>
-              <span id="liveMetricStatusText" style="color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">IDLE</span>
-            </div>
-          </div>
-
-          <style id="consoleCatStyle">
-#terminalOutput .ln{white-space:pre-wrap;word-break:break-word}
-#terminalOutput .ln-prompt{color:#d2a8ff}
-#terminalOutput .ln-thought{color:#e3b341;font-style:italic}
-#terminalOutput .ln-response{color:#7ee787}
-#terminalOutput .ln-action{color:#79c0ff;font-weight:600}
-#terminalOutput .ln-result,#terminalOutput .ln-code{color:#8b949e}
-#terminalOutput .ln-cmd{color:#79c0ff}
-#terminalOutput .ln-tokens{color:#6e7681}
-#terminalOutput .ln-subrun{color:#f0883e;font-weight:700}
-#terminalOutput .ln-omp{color:#ffa657}
-#terminalOutput .ln-error{color:#ff7b72;font-weight:700}
-#terminalOutput .ln-warn,#terminalOutput .ln-waiting{color:#e3b341}
-#terminalOutput .ln-sec{color:#58a6ff;font-weight:700}
-#terminalOutput .ln-pass{color:#3fb950;font-weight:700}
-#terminalOutput .ln-fail{color:#f85149;font-weight:700}
-#terminalOutput.hide-prompt .ln-prompt,#terminalOutput.hide-thought .ln-thought,#terminalOutput.hide-response .ln-response,#terminalOutput.hide-action .ln-action,#terminalOutput.hide-action .ln-cmd,#terminalOutput.hide-result .ln-result,#terminalOutput.hide-code .ln-code,#terminalOutput.hide-meta .ln-tokens{display:none}
-.cat-chip{font-size:.7rem;padding:2px 9px;border-radius:20px;border:1px solid var(--border);background:#0d1117;color:var(--text-muted);cursor:pointer;font-weight:600}
-.cat-chip.on{color:#fff;border-color:#58a6ff;background:#1c2b45}
-</style>
-<div id="consoleCats" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0;">
-<span style="font-size:.72rem;color:var(--text-muted);font-weight:600;">SHOW:</span>
-<button class="cat-chip on" onclick="toggleCat(this,'prompt')">Prompt</button>
-<button class="cat-chip on" onclick="toggleCat(this,'thought')">Thoughts</button>
-<button class="cat-chip on" onclick="toggleCat(this,'response')">Responses</button>
-<button class="cat-chip on" onclick="toggleCat(this,'action')">Actions</button>
-<button class="cat-chip on" onclick="toggleCat(this,'result')">Results</button>
-<button class="cat-chip on" onclick="toggleCat(this,'code')">Code</button>
-<button class="cat-chip on" onclick="toggleCat(this,'meta')">Meta</button>
-</div>
-<div id="breakerBanner" style="display: none; padding: 8px 12px; font-size: 0.8rem; border-radius: 4px; background: rgba(187,128,9,0.15); border: 1px solid rgba(187,128,9,0.5); color: #e3b341; margin-bottom: 8px;"></div>
-<div class="terminal" id="terminalOutput">SubDollarBench console initialized.
-Select a model, choose reasoning effort, and click "Start Benchmark Run" to begin.
-</div>
-        </div>
-
-        <!-- Tab 2: Traceability & Runs History -->
-        <div id="tab-traceability" style="display: none; flex-direction: column; gap: 16px;">
-          <!-- Controls Toolbar -->
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 10px; flex: 1; max-width: 520px;">
-              <input type="text" id="runsSearchInput" placeholder="🔍 Search runs by model, task, language, status..." oninput="filterRunsList(this.value)" style="flex: 1; padding: 6px 12px; font-size: 0.78rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
-              <span id="runsCountBadge" class="badge badge-info" style="font-size: 0.72rem; white-space: nowrap;">Loading runs...</span>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <div style="display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
-                <button id="viewBtnTable" class="btn-toggle active" onclick="setRunsViewMode('table')" title="Table View">📑 Table</button>
-                <button id="viewBtnCards" class="btn-toggle" onclick="setRunsViewMode('cards')" title="Cards View">🗂️ Cards</button>
-              </div>
-              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Show hidden trial subruns">
-                <input type="checkbox" onchange="toggleHiddenRuns(this.checked)"> 👁 Hidden
-              </label>
-              <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="loadRuns()">🔄 Refresh</button>
-            </div>
-          </div>
-          <div id="runsErrorBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.4); color: #ff7b72;"></div>
-          <div id="dbFallbackBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(187,128,9,0.12); border: 1px solid rgba(187,128,9,0.4); color: #d29922;">⚠️ Server is running on a temporary DB (bench.db unavailable) — queue history is not durable.</div>
-
-          <!-- Runs List Table View (Zero horizontal scroll) -->
-          <div id="runsTableView" style="width: 100%;">
-            <table class="responsive-runs-table">
-              <thead>
-                <tr>
-                  <th style="width: 38%;">Model & Benchmark Run</th>
-                  <th style="width: 18%;">Pass Rate & Effort</th>
-                  <th style="width: 14%;">API cost / Effective cost & Tokens</th>
-                  <th style="width: 14%;">Score & Throughput</th>
-                  <th style="width: 16%; text-align: right;">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="runsTableBody">
-                <tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading runs...</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Runs Cards View (Toggleable) -->
-          <div id="runsCardsView" style="display: none; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px;">
-          </div>
-        </div>
-
-        <!-- Tab: Leaderboard (detailed per model x task, internal) -->
-        <div id="tab-leaderboard" style="display: none; flex-direction: column; gap: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 10px; flex: 1; max-width: 520px;">
-              <input type="text" id="lbSearchInput" placeholder="🔍 Filter by model, task, effort..." oninput="filterLeaderboard(this.value)" style="flex: 1; padding: 6px 12px; font-size: 0.78rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
-              <span id="lbCountBadge" class="badge badge-info" style="font-size: 0.72rem; white-space: nowrap;">Loading...</span>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <label style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Show hidden runs">
-                <input type="checkbox" onchange="toggleLbHidden(this.checked)"> 👁 Hidden
-              </label>
-              <select id="lbTierSelect" onchange="setBoardTier(this.value)" title="Free = $0 API spend (compute floor only). Never compare across tiers on cost." style="padding: 4px 8px; font-size: 0.75rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
-                <option value="all">All tiers</option>
-                <option value="paid">Paid</option>
-                <option value="free">Free ($0 API)</option>
-              </select>
-              <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="loadLeaderboard()">🔄 Refresh</button>
-              <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 5px 12px; font-size: 0.78rem; text-decoration: none;" title="Public rollup: one row per model">↗ Public rollup</a>
-            </div>
-          </div>
-          <div id="lbErrorBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.4); color: #ff7b72;"></div>
-          <div style="width: 100%; overflow-x: auto;">
-            <table class="responsive-runs-table">
-              <thead>
-                <tr>
-                  <th style="width: 3%;"></th>
-                  <th style="width: 24%;">Model & Task</th>
-                  <th style="width: 13%;">Pass / P@1 (lo–hi)</th>
-                  <th style="width: 7%;" title="Capability: first 100% trial (✓@N) or unsolved after n (✗n). Descriptive only — P@1-lo stays the rank key.">Cap</th>
-                  <th style="width: 9%;">Trials / Stability</th>
-                  <th style="width: 13%;">API cost / Effective</th>
-                  <th style="width: 9%;">$/pass</th>
-                  <th style="width: 11%;">Throughput</th>
-                  <th style="width: 9%;">Efficiency</th>
-                  <th style="width: 8%;">Rules</th>
-                  <th style="width: 11%;">When</th>
-                </tr>
-              </thead>
-              <tbody id="lbTableBody">
-                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading leaderboard...</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="hint" style="font-size: 0.75rem;">Internal detail board: one row per model × task. Public portal shows one row per model only.</p>
-        </div>
-
-        <!-- Tab: Models (live per-model rollup + sort + $/pass) -->
-        <div id="tab-models" style="display: none; flex-direction: column; gap: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <span class="hint" style="font-weight: 600; color: #fff;">Sort:</span>
-              <select id="modelsSort" onchange="renderModels()" style="padding: 4px 10px; font-size: 0.78rem;">
-                <option value="avg">Avg pass</option>
-                <option value="p1lo">P@1 lower bound</option>
-                <option value="cpp">Cost per pass (low first)</option>
-                <option value="cost">Total cost (low first)</option>
-                <option value="trials">Trials</option>
-              </select>
-              <select id="modelsTierSelect" onchange="setBoardTier(this.value)" title="Free = $0 API spend (compute floor only). Never compare across tiers on cost." style="padding: 4px 8px; font-size: 0.75rem; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: #fff;">
-                <option value="all">All tiers</option>
-                <option value="paid">Paid</option>
-                <option value="free">Free ($0 API)</option>
-              </select>
-              <span id="modelsCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
-            </div>
-            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => { renderModels(); renderTasks(); })">Refresh</button>
-          </div>
-          <div id="modelsErrorBanner" style="display: none; padding: 8px 12px; font-size: 0.78rem; border-radius: 4px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.4); color: #ff7b72;"></div>
-          <div style="width: 100%; overflow-x: auto;">
-            <table class="responsive-runs-table">
-              <thead><tr>
-                <th style="width: 4%;"></th><th>Model</th><th>Tasks</th><th>Trials</th>
-                <th>Avg pass</th><th>P@1 (lo–hi)</th><th>$/pass</th><th>Total API</th><th>Throughput</th><th>Efficiency</th><th>Stability</th>
-              </tr></thead>
-              <tbody id="modelsTableBody">
-                <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading models...</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div id="waveProgress" style="font-size: 0.78rem; color: var(--text-muted);"></div>
-          <p class="hint" style="font-size: 0.75rem;">Live rollup from leaderboard rows (hidden excluded). Public portal mirrors this at >=6 tasks.</p>
-        </div>
-
-        <!-- Tab: Tasks (transposed + verifier health) -->
-        <div id="tab-tasks" style="display: none; flex-direction: column; gap: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px;">
-            <span id="tasksCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
-            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => renderTasks())">Refresh</button>
-          </div>
-          <div style="width: 100%; overflow-x: auto;">
-            <table class="responsive-runs-table">
-              <thead><tr>
-                <th>Task</th><th>Models</th><th>Solved</th><th>Best</th><th>Spread</th><th>Avg pass</th><th>Health</th>
-              </tr></thead>
-              <tbody id="tasksTableBody">
-                <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading tasks...</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="hint" style="font-size: 0.75rem;">Spread = max–min avg pass across models. Health flags verifier suspicion (identical low scores across models).</p>
-        </div>
-
-        <!-- Tab: Matrix (model x task x effort coverage) -->
-        <div id="tab-matrix" style="display: none; flex-direction: column; gap: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px;">
-            <span id="matrixCountBadge" class="badge badge-info" style="font-size: 0.72rem;">Loading...</span>
-            <button class="btn btn-secondary" style="padding: 5px 12px; font-size: 0.78rem;" onclick="ensureBoardData(true).then(() => refreshMatrixLive()).then(() => renderMatrix())">Refresh</button>
-          </div>
-          <div id="matrixLiveStrip" style="display: none; font-size: 0.75rem; color: var(--text-muted);"></div>
-          <div style="width: 100%; overflow-x: auto;">
-            <table class="responsive-runs-table">
-              <thead><tr id="matrixHeadRow">
-                <th>Model</th>
-              </tr></thead>
-              <tbody id="matrixTableBody">
-                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading matrix...</td></tr>
-              </tbody>
-              <tfoot id="matrixTableFoot"></tfoot>
-            </table>
-          </div>
-          <p class="hint" style="font-size: 0.75rem;">Coverage matrix: P@1 per model × task × effort. Cells show pass% + trials; empty = not run. The last column summarizes each row (mean P@1, 100% cells, coverage, spend); the footer summarizes each task column (mean P@1, best model, rows run). ⏳/▶ cells are queued/running wave cells (no P@1 yet — hover for status); ↻ on a scored cell means a rerun is queued or running. Same-regime ranks only — mixed stamps never compare.</p>
-        </div>
-
-        <!-- Tab 3: Prompt Specification -->
       </main>
     </div>
   </div>
 
   <script src="/static/shared.js"></script>
   <!--__SHARED_JS__-->
+  <!--__RULES__-->
   <script>
     let allModels = [];
     let activeFamily = 'all';
     let currentInspectRun = null;
     let inspectCrumbTrail = [];
     // Explorer (matrix drill-down) context: {model, effort, harness, task, trialId}
-    let explorerCtx = null;
-    function explorerGroupRows() {
-      if (!explorerCtx) return [];
-      const { model, effort, harness } = explorerCtx;
-      return boardRows.filter(r =>
-        (r.model || '') === model &&
-        (r.effort || 'auto') === effort &&
-        ((r.harness || 'omp').toLowerCase()) === (harness || 'omp') &&
-        !(r.id || '').startsWith('test_'));
-    }
-    function explorerCanonByTask() {
-      const canon = {};
-      for (const r of explorerGroupRows()) {
-        const task = (r.task || '').toLowerCase();
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const ex = canon[task];
-        if (!ex || n > (ex.total_trials ?? (ex.subruns || []).length ?? 1)) canon[task] = r;
-      }
-      return canon;
-    }
-    async function inspectMatrixCell(model, effort, task, harness) {
-      await ensureBoardData();
-      explorerCtx = { model, effort, harness: (harness || 'omp').toLowerCase(), task: (task || '').toLowerCase(), trialId: null };
-      openRunInspectorModal();
-      document.querySelector('.modal-dialog').classList.add('exploring');
-      document.getElementById('modalInspectRunId').textContent = `${shortModelName(model)} · ${effort} · ${explorerCtx.harness}`;
-      explorerCtx.expanded = { [explorerCtx.task]: true };
-      renderExplorerTree();
-      selectExplorerTask(explorerCtx.task, true);
-    }
-    function exitExplorerMode() {
-      explorerCtx = null;
-      document.querySelector('.modal-dialog').classList.remove('exploring');
-    }
-
-
-
-    const explorerDetailCache = {};
-
-    function renderExplorerTree() {
-      const box = document.getElementById('explorerTree');
-      const head = document.getElementById('explorerTasksHead');
-      if (!box) return;
-      const canon = explorerCanonByTask();
-      const tasks = Object.keys(canon).sort();
-      if (!explorerCtx.expanded) explorerCtx.expanded = {};
-      if (head) head.textContent = `Tasks › trials (${tasks.length}) — ${shortModelName(explorerCtx.model)} · ${explorerCtx.effort} · ${explorerCtx.harness}`;
-      box.innerHTML = tasks.map(tk => {
-        const r = canon[tk];
-        const p1 = Math.round(r.pass_at_1 ?? r.pass_rate ?? 0);
-        const kids = ((r.subruns || []).slice()).sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
-        const open = !!explorerCtx.expanded[tk];
-        let html = `<div class="explorer-row${tk === explorerCtx.task ? ' active' : ''}" data-task="${escapeHtml(tk)}" onclick="selectExplorerTask(this.dataset.task)">`
-          + `<span>${open ? '▾' : '▸'}</span> <span class="badge badge-info">${escapeHtml(tk)}</span> `
-          + `<b>${p1}%</b> <span style="color:var(--text-muted);">n=${kids.length || (r.total_trials ?? 1)}</span></div>`;
-        if (open) {
-          html += kids.map(k => {
-            const on = k.id === explorerCtx.trialId;
-            const [txt, cls] = humanStatus(k.status, k.pass_rate);
-            const cost = (k.effective_cost_usd !== undefined && k.effective_cost_usd !== null) ? k.effective_cost_usd : (k.total_cost_usd || 0);
-            return `<div class="explorer-row explorer-trial${on ? ' active' : ''}" data-trial="${escapeHtml(k.id || '')}" onclick="selectExplorerTrial(this.dataset.trial)">`
-              + `<span style="font-family:monospace;color:var(--text-muted);">${escapeHtml((k.id || '').slice(-8))}</span> `
-              + `<span class="badge ${cls}">${escapeHtml(txt)}</span> `
-              + `<span>${Math.round(k.pass_rate || 0)}%</span> `
-              + `<span style="color:var(--text-muted);">$${Number(cost).toFixed(4)}</span></div>`;
-          }).join('') || `<div class="explorer-trial" style="font-size:0.72rem;color:var(--text-muted);">Single-trial row — see detail →</div>`;
-        }
-        return html;
-      }).join('') || '<span style="color:var(--text-muted);font-size:0.76rem;">No tasks in this group.</span>';
-    }
-    function selectExplorerTask(task, autoTrial) {
-      explorerCtx.task = task;
-      if (!explorerCtx.expanded) explorerCtx.expanded = {};
-      explorerCtx.expanded[task] = !explorerCtx.expanded[task];
-      const canon = explorerCanonByTask();
-      const row = canon[task];
-      const kids = ((row && row.subruns) || []).slice();
-      if (explorerCtx.expanded[task] && kids.length && autoTrial !== false) {
-        const best = kids.find(k => k.id === explorerCtx.trialId)
-          || kids.slice().sort((a, b) => (b.pass_rate || 0) - (a.pass_rate || 0))[0];
-        explorerCtx.trialId = best.id;
-        renderExplorerTree();
-        selectExplorerTrial(best.id);
-        return;
-      }
-      if (!explorerCtx.expanded[task]) {
-        const det = document.getElementById('explorerDetail');
-        if (det) det.innerHTML = '<span style="color:var(--text-muted);font-size:0.76rem;">Select a trial.</span>';
-      } else if (!kids.length && row) {
-        renderExplorerTrialDetail(row, true);
-      }
-      renderExplorerTree();
-    }
-    function selectExplorerTrial(trialId) {
-      explorerCtx.trialId = trialId;
-      document.querySelectorAll('#explorerTree .explorer-row').forEach(el => {
-        if (el.dataset.trial) el.classList.toggle('active', el.dataset.trial === trialId);
-      });
-      const canon = explorerCanonByTask();
-      const row = canon[explorerCtx.task];
-      const t = ((row && row.subruns) || []).find(k => k.id === trialId) || row;
-      renderExplorerTrialDetail(t, t === row);
-    }
-
-    async function renderExplorerTrialDetail(t, isParent) {
-      const det = document.getElementById('explorerDetail');
-      if (!det || !t) return;
-      const tid = t.id || '';
-      const [txt, cls] = humanStatus(t.status, t.pass_rate);
-      const cost = (t.effective_cost_usd !== undefined && t.effective_cost_usd !== null) ? t.effective_cost_usd : (t.total_cost_usd || 0);
-      const api = t.total_cost_usd || 0;
-      const toks = t.total_tokens ?? ((t.prompt_tokens || 0) + (t.cached_tokens || 0) + (t.completion_tokens || 0));
-      const kpi = (k, v, title) => `<div class="xdet-kpi" ${title ? `title="${escapeHtml(title)}"` : ''}><div class="k">${k}</div><div class="v">${v}</div></div>`;
-      let stages = '';
-      if (t.stages && t.stages.length) {
-        const fails = t.stages.filter(s => !s.passed).length;
-        stages = `<div class="xdet-sec">Stages — ${t.stages.length - fails}/${t.stages.length} green</div>` + t.stages.map(s => {
-          const nm = escapeHtml(s.name || s.stage || 'stage');
-          const ok = !!s.passed;
-          return `<div class="xdet-stage"><span style="color:${ok ? 'var(--success)' : 'var(--danger)'};font-weight:700;">${ok ? '✔' : '✕'}</span><span>${nm}</span></div>`
-            + (s.error ? `<div class="xdet-err">${escapeHtml(String(s.error))}</div>` : '');
-        }).join('');
-      } else {
-        stages = `<div class="xdet-sec">Stages</div><div style="font-size:0.74rem;color:var(--text-muted);">No stage detail on this row — open full view.</div>`;
-      }
-      det.innerHTML = `<div style="font-size:0.78rem;display:flex;flex-direction:column;">`
-        + `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px;">`
-        + `<b style="font-size:0.86rem;">${escapeHtml(tid.slice(-28))}</b> <span class="badge ${cls}">${escapeHtml(txt)}</span>${isParent ? ' <span class="badge">parent row</span>' : ''}`
-        + `<button class="btn-secondary" style="padding:1px 8px;font-size:0.68rem;margin-left:auto;" data-cp="${escapeHtml(tid)}" onclick="copyTextToClipboard(this.dataset.cp).then(() => copyButtonFeedback('explorerCpBtn', 'Copied!'))" id="explorerCpBtn" title="Copy full run id">📋</button></div>`
-        + `<div style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(t.model || '')} · ${escapeHtml(t.task || '')} · effort ${escapeHtml(t.effort || 'auto')} · harness ${escapeHtml(t.harness || 'omp')} · ${escapeHtml((t.timestamp || '').slice(0, 16).replace('T', ' '))}</div>`
-        + `<div class="xdet-grid">`
-        + kpi('Pass', `${Math.round(t.pass_rate || 0)}% <span style="font-size:0.68rem;color:var(--text-muted);">(${t.passed_stages ?? '?'}/${t.total_stages ?? '?'})</span>`, 'Share of verification stages passing')
-        + kpi('Score', (t.efficiency_score ?? 0).toFixed(1), 'Pass@1 per cent of effective cost')
-        + kpi('Cost', `$${Number(cost).toFixed(4)}`, `API $${Number(api).toFixed(4)} + compute $${Math.max(0, cost - api).toFixed(4)}`)
-        + kpi('Tokens', Number(toks || 0).toLocaleString(), `prompt ${t.prompt_tokens ?? 0} / cached ${t.cached_tokens ?? 0} / completion ${t.completion_tokens ?? 0}`)
-        + kpi('Turns', `${t.turns ?? '?'}`, 'Agent steps used')
-        + kpi('Duration', (t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-', 'End-to-end wall time')
-        + kpi('Throughput', (t.throughput_req_sec !== undefined && t.throughput_req_sec !== null) ? formatThroughput(t.throughput_req_sec, t.task) : '—', 'Measured statement rate (the SQL ladder is graded differentially and reports none)')
-        + `</div>`
-        + stages
-        + `<div class="xdet-sec">Files <span id="explorerFilesNote" style="font-weight:400;"></span></div><div id="explorerFiles" style="font-size:0.74rem;"></div>`
-        + `<div id="explorerFileView" style="display:none;"><pre id="explorerFilePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:260px;white-space:pre;"></pre></div>`
-        + `<div class="xdet-sec">Trace tail</div><pre id="explorerTracePre" style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.7rem;max-height:200px;white-space:pre-wrap;">loading…</pre>`
-        + `<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;"><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}')">Open full view</button><button class="btn-secondary" style="padding:3px 10px;font-size:0.72rem;" onclick="exitExplorerMode();inspectRun('${escapeHtml(tid)}', {tab:'trace'})">Full trace</button></div></div>`;
-      if (!explorerDetailCache[tid]) explorerDetailCache[tid] = {};
-      const cached = explorerDetailCache[tid];
-      const filesBox = document.getElementById('explorerFiles');
-      const renderFiles = (files) => {
-        if (!filesBox || !document.body.contains(filesBox)) return;
-        if (!explorerCtx || explorerCtx.trialId !== tid) return;
-        filesBox.innerHTML = (files || []).map(f => `<div class="explorer-row" data-f="${escapeHtml(f.name || f)}" onclick="selectExplorerFile('${escapeHtml(tid)}', this.dataset.f)" style="padding:3px 8px;">${escapeHtml(f.name || f)}</div>`).join('') || '<span style="color:var(--text-muted);">No workspace files.</span>';
-        const note = document.getElementById('explorerFilesNote');
-        if (note) note.textContent = `(${(files || []).length})`;
-      };
-      if (cached.files) { renderFiles(cached.files); }
-      else {
-        fetch(`/api/runs/${encodeURIComponent(tid)}/files`).then(r => r.ok ? r.json() : []).then(f => {
-          cached.files = f; renderFiles(f);
-        }).catch(() => { cached.files = []; renderFiles([]); });
-      }
-      const tracePre = document.getElementById('explorerTracePre');
-      const renderTrace = (txt) => {
-        if (!tracePre || !document.body.contains(tracePre)) return;
-        if (!explorerCtx || explorerCtx.trialId !== tid) return;
-        const lines = String(txt || '').split('\n');
-        tracePre.textContent = lines.slice(-80).join('\n') + (lines.length > 80 ? `\n… (${lines.length - 80} earlier lines in full view)` : '');
-      };
-      if (cached.trace !== undefined) { renderTrace(cached.trace); }
-      else {
-        fetch(`/api/runs/${encodeURIComponent(tid)}/log`).then(r => r.ok ? r.text() : '').then(tx => {
-          cached.trace = tx; renderTrace(tx);
-        }).catch(() => { cached.trace = ''; renderTrace(''); });
-      }
-    }
-    async function selectExplorerFile(trialId, filename) {
-      const pre = document.getElementById('explorerFilePre');
-      const wrap = document.getElementById('explorerFileView');
-      if (!pre || !wrap) return;
-      document.querySelectorAll('#explorerFiles .explorer-row').forEach(el => {
-        el.classList.toggle('active', el.dataset.f === filename);
-      });
-      if (!explorerDetailCache[trialId]) explorerDetailCache[trialId] = {};
-      const cached = explorerDetailCache[trialId];
-      if (cached['file:' + filename] !== undefined) {
-        pre.textContent = cached['file:' + filename];
-      } else {
-        pre.textContent = 'loading…';
-        try {
-          const res = await fetch(`/api/runs/${encodeURIComponent(trialId)}/file?file=${encodeURIComponent(filename)}`);
-          const txt = res.ok ? await res.text() : '(unreadable)';
-          cached['file:' + filename] = txt;
-          if (explorerCtx && explorerCtx.trialId === trialId) pre.textContent = txt;
-        } catch (e) { pre.textContent = '(fetch failed)'; }
-      }
-      wrap.style.display = '';
-    }
-    function renderCrumbs() {
-      const box = document.getElementById('modalCrumbs');
-      if (!box) return;
-      if (!inspectCrumbTrail.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
-      box.style.display = 'flex';
-      let html = '';
-      inspectCrumbTrail.forEach((id, i) => {
-        const last = i === inspectCrumbTrail.length - 1;
-        const short = escapeHtml(id.length > 34 ? id.slice(0, 20) + '…' + id.slice(-12) : id);
-        html += last
-          ? `<span style="color:#fff;font-weight:700;" title="${escapeHtml(id)}">${short}</span>`
-          : `<a href="#" style="color:var(--primary);" title="${escapeHtml(id)}" data-crumb="${i}" onclick="inspectCrumb(this.dataset.crumb); return false;">${short}</a><span>›</span>`;
-      });
-      if (inspectCrumbTrail.length > 1) {
-        html += `<button class="btn-secondary" style="padding:1px 9px;font-size:0.7rem;margin-left:auto;" onclick="inspectBack()">← Back</button>`;
-      }
-      box.innerHTML = html;
-    }
-    function inspectCrumb(i) {
-      const n = parseInt(i, 10);
-      if (isNaN(n) || n < 0 || n >= inspectCrumbTrail.length) return;
-      inspectCrumbTrail = inspectCrumbTrail.slice(0, n + 1);
-      loadInspectedRun(inspectCrumbTrail[n], {});
-    }
-    function inspectBack() {
-      if (inspectCrumbTrail.length < 2) return;
-      inspectCrumbTrail.pop();
-      loadInspectedRun(inspectCrumbTrail[inspectCrumbTrail.length - 1], {});
-    }
     function inspectTrial(runId) {
       const cur = inspectCrumbTrail.length ? inspectCrumbTrail[inspectCrumbTrail.length - 1] : null;
       if (cur && cur !== runId) inspectCrumbTrail.push(runId);
@@ -2159,151 +1686,550 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
 
     // Setup panel lives outside <main> (single-column grid stacks it above).
-    function switchTab(name) {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.getElementById('tab-setup').style.display = 'none';
-      document.getElementById('tab-console').style.display = 'none';
-      document.getElementById('tab-traceability').style.display = 'none';
-      document.getElementById('tab-leaderboard').style.display = 'none';
-      document.getElementById('tab-models').style.display = 'none';
-      document.getElementById('tab-tasks').style.display = 'none';
-      document.getElementById('tab-matrix').style.display = 'none';
-      document.getElementById('tab-campaigns').style.display = 'none';
+    const TAB_IDS = { board: 'tab-board', run: 'tab-run', live: 'tab-live', admin: 'tab-admin' };
 
-      const tabBtn = document.querySelector(`.tab[data-tab="${name}"]`);
-      if (name === 'setup') {
-        document.getElementById('tab-setup').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        if (typeof loadPrompt === 'function') loadPrompt();
-      } else if (name === 'console') {
-        document.getElementById('tab-console').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-      } else if (name === 'traceability') {
-        document.getElementById('tab-traceability').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        if (!allRunsCache || !allRunsCache.length) loadRuns();
-      } else if (name === 'prompt') {
-        // Merged into Setup: legacy deep-link lands on setup with spec visible.
-        document.getElementById('tab-setup').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        document.getElementById('promptSection').open = true;
-      } else if (name === 'leaderboard') {
-        document.getElementById('tab-leaderboard').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        if (!lbCache || !lbCache.length) loadLeaderboard();
-      } else if (name === 'models') {
-        document.getElementById('tab-models').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        ensureBoardData().then(() => renderModels());
-      } else if (name === 'tasks') {
-        document.getElementById('tab-tasks').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        ensureBoardData().then(() => renderTasks());
-      } else if (name === 'matrix') {
-        document.getElementById('tab-matrix').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        ensureBoardData().then(() => refreshMatrixLive()).then(() => renderMatrix());
-      } else if (name === 'campaigns') {
-        document.getElementById('tab-campaigns').style.display = 'flex';
-        if (tabBtn) tabBtn.classList.add('active');
-        refreshCampaigns();
+    // Pure display switch (the hash router is the only place that changes
+    // the URL; tab clicks go through switchTab below).
+    function showTab(name) {
+      if (!TAB_IDS[name]) name = 'board';
+      Object.values(TAB_IDS).forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+      });
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+      const el = document.getElementById(TAB_IDS[name]);
+      if (el) el.style.display = 'flex';
+      if (name === 'board') refreshBoard();
+      if (name === 'run' && currentRunDetail) renderRun();
+      if (name === 'live' && typeof renderLive === 'function') renderLive();
+      if (name === 'admin' && typeof loadPrompt === 'function') loadPrompt();
+    }
+
+    function switchTab(name) {
+      if (name === 'run' && currentRunDetail) {
+        location.hash = 'run/' + encodeURIComponent(currentRunDetail.id);
+        return;
       }
+      if (TAB_IDS[name]) location.hash = name;
+    }
+
+    function applyHash() {
+      const h = decodeURIComponent(location.hash.replace(/^#/, ''));
+      if (h.startsWith('run/')) {
+        const id = h.slice(4);
+        if (id && (!currentRunDetail || currentRunDetail.id !== id)) loadRunDetail(id);
+        showTab('run');
+      } else if (TAB_IDS[h]) {
+        showTab(h);
+      } else {
+        showTab('board');
+      }
+    }
+    window.addEventListener('hashchange', applyHash);
+
+    // =========================================================================
+    // Live (gui-spec.md §4.3): the running campaign's console, structured
+    // =========================================================================
+    let liveRunId = null;
+    let liveOffset = 0;
+    let liveLines = [];
+    let liveKinds = new Set(['verdict', 'agent']);
+    let liveFollowing = true;
+    let liveBlocks = {};
+    let liveTimer = null;
+
+    const LIVE_KIND_COLORS = {
+      verdict: 'var(--primary)',
+      agent: 'var(--text)',
+      tools: 'var(--accent)',
+      verifier: 'var(--text-muted)',
+      setup: 'var(--warning)',
+    };
+
+    function liveKindToggle(kind) {
+      if (liveKinds.has(kind)) liveKinds.delete(kind);
+      else liveKinds.add(kind);
+      liveOffset = 0;
+      liveLines = [];
+      liveBlocks = {};
+      pollLive();
+    }
+
+    function liveOnScroll() {
+      const el = document.getElementById('liveStream');
+      if (!el) return;
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+      liveFollowing = atBottom;
+      const jump = document.getElementById('liveJump');
+      if (jump) jump.style.display = atBottom ? 'none' : 'inline-block';
+    }
+
+    function liveJump() {
+      const el = document.getElementById('liveStream');
+      if (el) el.scrollTop = el.scrollHeight;
+      liveFollowing = true;
+      const jump = document.getElementById('liveJump');
+      if (jump) jump.style.display = 'none';
+    }
+
+    function liveChips() {
+      return ['verdict', 'agent', 'tools', 'verifier', 'setup'].map(k => {
+        const on = liveKinds.has(k);
+        return `<span onclick="liveKindToggle('${k}')" style="cursor:pointer;padding:2px 10px;border-radius:10px;font-size:.72rem;border:1px solid ${on ? LIVE_KIND_COLORS[k] : 'var(--border)'};color:${on ? LIVE_KIND_COLORS[k] : 'var(--text-muted)'};margin-right:4px;">${k}</span>`;
+      }).join('');
+    }
+
+    function renderLiveLine(l) {
+      const color = LIVE_KIND_COLORS[l.kind] || 'var(--text)';
+      const text = escapeHtml(l.text);
+      if (l.kind === 'verdict') {
+        return `<div style="color:${color};font-weight:600;">${text}</div>`;
+      }
+      return `<div style="color:${color};white-space:pre-wrap;">${text}</div>`;
+    }
+
+    // Collapse the prompt/report blocks that are re-logged every round:
+    // a tagged line followed by indented/pipe continuation lines becomes a
+    // <details>, and an identical block seen before collapses to a count.
+    function collapseLiveBlocks(lines) {
+      const out = [];
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        const isBlockStart = /^\[(PROMPT|OMP-PROMPT)\]|^\s*\|\s*(# Automated Verification Failure Report|#) /.test(l.text);
+        if (!isBlockStart) { out.push({ type: 'line', line: l }); continue; }
+        let j = i + 1;
+        const body = [];
+        while (j < lines.length && !/^\[[A-Z]/.test(lines[j].text.trimStart())) { body.push(lines[j]); j++; }
+        const sig = l.text.slice(0, 60) + '|' + body.length;
+        if (body.length < 8) {
+          out.push({ type: 'line', line: l });
+          body.forEach(b => out.push({ type: 'line', line: b }));
+        } else {
+          liveBlocks[sig] = (liveBlocks[sig] || 0) + 1;
+          out.push({ type: 'block', name: l.text.trim().slice(0, 70), body, sig });
+          if (liveBlocks[sig] > 1) {
+            out[out.length - 1].repeat = liveBlocks[sig];
+          }
+        }
+        i = j - 1;
+      }
+      return out;
+    }
+
+    function renderLiveStream() {
+      const el = document.getElementById('liveStream');
+      if (!el) return;
+      const parts = collapseLiveBlocks(liveLines).map(item => {
+        if (item.type === 'line') return renderLiveLine(item.line);
+        const inner = item.body.map(b => escapeHtml(b.text)).join('\n');
+        const label = item.repeat ? `${escapeHtml(item.name)} (repeated ×${item.repeat})` : `${escapeHtml(item.name)} (${item.body.length + 1} lines)`;
+        return `<details style="margin:2px 0;"><summary style="cursor:pointer;color:var(--text-muted);font-size:.72rem;">▸ ${label}</summary><pre style="white-space:pre-wrap;font-size:.72rem;color:var(--text-muted);margin:4px 0 4px 14px;">${inner}</pre></details>`;
+      });
+      el.innerHTML = parts.join('') || '<div class="hint">waiting for output…</div>';
+      if (liveFollowing) el.scrollTop = el.scrollHeight;
+    }
+
+    function liveStrip() {
+      const box = document.getElementById('liveStrip');
+      if (!box) return;
+      const cell = boardCache.find(c => c.id === liveRunId) || null;
+      const r = cell ? (cell.rollup || {}) : {};
+      let turn = null, spent = null, ticket = null, variant = null, round = null;
+      for (let i = liveLines.length - 1; i >= 0 && (!turn || ticket == null); i--) {
+        const t = liveLines[i].text;
+        let m;
+        if (!turn && (m = t.match(/\[LIVE\] Turn (\d+)\/(\d+)/)) ) { turn = m[1] + '/' + m[2]; }
+        if (spent == null && (m = t.match(/spent=\$([0-9.]+)/))) { spent = m[1]; }
+        if (ticket == null && (m = t.match(/^─── ticket (\d+) \[([a-z]+)\]/))) { ticket = m[1]; variant = m[2]; }
+        if (round == null && (m = t.match(/Round (\d+)\/(\d+)/))) { round = m[1]; }
+      }
+      const cap = currentRunDetail && currentRunDetail.id === liveRunId ? currentRunDetail.budget_usd : null;
+      box.innerHTML = `<span class="hint">run <b>${escapeHtml(liveRunId || '—')}</b></span>`
+        + (ticket != null ? ` <span class="hint">· ticket ${escapeHtml(String(ticket))}${variant ? ' [' + escapeHtml(variant) + ']' : ''}</span>` : '')
+        + (round ? ` <span class="hint">· repair round ${escapeHtml(round)}</span>` : '')
+        + (turn ? ` <span class="hint">· turn ${escapeHtml(turn)}</span>` : '')
+        + (r.total_cost_usd != null ? ` <span class="hint">· $${fmtMoney(r.total_cost_usd)}${cap ? ' / $' + fmtMoney(cap) : ''} campaign</span>` : '');
+    }
+
+    async function pollLive() {
+      if (!liveRunId) return;
+      const kinds = [...liveKinds].join(',') || 'verdict';
+      try {
+        const r = await fetch(`/api/campaigns/${encodeURIComponent(liveRunId)}/log?after=${liveOffset}&kinds=${encodeURIComponent(kinds)}`);
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.offset < liveOffset) { liveOffset = 0; liveLines = []; liveBlocks = {}; return; }
+        liveOffset = data.offset;
+        if (data.lines && data.lines.length) {
+          liveLines = liveLines.concat(data.lines);
+          if (liveLines.length > 1500) liveLines = liveLines.slice(-1500);
+          liveStrip();
+          renderLiveStream();
+        }
+      } catch (e) { /* transient */ }
+    }
+
+    function renderLive() {
+      const body = document.getElementById('liveBody');
+      if (!body) return;
+      const running = boardCache.find(c => c.state === 'running');
+      const wantId = (currentRunDetail && currentRunDetail.state === 'running') ? currentRunDetail.id : (running ? running.id : (currentRunDetail ? currentRunDetail.id : null));
+      if (wantId && wantId !== liveRunId) {
+        liveRunId = wantId;
+        liveOffset = 0;
+        liveLines = [];
+        liveBlocks = {};
+      }
+      body.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div id="liveStrip">${liveRunId ? '' : '<span class="hint">no run selected</span>'}</div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button id="liveJump" class="btn-secondary" style="display:none;padding:3px 10px;font-size:.72rem;" onclick="liveJump()">jump to live</button>
+            <span class="hint">follows automatically while at the bottom</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">${liveChips()}<span class="hint">polls every 4s, transfers only new bytes</span></div>
+        <div id="liveStream" onscroll="liveOnScroll()" style="height:60vh;overflow:auto;background:#05070a;border:1px solid var(--border);border-radius:6px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.74rem;line-height:1.45;">
+          <div class="hint">${liveRunId ? 'loading…' : 'start a run or open one from the Board'}</div>
+        </div>`;
+      if (liveRunId) {
+        pollLive();
+        if (liveTimer) clearInterval(liveTimer);
+        liveTimer = setInterval(() => { if (location.hash.startsWith('#live')) pollLive(); }, 4000);
+      }
+    }
+
+    // =========================================================================
+    // Board + Run (gui-spec.md §4.1/§4.2): campaign-first console
+    // =========================================================================
+    let boardCache = [];
+    let currentRunDetail = null;
+    let boardRulesFilter = localStorage.getItem('board_rules') || 'current';
+    let boardExpandedGroups = {};
+    let runExpandedTickets = {};
+
+    const LADDER_STATUS = {
+      pass: { color: 'var(--success)', label: 'pass' },
+      lite: { color: 'var(--warning)', label: 'lite' },
+      fail: { color: 'var(--danger)', label: 'fail' },
+      fault: { color: 'var(--text-muted)', label: 'fault', stripe: true },
+      skipped: { color: 'var(--text-muted)', label: 'skipped' },
+      not_reached: { color: 'transparent', label: 'not reached' },
+    };
+
+    function fmtMoney(v) { return Number(v || 0).toFixed(4); }
+    function fmt1(v) { return Number(v || 0).toFixed(1); }
+
+    function fmtDurSec(sec) {
+      if (sec == null || !isFinite(sec)) return '—';
+      if (sec < 90) return `${Math.round(sec)}s`;
+      const m = Math.floor(sec / 60);
+      if (m < 90) return `${m}m ${Math.round(sec % 60)}s`;
+      return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+    }
+
+    function ladderStrip(ladder) {
+      if (!ladder || !ladder.length) return '<span class="hint">no ladder</span>';
+      return ladder.map(e => {
+        const st = LADDER_STATUS[e.status] || LADDER_STATUS.not_reached;
+        const bg = st.stripe
+          ? `repeating-linear-gradient(45deg, ${st.color}, ${st.color} 2px, transparent 2px, transparent 4px)`
+          : st.color;
+        const tip = `ticket ${e.id} · ${e.title} · ${st.label}${e.cause ? ' · ' + e.cause : ''}`;
+        return `<span title="${escapeHtml(tip)}" style="display:inline-block;width:11px;height:11px;margin-right:2px;border-radius:2px;background:${bg};border:1px solid var(--border);"></span>`;
+      }).join('');
+    }
+
+    function cellRollup(c) { return c.rollup || {}; }
+    function cellPoints(c) { return Number(cellRollup(c).points || 0); }
+    function cellCost(c) { return Number(cellRollup(c).total_cost_usd || 0); }
+    function cellPerDollar(c) { const v = cellCost(c); return v > 0 ? cellPoints(c) / v : null; }
+    function cellRules(c) { return cellRollup(c).rules_version || ''; }
+    function cellState(c) {
+      const stop = c.stop_reason ? ` · ${c.stop_reason}` : '';
+      if (c.state === 'running') {
+        return `running${c.current_stage != null ? ` · ticket ${c.current_stage}` : ''}`;
+      }
+      return `${c.state || '?'}${stop}`;
+    }
+
+
+    function groupCells(cells) {
+      // The API already returns cells in the one Rust board order
+      // (campaign::board_order); the grouping preserves it: the first cell
+      // of a group is its best, and groups keep first-seen order.
+      const groups = {};
+      cells.forEach(c => {
+        const r = cellRollup(c);
+        if (!r.model) return;
+        const key = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}`;
+        (groups[key] = groups[key] || []).push(c);
+      });
+      return Object.entries(groups).map(([key, list]) => ({ key, cells: list }));
+    }
+
+    async function refreshBoard() {
+      try {
+        const r = await fetch('/api/campaigns');
+        if (!r.ok) return;
+        boardCache = await r.json();
+      } catch (e) { return; }
+      renderBoard();
+    }
+
+    function setBoardRules(v) {
+      boardRulesFilter = v;
+      localStorage.setItem('board_rules', v);
+      renderBoard();
+    }
+
+    function toggleBoardGroup(key) {
+      boardExpandedGroups[key] = !boardExpandedGroups[key];
+      renderBoard();
+    }
+
+    function boardRowHtml(cell, rank, opts) {
+      const r = cellRollup(cell);
+      const pd = cellPerDollar(cell);
+      const cur = window.__SDB_RULES__ || '';
+      const rules = cellRules(cell);
+      const stale = (cur && rules && rules !== cur)
+        ? ` <span class="badge" style="border-color:var(--warning);color:var(--warning);font-size:.62rem;" title="graded under a different rule set">${escapeHtml(rules)}</span>`
+        : '';
+      const indent = opts && opts.indent ? 'padding-left:28px;opacity:.8;' : '';
+      const extra = (opts && opts.extra) ? opts.extra : '';
+      return `<tr style="cursor:pointer;" onclick="location.hash='run/${encodeURIComponent(cell.id)}'">
+        <td style="text-align:center;color:var(--text-muted);${indent}">${rank}</td>
+        <td style="${indent}"><b>${escapeHtml(r.model || cell.id)}</b>${extra}
+          <div class="hint">${escapeHtml((r.harness || '') + (r.effort ? ' · ' + r.effort : ''))} · ${escapeHtml(cell.id.replace(/^campaign_sdb-sql_/, '').slice(0, 40))}</div></td>
+        <td>${ladderStrip(cell.ladder)}</td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt1(cellPoints(cell))}/${Math.round(r.max_points || 0)}</td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums;">$${fmtMoney(r.total_cost_usd)}</td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums;">${pd == null ? '—' : fmt1(pd)}</td>
+        <td>${escapeHtml(cellState(cell))}${stale}</td>
+      </tr>`;
+    }
+
+    function renderBoard() {
+      const head = document.getElementById('boardHead');
+      const body = document.getElementById('boardBody');
+      if (!head || !body) return;
+      const cur = window.__SDB_RULES__ || '';
+      const versions = [...new Set(boardCache.map(cellRules))].filter(Boolean).sort().reverse();
+      const showAll = boardRulesFilter === 'all';
+      const pickVersion = v => boardCache.filter(c => cellRules(c) === v);
+      const visible = showAll
+        ? boardCache.slice()
+        : (boardRulesFilter === 'current' ? boardCache.slice() : pickVersion(boardRulesFilter));
+      const best = boardCache.reduce((m, c) => {
+        const reached = cellRollup(c).reached;
+        return Math.max(m, reached == null ? -1 : reached);
+      }, -1);
+      const spend = boardCache.reduce((s, c) => s + cellCost(c), 0);
+      head.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <h2 style="margin:0;font-size:1.05rem;">sdb-sql</h2>
+          <span class="hint">${boardCache.length} runs · best: ${best >= 0 ? 'ticket ' + best : '—'} · spend $${fmtMoney(spend)}</span>
+        </div>
+        <label class="hint" style="display:flex;align-items:center;gap:6px;">rules
+          <select onchange="setBoardRules(this.value)" style="padding:3px 8px;font-size:.75rem;">
+            <option value="current"${boardRulesFilter === 'current' ? ' selected' : ''}>current${cur ? ' (' + escapeHtml(cur) + ')' : ''}</option>
+            <option value="all"${showAll ? ' selected' : ''}>all</option>
+            ${versions.filter(v => v !== cur).map(v => `<option value="${escapeHtml(v)}"${boardRulesFilter === v ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}
+          </select></label>`;
+      const table = inner => `<table class="responsive-runs-table"><thead><tr>
+          <th style="width:36px;">#</th><th>Model</th><th>Ladder</th>
+          <th style="text-align:right;">Points</th><th style="text-align:right;">$</th>
+          <th style="text-align:right;">Pts/$</th><th>State</th>
+        </tr></thead><tbody>${inner}</tbody></table>`;
+      if (!visible.length) {
+        body.innerHTML = table('<tr><td colspan="7" class="hint" style="padding:18px;">No runs yet. Start one from the Admin tab.</td></tr>');
+        return;
+      }
+      let rank = 0;
+      let rows = '';
+      let dividerDone = false;
+      groupCells(visible).forEach(({ key, cells }) => {
+        const top = cells[0];
+        if (boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
+          rows += `<tr><td colspan="7" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
+          dividerDone = true;
+        }
+        rank += 1;
+        const n = cells.length;
+        const expanded = !!boardExpandedGroups[key];
+        const extra = n > 1
+          ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">×${n} runs ${expanded ? '▾' : '▸'}</a>`
+          : '';
+        rows += boardRowHtml(top, rank, { extra });
+        if (expanded && n > 1) {
+          const sorted = cells.map(cellPoints).sort((a, b) => a - b);
+          const med = sorted[Math.floor(sorted.length / 2)];
+          rows += `<tr><td colspan="7" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
+          cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '·', { indent: true }); });
+        }
+      });
+      body.innerHTML = table(rows);
+    }
+
+    // ---- Run view (gui-spec.md §4.2) ----
+
+    async function loadRunDetail(id, silent) {
+      try {
+        const r = await fetch(`/api/campaigns/${encodeURIComponent(id)}`);
+        if (!r.ok) {
+          if (!silent) document.getElementById('runBody').innerHTML = '<div class="hint">run not found</div>';
+          return;
+        }
+        currentRunDetail = await r.json();
+      } catch (e) { return; }
+      renderRun();
+    }
+
+    function roundCell(round, first) {
+      if (!round) return '·';
+      const score = `${round.passed_stages}/${round.total_stages}`;
+      return `${score}${round.derived ? '<span class="hint" title="derived from the manifest (recorded before rounds existed)">*</span>' : ''}`;
+    }
+
+    function roundsCell(rec) {
+      if (!rec) return '<span class="hint">·</span>';
+      const rounds = rec.rounds || [];
+      if (!rounds.length) return `${rec.passed_stages}/${rec.total_stages}`;
+      return rounds.map((rd, i) => {
+        const worse = i > 0 && rounds[i - 1].passed_stages > rd.passed_stages;
+        const warn = worse ? ' <span title="this round scored lower than the one before" style="color:var(--warning);">⚠</span>' : '';
+        return roundCell(rd, i === 0) + warn;
+      }).join(' → ');
+    }
+
+    function runTicketDetail(recs) {
+      if (!recs.length) return '<div class="hint">never attempted</div>';
+      return recs.map(rec => {
+        const rounds = rec.rounds || [];
+        const roundRows = rounds.map(rd => `<div class="hint" style="margin-left:12px;">
+            round ${rd.round} · ${rd.passed_stages}/${rd.total_stages} · ${rd.turns ?? '?'} turns · $${fmtMoney(rd.cost_usd)} · ${fmtDurSec(rd.duration_seconds)}${rd.failure ? ' · ' + escapeHtml(rd.failure.kind) : ''}
+          </div>`).join('');
+        const f = rec.failure;
+        const fail = f ? `<div style="margin:6px 0;">
+            <b>${escapeHtml(f.kind)}</b> · ${escapeHtml(f.line)}
+            ${f.detail ? `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">full verifier error</summary><pre style="white-space:pre-wrap;font-size:.72rem;background:#05070a;border:1px solid var(--border);border-radius:4px;padding:8px;max-height:240px;overflow:auto;">${escapeHtml(f.detail)}</pre></details>` : ''}
+            ${f.stderr_tail ? `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">candidate stderr tail</summary><pre style="white-space:pre-wrap;font-size:.72rem;background:#05070a;border:1px solid var(--border);border-radius:4px;padding:8px;max-height:240px;overflow:auto;">${escapeHtml(f.stderr_tail)}</pre></details>` : ''}
+          </div>` : '';
+        return `<div style="margin-bottom:8px;">
+          <div><b>${escapeHtml(rec.variant)}</b> · ${rec.status} · $${fmtMoney(rec.effective_cost_usd)} · ${rec.turns ?? '?'} turns${rec.git_commit ? ` · <span style="font-family:ui-monospace;">${escapeHtml(String(rec.git_commit).slice(0, 8))}</span>` : ''}
+            ${typeof inspectRun === 'function' ? ` · <a href="#" onclick="event.preventDefault(); inspectRun('${escapeHtml(rec.run_id)}')" style="color:var(--primary);">console</a>` : ''}
+          </div>
+          ${roundRows}${fail}
+        </div>`;
+      }).join('');
+    }
+
+    function renderRun() {
+      const d = currentRunDetail;
+      const body = document.getElementById('runBody');
+      if (!d || !body) return;
+      const r = d.rollup || {};
+      const ladder = d.ladder || [];
+      const records = r.stages || [];
+      const total = cellCost({ rollup: r });
+      const cap = Number(d.budget_usd || 0);
+      const elapsed = (r.started_at && r.finished_at)
+        ? (Date.parse(r.finished_at) - Date.parse(r.started_at)) / 1000
+        : null;
+      const turns = records.reduce((s, x) => s + (x.turns || 0), 0);
+      const scale = Math.max(cap || 0, total || 0) || 1;
+      const segs = records.map(rec => {
+        const w = Math.max(1.2, (Number(rec.effective_cost_usd || 0) / scale) * 100);
+        const col = rec.passed ? 'var(--success)'
+          : (rec.status === 'fault' ? 'var(--text-muted)' : 'var(--danger)');
+        const tip = `ticket ${rec.id} ${rec.variant} · $${fmtMoney(rec.effective_cost_usd)} · ${rec.turns ?? '?'} turns · ${rec.status}`;
+        return `<span title="${escapeHtml(tip)}" style="display:inline-block;height:14px;width:${w.toFixed(2)}%;background:${col};"></span>`;
+      }).join('');
+      const capMark = (cap > 0 && total > cap)
+        ? `<span title="cap $${fmtMoney(cap)}" style="position:absolute;left:${Math.min(100, (cap / scale) * 100).toFixed(1)}%;top:-3px;bottom:-3px;width:2px;background:var(--warning);"></span>`
+        : '';
+      const byId = {};
+      records.forEach(rec => { (byId[rec.id] = byId[rec.id] || []).push(rec); });
+      let rows = '';
+      ladder.forEach(e => {
+        const recs = byId[e.id] || [];
+        const full = recs.find(x => x.variant !== 'lite');
+        const lite = recs.find(x => x.variant === 'lite');
+        const cost = recs.reduce((s, x) => s + Number(x.effective_cost_usd || 0), 0);
+        const expanded = !!runExpandedTickets[e.id];
+        const cause = e.cause || '';
+        rows += `<tr style="cursor:pointer;" onclick="toggleRunTicket(${e.id})">
+          <td>${e.id} ${escapeHtml(e.title)} <span class="hint">${escapeHtml(LADDER_STATUS[e.status] ? LADDER_STATUS[e.status].label : e.status)}</span></td>
+          <td>${full ? roundsCell(full) : '<span class="hint">·</span>'}</td>
+          <td>${lite ? roundsCell(lite) : '<span class="hint">·</span>'}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt1(e.points)}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums;">${cost ? '$' + fmtMoney(cost) : '·'}</td>
+          <td class="hint" style="max-width:380px;">${escapeHtml(cause)}</td>
+        </tr>
+        <tr style="display:${expanded ? 'table-row' : 'none'};"><td colspan="6" style="background:#0b0f18;">${runTicketDetail(recs)}</td></tr>`;
+      });
+      body.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+          <div>
+            <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(r.model || d.id)}</h2>
+            <div class="hint">${escapeHtml(r.harness || '')}${r.effort ? ' · effort ' + escapeHtml(r.effort) : ''} · rules ${escapeHtml(r.rules_version || '—')} · ${escapeHtml((r.started_at || '').slice(0, 16).replace('T', ' '))} → ${escapeHtml((r.finished_at || '').slice(0, 16).replace('T', ' '))} · ${escapeHtml(d.state || '')}${d.stop_reason ? ' · ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ' · <span style="color:var(--warning);">over budget</span>' : ''}${r.over_wall ? ' · <span style="color:var(--warning);">over wall</span>' : ''}</div>
+          </div>
+          <a href="#" onclick="event.preventDefault(); location.hash='board';" class="hint" style="color:var(--primary);">← Board</a>
+        </div>
+        <div style="position:relative;height:14px;border-radius:3px;overflow:hidden;background:#05070a;border:1px solid var(--border);display:flex;">${segs}${capMark}</div>
+        <div class="hint">$${fmtMoney(total)}${cap > 0 ? ` / $${fmtMoney(cap)} cap` : ''} · ${fmtDurSec(elapsed)} elapsed${d.wall_min ? ` (${d.wall_min} min wall cap)` : ''} · ${turns} turns · ${r.regression_free_tickets || 0} regression-free · reached ${r.reached == null ? '—' : 'ticket ' + r.reached}</div>
+        <div style="width:100%;overflow-x:auto;margin-top:8px;">
+          <table class="responsive-runs-table"><thead><tr>
+            <th>Ticket</th><th>First try</th><th>Lite</th>
+            <th style="text-align:right;">Pts</th><th style="text-align:right;">$</th><th>Cause</th>
+          </tr></thead><tbody>${rows}</tbody></table>
+        </div>
+        <div class="hint">Click a ticket for its rounds, full verifier error and stderr tail; * marks a round derived from the manifest.</div>`;
+    }
+
+    function toggleRunTicket(id) {
+      runExpandedTickets[id] = !runExpandedTickets[id];
+      renderRun();
+    }
+
+    async function startCampaign() {
+      const typed = (document.getElementById('campaignModel').value || '').trim();
+      const model = typed || (document.getElementById('model').value || '').trim();
+      const budget = parseFloat(document.getElementById('campaignBudget').value || '0');
+      const wall = parseInt(document.getElementById('campaignWall').value || '0', 10);
+      const effort = document.getElementById('campaignEffort').value;
+      const msg = document.getElementById('campaignStartMsg');
+      const cmd = document.getElementById('campaignCmd');
+      if (!model) { msg.textContent = 'Pick a model first.'; return; }
+      const resolved = `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 20`;
+      cmd.innerHTML = `resolved: <code>${escapeHtml(resolved)}</code>`;
+      msg.textContent = 'starting…';
+      try {
+        const res = await fetch('/api/campaigns', {
+          method: 'POST',
+          headers: authHeaders({'Content-Type': 'application/json'}),
+          body: JSON.stringify({model, budget_usd: budget, wall_min: wall, effort}),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) { msg.textContent = body.error || `failed (${res.status})`; return; }
+        msg.innerHTML = `started (pid ${body.pid}) · <code>${escapeHtml(body.cmd || resolved)}</code> — watch it on the Board/Live tabs`;
+        refreshBoard();
+      } catch (e) { msg.textContent = 'failed: ' + e.message; }
+    }
+
+    async function loadRulesVersion() {
+      // serve_index injects the current rules fingerprint; the fetch is a
+      // fallback for a page served without the injection.
+      if (window.__SDB_RULES__) return;
+      try {
+        const r = await fetch('/api/status');
+        if (r.ok) window.__SDB_RULES__ = (await r.json()).rules_version || '';
+      } catch (e) { /* board renders without stale badges */ }
     }
 
     // =========================================================================
     // Campaigns (ordered tickets on one living workspace, cost-first)
     // =========================================================================
-    let campaignsCache = [];
-    let selectedCampaign = null;
-
-    function campaignStatusColor(s) {
-      if (s === 'passed') return 'var(--success)';
-      if (s === 'fault') return 'var(--warning)';
-      if (s === 'failed') return 'var(--danger)';
-      return 'var(--text-muted)';
-    }
-
-    async function refreshCampaigns() {
-      try {
-        const r = await fetch('/api/campaigns');
-        campaignsCache = await r.json();
-      } catch (e) { return; }
-      renderCampaigns();
-      if (selectedCampaign) loadCampaignLog(selectedCampaign, true);
-    }
-
-    function renderCampaigns() {
-      const el = document.getElementById('campaignsList');
-      if (!el) return;
-      if (!campaignsCache.length) {
-        el.innerHTML = '<div class="hint">No campaigns yet. Run one: <code>subdollarbench campaign run --name sdb-sql --model &lt;model&gt;</code></div>';
-        return;
-      }
-      el.innerHTML = campaignsCache.map(c => {
-        const roll = c.rollup || null;
-        const stages = roll ? (roll.stages || []) : [];
-        const chips = stages.map(s => {
-          const col = campaignStatusColor(s.status);
-          const reg = (s.regressed && s.regressed.length) ? ` \u26a0${s.regressed.join(',')}` : '';
-          const tip = `${s.title || ''} \u00b7 ${s.passed_stages}/${s.total_stages}${reg ? ' \u00b7 regressions ' + reg : ''}`;
-          return `<span class="badge" style="border-color:${col};color:${col}" title="${escapeHtml(tip)}">s${s.id} ${escapeHtml(String(s.status))}${reg}</span>`;
-        }).join(' ');
-        const running = c.state === 'running';
-        const stateBadge = running
-          ? '<span class="badge" style="border-color:var(--primary);color:var(--primary)">RUNNING</span>'
-          : `<span class="badge">${escapeHtml(String(c.state || '?'))}</span>`;
-        const cur = (running && c.current_stage != null) ? ` \u00b7 ticket ${c.current_stage} in progress` : '';
-        const model = (roll && roll.model) ? roll.model : (c.id || '');
-        const cost = roll ? Number(roll.total_cost_usd || 0).toFixed(4) : '\u2014';
-        const rf = roll ? (roll.regression_free_tickets || 0) : 0;
-        const reached = (roll && roll.reached != null) ? `reached ${roll.reached}` : (running ? 'in progress' : 'none');
-        const ob = (roll && roll.over_budget) ? ' \u00b7 <b style="color:var(--warning)">over_budget</b>' : '';
-        const sel = selectedCampaign === c.id ? 'border-color:var(--primary);' : '';
-        return `<div class="queue-row" style="cursor:pointer;${sel}" onclick="selectCampaign('${c.id}')">
-          <div>${stateBadge} <b>${escapeHtml(model)}</b>${cur}</div>
-          <div class="hint" style="margin:4px 0;">${escapeHtml(roll ? (roll.name || '') : '')} \u00b7 ${reached} \u00b7 regression-free ${rf} \u00b7 $${cost}${ob}</div>
-          <div style="margin-top:4px;">${chips || '<span class="hint">no tickets finished yet</span>'}</div>
-        </div>`;
-      }).join('');
-    }
-
-    function selectCampaign(id) {
-      selectedCampaign = id;
-      const t = document.getElementById('campaignLogTitle');
-      if (t) t.textContent = id;
-      renderCampaigns();
-      loadCampaignLog(id, false);
-    }
-
-    async function loadCampaignLog(id, silent) {
-      const el = document.getElementById('campaignLog');
-      if (!el) return;
-      try {
-        const r = await fetch(`/api/campaigns/${encodeURIComponent(id)}/log?tail=600`);
-        if (!r.ok) { if (!silent) el.textContent = 'no console yet'; return; }
-        const t = await r.text();
-        const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
-        el.textContent = t;
-        if (nearBottom) el.scrollTop = el.scrollHeight;
-      } catch (e) { /* transient */ }
-    }
-
-    // =========================================================================
-    // Live Console Telemetry Engine (Elapsed, Turns, Spent, Tokens)
-    // =========================================================================
-    let liveTelemetry = {
-      startedAtMs: null,
-      durationSecs: null,
-      turns: 0,
-      maxTurns: 100,
-      spent: 0.0,
-      tokens: 0,
-      subrun: 1,
-      totalSubruns: 3,
-      isRunning: false,
-      timerInterval: null
-    };
-
     function formatElapsed(totalSeconds) {
       const s = Math.max(0, Math.floor(totalSeconds));
       const hrs = Math.floor(s / 3600);
@@ -2503,121 +2429,12 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       return false;
     }
 
-    let showCodeDetails = true;
+    // The retired single-run console's renderers are gone (gui-spec.md §3):
+    // the Live view reads the campaign log stream instead. These stubs keep
+    // the run-control callers valid.
+    function clearConsole() {}
+    function appendLog() {}
 
-    function toggleCodeDetails(enabled) {
-      showCodeDetails = enabled;
-      fetchConsoleLogs(true);
-    }
-
-    function clearConsole() {
-      document.getElementById('terminalOutput').textContent = '';
-      seenLineHashes.clear();
-      seenLineOrder.length = 0;
-      consoleKnownLines = 0;
-      consoleCursors = { all: 0 };
-      consoleSynced = false;
-    }
-
-    function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-    function catFor(raw){
-      let line = raw;
-      line = line.replace(/^\s*\[\d{2}:\d{2}:\d{2}\] /, '');
-      if (line.includes('[TELEMETRY]') || line.includes('[LIVE]')) return 'skip';
-      if (line.includes('[WAITING]')) return 'waiting';
-      if (line.startsWith('[OMP-PROMPT]') || line.startsWith('[PROMPT]')) return 'prompt';
-      if (line.startsWith('[THOUGHT]')) return 'thought';
-      if (line.startsWith('[RESPONSE]')) return 'response';
-      if (line.startsWith('[ACTION]')) return 'action';
-      if (line.startsWith('[RESULT]')) return 'result';
-      if (line.startsWith('[STDERR]') || line.startsWith('[FAIL') || line.includes('FAILED')) return 'error';
-      if (line.startsWith('[TOKENS]')) return 'tokens';
-      if (line.startsWith('[OMP]')) return 'omp';
-      if (line.startsWith('[OPENCODE')) return 'omp';
-      if (line.startsWith('[WARN') || line.startsWith('[LIMIT]') || line.startsWith('[STOP]')) return 'warn';
-      if (/^\[(PIPELINE|SETUP|BENCH|DIAGNOSTICS|STATUS|EVAL|REVIVAL|MULTI-TRIAL|SUBRUN|DONE|LOCAL RUNNER|OMP)/.test(line)) return 'sec';
-      if (line.startsWith('  | ') || line.startsWith('  | ...')) return 'code';
-      if (line.startsWith('  > ')) return 'result';
-      if (line.startsWith('  $ ') || line.startsWith('  path:') || line.startsWith('  - ') || line.startsWith('  + ')) return 'cmd';
-      if (line.includes('-> PASS') || line.includes('  PASS')) return 'pass';
-      if (line.includes('-> FAIL') || line.includes('  FAIL')) return 'fail';
-      return '';
-    }
-    function renderLines(lines){
-      let html = '';
-      // Collapse [WAITING] progress spam: the elapsed counter updates every
-      // few seconds and each unique text would churn the DOM = flicker.
-      // Keep one waiting line per batch AND skip it entirely when the DOM
-      // already shows one — progress stays visible via the telemetry bar
-      // (turns/elapsed tick every second without touching the log).
-      const domHasWaiting = (typeof document !== 'undefined') &&
-        !!document.getElementById('terminalOutput')?.querySelector('.ln-waiting');
-      const out = [];
-      for (const raw of lines) {
-        if (raw && raw.includes('[WAITING]')) {
-          const prev = out[out.length - 1];
-          if (prev && prev.includes('[WAITING]')) out.pop();
-          if (domHasWaiting) continue;
-        }
-        out.push(raw);
-      }
-      for (const raw of out) {
-        if (!raw) continue;
-        if (parseTelemetryLine(raw)) continue;
-        const cat = catFor(raw);
-        if (cat === 'skip') continue;
-        if (!showCodeDetails && cat === 'code') continue;
-        const shown = raw.length > 4096 ? raw.slice(0, 4096) + '\n… (line truncated for display; full line in run console.log)' : raw;
-        html += cat ? '<div class="ln ln-' + cat + '">' + escHtml(shown) + '</div>' : '<div class="ln">' + escHtml(shown) + '</div>';
-      }
-      return html;
-    }
-    function toggleCat(btn, cat){
-      const term = document.getElementById('terminalOutput');
-      term.classList.toggle('hide-' + cat);
-      btn.classList.toggle('on');
-    }
-    function scrollTerm(){
-      const autoScroll = document.getElementById('autoScrollCheck');
-      if (!autoScroll || !autoScroll.checked) return;
-      const term = document.getElementById('terminalOutput');
-      // Stick to bottom only when already near it; never yank while reading.
-      const nearBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 120;
-      if (nearBottom) term.scrollTop = term.scrollHeight;
-    }
-    function appendLog(line) {
-      if (!line) return;
-      if (!isNewLine(line)) return;
-      if (parseTelemetryLine(line)) {
-        return;
-      }
-      if (!showCodeDetails && catFor(line) === 'code') {
-        return;
-      }
-      const term = document.getElementById('terminalOutput');
-      const cat = catFor(line);
-      if (cat === 'skip') return;
-      if (cat === 'waiting') {
-        // Replace in place when the waiting line is the visible tail;
-        // otherwise drop the stale one wherever it sits and append fresh.
-        // (:last-of-type breaks once any later sibling lands.)
-        const last = term.lastElementChild;
-        if (last && last.classList.contains('ln-waiting')) {
-          last.textContent = line;
-          scrollTerm();
-          return;
-        }
-        term.querySelectorAll('.ln-waiting').forEach(el => el.remove());
-      }
-      const div = document.createElement('div');
-      div.className = cat ? 'ln ln-' + cat : 'ln';
-      div.textContent = line.length > 4096 ? line.slice(0, 4096) + '\n… (line truncated for display; full line in run console.log)' : line;
-      div.title = line.length > 4096 ? `${line.length.toLocaleString()} chars total` : '';
-      term.appendChild(div);
-      trimTerminal(term);
-      scrollTerm();
-    }
-    // Markdown Parser
     function sanitizeHtml(html) {
       if (!html) return '';
       const doc = new DOMParser().parseFromString(String(html), 'text/html');
@@ -2987,16 +2804,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
     }
 
-    let allRunsCache = [];
-    let currentRunsFilter = '';
-    let showHiddenRuns = false;
-    let currentRunsView = localStorage.getItem('runs_view_mode') || 'table';
-
-    function toggleSidebar() {
-      // Legacy: setup is now a tab; jump to it.
-      switchTab('setup');
-    }
-
     function formatTimestamp(ts) {
       if (!ts) return '';
       try {
@@ -3024,889 +2831,6 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         setTimeout(() => { el.innerHTML = orig; }, 1500);
       });
     }
-
-    function setRunsViewMode(mode) {
-      currentRunsView = mode;
-      localStorage.setItem('runs_view_mode', mode);
-      const btnTbl = document.getElementById('viewBtnTable');
-      const btnCrd = document.getElementById('viewBtnCards');
-      if (btnTbl) btnTbl.classList.toggle('active', mode === 'table');
-      if (btnCrd) btnCrd.classList.toggle('active', mode === 'cards');
-      const tblView = document.getElementById('runsTableView');
-      const crdView = document.getElementById('runsCardsView');
-      if (tblView) tblView.style.display = mode === 'table' ? 'block' : 'none';
-      if (crdView) crdView.style.display = mode === 'cards' ? 'grid' : 'none';
-      renderRuns();
-    }
-
-    function filterRunsList(q) {
-      currentRunsFilter = (q || '').trim().toLowerCase();
-      renderRuns();
-    }
-
-    // Runs fetch health: 'loading' | 'ok' | 'error'. renderRuns splits the
-    // empty states: no runs at all vs filter-matched-none vs offline/error.
-    let runsFetchState = 'loading';
-    let runsFetchError = '';
-
-    function setRunsError(msg) {
-      runsFetchState = 'error';
-      runsFetchError = msg || '';
-      const banner = document.getElementById('runsErrorBanner');
-      if (banner) {
-        if (msg) {
-          banner.style.display = 'block';
-          banner.textContent = `⚠️ Could not load runs: ${msg}`;
-        } else {
-          banner.style.display = 'none';
-          banner.textContent = '';
-        }
-      }
-    }
-
-    async function loadRuns() {
-      try {
-        const res = await fetch('/api/runs');
-        if (!res.ok) {
-          setRunsError(`HTTP ${res.status}`);
-          renderRuns();
-          return;
-        }
-        allRunsCache = await res.json();
-        runsFetchState = 'ok';
-        runsFetchError = '';
-        const banner = document.getElementById('runsErrorBanner');
-        if (banner) { banner.style.display = 'none'; banner.textContent = ''; }
-        renderRuns();
-      } catch (e) {
-        setRunsError(e.message || String(e));
-        renderRuns();
-      }
-    }
-
-    let lbCache = [];
-    let lbFilter = '';
-    let lbShowHidden = false;
-
-    async function loadLeaderboard() {
-      try {
-        const res = await fetch('/api/leaderboard?task=all');
-        if (!res.ok) {
-          const b = document.getElementById('lbErrorBanner');
-          if (b) { b.style.display = 'block'; b.textContent = `Leaderboard HTTP ${res.status}`; }
-          renderLeaderboard();
-          return;
-        }
-        lbCache = await res.json();
-        const b = document.getElementById('lbErrorBanner');
-        if (b) { b.style.display = 'none'; b.textContent = ''; }
-        renderLeaderboard();
-      } catch (e) {
-        const b = document.getElementById('lbErrorBanner');
-        if (b) { b.style.display = 'block'; b.textContent = `Leaderboard offline: ${e.message || e}`; }
-        renderLeaderboard();
-      }
-    }
-
-    function filterLeaderboard(q) {
-      lbFilter = (q || '').trim().toLowerCase();
-      renderLeaderboard();
-    }
-
-    function toggleLbHidden(show) {
-      lbShowHidden = show;
-      renderLeaderboard();
-    }
-
-    function renderLeaderboard() {
-      const badge = document.getElementById('lbCountBadge');
-      const tbody = document.getElementById('lbTableBody');
-      const rows = (lbCache || []).filter(r => {
-        if ((r.portal_hidden || r.poisoned) && !lbShowHidden) return false;
-        if (boardTier !== 'all' && tierOf(r) !== boardTier) return false;
-        if (!lbFilter) return true;
-        const text = `${r.model} ${r.task} ${r.effort || ''} ${r.stability || ''}`.toLowerCase();
-        return text.includes(lbFilter);
-      });
-      // Sort: avg pass desc, then P@1 lo desc (mirror server finalize_results).
-      rows.sort((a, b) => {
-        const ap = (a.avg_pass_rate ?? a.pass_rate) - (b.avg_pass_rate ?? b.pass_rate);
-        if (ap !== 0) return -ap;
-        return (b.pass_at_1_lo ?? b.pass_at_1 ?? 0) - (a.pass_at_1_lo ?? a.pass_at_1 ?? 0);
-      });
-      if (badge) badge.textContent = `${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`;
-      if (!tbody) return;
-      if (rows.length === 0) {
-        const msg = (lbCache || []).length === 0
-          ? 'No leaderboard rows yet — run the wave first.'
-          : `No rows matched filter "${lbFilter}".`;
-        tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; color: var(--text-muted); padding: 24px;">${escapeHtml(msg)}</td></tr>`;
-        return;
-      }
-      tbody.innerHTML = '';
-      window._lbExpanded = window._lbExpanded || {};
-      rows.forEach((r, ri) => {
-        const meta = getModelMeta(r.model);
-        const avg = r.avg_pass_rate ?? r.pass_rate;
-        const p1 = r.pass_at_1 ?? r.pass_rate;
-        const lo = r.pass_at_1_lo, hi = r.pass_at_1_hi;
-        const ci = (lo != null && hi != null) ? ` <span style="font-size:0.72rem;color:var(--text-muted);">(${Math.round(lo)}–${Math.round(hi)})</span>` : '';
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const stab = r.stability
-          ? (r.stability === 'stable' ? '🟢' : r.stability === 'watch' ? '🟡' : '🔴') + ' ' + escapeHtml(r.stability)
-          : '<span style="color:var(--text-muted);">-</span>';
-        const api = r.total_cost_usd != null ? '$' + Number(r.total_cost_usd).toFixed(4) : 'n/a';
-        const eff = r.effective_cost_usd != null ? '$' + Number(r.effective_cost_usd).toFixed(4) : 'n/a';
-        const rules = r.rules_version ? escapeHtml(String(r.rules_version).split('+')[0]) : '<span style="color:var(--text-muted);">legacy</span>';
-        const when = r.timestamp ? escapeHtml(String(r.timestamp).slice(0, 16).replace('T', ' ')) : '-';
-        const key = `${r.model}\u0001${r.task}\u0001${r.effort || ''}\u0001${r.harness || 'omp'}`;
-        const open = !!window._lbExpanded[key];
-        const subs = r.subruns || [];
-        const nPass = subs.filter(t => (t.pass_rate ?? 0) >= 100).length;
-        const cpp = nPass > 0 && r.total_cost_usd != null
-          ? '$' + (Number(r.total_cost_usd) / nPass).toFixed(4)
-          : '<span style="color:var(--text-muted);">-</span>';
-        const tr = document.createElement('tr');
-        tr.style.borderLeft = `4px solid ${meta.color}`;
-        tr.style.cursor = 'pointer';
-        tr.title = `${r.id} — click to inspect`;
-        tr.onclick = (e) => { if (e.target.closest('button') || e.target.closest('a')) return; inspectRun(r.id); };
-        tr.innerHTML = `
-          <td style="text-align:center;"><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-lbkey="${escapeHtml(key)}" onclick="event.stopPropagation();toggleLbRow(this.dataset.lbkey)" title="${subs.length ? 'Show per-trial breakdown' : 'No trial detail'}">${open ? '▾' : '▸'}</button></td>
-          <td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-            <span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(r.model)}" style="font-weight:600;color:${meta.color};font-size:0.88rem;">${escapeHtml(shortModelName(r.model))}</span></span>
-            <span class="badge badge-info">${escapeHtml(r.task)}</span>
-            <span class="badge badge-effort">effort: ${escapeHtml(r.effort || 'n/a')}</span>
-            <span class="badge" title="Agent harness (ranks never mix harnesses)">harness: ${escapeHtml(r.harness || 'omp')}</span>
-            ${r.poisoned ? '<span class="badge" style="background:#da3633;color:#fff;" title="Infra-killed: 429/404, not a model verdict">Poisoned</span>' : ''}            ${r.portal_hidden ? '<span class="badge" style="background:#6e7681;color:#fff;">Hidden</span>' : ''}
-          </div></td>
-          <td style="text-align:center;font-weight:700;">${Math.round(avg)}% / ${Math.round(p1)}%${ci}</td>
-          <td style="text-align:center;" title="Capability: first 100% trial under stop-on-pass (would halt here); P@1-lo stays the rank key">${(() => {
-            if (r.solved_at != null) return `✓@${r.solved_at}`;
-            if (r.solved === false) return `✗${n}`;
-            if (subs.length) {
-              const fi = subs.findIndex(t => (t.pass_rate ?? 0) >= 100);
-              return fi >= 0 ? `✓@${fi + 1}` : `✗${subs.length}`;
-            }
-            return '<span style="color:var(--text-muted);">-</span>';
-          })()}</td>
-          <td style="text-align:center;">${n}× / ${stab}</td>
-          <td style="text-align:center;">${api} / ${eff}</td>
-          <td style="text-align:center;" title="API cost per passing trial">${cpp}</td>
-          <td style="text-align:center;font-size:0.75rem;">${(() => {
-            if (r.throughput_req_sec == null) {
-              // Ran but probe produced nothing (candidate too slow/broken) vs task unscored.
-              const ran = (r.total_trials ?? (r.subruns || []).length ?? 0) > 0;
-              return ran
-                ? '<span title="Candidate ran but throughput probe produced no measurement">no probe</span>'
-                : '<span style="color:var(--text-muted);">-</span>';
-            }
-            const ref = r.reference_throughput_req_sec;
-            const ratio = (ref && ref > 0) ? (r.throughput_req_sec / ref) : null;
-            return `<b>${fmtTp(r.throughput_req_sec)}</b>` + (ratio != null ? `<br><span style="color:var(--text-muted);">${ratio.toFixed(2)}x ref</span>` : '');
-          })()}</td>
-          <td style="text-align:center;" title="Efficiency score (pass-adjusted throughput per cost)">${r.efficiency_score != null ? Number(r.efficiency_score).toFixed(1) : '-'}</td>
-          <td style="text-align:center;font-size:0.75rem;">${rules}</td>
-          <td style="text-align:center;font-size:0.75rem;color:var(--text-muted);">${when}</td>`;
-        tbody.appendChild(tr);
-        if (open) {
-          const dr = document.createElement('tr');
-          const dc = document.createElement('td');
-          dc.colSpan = 11;
-          dc.style.cssText = 'background:rgba(13,17,23,0.6);padding:6px 12px 10px 34px;';
-          if (!subs.length) {
-            dc.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No per-trial detail in this row.</span>';
-          } else {
-            const tpIqr = iqr(subs.map(t => t.throughput_req_sec));
-            const tokIqr = iqr(subs.map(t => t.total_tokens ?? ((t.prompt_tokens || 0) + (t.cached_tokens || 0) + (t.completion_tokens || 0))));
-            const spread = `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:6px;" title="Inter-quartile range across trials (display only; ranking uses Wilson P@1 bounds)">spread — throughput: ${fmtIqr(tpIqr, v => fmtTp(v))} · tokens: ${fmtIqr(tokIqr)}</div>`;
-            dc.innerHTML = spread + '<table style="width:100%;font-size:0.75rem;"><thead><tr style="color:var(--text-muted);text-align:left;"><th>Trial</th><th>Pass</th><th>Cost</th><th>Turns</th><th>Duration</th><th>Throughput</th></tr></thead><tbody>' +
-              subs.map((t, i) => {
-                const ok = (t.pass_rate ?? 0) >= 100;
-                const tc = t.total_cost_usd ?? t.effective_cost_usd;
-                const isFault = ['agent_failed', 'agent_killed', 'infra_error'].includes((t.status || ''));
-                const trialMark = (t.status === 'disqualified_cheat' ? '<span title="Excluded from parent score, retained in record">DQ</span> ' : '') + (isFault ? '<span title="Harness/agent fault: excluded from parent score (neutral, not a model failure)">⚠</span> ' : '');
-                return `<tr><td>#${i + 1}</td><td style="font-weight:700;color:${ok ? 'var(--success)' : (isFault ? 'var(--text-muted)' : 'var(--danger)')};">${trialMark + Math.round(t.pass_rate ?? 0)}%</td><td>${tc != null ? '$' + Number(tc).toFixed(4) : 'n/a'}</td><td>${t.turns ?? '-'}</td><td>${t.duration_seconds != null ? Math.round(t.duration_seconds) + 's' : '-'}</td><td>${t.throughput_req_sec != null ? fmtTp(t.throughput_req_sec) : '<span title="Probe produced no measurement">no probe</span>'}</td></tr>`;
-              }).join('') + '</tbody></table>';
-          }
-          dr.appendChild(dc);
-          tbody.appendChild(dr);
-        }
-      });
-    }
-
-    // ===== Shared board data: Models / Tasks / Formula tabs =====
-    let boardRows = [];
-    let boardQueue = { Running: 0, Pending: 0, Done: 0 };
-    // Raw queue cells + live worker snapshot for the matrix wave monitor.
-    // Queued cells have no P@1: they render as status cells, never into
-    // aggregates. Refreshed with boardRows (matrix re-reads both).
-    let boardQueueItems = [];
-    let boardWorkers = {};
-    let boardCurrentRun = null;
-
-    async function ensureBoardData(force = false) {
-      if (boardRows.length && !force) return boardRows;
-      try {
-        const [lb, q, st] = await Promise.all([
-          fetch('/api/leaderboard?task=all').then(r => r.ok ? r.json() : []),
-          fetch('/api/queue').then(r => r.ok ? r.json() : []).catch(() => []),
-          fetch('/api/status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
-        ]);
-        boardRows = (lb || []).filter(r => !r.portal_hidden && !r.poisoned);
-        const c = { Running: 0, Pending: 0, Done: 0 };
-        (q || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
-        boardQueue = c;
-        boardQueueItems = q || [];
-        boardWorkers = (st && st.workers) || {};
-        boardCurrentRun = (st && st.current_run) || null;
-      } catch (e) {
-        const b = document.getElementById('modelsErrorBanner');
-        if (b) { b.style.display = 'block'; b.textContent = `Board offline: ${e.message || e}`; }
-      }
-      return boardRows;
-    }
-
-    function boardGroups() {
-      // Canonical per (model, effort, task): most trials wins, latest breaks ties.
-      const canon = {};
-      boardRows.forEach(r => {
-        if ((r.id || '').startsWith('test_')) return;
-        if (boardTier !== 'all' && tierOf(r) !== boardTier) return;
-        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}\u0001${(r.harness || 'omp').toLowerCase()}`;
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const ex = canon[key];
-        const exN = ex ? (ex.total_trials ?? (ex.subruns || []).length ?? 1) : -1;
-        if (!ex || n > exN || (n === exN && (r.timestamp || '') > (ex.timestamp || ''))) canon[key] = r;
-      });
-      const groups = {};
-      Object.values(canon).forEach(r => {
-        const g = groups[r.model] = groups[r.model] || { model: r.model, tasks: [], nTrials: 0, nPass: 0, sumAvg: 0, sumApi: 0, sumEff: 0, worstStab: 0, costs: [], stabs: [], bestTp: null, sumTpScore: 0, nTp: 0 };
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const subs = r.subruns || [];
-        const c = subs.length ? subs.filter(t => (t.pass_rate ?? 0) >= 100).length : ((r.avg_pass_rate ?? r.pass_rate) >= 100 ? n : 0);
-        g.tasks.push(r.task);
-        g.nTrials += n; g.nPass += c;
-        g.sumAvg += (r.avg_pass_rate ?? r.pass_rate);
-        g.sumApi += (r.total_cost_usd ?? 0); g.sumEff += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
-        if (r.throughput_req_sec != null && (g.bestTp == null || r.throughput_req_sec > g.bestTp)) g.bestTp = r.throughput_req_sec;
-        if (r.efficiency_score != null) { g.sumTpScore += r.efficiency_score; g.nTp++; }
-        const sr = r.stability === 'unstable' ? 3 : r.stability === 'watch' ? 2 : r.stability === 'stable' ? 1 : 0;
-        g.worstStab = Math.max(g.worstStab, sr);
-        g.costs.push(r.total_cost_usd ?? 0); g.stabs.push(r.stability || '-');
-      });
-      return Object.values(groups).map(g => {
-        const n = g.tasks.length;
-        // Wilson 95% on pooled trials.
-        const z = 1.96, t = Math.max(1, g.nTrials), p = g.nPass / t;
-        const d = 1 + z * z / t, cc = p + z * z / (2 * t);
-        const m = z * Math.sqrt(p * (1 - p) / t + z * z / (4 * t * t)) / d;
-        const lo = Math.max(0, (cc - m)) * 100, hi = Math.min(1, cc + m) * 100;
-        const passTrials = g.nTrials ? g.nPass : 0;
-        return {
-          model: g.model, nTasks: n, tasks: [...new Set(g.tasks)].sort(),
-          nTrials: g.nTrials, nPass: g.nPass,
-          avg: g.sumAvg / Math.max(1, n),
-          p1: t ? 100 * g.nPass / t : 0, p1lo: lo, p1hi: hi,
-          totalApi: g.sumApi, avgApi: g.sumApi / Math.max(1, n),
-          bestTp: g.bestTp, avgEff: g.nTp ? g.sumTpScore / g.nTp : null,
-          cpp: passTrials > 0 ? g.sumApi / passTrials : null,
-          stab: g.worstStab === 3 ? 'unstable' : g.worstStab === 2 ? 'watch' : g.worstStab === 1 ? 'stable' : '-',
-          stabRank: g.worstStab,
-          unstableCells: g.stabs.filter(x => x === 'unstable').length,
-          minCost: Math.min(...g.costs), maxCost: Math.max(...g.costs),
-        };
-      });
-    }
-
-    function stabBadge(s) {
-      return s === 'stable' ? '🟢 stable' : s === 'watch' ? '🟡 watch' : s === 'unstable' ? '🔴 unstable' : '-';
-    }
-
-    function renderModels() {
-      const badge = document.getElementById('modelsCountBadge');
-      const tbody = document.getElementById('modelsTableBody');
-      if (!tbody) return;
-      const mode = (document.getElementById('modelsSort') || {}).value || 'avg';
-      let rows = boardGroups();
-      const key = { avg: (a, b) => b.avg - a.avg, p1lo: (a, b) => b.p1lo - a.p1lo,
-        cpp: (a, b) => (a.cpp ?? 1e9) - (b.cpp ?? 1e9), cost: (a, b) => a.totalApi - b.totalApi,
-        trials: (a, b) => b.nTrials - a.nTrials }[mode] || ((a, b) => b.avg - a.avg);
-      rows.sort(key);
-      if (badge) badge.textContent = `${rows.length} models`;
-      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px;">No rows yet.</td></tr>'; return; }
-      tbody.innerHTML = '';
-      rows.forEach((g, i) => {
-        const meta = getModelMeta(g.model);
-        const tr = document.createElement('tr');
-        tr.style.borderLeft = `4px solid ${meta.color}`;
-        tr.innerHTML = `
-          <td style="text-align:center;color:var(--text-muted);">${i + 1}</td>
-          <td><span class="model-pill" style="background:${meta.bg};border:1px solid ${meta.border};"><span title="${escapeHtml(g.model)}" style="font-weight:600;color:${meta.color};">${escapeHtml(shortModelName(g.model))}</span></span></td>
-          <td style="text-align:center;" title="${escapeHtml(g.tasks.join(', '))}">${g.nTasks} <span style="font-size:.72rem;color:var(--text-muted);">tasks</span></td>
-          <td style="text-align:center;">${g.nTrials}</td>
-          <td style="text-align:center;font-weight:700;">${Math.round(g.avg)}%</td>
-          <td style="text-align:center;font-weight:700;">${Math.round(g.p1)}% <span style="font-size:.72rem;color:var(--text-muted);">(${Math.round(g.p1lo)}–${Math.round(g.p1hi)})</span></td>
-          <td style="text-align:center;">${g.cpp != null ? '$' + g.cpp.toFixed(4) : '-'}</td>
-          <td style="text-align:center;">$${g.totalApi.toFixed(3)}</td>
-          <td style="text-align:center;">${g.bestTp != null ? fmtTp(g.bestTp) : '-'}</td>
-          <td style="text-align:center;">${g.avgEff != null ? g.avgEff.toFixed(1) : '-'}</td>
-          <td style="text-align:center;font-size:.75rem;">${stabBadge(g.stab)}</td>`;
-        tbody.appendChild(tr);
-      });
-      const wp = document.getElementById('waveProgress');
-      if (wp) {
-        const q = boardQueue;
-        const done = boardRows.length;
-        wp.textContent = `Wave: ${done} result rows in store · queue ${q.Running} running / ${q.Pending} pending / ${q.Done} done`;
-      }
-    }
-
-    function docHarness(hh) {
-      if (hh === 'omp' || hh === 'opencode') return hh;
-      const el = document.getElementById('harnessSelect');
-      return ((el || {}).value || 'omp');
-    }
-
-    // Queue + workers go stale within a wave: the shared loader
-    // early-returns on cached boardRows, so the matrix refreshes its live
-    // inputs itself on every view. Failure keeps the last snapshot.
-    async function refreshMatrixLive() {
-      try {
-        const [q, st] = await Promise.all([
-          fetch('/api/queue').then(r => r.ok ? r.json() : []).catch(() => []),
-          fetch('/api/status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
-        ]);
-        boardQueueItems = q || [];
-        boardWorkers = (st && st.workers) || {};
-        boardCurrentRun = (st && st.current_run) || null;
-        const c = { Running: 0, Pending: 0, Done: 0 };
-        (boardQueueItems || []).forEach(x => { if (c[x.status] !== undefined) c[x.status]++; });
-        boardQueue = c;
-      } catch (e) { /* keep last snapshot */ }
-    }
-
-    function renderMatrix() {
-      const badge = document.getElementById('matrixCountBadge');
-      const strip = document.getElementById('matrixLiveStrip');
-      if (strip) {
-        const live = (() => {
-          const seen = {};
-          const out = [];
-          Object.values(boardWorkers || {}).forEach(w => {
-            if (w && w.model && w.task && w.run_id && !seen[w.run_id]) { seen[w.run_id] = 1; out.push(w); }
-          });
-          if (boardCurrentRun && boardCurrentRun.run_id && !seen[boardCurrentRun.run_id]) out.push(boardCurrentRun);
-          return out.filter(w => w && w.model && w.task);
-        })();
-        if (!live.length) {
-          strip.style.display = 'none';
-          strip.innerHTML = '';
-        } else {
-          strip.style.display = 'block';
-          const pend = (boardQueueItems || []).filter(qi => qi && qi.status === 'Pending' && qi.kind && qi.kind.Extend);
-          const pendTxt = pend.length ? ' · ↻ top-ups queued: ' + pend.map(qi => {
-            const e = qi.kind.Extend;
-            const task = String(e.parent_run_id || '').split('_')[0] || '?';
-            return `${qi.id} (+${e.trials ?? '?'} ${task})`;
-          }).join(', ') : '';
-          strip.innerHTML = '▶ now running: ' + live.map(w =>
-            `<span class="badge badge-info" style="margin-right:6px;" title="${escapeHtml(w.run_id || '')}">▶ ${escapeHtml(shortModelName(w.model))} ${(w.task || '').toLowerCase()} ${escapeHtml(w.effort || '')} · trial ${(w.subrun ?? '?')}/${(w.total_subruns ?? '?')}${(w.turns != null ? ` · ${w.turns}t` : '')}</span>`
-          ).join('') + pendTxt;
-        }
-      }
-      const head = document.getElementById('matrixHeadRow');
-      const tbody = document.getElementById('matrixTableBody');
-      const tfoot = document.getElementById('matrixTableFoot');
-      if (!tbody || !head) return;
-      // Canonical per (model, effort, task): most trials wins, latest breaks ties.
-      const canon = {};
-      boardRows.forEach(r => {
-        if ((r.id || '').startsWith('test_')) return;
-        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}\u0001${(r.harness || 'omp').toLowerCase()}`;
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const ex = canon[key];
-        if (!ex || n > (ex.total_trials ?? 0)) canon[key] = r;
-      });
-      // Wave monitor: queued cells by canon key (Pending/Running only —
-      // Done rows are history, canon covers them). Pending order gives the
-      // "#n in queue" position.
-      const queued = {};
-      let pendPos = 0;
-      (boardQueueItems || []).forEach(qi => {
-        if (!qi || !qi.kind || !qi.kind.Run) return;
-        if (qi.status !== 'Pending' && qi.status !== 'Running') return;
-        const rk = qi.kind.Run;
-        const key = `${rk.model}\u0001${rk.effort || 'auto'}\u0001${(rk.task || '').toLowerCase()}\u0001${(rk.harness || 'omp').toLowerCase()}`;
-        if (qi.status === 'Pending') pendPos++;
-        queued[key] = { status: qi.status, id: qi.id, pos: qi.status === 'Pending' ? pendPos : 0,
-          trials: rk.trials ?? 9, screening: rk.stop_on_pass ? Math.min(rk.trials ?? 9, 4) : null,
-          note: qi.note || '', refusals: qi.refusals || 0,
-          notBefore: qi.not_before || null };
-      });
-      // Live trial progress. Workers carry (model, task, effort) but no
-      // harness, so a worker attaches to a rendered Running cell only when
-      // the attribution is unique: exactly one worker AND exactly one
-      // Running queued key on the triple. Otherwise silent, never wrong.
-      const workersByTriple = {};
-      Object.values(boardWorkers || {}).forEach(w => {
-        if (!w || !w.model || !w.task) return;
-        const tk = `${w.model}\u0001${(w.task || '').toLowerCase()}\u0001${w.effort || 'auto'}`;
-        (workersByTriple[tk] = workersByTriple[tk] || []).push(w);
-      });
-      const runningKeysByTriple = {};
-      Object.keys(queued).forEach(k => {
-        if (queued[k].status !== 'Running') return;
-        const parts = k.split('\u0001');
-        const tk = parts[0] + '\u0001' + parts[2] + '\u0001' + parts[1];
-        runningKeysByTriple[tk] = (runningKeysByTriple[tk] || 0) + 1;
-      });
-      // Live sources: worker snapshot + engine current_run (direct-
-      // started extends have no queue row; workers dict lags dispatch).
-      // Deduped by run_id: current_run often duplicates a worker entry.
-      const livePool = (() => {
-        const seen = {};
-        const out = [];
-        Object.values(boardWorkers || {}).forEach(w => {
-          if (w && w.run_id && !seen[w.run_id]) { seen[w.run_id] = 1; out.push(w); }
-        });
-        if (boardCurrentRun && boardCurrentRun.run_id && !seen[boardCurrentRun.run_id]) {
-          out.push(boardCurrentRun);
-        }
-        return out;
-      })();
-      const liveFor = (key, m, eff, tkTask, rowId) => {
-        if (!livePool.length) return null;
-        // 1. Exact: worker trial stem == rendered row id (no ambiguity,
-        // harness-free). Covers direct-started trials with no queue row.
-        if (rowId) {
-          const hit = livePool.find(w => String(w.run_id || '').replace(/_trial\d+$/, '') === rowId);
-          if (hit) return hit;
-        }
-        // 2. Fallback: unique worker + unique Running queued key on triple.
-        const tk = `${m}\u0001${(tkTask || '').toLowerCase()}\u0001${eff || 'auto'}`;
-        const q = queued[key];
-        if (!q || q.status !== 'Running') return null;
-        const ws = livePool.filter(w =>
-          `${w.model}\u0001${(w.task || '').toLowerCase()}\u0001${w.effort || 'auto'}` === tk);
-        if (ws.length !== 1 || (runningKeysByTriple[tk] || 0) !== 1) return null;
-        return ws[0];
-      };
-      // Pending top-up extends attach to their parent cell (no kind.Run).
-      const extendMarks = {};
-      (boardQueueItems || []).forEach(qi => {
-        if (!qi || qi.status !== 'Pending' || !qi.kind || !qi.kind.Extend) return;
-        const e = qi.kind.Extend;
-        if (e && e.parent_run_id) extendMarks[e.parent_run_id] = { id: qi.id, n: e.trials ?? '?' };
-      });
-      const qModels = Object.keys(queued).map(k => k.split('\u0001')[0]);
-      const models = [...new Set(Object.values(canon).map(r => r.model).concat(qModels))].sort();
-      // One task remains: the differential SQL ladder. The pre-sdb-sql
-      // tasks were retired 2026-10-17.
-      const tasks = ['sql'];
-      // Column aggregates: mean P@1, best model, rows run — over cells that ran.
-      const colStats = tasks.map(() => ({ sum: 0, n: 0, best: null, bestV: -1 }));
-      let rowCount = 0, filledCells = 0, grandSum = 0, grandN = 0;
-      const qEfforts = Object.keys(queued).map(k => k.split('\u0001')[1] || 'auto');
-      const efforts = [...new Set(Object.values(canon).map(r => r.effort || 'auto').concat(qEfforts))].sort();
-      head.innerHTML = '<th>Model</th>' + tasks.map(t => `<th>${escapeHtml(t)}</th>`).join('')
-        + `<th title="Row summary: mean P@1 across tasks this row ran · cells at 100% · task coverage · summed spend">Row summary</th>`;
-      tbody.innerHTML = '';
-      models.forEach(m => {
-        efforts.forEach(eff => {
-          const hhs = ['omp', 'opencode'].filter(hh => tasks.some(t => !!canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`] || !!queued[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]));
-          if (!hhs.length) return;
-          hhs.forEach(hh => {
-          const tr = document.createElement('tr');
-          let rowSum = 0, rowRun = 0, rowFull = 0, rowCost = 0, rowSolved = 0, rowFirstTry = 0;
-          const rowTip = [];
-          const htag = `<span class="badge ${hh === 'omp' ? 'badge-info' : 'badge-effort'}" title="Agent harness (ranks never mix harnesses)">harness: ${hh}</span>`;
-          const stampRow = tasks.map(t => canon[`${m}\u0001${eff}\u0001${t}\u0001${hh}`]).find(Boolean);
-          const stamp = stampRow ? String(stampRow.rules_version || 'legacy').split('+')[0] : '';
-          const wave = stampRow ? String(stampRow.timestamp || '').slice(5, 16).replace('T', ' ') : '';
-          let cells = `<td><div style="display:flex;flex-direction:column;gap:2px;">`
-            + `<span style="font-weight:700;">${escapeHtml(shortModelName(m))}</span>`
-            + `<span style="font-size:.7rem;color:var(--text-muted);">effort: ${escapeHtml(eff)}</span>`
-            + `${htag}`
-            + (stamp ? `<span style="font-size:.68rem;color:var(--text-muted);" title="Rules stamp + wave time">${escapeHtml(stamp)} · ${escapeHtml(wave)}</span>` : '')
-            + `</div></td>`;
-          tasks.forEach((t, ti) => {
-            const key = `${m}\u0001${eff}\u0001${t}\u0001${hh}`;
-            const r = canon[key];
-            const qi = queued[key];
-            if (!r && qi) {
-              // Queued but unrun: status cell, never an aggregate. Parked
-              // (not_before) and refused cells say so in the tooltip.
-              const parked = !!qi.notBefore;
-              const live = qi.status === 'Running' ? liveFor(key, m, eff, t, null) : null;
-              const prog = live ? ` trial ${(live.subrun ?? '?')}/${(live.total_subruns ?? '?')}` + (live.turns != null ? ` · ${live.turns}t` : '') : '';
-              const state = qi.status === 'Running' ? `▶ running${prog}` : (parked ? `⏸ ${qi.id}` : `⏳ ${qi.id} · #${qi.pos}`);
-              const tip = `${qi.id} · ${qi.status}` + (parked ? ` · parked until ${qi.notBefore}` : '') + (qi.refusals ? ` · refused ×${qi.refusals}` : '') + (qi.note ? ` · ${qi.note}` : '') + ` · ${qi.trials} planned` + (qi.screening ? ` · screening ≤${qi.screening}` : '') + (live ? ' · live snapshot' : '');
-              const bg = qi.status === 'Running' ? 'rgba(88,166,255,.13)' : 'transparent';
-              cells += `<td style="text-align:center;background:${bg};color:var(--text-muted);font-size:.78rem;" title="${escapeHtml(tip)}">${escapeHtml(state)}</td>`;
-              return;
-            }
-            if (!r) { cells += `<td style="text-align:center;color:var(--text-muted);">— <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="queueRerun('${escapeHtml(m)}','${t}','${eff}', document.getElementById('harnessSelect').value)" title="Queue ${escapeHtml(m)} / ${t} / ${eff}">＋</button></td>`; return; }
-            if (r.poisoned) { cells += `<td style="text-align:center;color:#da3633;" title="Poisoned: infra-killed, not a model verdict — click the cell to inspect, ＋ to rerun clean" style="cursor:pointer;" onclick="inspectRun('${escapeHtml(r.id || '')}')">☠ <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', docHarness(hh))" title="Rerun clean ${escapeHtml(m)} / ${t} / ${eff}">＋</button></td>`; return; }
-
-            const isCap = r.protocol === 'sequential_cap' || (r.solved !== undefined && r.solved !== null);
-            const isSolved = r.solved === true || (!isCap && (r.pass_at_1 ?? r.pass_rate ?? 0) >= 100);
-            const p1 = r.pass_at_1 ?? r.pass_rate ?? 0;
-            const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-            const bg = isSolved ? 'rgba(63,185,80,.18)' : p1 >= 50 ? 'rgba(210,153,34,.15)' : p1 > 0 ? 'rgba(248,81,73,.12)' : 'transparent';
-            const stamp = (r.rules_version || '').split('+')[0] || '';
-            const thin = (!isCap && n < 9) ? ` <button class="btn btn-secondary" style="padding:1px 8px;font-size:.7rem;" onclick="event.stopPropagation(); queueRerun('${escapeHtml(m)}','${t}','${eff}', (r.harness || document.getElementById('harnessSelect').value))" title="Top up trials: ${escapeHtml(m)} / ${t} / ${eff}">＋</button>` : '';
-            const cost = (r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : (r.total_cost_usd || 0);
-            const reQ = queued[key];
-            const liveRun = liveFor(key, m, eff, t, r ? r.id : null);
-            const liveTxt = liveRun ? ` ▶ trial ${(liveRun.subrun ?? '?')}/${(liveRun.total_subruns ?? '?')}` + (liveRun.turns != null ? ` · ${liveRun.turns}t` : '') : '';
-            const reMark = reQ ? ` <span title="${escapeHtml(`${reQ.status}: ${reQ.id}` + (liveRun ? ' · live snapshot' : ''))}">↻${escapeHtml(liveTxt)}</span>` : '';
-            const extQ = (r && r.id && extendMarks[r.id]) || null;
-            const extMark = extQ ? ` <span title="${escapeHtml(`top-up pending: ${extQ.id} (+${extQ.n} trial${extQ.n === 1 ? '' : 's'})`)}">↻+${escapeHtml(String(extQ.n))}</span>` : '';
-            const dqSubs = (r.subruns || []).filter(s => (s.status || '') === 'disqualified_cheat');
-            const faultSubs = (r.subruns || []).filter(s => ['agent_failed', 'agent_killed', 'infra_error'].includes((s.status || '')));
-            const dqMark = dqSubs.length ? ` <span style="color:var(--text-muted);font-size:.72rem;" title="${escapeHtml('excluded from score, retained in record: ' + dqSubs.map(s => s.id).join(', '))}">DQ${dqSubs.length}</span>` : '';
-            const faultMark = faultSubs.length ? ` <span style="color:var(--text-muted);font-size:.72rem;" title="${escapeHtml('harness/agent fault, excluded from score (neutral, not a model failure): ' + faultSubs.map(s => s.id).join(', '))}">⚠${faultSubs.length}</span>` : '';
-            const repLabel = (r.repaired ? '🔧' : '');
-            const cellLabel = isCap ? (isSolved ? `<b style="color:var(--text-pass,#3fb950);">${repLabel}✓${r.solved_at || 1}</b>` : `<span style="color:#f85149;">✗ ${Math.round(r.best_stage_score ?? p1)}%</span>`) : (isSolved && r.repaired ? `🔧${Math.round(p1)}%` : `${Math.round(p1)}%`);
-            const repTip = r.repaired ? ` · repaired via feedback (round ${r.feedback_rounds || 1})` : (r.repair_attempted ? ` · repair attempted (${r.feedback_rounds ?? 0} rounds) but unconverted` : (isSolved && r.repaired === false ? ` · zero-shot pass on attempt 1` : ''));
-            const cellTip = `${r.id || ''} · ${stamp || 'legacy'} · harness ${r.harness || 'omp'}` + (isCap ? ` · capability protocol: solved ${isSolved}${r.solved_at ? ` at trial ${r.solved_at}` : ''} (best stage: ${Math.round(r.best_stage_score ?? p1)}%)` : '') + repTip + ` · ${tierOf(r)} · $${Number(cost).toFixed(4)} · ${r.turns ?? '?'} turns · click to inspect`;
-            cells += `<td style="text-align:center;background:${bg};cursor:pointer;" title="${escapeHtml(cellTip)} — click to explore tasks › trials › trial" onclick="inspectMatrixCell('${escapeHtml(m)}','${escapeHtml(eff)}','${escapeHtml(t)}','${escapeHtml(r.harness || 'omp')}')">${cellLabel} <span style="color:var(--text-muted);font-size:.72rem;">n=${n}</span>${thin}${reMark}${extMark}${dqMark}${faultMark}</td>`;
-            rowSum += p1; rowRun++; if (p1 >= 100) rowFull++;
-            if (isSolved) { rowSolved++; if ((r.solved_at || 1) === 1) rowFirstTry++; }
-            rowCost += (r.effective_cost_usd ?? r.total_cost_usd ?? 0);
-            rowTip.push(`${t}: ${isCap ? (isSolved ? `✓ solved@${r.solved_at || 1}` : `✗ best ${Math.round(r.best_stage_score ?? p1)}%`) : `${Math.round(p1)}%`} (n=${n})`);
-            const cs = colStats[ti];
-            cs.sum += p1; cs.n++;
-            if (isSolved) cs.solved = (cs.solved || 0) + 1;
-            if (p1 > cs.bestV) { cs.bestV = p1; cs.best = m; }
-          });
-          const rowAvg = rowRun ? Math.round(rowSum / rowRun) : 0;
-          const capText = rowSolved ? `${rowSolved}/${tasks.length} solved (${rowFirstTry} 1st-try)` : `${rowFull}/${tasks.length} @100%`;
-          cells += `<td style="font-size:.75rem;white-space:nowrap;" title="${escapeHtml(rowTip.join('\n'))}">${capText} · ${rowAvg}% avg · cov ${rowRun}/${tasks.length} · $${rowCost.toFixed(4)}</td>`;
-          rowCount++; filledCells += rowRun; grandSum += rowSum; grandN += rowRun;
-          tr.innerHTML = cells;
-          tbody.appendChild(tr);
-          });
-        });
-      });
-      if (tfoot) {
-        if (!rowCount) {
-          tfoot.innerHTML = '';
-        } else {
-          const cornerAvg = grandN ? Math.round(grandSum / grandN) : 0;
-          const corner = `<td><div style="display:flex;flex-direction:column;gap:2px;"><span style="font-weight:700;">Column summary</span><span style="font-size:.7rem;color:var(--text-muted);">${rowCount} rows · ${filledCells}/${rowCount * tasks.length} cells · avg ${cornerAvg}%</span></div></td>`;
-          const cols = tasks.map((t, ti) => {
-            const cs = colStats[ti];
-            if (!cs.n) return `<td style="text-align:center;color:var(--text-muted);">—</td>`;
-            const solvePct = Math.round(((cs.solved || 0) / cs.n) * 100);
-            const tip = `${cs.solved || 0}/${cs.n} solved (${solvePct}%) across the ${cs.n} row(s) that ran ${t}; mean P@1 ${Math.round(cs.sum / cs.n)}%`;
-            return `<td style="text-align:center;font-size:.75rem;" title="${escapeHtml(tip)}">${cs.solved || 0}/${cs.n} solved (${solvePct}%)<br><span style="color:var(--text-muted);">${Math.round(cs.sum / cs.n)}% avg · best ${escapeHtml(shortModelName(cs.best))}</span></td>`;
-          }).join('');
-          tfoot.innerHTML = `<tr style="border-top:2px solid var(--border);background:rgba(13,17,23,.5);">${corner}${cols}<td></td></tr>`;
-        }
-      }
-      const nPend = Object.values(queued).filter(x => x.status === 'Pending').length;
-      const nRun = Object.values(queued).filter(x => x.status === 'Running').length;
-      if (badge) badge.textContent = `${models.length} models × ${tasks.length} tasks · ${rowCount} rows · ${filledCells} cells` + (nPend || nRun ? ` · ⏳ ${nPend} queued · ▶ ${nRun} running` : '');
-    }
-
-    function renderTasks() {
-      const badge = document.getElementById('tasksCountBadge');
-      const tbody = document.getElementById('tasksTableBody');
-      if (!tbody) return;
-      const canon = {};
-      boardRows.forEach(r => {
-        if ((r.id || '').startsWith('test_')) return;
-        const key = `${r.model}\u0001${r.effort || 'auto'}\u0001${(r.task || '').toLowerCase()}`;
-        const n = r.total_trials ?? (r.subruns || []).length ?? 1;
-        const ex = canon[key];
-        if (!ex || n > (ex.total_trials ?? 0)) canon[key] = r;
-      });
-      const byTask = {};
-      Object.values(canon).forEach(r => {
-        const t = (r.task || '').toLowerCase();
-        const b = byTask[t] = byTask[t] || { task: t, rows: [] };
-        b.rows.push(r);
-      });
-      const list = Object.values(byTask).map(b => {
-        const avgs = b.rows.map(r => r.avg_pass_rate ?? r.pass_rate);
-        const solvedCount = b.rows.filter(r => r.solved === true || (r.pass_at_1 ?? r.pass_rate ?? 0) >= 100).length;
-        const solveRate = b.rows.length ? Math.round((solvedCount / b.rows.length) * 100) : 0;
-        const mx = Math.max(...avgs), mn = Math.min(...avgs);
-        const best = b.rows[avgs.indexOf(mx)];
-        // Health: identical low scores across models smell like verifier cliff.
-        const uniq = [...new Set(avgs.map(a => Math.round(a)))];
-        const health = (uniq.length === 1 && mx < 50) ? 'verifier cliff? (identical ' + Math.round(mx) + '%)'
-          : (solveRate === 100) ? 'saturates (100% solved)'
-          : (solveRate === 0 && b.rows.length >= 3) ? 'cliff (0% solved)'
-          : (mx - mn > 40 || (solveRate > 0 && solveRate < 100)) ? 'discriminates (' + solveRate + '% solved)' : 'flat-ish';
-        return { task: b.task, n: b.rows.length, best: shortModelName(best.model), bestAvg: mx, spread: mx - mn,
-          avg: avgs.reduce((a, x) => a + x, 0) / avgs.length, solvedCount, solveRate, health };
-      }).sort((a, b) => b.spread - a.spread);
-      if (badge) badge.textContent = `${list.length} tasks`;
-      tbody.innerHTML = '';
-      window._tasksExpanded = window._tasksExpanded || {};
-      // trial lookup per task across canonical parents (embedded subruns).
-      const trialsByTask = {};
-      Object.values(canon).forEach(r => {
-        const tk = (r.task || '').toLowerCase();
-        const arr = trialsByTask[tk] = trialsByTask[tk] || [];
-        (r.subruns || []).forEach(s => arr.push({ trial: s, parent: r }));
-      });
-      list.forEach(t => {
-        const open = !!window._tasksExpanded[t.task];
-        const tkids = trialsByTask[t.task] || [];
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><button class="btn-secondary" style="padding:1px 7px;font-size:0.72rem;" data-task="${escapeHtml(t.task)}" onclick="toggleTasksRow(this.dataset.task)" title="${tkids.length ? 'Show trials' : 'No trial detail'}">${open ? '▾' : '▸'}</button> <span class="badge badge-info">${escapeHtml(t.task)}</span> <span style="color:var(--text-muted);font-size:.72rem;">${tkids.length} trials</span></td>
-          <td style="text-align:center;">${t.n}</td>
-          <td style="text-align:center;">${t.solvedCount}/${t.n} <span style="color:var(--text-muted);font-size:.72rem;">(${t.solveRate}%)</span></td>
-          <td>${escapeHtml(t.best)} <span style="color:var(--text-muted);font-size:.75rem;">(${Math.round(t.bestAvg)}%)</span></td>
-          <td style="text-align:center;">${Math.round(t.spread)}pp</td>
-          <td style="text-align:center;">${Math.round(t.avg)}%</td>
-          <td style="font-size:.75rem;">${escapeHtml(t.health)}</td>`;
-        tbody.appendChild(tr);
-        if (open) {
-          const cr = document.createElement('tr');
-          const shown = tkids.slice(0, 200);
-          cr.innerHTML = `<td colspan="7" style="padding:6px 6px 6px 28px;background:rgba(0,0,0,0.2);">`
-            + `<div style="display:flex;gap:6px;flex-wrap:wrap;">`
-            + shown.map(({ trial: s, parent: r }) => {
-              const ok = (s.pass_rate || 0) >= 100;
-              const tip = `${s.id || ''} · ${r.model || ''} · ${r.effort || 'auto'} · harness ${r.harness || 'omp'} · ${Math.round(s.pass_rate || 0)}% (click to inspect)`;
-              return `<button class="btn-secondary" style="padding:2px 9px;font-size:0.7rem;border-color:${ok ? 'rgba(63,185,80,.4)' : 'rgba(248,81,73,.4)'};" data-trial="${escapeHtml(s.id || '')}" title="${escapeHtml(tip)}" onclick="inspectRun(this.dataset.trial)">${escapeHtml((s.id || '').slice(-8))} ${ok ? '✔' : '✕'}</button>`;
-            }).join('')
-            + (tkids.length > shown.length ? `<span style="color:var(--text-muted);font-size:0.72rem;">+${tkids.length - shown.length} more (open a parent run to page)</span>` : '')
-            + `</div></td>`;
-          tbody.appendChild(cr);
-        }
-      });
-    }
-
-    function toggleTasksRow(task) {
-      window._tasksExpanded = window._tasksExpanded || {};
-      window._tasksExpanded[task] = !window._tasksExpanded[task];
-      renderTasks();
-    }
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    function toggleLbRow(key) {
-      window._lbExpanded = window._lbExpanded || {};
-      window._lbExpanded[key] = !window._lbExpanded[key];
-      renderLeaderboard();
-    }
-
-    function toggleHiddenRuns(show) {
-      showHiddenRuns = show;
-      renderRuns();
-    }
-    // fmtTp / tierOf / iqr / fmtIqr live in shared.js (single source: the GUI
-    // and the static portal import the same leaf helpers).
-    let boardTier = 'all';
-    function setBoardTier(v) {
-      boardTier = v;
-      for (const id of ['lbTierSelect', 'modelsTierSelect']) {
-        const el = document.getElementById(id);
-        if (el) el.value = v;
-      }
-      renderLeaderboard();
-      renderModels();
-    }
-    // Inter-quartile range + formatter come from shared.js.
-
-
-
-
-    function renderRuns() {
-      const q = currentRunsFilter;
-      const runs = allRunsCache.filter(r => {
-        if ((r.portal_hidden || r.poisoned) && !showHiddenRuns) return false;
-        if (!q) return true;
-        const text = `${r.run_id} ${r.model} ${r.task} ${r.language} ${r.status} ${r.effort || ''}`.toLowerCase();
-        return text.includes(q);
-      });
-
-      const badge = document.getElementById('runsCountBadge');
-      if (badge) badge.textContent = `${runs.length} ${runs.length === 1 ? 'run' : 'runs'}`;
-
-      const tbody = document.getElementById('runsTableBody');
-      const cardsContainer = document.getElementById('runsCardsView');
-
-      if (runs.length === 0) {
-        let emptyMsg;
-        let emptyColor = 'var(--text-muted)';
-        if (runsFetchState === 'error') {
-          emptyMsg = `Runs unavailable (offline or server error${runsFetchError ? `: ${runsFetchError}` : ''}). Showing last good data.`;
-          emptyColor = '#ff7b72';
-        } else if (runsFetchState === 'loading') {
-          emptyMsg = 'Loading runs...';
-        } else if (allRunsCache.length === 0) {
-          emptyMsg = 'No archived runs found in runs/.';
-        } else {
-          emptyMsg = `No runs matched search query "${q}".`;
-        }
-        if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: ${emptyColor}; padding: 24px;">${escapeHtml(emptyMsg)}</td></tr>`;
-        if (cardsContainer) cardsContainer.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: ${emptyColor}; padding: 24px;">${escapeHtml(emptyMsg)}</div>`;
-        return;
-      }
-
-      if (tbody) tbody.innerHTML = '';
-      if (cardsContainer) cardsContainer.innerHTML = '';
-
-      runs.forEach(r => {
-        const tp = formatThroughput(r.throughput_req_sec, r.task);
-        const passBadge = r.pass_rate === 100 
-          ? `<span class="badge badge-pass">✔ 100% (${r.passed_stages}/${r.total_stages})</span>` 
-          : `<span class="badge badge-fail">✕ ${Math.round(r.pass_rate)}% (${r.passed_stages}/${r.total_stages})</span>`;
-        const safeModel = escapeHtml(r.model);
-        const safeTask = escapeHtml(r.task);
-        const safeLanguage = escapeHtml(r.language);
-        const safeEffort = escapeHtml(r.effort || 'high');
-        const effBadge = `<span class="badge badge-effort">effort: ${safeEffort}</span> <span class="badge" title="Agent harness (ranks never mix harnesses)">harness: ${escapeHtml(r.harness || 'omp')}</span>`;
-        const pubBadge = r.portal_hidden 
-          ? `<span class="badge" style="background:#6e7681;color:#fff;font-size:0.72rem;padding:2px 8px;">Hidden</span>` 
-          : `<span class="badge" style="background:#238636;color:#fff;font-size:0.72rem;padding:2px 8px;">Portal</span>`;
-
-        const dateStr = formatTimestamp(r.started_at || r.completed_at);
-        const durationStr = formatDuration(r.duration_seconds);
-        const tokensStr = r.tokens ? `${(r.tokens.total_tokens / 1000).toFixed(1)}k tokens` : 'N/A';
-        const shortId = r.run_id.length > 14 ? r.run_id.slice(-8) : r.run_id;
-
-        // 1. Table row
-        const meta = getModelMeta(r.model);
-        if (tbody) {
-          const tr = document.createElement('tr');
-          tr.style.borderLeft = `4px solid ${meta.color}`;
-          tr.style.background = `linear-gradient(90deg, ${meta.bg} 0%, rgba(22, 27, 34, 0.5) 15%, transparent 100%)`;
-          tr.innerHTML = `
-            <td>
-              <div style="display: flex; flex-direction: column; gap: 4px;">
-                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
-                    <span class="model-icon" title="${meta.family}">${meta.icon}</span>
-                    <span title="${safeModel}" style="font-weight: 600; color: ${meta.color}; font-size: 0.88rem;">${escapeHtml(shortModelName(r.model))}</span>
-                  </div>
-                  <span class="badge badge-info">${safeTask}</span>
-                  <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
-                </div>
-                <div style="display: flex; align-items: center; gap: 8px; font-size: 0.72rem; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">
-                  <span>${dateStr}</span>
-                  <span>·</span>
-                  <span title="${escapeHtml(r.run_id)}" style="cursor: pointer; text-decoration: underline dotted;" data-run-id="${escapeHtml(r.run_id)}" onclick="copySpecificText(this.dataset.runId, this, 'Copied ID!')">
-                    id: ...${escapeHtml(shortId)} 📋
-                  </span>
-                  <span>·</span>
-                  <span>${durationStr}</span>
-                  ${(r.turns !== undefined && r.turns !== null) ? `<span>·</span><span>${r.turns} turns</span>` : ''}
-                </div>
-              </div>
-            </td>
-            <td>
-              <div style="display: flex; flex-direction: column; gap: 4px;">
-                <div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
-                  ${passBadge}
-                  ${r.repaired ? `<span class="badge" style="background: rgba(56, 139, 253, 0.15); color: #58a6ff; font-size: 0.7rem;" title="Repaired via interactive feedback (round ${r.feedback_rounds || 1})">🔧 Repaired (${r.feedback_rounds || 1})</span>` : (r.pass_rate === 100 && r.repaired === false ? `<span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success); font-size: 0.7rem;" title="Zero-shot 100% on initial attempt">🎯 Zero-shot</span>` : '')}
-                </div>
-                <div>${effBadge}</div>
-                ${(() => { const subs = r.subruns || []; return subs.length ? `<span class="badge" style="background: rgba(210,168,255,0.15); color: #d2a8ff; font-size: 0.7rem;" title="Trial outcomes: ${subs.map(k => Math.round(k.pass_rate) + '%').join(' / ')}">📦 ${subs.length} subruns</span>` : ''; })()}
-              </div>
-            </td>
-            <td>
-              <div style="display: flex; flex-direction: column; gap: 2px;">
-                <div>
-                  <div><span style="font-size: 0.7rem; color: var(--text-muted);">API</span> <span style="font-weight: 600; font-size: 0.85rem;">$${r.cost_usd.toFixed(4)}</span></div><div><span style="font-size: 0.7rem; color: var(--text-muted);">Effective</span> <span style="font-weight: 600; color: var(--accent); font-size: 0.88rem;">$${((r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.cost_usd).toFixed(4)}</span></div>
-                  ${(r.effective_cost_usd !== undefined && r.effective_cost_usd !== null && Math.abs(r.effective_cost_usd - r.cost_usd) > 0.00001) ? `<span style="font-size: 0.7rem; color: var(--text-muted);" title="Model API Spend">(API: $${r.cost_usd.toFixed(4)})</span>` : ''}
-                </div>
-                <span style="font-size: 0.72rem; color: var(--text-muted);">${tokensStr}</span>
-              </div>
-            </td>
-            <td>
-              <div style="display: flex; flex-direction: column; gap: 2px;">
-                <span style="font-weight: 700; color: var(--primary); font-size: 0.95rem;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)} <span style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">pts/¢</span></span>
-                ${(r.throughput_score !== undefined && r.throughput_score !== null && Math.abs(r.throughput_score - r.efficiency_score) > 0.1 && r.pass_rate >= 100) ? `<span style="font-size: 0.7rem; color: var(--text-muted);">(base: ${r.efficiency_score.toFixed(1)})</span>` : ''}
-                ${(r.total_trials && r.total_trials > 1) ? `<span style="font-size: 0.7rem; color: #d2a8ff;" title="Trial outcomes: ${((r.subruns || []).map(t => Math.round(t.pass_rate) + '%').join(' / ') || 'n/a')}">📦 ${r.total_trials} trials (Fair)${(r.pass_at_1 !== undefined && r.pass_at_1 !== null) ? ` • P@1 ${Math.round(r.pass_at_1)}%${(r.pass_at_1_lo !== undefined && r.pass_at_1_lo !== null && r.pass_at_1_hi !== undefined && r.pass_at_1_hi !== null) ? ` (${Math.round(r.pass_at_1_lo)}–${Math.round(r.pass_at_1_hi)})` : ''}` : ''}${(r.avg_pass_rate !== undefined && r.avg_pass_rate !== null) ? ` • avg ${Math.round(r.avg_pass_rate)}%` : ''}${(r.stability !== undefined && r.stability !== null) ? ` • ${r.stability === 'stable' ? '🟢' : r.stability === 'watch' ? '🟡' : '🔴'} ${r.stability}` : ''}</span>` : ''}
-                <span style="font-size: 0.72rem; color: var(--text-muted);">${tp}</span>
-              </div>
-            </td>
-            <td style="text-align: right;">
-              <div style="display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap;">
-                <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; white-space: nowrap;" data-run-id="${escapeHtml(r.run_id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
-                
-                ${(r.total_trials > 1 && r.stability && r.stability !== 'stable') ? `<button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="extendRun(this.dataset.runId)" title="Run 3 more trials and re-merge">＋ Extend</button>` : ''}
-                ${pubBadge}
-              </div>
-            </td>
-          `;
-          tbody.appendChild(tr);
-        }
-
-        // 2. Cards element
-        if (cardsContainer) {
-          const card = document.createElement('div');
-          card.style.cssText = `background: #161b22; border: 1px solid var(--border); border-left: 4px solid ${meta.color}; border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px;`;
-          card.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
-              <div>
-                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <div class="model-pill" style="background: ${meta.bg}; border: 1px solid ${meta.border};">
-                    <span class="model-icon" title="${meta.family}">${meta.icon}</span>
-                    <span title="${safeModel}" style="font-weight: 600; color: ${meta.color}; font-size: 0.9rem;">${escapeHtml(shortModelName(r.model))}</span>
-                  </div>
-                  <span class="badge badge-info">${safeTask}</span>
-                  <span class="badge" style="background: rgba(63, 185, 80, 0.15); color: var(--success);">${safeLanguage}</span>
-                </div>
-                <div style="font-size: 0.72rem; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 3px;">
-                  ${dateStr} · <span title="${escapeHtml(r.run_id)}" style="cursor: pointer;" data-run-id="${escapeHtml(r.run_id)}" onclick="copySpecificText(this.dataset.runId, this, 'Copied!')">...${escapeHtml(shortId)} 📋</span> · ${durationStr}
-                </div>
-              </div>
-              <div style="display: flex; gap: 6px; align-items: center;">
-                <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="inspectRun(this.dataset.runId)">🔍 Inspect</button>
-                
-              ${(r.total_trials > 1 && r.stability && r.stability !== 'stable') ? `<button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" data-run-id="${escapeHtml(r.run_id)}" onclick="extendRun(this.dataset.runId)" title="Run 3 more trials and re-merge">＋ Extend</button>` : ''}
-              </div>
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; background: #090d13; padding: 8px; border-radius: 6px; text-align: center;">
-              <div>
-                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Pass Rate</div>
-                <div style="font-weight: 600; font-size: 0.78rem; margin-top: 2px;">
-                  ${r.pass_rate}% (${r.passed_stages}/${r.total_stages})
-                  ${r.repaired ? `<br><span style="font-size:0.68rem; color:#58a6ff;">🔧 Repaired (${r.feedback_rounds || 1})</span>` : (r.pass_rate === 100 && r.repaired === false ? `<br><span style="font-size:0.68rem; color:var(--success);">🎯 Zero-shot</span>` : '')}
-                </div>
-              </div>
-              <div>
-                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Score / ¢</div>
-                <div style="font-weight: 700; color: var(--primary); font-size: 0.85rem; margin-top: 2px;">${(r.throughput_score !== undefined && r.throughput_score !== null ? r.throughput_score : r.efficiency_score).toFixed(1)}</div>
-              </div>
-              <div>
-                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">API / Eff Cost</div>
-                <div style="font-weight: 600; font-size: 0.78rem; margin-top: 2px;">API $${r.cost_usd.toFixed(4)}</div><div style="font-weight: 600; color: var(--accent); font-size: 0.78rem;">Eff $${((r.effective_cost_usd !== undefined && r.effective_cost_usd !== null) ? r.effective_cost_usd : r.cost_usd).toFixed(4)}</div>
-              </div>
-              <div>
-                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;">Throughput</div>
-                <div style="font-weight: 600; font-size: 0.78rem; margin-top: 2px;">${tp}</div>
-              </div>
-            </div>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>${effBadge}</div>
-              <div>${pubBadge}</div>
-            </div>
-          `;
-          cardsContainer.appendChild(card);
-        }
-      });
-    }
-
-
 
     let currentInspectLogRaw = '';
     let currentInspectFiles = [];
@@ -4358,7 +3282,7 @@ function copyRunId() {
     }
 
     async function refreshAfterRunMutation() {
-      try { await loadRuns(); } catch (e) { console.error(e); }
+      try { await refreshBoard(); } catch (e) { console.error(e); }
     }
 
     function updatePortalModalBadge() {
@@ -4446,7 +3370,7 @@ function copyRunId() {
       section.style.display = 'none';
       body.innerHTML = '';
       try {
-        let cache = (typeof allRunsCache !== 'undefined' && allRunsCache.length) ? allRunsCache : null;
+        let cache = null;
         if (!cache) {
           const res = await fetch('/api/runs');
           if (!res.ok) return;
@@ -4601,270 +3525,6 @@ function copyRunId() {
     // Cursors are per-view: switching views re-syncs that view from scratch.
     let consoleWorkerFilter = 'all';
     let consoleCursors = { all: 0 };
-    function setConsoleWorkerFilter(f) {
-      consoleWorkerFilter = f;
-      if (!(f in consoleCursors)) consoleCursors[f] = 0;
-      consoleSynced = false;
-      reseedSeen([]);
-      fetchConsoleLogs(true);
-    }
-    function renderConsoleWorkerTabs(workers) {
-      const box = document.getElementById('consoleWorkerTabs');
-      if (!box || !logsShown()) { if (box) box.style.display = 'none'; return; }
-      const ids = Object.keys(workers || {}).sort();
-      // Keep the selected tab even after its worker finishes (buffer
-      // persists until the slot is reused); drop nothing silently.
-      const want = ['all', ...ids];
-      if (!want.includes(consoleWorkerFilter)) consoleWorkerFilter = 'all';
-      if (!ids.length && consoleWorkerFilter === 'all') { box.style.display = 'none'; box.innerHTML = ''; return; }
-      box.style.display = 'flex';
-      box.innerHTML = '<span class="hint" style="font-size: 0.72rem;">worker:</span>' + want.map(w => {
-        const label = w === 'all' ? 'All' : ('W' + w);
-        const on = w === consoleWorkerFilter;
-        return `<button class="btn-secondary" style="padding:2px 10px;font-size:0.72rem;${on ? 'border-color:var(--primary);color:#fff;' : ''}" onclick="setConsoleWorkerFilter('${w}')">${label}</button>`;
-      }).join('');
-    }
-
-    // Max rendered rows in the terminal. The server caps its buffer at 3000;
-    // the DOM keeps a smaller window (800) so long runs stay smooth.
-    const MAX_RENDERED_LINES = 800;
-    // Render dedup: two feeds write to this terminal (SSE appends live lines,
-    // the 2s poll appends deltas; in GUI-proxy mode /api/stream is a one-shot
-    // snapshot that reconnects and replays). Both paths check this set so a
-    // line renders once even when both feeds deliver it. Keyed by content
-    // hash; server lines carry timestamps so legit repeats stay distinct.
-    const seenLineHashes = new Set();
-    const seenLineOrder = [];
-    function lineHash(s) {
-      let h = 5381;
-      for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-      return h + ':' + s.length;
-    }
-    function isNewLine(line) {
-      const h = lineHash(line);
-      if (seenLineHashes.has(h)) return false;
-      seenLineHashes.add(h);
-      seenLineOrder.push(h);
-      if (seenLineOrder.length > 5000) seenLineHashes.delete(seenLineOrder.shift());
-      return true;
-    }
-    function reseedSeen(lines) {
-      seenLineHashes.clear();
-      seenLineOrder.length = 0;
-      for (const l of lines) {
-        const h = lineHash(l);
-        if (!seenLineHashes.has(h)) {
-          seenLineHashes.add(h);
-          seenLineOrder.push(h);
-        }
-      }
-      while (seenLineOrder.length > 5000) seenLineHashes.delete(seenLineOrder.shift());
-    }
-    function trimTerminal(term) {
-      let over = term.childElementCount - MAX_RENDERED_LINES;
-      while (over-- > 0 && term.firstChild) term.removeChild(term.firstChild);
-    }
-    function appendConsoleLines(lines) {
-      const fresh = lines.filter(isNewLine);
-      if (!fresh.length) return;
-      const term = document.getElementById('terminalOutput');
-      const wrap = document.createElement('div');
-      wrap.innerHTML = renderLines(fresh);
-      // At most one WAITING line may exist in the DOM: drop all stale ones,
-      // then let the batch's (single, collapsed) line append normally.
-      const freshWaiting = wrap.querySelector('.ln-waiting');
-      if (freshWaiting) {
-        term.querySelectorAll('.ln-waiting').forEach(el => el.remove());
-      }
-      while (wrap.firstChild) term.appendChild(wrap.firstChild);
-      trimTerminal(term);
-      scrollTerm();
-    }
-
-    function renderConsoleBody(term, body) {
-      const lines = body.split('\n');
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].includes('[TELEMETRY]') || lines[i].includes('[LIVE]')) {
-          parseTelemetryLine(lines[i]);
-          break;
-        }
-      }
-      let filtered = lines.filter(l => !l.includes('[TELEMETRY]'));
-      if (!showCodeDetails) {
-        filtered = filtered.filter(l => !l.includes('  | ') && !l.includes('  | ...'));
-      }
-      return filtered;
-    }
-
-    async function fetchConsoleLogs(force = false) {
-      if (isFetchingConsole) return;
-      if (!logsShown() && !force) return;
-      isFetchingConsole = true;
-      try {
-        const term = document.getElementById('terminalOutput');
-        // Fresh snapshot (manual refresh or first paint): render capped tail.
-        if (force || !consoleSynced) {
-          const wq = consoleWorkerFilter === 'all' ? '' : `&worker=${encodeURIComponent(consoleWorkerFilter)}`;
-          const res = await fetch(`/api/console?tail=800${wq}`);
-          if (res.ok) {
-            const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
-            const body = await res.text();
-            if (body.trim()) {
-              const fresh = body.split('\n');
-              reseedSeen(fresh);
-              term.innerHTML = renderLines(renderConsoleBody(term, body));
-            } else {
-              term.innerHTML = '';
-            }
-            consoleKnownLines = total;
-            consoleCursors[consoleWorkerFilter] = total;
-            consoleSynced = true;
-            scrollTerm();
-          }
-        } else {
-          // Steady state: append only lines newer than the cursor.
-          const wq = consoleWorkerFilter === 'all' ? '' : `&worker=${encodeURIComponent(consoleWorkerFilter)}`;
-          const res = await fetch(`/api/console?since=${consoleKnownLines}${wq}`);
-          if (res.ok) {
-            const total = parseInt(res.headers.get('X-Console-Total') || '0', 10);
-            const text = await res.text();
-            // Server resends the capped tail when the cursor is stale
-            // (trim/restart/desync): re-render, then resume deltas.
-            if (text && total > 0 && total - consoleKnownLines > 800) {
-              reseedSeen(text.split('\n'));
-              term.innerHTML = renderLines(renderConsoleBody(term, text));
-            } else if (text.trim()) {
-              appendConsoleLines(renderConsoleBody(term, text));
-            }
-            consoleKnownLines = total;
-            consoleCursors[consoleWorkerFilter] = total;
-          }
-        }
-          const badge = document.getElementById('consolePulseBadge');
-          const pText = document.getElementById('consolePulseText');
-          if (badge && pText) {
-            badge.style.display = 'inline-flex';
-            pText.textContent = activeEventSource ? 'Live Stream Connected' : 'Auto-Sync Active';
-          }
-      } catch (e) {
-        console.warn('Console fetch error:', e);
-      } finally {
-        isFetchingConsole = false;
-      }
-    }
-
-    function manualRefreshConsole() {
-      if (!logsShown()) {
-        localStorage.setItem('sdb_show_logs', '1');
-        applyLogsVisible();
-      }
-      fetchConsoleLogs(true);
-    }
-    // Raw log stream is hidden by default (too much); worker cards +
-    // telemetry carry the signal. Shown only on request, choice persists.
-    function logsShown() { return localStorage.getItem('sdb_show_logs') === '1'; }
-    function applyLogsVisible() {
-      const show = logsShown();
-      const term = document.getElementById('terminalOutput');
-      const tabs = document.getElementById('consoleWorkerTabs');
-      const btn = document.getElementById('logsToggleBtn');
-      if (term) term.style.display = show ? '' : 'none';
-      if (tabs) tabs.style.display = show ? 'flex' : 'none';
-      if (btn) btn.textContent = show ? '🧾 Hide logs' : '🧾 Show logs';
-    }
-    function toggleLogsVisible() {
-      const show = localStorage.getItem('sdb_show_logs') !== '1';
-      localStorage.setItem('sdb_show_logs', show ? '1' : '0');
-      applyLogsVisible();
-      if (show) {
-        const auto = document.getElementById('autoRefreshCheck');
-        if (auto && auto.checked) toggleAutoRefresh(true);
-        attachLogStream();
-        fetchConsoleLogs(true);
-      } else {
-        if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
-        if (activeEventSource) {
-          try { activeEventSource.close(); } catch (e) {}
-          activeEventSource = null;
-        }
-      }
-    }
-
-    function toggleAutoRefresh(enabled) {
-      if (autoRefreshTimer) {
-        clearInterval(autoRefreshTimer);
-        autoRefreshTimer = null;
-      }
-      if (enabled) {
-        autoRefreshTimer = setInterval(() => {
-          fetchConsoleLogs(false);
-        }, 2000);
-      }
-    }
-
-    let activeEventSource = null;
-    function fmtElapsed(ms) {
-      const s = Math.max(0, Math.floor(ms / 1000));
-      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-      const p = n => String(n).padStart(2, '0');
-      return (h > 0 ? h + ':' : '') + p(m) + ':' + p(ss);
-    }
-    function tickWorkerElapsed() {
-      const now = Date.now();
-      document.querySelectorAll('.wElapsed').forEach(el => {
-        const t = Date.parse(el.dataset.started || '');
-        el.textContent = isNaN(t) ? '-' : fmtElapsed(now - t);
-      });
-    }
-    setInterval(tickWorkerElapsed, 1000);
-
-    let lastStreamAttach = 0;
-    function attachLogStream() {
-      const now = Date.now();
-      if (!logsShown()) return;
-      if (activeEventSource || now - lastStreamAttach < 5000) return;
-      // GUI-proxy mode: /api/stream is a one-shot snapshot, not a live feed
-      // (re-attaching replays it = duplicate terminal lines). The 2s poll
-      // owns the terminal there; skip EventSource entirely.
-      if (window.__sdbProxy) return;
-      lastStreamAttach = now;
-      activeEventSource = new EventSource('/api/stream');
-      const badge = document.getElementById('consolePulseBadge');
-      const pText = document.getElementById('consolePulseText');
-      if (badge && pText) {
-        badge.style.display = 'inline-flex';
-        pText.textContent = 'Live Stream Connected';
-      }
-
-      activeEventSource.onmessage = (event) => {
-        if (event.data === '[DONE]') {
-          appendLog('\n[COMPLETED] Benchmark run finished.');
-          stopElapsedTimer();
-          try { activeEventSource.close(); } catch(e) {}
-          activeEventSource = null;
-          if (pText) pText.textContent = 'Completed';
-          resetStatus();
-          renderRunningSetup(null);
-          checkActiveRun();
-          loadRuns();
-        } else {
-          if (consoleWorkerFilter !== 'all') return;
-          appendLog(event.data);
-        }
-      };
-
-      activeEventSource.onerror = () => {
-        const pText = document.getElementById('consolePulseText');
-        if (pText) pText.textContent = 'Auto-Sync Active';
-        fetchConsoleLogs(false);
-        setTimeout(checkActiveRun, 2500);
-      };
-    }
-
-
-    // =========================================================================
-    // Stop Benchmark Run
-    // =========================================================================
     async function stopRun() {
       if (!confirm('Are you sure you want to stop the currently running benchmark?')) return;
       const stopBtn = document.getElementById('stopBtn');
@@ -4938,10 +3598,6 @@ function copyRunId() {
           }
           liveTelemetry.isRunning = true;
           updateTelemetryDisplay();
-          fetchConsoleLogs(false);
-          if (!activeEventSource) {
-            attachLogStream();
-          }
         } else {
           if (liveTelemetry.isRunning) {
             stopElapsedTimer();
@@ -5061,50 +3717,6 @@ function copyRunId() {
       return h;
     }
 
-    async function queueRerun(model, task, effort, harness) {
-      if (!authed && !(((document.getElementById('uiToken') || {}).value || '').trim())) {
-        alert('Sign in first (or paste the UI Token in Setup).');
-        return;
-      }
-      const selHarness = ((document.getElementById('harnessSelect') || {}).value || 'omp');
-      const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : true;
-      const feedbackRepair = document.getElementById('feedbackRepair') ? document.getElementById('feedbackRepair').checked : true;
-      const feedbackRounds = feedbackRepair ? (parseInt((document.getElementById('feedbackRounds') || {}).value, 10) || 2) : 0;
-      const payload = {
-        model, task, effort,
-        harness: harness || selHarness,
-        api_key: null, // server .env key bills the run
-        budget_usd: parseFloat((document.getElementById('budget') || {}).value) || 1.00,
-        max_turns: parseInt((document.getElementById('turns') || {}).value, 10) || 100,
-        timeout_min: parseInt((document.getElementById('timeout_min') || {}).value, 10) || 120,
-        trials: stopOnPass ? 3 : 9, eval_only: false,
-        stop_on_pass: stopOnPass,
-        protocol: stopOnPass ? 'sequential_cap' : null,
-        feedback_rounds: feedbackRounds,
-        extend_if_unstable: false, max_trials: stopOnPass ? 5 : 9,
-        review_model: (document.getElementById('reviewModel') || {}).value || null
-      };
-      try {
-        const res = await fetch('/api/queue', {
-          method: 'POST',
-          headers: authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) {
-          if (res.status === 401) {
-            authed = false;
-            alert('Not signed in (server restarts clear sessions) — sign in first (or paste the UI Token in Setup), then retry.');
-            checkAuth();
-            return;
-          }
-          alert('Queue refused: ' + await res.text()); return;
-        }
-        const data = await res.json();
-        alert('Queued ' + data.id + ' (' + model.split('/').pop() + ' / ' + task + ' / ' + effort + ') — ' + (data.started ? 'started now' : 'position ' + (data.position ?? '?')));
-        ensureBoardData(true).then(() => refreshMatrixLive()).then(() => renderMatrix());
-      } catch (e) { alert('Queue error: ' + e.message); }
-    }
-
     async function refreshQueue() {
       const list = document.getElementById('queueList');
       const count = document.getElementById('queueCount');
@@ -5174,8 +3786,7 @@ function copyRunId() {
           return;
         }
 
-        switchTab('console');
-        clearConsole();
+        switchTab('live');
         appendLog(`[INIT] Starting benchmark for ${model} (Effort: ${effort}, Subruns: ${trials}) on task '${task}'...`);
         liveTelemetry.turns = 0;
         liveTelemetry.maxTurns = turns;
@@ -5185,7 +3796,6 @@ function copyRunId() {
         liveTelemetry.totalSubruns = trials;
         liveTelemetry.durationSecs = null;
         startElapsedTimer(Date.now());
-        attachLogStream();
         if (startBtn) startBtn.disabled = false;
         checkActiveRun();
 
@@ -5223,9 +3833,6 @@ function copyRunId() {
     const initialSavedTask = 'sql';
     onTaskChange(initialSavedTask);
     // Log traffic only when the log view is visible (default hidden).
-    if (logsShown()) toggleAutoRefresh(true);
-
-    setRunsViewMode(currentRunsView);
     setPromptViewMode(currentPromptViewMode);
     checkActiveRun();
 
@@ -5347,7 +3954,7 @@ function copyRunId() {
     setInterval(() => { checkActiveRun(); refreshQueue(); checkBreaker(); }, 5000);
     setInterval(() => {
       const t = document.getElementById('tab-campaigns');
-      if (t && t.style.display !== 'none') refreshCampaigns();
+      if (t && t.style.display !== 'none') refreshBoard();
     }, 4000);
 
     async function checkBreaker() {
@@ -5360,15 +3967,10 @@ function copyRunId() {
         // log traffic at all while logs are hidden; fall back to the status
         // flag with a generic reason instead.
         let text = '';
-        if (logsShown()) {
-          const cres = await fetch('/api/console?tail=50');
-          text = cres.ok ? await cres.text() : '';
-        } else {
-          try {
-            const sres = await fetch('/api/status');
-            if (sres.ok && (await sres.json()).queue_paused) text = '[BREAKER] Queue paused: billing (details in logs)';
-          } catch (e) { /* status already polled elsewhere; ignore */ }
-        }
+        try {
+          const sres = await fetch('/api/status');
+          if (sres.ok && (await sres.json()).queue_paused) text = '[BREAKER] Queue paused: billing (details in logs)';
+        } catch (e) { /* status already polled elsewhere; ignore */ }
         const banner = document.getElementById('breakerBanner');
         if (!banner) return;
         const m = text.match(/\[BREAKER\] Queue paused: ([^\n]+)/);
@@ -5392,11 +3994,9 @@ function copyRunId() {
       if (res.ok) { checkBreaker(); refreshQueue(); }
       else alert('Resume failed');
     }
-    setInterval(() => { loadRuns(); }, 30000);
-    loadRuns();
+    setInterval(() => { refreshBoard(); }, 4000);
+    loadRulesVersion().then(() => { applyHash(); refreshBoard(); });
     refreshQueue();
-    applyLogsVisible();
-    if (!logsShown() && autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
     fetchOmpStatus();
     fetchOpencodeStatus();
     fetchIntegrity();

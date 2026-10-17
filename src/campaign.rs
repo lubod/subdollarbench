@@ -633,6 +633,19 @@ pub struct FailureSummary {
     pub stderr_tail: Option<String>,
 }
 
+/// `"5 of 6 stages passed (83.3%)"` -> `(5, 6)`.
+fn parse_of_rest(rest: &str) -> Option<(u32, u32)> {
+    let (p, t) = rest.split_once(" of ")?;
+    let passed = p.trim().parse::<u32>().ok()?;
+    let total = t
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    Some((passed, total))
+}
+
 fn truncate_line(s: &str, n: usize) -> String {
     let line = s.lines().next().unwrap_or("").trim().to_string();
     if line.chars().count() <= n {
@@ -646,14 +659,23 @@ fn truncate_line(s: &str, n: usize) -> String {
 /// The first stderr-looking error line of a candidate log tail, with its
 /// `File "...", line N` context when present (`IndentationError server.py:101`).
 fn first_error_line(tail: &str) -> Option<String> {
-    let lines: Vec<&str> = tail.lines().map(str::trim).collect();
+    let strip = |l: &str| -> String {
+        // Console lines carry a `[HH:MM:SS] ` prefix and `| ` continuation.
+        let l = l.trim();
+        let l = match l.strip_prefix('[') {
+            Some(rest) => rest.split_once("] ").map(|(_, r)| r).unwrap_or(l),
+            None => l,
+        };
+        l.trim().trim_start_matches('|').trim().to_string()
+    };
+    let lines: Vec<String> = tail.lines().map(strip).collect();
     for (i, line) in lines.iter().enumerate() {
         if !line.contains("Error:") {
             continue;
         }
         // `File "/app/./server.py", line 101` on the line just above.
         let place = lines[..i].iter().rev().find_map(|l| {
-            let l = l.trim_start_matches('|').trim();
+            let l = l.as_str();
             let rest = l.strip_prefix("File \"")?;
             let file = rest.split('"').next()?;
             let line_no = rest.split("line ").nth(1)?.trim();
@@ -663,7 +685,7 @@ fn first_error_line(tail: &str) -> Option<String> {
                 .unwrap_or_else(|| file.to_string());
             Some(format!("{base}:{line_no}"))
         });
-        let msg = line.trim_start_matches('|').trim();
+        let msg = line.as_str();
         return Some(match place {
             Some(p) => format!("{p}: {msg}"),
             None => msg.to_string(),
@@ -846,28 +868,93 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
                 });
             }
         } else if let Some(m) = &manifest {
-            // A manifest from before rounds existed: one derived round
-            // carrying its final results.
+            // A manifest from before rounds existed. The stage console.log
+            // still carries each round's score ("Initial attempt passed 5
+            // of 6", "Round 1 test result: 2 of 6"); recover the rounds
+            // from it, then classify the final round from the manifest's
+            // stage results.
             let stages = stages_of(m);
-            let failure = classify_failure(id, &was_green, &stages, agent_failed, false, None);
-            let rec = &rollup.stages[i];
-            rounds.push(RoundRecord {
-                round: 0,
-                passed_stages: m["passed_stages"]
-                    .as_u64()
-                    .map(|v| v as u32)
-                    .unwrap_or(rec.passed_stages),
-                total_stages: m["total_stages"]
-                    .as_u64()
-                    .map(|v| v as u32)
-                    .unwrap_or(rec.total_stages),
-                turns: m["turns"].as_u64().map(|v| v as u32).or(rec.turns),
-                cost_usd: 0.0,
-                duration_seconds: m["duration_seconds"].as_f64().or(rec.duration_seconds),
-                git_commit: None,
-                failure,
-                derived: true,
-            });
+            let console = std::fs::read_to_string(
+                campaign_dir
+                    .join(format!("s{id}_{variant}"))
+                    .join("console.log"),
+            )
+            .unwrap_or_default();
+            // The console tail is the best stderr evidence an old cell has
+            // (the manifest predates candidate_logs_tail).
+            let console_tail: String = console
+                .lines()
+                .rev()
+                .take(20)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let final_failure = classify_failure(
+                id,
+                &was_green,
+                &stages,
+                agent_failed,
+                false,
+                (!console_tail.trim().is_empty()).then_some(console_tail.as_str()),
+            );
+            let mut scores: Vec<(u32, u32, u32)> = Vec::new();
+            for line in console.lines() {
+                let Some(at) = line.find("[FEEDBACK] ") else {
+                    continue;
+                };
+                let rest = &line[at + "[FEEDBACK] ".len()..];
+                if let Some(rest) = rest.strip_prefix("Initial attempt passed ") {
+                    if let Some((p, t)) = parse_of_rest(rest) {
+                        scores.push((0, p, t));
+                    }
+                } else if let Some(rest) = rest.strip_prefix("Round ") {
+                    if let Some((round, tail)) = rest.split_once(" test result: ") {
+                        if let (Ok(r), Some((p, t))) =
+                            (round.trim().parse::<u32>(), parse_of_rest(tail))
+                        {
+                            scores.push((r, p, t));
+                        }
+                    }
+                }
+            }
+            if !scores.is_empty() {
+                let last = scores.len() - 1;
+                for (n, (round, passed, total)) in scores.iter().enumerate() {
+                    rounds.push(RoundRecord {
+                        round: *round,
+                        passed_stages: *passed,
+                        total_stages: *total,
+                        turns: None,
+                        cost_usd: 0.0,
+                        duration_seconds: None,
+                        git_commit: None,
+                        failure: (n == last).then(|| final_failure.clone()).flatten(),
+                        derived: true,
+                    });
+                }
+            } else {
+                // No console either: one derived round with the final score.
+                let rec = &rollup.stages[i];
+                rounds.push(RoundRecord {
+                    round: 0,
+                    passed_stages: m["passed_stages"]
+                        .as_u64()
+                        .map(|v| v as u32)
+                        .unwrap_or(rec.passed_stages),
+                    total_stages: m["total_stages"]
+                        .as_u64()
+                        .map(|v| v as u32)
+                        .unwrap_or(rec.total_stages),
+                    turns: m["turns"].as_u64().map(|v| v as u32).or(rec.turns),
+                    cost_usd: 0.0,
+                    duration_seconds: m["duration_seconds"].as_f64().or(rec.duration_seconds),
+                    git_commit: None,
+                    failure: final_failure,
+                    derived: true,
+                });
+            }
         }
         if rounds.is_empty() {
             // No manifest on disk: the record's own summary is all we have.
@@ -907,6 +994,54 @@ pub struct LadderEntry {
     /// One-line cause for the Run view; None when the ticket passed.
     #[serde(default)]
     pub cause: Option<String>,
+}
+
+/// The board's ranking key (gui-spec.md §4.1): current rule sets first,
+/// then difficulty-weighted points, then points per dollar, then cheaper.
+/// ONE implementation for the console, the API and the public board —
+/// there must be no second ranking.
+#[derive(Debug, Clone, Copy)]
+pub struct BoardSortKey {
+    pub current_rules: bool,
+    pub points: f64,
+    pub per_dollar: Option<f64>,
+    pub cost: f64,
+}
+
+impl BoardSortKey {
+    pub fn of(rollup: &CampaignRollup) -> Self {
+        let current = rollup.rules_version == crate::report::rules::RULES_VERSION;
+        Self {
+            current_rules: current,
+            points: rollup.points,
+            per_dollar: (rollup.total_cost_usd > 0.0)
+                .then(|| rollup.points / rollup.total_cost_usd),
+            cost: rollup.total_cost_usd,
+        }
+    }
+}
+
+/// The board order: current rules first, then points desc, then points per
+/// dollar desc, then cheaper.
+pub fn board_order(a: &BoardSortKey, b: &BoardSortKey) -> std::cmp::Ordering {
+    b.current_rules
+        .cmp(&a.current_rules)
+        .then_with(|| {
+            b.points
+                .partial_cmp(&a.points)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            b.per_dollar
+                .unwrap_or(0.0)
+                .partial_cmp(&a.per_dollar.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            a.cost
+                .partial_cmp(&b.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 /// The stop reason for a finished campaign cell (gui-spec.md §4.1).
@@ -1668,6 +1803,146 @@ mod tests {
         assert_eq!(agent.kind, "agent");
         // A passing round has no cause.
         assert!(classify_failure(8, &[0], &[result(0, true, None)], false, false, None).is_none());
+    }
+
+    /// gui-spec.md §6.1 backfill: a pre-rounds cell's per-round scores come
+    /// from its console log, and its final failure from the manifest.
+    #[test]
+    fn backfill_reads_rounds_from_the_console_and_classifies_the_failure() {
+        let dir = std::env::temp_dir().join(format!("backfill_{}", std::process::id()));
+        let stage = dir.join("s8_full");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(
+            stage.join("console.log"),
+            "[FEEDBACK] Initial attempt passed 5 of 6 stages (83.3%). Starting interactive repair loop (max 1 rounds)...\n[FEEDBACK] Round 1 test result: 2 of 6 stages passed (33.3%)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            stage.join("manifest.json"),
+            serde_json::json!({
+                "status": "failed_tests",
+                "passed_stages": 2,
+                "total_stages": 6,
+                "duration_seconds": 900.0,
+                "stages": [
+                    {"stage": 3, "name": "s3", "passed": false, "error": "Kind: expected OK 2, got OK 0"},
+                    {"stage": 8, "name": "s8", "passed": false, "error": "ErrorClass: expected ERR no_column, got ERR syntax"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut rollup = CampaignRollup {
+            campaign_id: "c".into(),
+            name: "sdb-sql".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            task: "sql".into(),
+            started_at: String::new(),
+            finished_at: String::new(),
+            stages: vec![],
+            reached: None,
+            regression_free_tickets: 0,
+            total_cost_usd: 0.0,
+            over_budget: false,
+            over_wall: false,
+            rules_version: String::new(),
+            budget_usd: 0.0,
+            wall_min: 0,
+            points: 0.0,
+            max_points: 0.0,
+        };
+        // Ticket 3 passed before this attempt: stage 3 failing again is a
+        // regression, not an own-stage miss.
+        rollup.stages.push(StageRecord {
+            id: 3,
+            title: "Update/Delete".into(),
+            kind: "feature".into(),
+            passed: true,
+            pass_rate: 100.0,
+            passed_stages: 3,
+            total_stages: 3,
+            regressed: vec![],
+            regression_severity: 0,
+            effective_cost_usd: 0.02,
+            turns: Some(12),
+            duration_seconds: Some(200.0),
+            status: "passed".into(),
+            variant: "full".into(),
+            tier: 1,
+            points: 1.0,
+            run_id: "r3".into(),
+            git_commit: None,
+            git_stat: None,
+            rounds: vec![],
+            failure: None,
+        });
+        rollup.stages.push(StageRecord {
+            id: 8,
+            title: "Joins".into(),
+            kind: "feature".into(),
+            passed: false,
+            pass_rate: 33.3,
+            passed_stages: 2,
+            total_stages: 6,
+            regressed: vec![3, 4, 5],
+            regression_severity: 3,
+            effective_cost_usd: 0.1,
+            turns: Some(30),
+            duration_seconds: Some(900.0),
+            status: "failed".into(),
+            variant: "full".into(),
+            tier: 3,
+            points: 0.0,
+            run_id: "r8".into(),
+            git_commit: None,
+            git_stat: None,
+            rounds: vec![],
+            failure: None,
+        });
+        backfill_rounds(&mut rollup, &dir);
+        let rounds = &rollup.stages[1].rounds;
+        assert_eq!(rounds.len(), 2, "both rounds recovered: {rounds:?}");
+        assert_eq!(
+            (
+                rounds[0].round,
+                rounds[0].passed_stages,
+                rounds[0].total_stages
+            ),
+            (0, 5, 6)
+        );
+        assert_eq!((rounds[1].round, rounds[1].passed_stages), (1, 2));
+        assert!(rounds.iter().all(|r| r.derived));
+        // Only the final round carries the classified failure (stage 3 is
+        // not green-before, stage 8 owns the ticket).
+        assert!(rounds[0].failure.is_none());
+        let f = rounds[1].failure.as_ref().expect("classified");
+        assert_eq!(f.kind, "regression");
+        assert!(f.line.starts_with("broke tickets 3"), "{}", f.line);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// gui-spec.md §4.1: the one ranking — current rules first, then
+    /// points, then points per dollar, then cheaper.
+    #[test]
+    fn board_order_ranks_points_then_dollars() {
+        use crate::report::rules::RULES_VERSION;
+        let key = |rules: &str, points: f64, cost: f64| BoardSortKey {
+            current_rules: rules == RULES_VERSION,
+            points,
+            per_dollar: (cost > 0.0).then(|| points / cost),
+            cost,
+        };
+        let current = key(RULES_VERSION, 10.0, 0.5);
+        let richer = key(RULES_VERSION, 12.0, 0.5);
+        let cheaper = key(RULES_VERSION, 10.0, 0.2);
+        let stale = key("2026-10-16.12", 99.0, 0.1);
+        assert_eq!(board_order(&current, &richer), std::cmp::Ordering::Greater);
+        assert_eq!(board_order(&current, &cheaper), std::cmp::Ordering::Greater);
+        assert_eq!(board_order(&current, &stale), std::cmp::Ordering::Less);
+        assert_eq!(board_order(&current, &current), std::cmp::Ordering::Equal);
     }
 
     /// gui-spec.md §5.3: attempted, lite, failed, skipped and not-reached

@@ -648,10 +648,18 @@ static INDEX_HTML: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// Shared fns live only in `shared.js`; `index.html` carries a placeholder.
 pub(crate) async fn serve_index() -> Html<String> {
     let page = INDEX_HTML.get_or_init(|| {
-        include_str!("index.html").replace(
-            "<!--__SHARED_JS__-->",
-            &format!("<script>\n{}\n</script>", include_str!("shared.js")),
-        )
+        include_str!("index.html")
+            .replace(
+                "<!--__SHARED_JS__-->",
+                &format!("<script>\n{}\n</script>", include_str!("shared.js")),
+            )
+            .replace(
+                "<!--__RULES__-->",
+                &format!(
+                    "<script>window.__SDB_RULES__ = \"{}\";</script>",
+                    crate::report::rules::RULES_VERSION
+                ),
+            )
     });
     Html(page.clone())
 }
@@ -1473,8 +1481,120 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             .unwrap_or("")
             .cmp(a["id"].as_str().unwrap_or(""))
     });
+    // The board order is the Rust comparator (no second ranking in JS).
+    out.sort_by(|a, b| {
+        let key = |v: &serde_json::Value| {
+            serde_json::from_value::<crate::campaign::CampaignRollup>(v["rollup"].clone())
+                .map(|r| crate::campaign::BoardSortKey::of(&r))
+                .ok()
+        };
+        match (key(a), key(b)) {
+            (Some(ka), Some(kb)) => crate::campaign::board_order(&ka, &kb),
+            _ => std::cmp::Ordering::Equal,
+        }
+    });
     out.truncate(50);
     Json(out)
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CampaignStartRequest {
+    pub model: String,
+    #[serde(default)]
+    pub budget_usd: f64,
+    #[serde(default)]
+    pub wall_min: u64,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// Start a campaign run (gui-spec.md §4.4): what `scripts/sql-cell.sh`
+/// runs, spawned from the engine. Refused while the engine is busy: a
+/// campaign owns the candidate's ports and store, so it must not overlap
+/// a wave (the runner itself enforces the budget and the ladder).
+pub(crate) async fn start_campaign(
+    State(state): State<AppState>,
+    Json(req): Json<CampaignStartRequest>,
+) -> Response {
+    if state.is_running.load(std::sync::atomic::Ordering::SeqCst) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "engine busy: a run or campaign is in flight"})),
+        )
+            .into_response();
+    }
+    let model = req.model.trim().to_string();
+    if model.is_empty() || model.len() > 200 || model.contains([' ', '\n', '\t']) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "a model id is required"})),
+        )
+            .into_response();
+    }
+    let budget = if req.budget_usd > 0.0 {
+        req.budget_usd
+    } else {
+        0.75
+    };
+    let wall = if req.wall_min > 0 { req.wall_min } else { 120 };
+    let effort = req.effort.unwrap_or_else(|| "high".to_string());
+    let budget_s = format!("{budget}");
+    let wall_s = wall.to_string();
+    let cmd = format!(
+        "campaign run --name sdb-sql --model {model} --effort {effort} \
+         --budget-usd {budget_s} --wall-min {wall_s} --timeout-min 20"
+    );
+    let exe =
+        match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": format!("cannot resolve the engine binary: {e}")}),
+                ),
+            )
+                .into_response(),
+        };
+    let spawned = std::process::Command::new(exe)
+        .args([
+            "campaign",
+            "run",
+            "--name",
+            "sdb-sql",
+            "--model",
+            &model,
+            "--effort",
+            &effort,
+            "--budget-usd",
+            &budget_s,
+            "--wall-min",
+            &wall_s,
+            "--timeout-min",
+            "20",
+        ])
+        .current_dir(crate::config::get_repo_root())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(child) => {
+            state
+                .is_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Json(serde_json::json!({
+                "started": true,
+                "pid": child.id(),
+                "cmd": format!("subdollarbench {cmd}"),
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("spawn failed: {e}")})),
+        )
+            .into_response(),
+    }
 }
 
 /// One campaign in depth (gui-spec.md §5.4): the rollup with rounds and
@@ -4744,57 +4864,47 @@ mod tests {
         );
     }
 
-    /// The GUI matrix tab is inline JS inside index.html: a typo there breaks
-    /// the whole board, and nothing in the Rust compile path would notice.
-    /// Mirrors the portal JS guard — pins the row/column summary markers and
-    /// runs node --check on the extracted script (skipped when node is
-    /// absent). The paren typo this family of tests guards against shipped
-    /// once in the portal during review.
+    /// The GUI console is inline JS inside index.html: a typo there breaks
+    /// the whole page and nothing in the Rust compile path would notice.
+    /// Pins the Board/Run/Live markers (gui-spec.md §4), forbids the retired
+    /// per-task views, and runs node --check on the extracted script
+    /// (skipped when node is absent).
     #[test]
-    fn test_gui_matrix_js_has_row_and_column_summaries_and_parses() {
+    fn test_gui_console_has_board_run_live_and_parses() {
         let html = include_str!("index.html");
-        // Markup: the footer element the column summaries render into.
-        assert!(
-            html.contains("matrixTableFoot"),
-            "matrix table must carry the column-summary footer element"
-        );
-        // Script: row accumulator + summary cell, column aggregates + footer,
-        // plus the wave monitor (queued/running status cells, live trial
-        // progress, rerun markers).
         for marker in [
-            "boardQueueItems",
-            "boardWorkers",
-            "liveFor",
-            "· #${qi.pos}",
-            "live snapshot",
-            "matrixLiveStrip",
-            "refreshMatrixLive",
-            "boardCurrentRun",
-            "top-ups queued",
+            "data-tab=\"board\"",
+            "data-tab=\"run\"",
+            "data-tab=\"live\"",
+            "data-tab=\"admin\"",
+            "id=\"tab-board\"",
+            "id=\"tab-run\"",
+            "id=\"runBody\"",
+            "id=\"liveStream\"",
+            "function renderBoard(",
+            "function renderRun(",
+            "function renderLive(",
+            "function ladderStrip(",
+            "function applyHash(",
+            "function loadRunDetail(",
+            "?after=",
         ] {
-            assert!(
-                html.contains(marker),
-                "matrix JS must contain the wave-monitor logic ({marker})"
-            );
+            assert!(html.contains(marker), "console must contain {marker}");
         }
-        for marker in [
-            "Row summary</th>",
-            "colStats",
-            "Column summary",
-            "rowTip",
-            "grandSum",
+        for gone in [
+            "matrixTableBody",
+            "renderMatrix",
+            "renderModels",
+            "renderTasks",
+            "loadLeaderboard",
+            "campaignsList",
+            "renderRuns",
+            "data-tab=\"matrix\"",
+            "data-tab=\"leaderboard\"",
+            "data-tab=\"traceability\"",
+            "data-tab=\"console\"",
         ] {
-            assert!(
-                html.contains(marker),
-                "matrix JS must contain the row/column summary logic ({marker})"
-            );
-        }
-        // Leaderboard capability co-column (display-only; P@1-lo stays rank key).
-        for marker in ["Cap</th>", "solved_at", "live snapshot", "Capability:"] {
-            assert!(
-                html.contains(marker),
-                "leaderboard JS must contain the capability column ({marker})"
-            );
+            assert!(!html.contains(gone), "retired view must be gone: {gone}");
         }
         // Extract the single inline <script> block (shared.js loads
         // separately via /static/shared.js) and parse-check it.
@@ -5233,6 +5343,44 @@ mod tests {
     /// gui-spec.md §5.4: the detail endpoint carries the full ladder
     /// (attempted, skipped and not-reached tickets) and backfills rounds
     /// and classified failures for a cell that predates them.
+    /// gui-spec.md §4.4: starting a campaign validates its input and
+    /// refuses to overlap a busy engine (spawning happens only when idle).
+    #[tokio::test]
+    async fn test_start_campaign_validates_and_respects_busy_engine() {
+        let state = create_test_state();
+        state
+            .is_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let base = serve_test_app(state).await;
+        let client = authed_client();
+        // Busy engine: conflict before any spawn.
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "ut/model"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 409);
+        // Empty model: bad request.
+        let idle = create_test_state();
+        let base = serve_test_app(idle).await;
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "   "}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        // A model with whitespace can never resolve: rejected too.
+        let res = client
+            .post(format!("{base}/api/campaigns"))
+            .json(&serde_json::json!({"model": "openrouter/a b"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+    }
+
     #[tokio::test]
     async fn test_campaign_detail_ladder_and_backfill() {
         let base = serve_test_app(create_test_state()).await;

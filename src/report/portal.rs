@@ -1197,6 +1197,11 @@ struct SqlBoardCell {
     over_budget: bool,
     over_wall: bool,
     updated: String,
+    /// The full ladder (attempted and not): the same Rust derivation the
+    /// console uses (gui-spec.md §4.1/§6.6).
+    ladder: Vec<crate::campaign::LadderEntry>,
+    /// The shared board ranking key.
+    key: crate::campaign::BoardSortKey,
 }
 
 impl SqlBoardCell {
@@ -1308,6 +1313,8 @@ impl PortalExporter {
     /// publish). Writes ONLY `index.html`.
     pub fn export_sql_board(runs_dir: &str, out: &str) -> Result<PortalSummary> {
         let mut cells: Vec<SqlBoardCell> = Vec::new();
+        let mut specs: std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>> =
+            std::collections::HashMap::new();
         if let Ok(rd) = fs::read_dir(runs_dir) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
@@ -1364,6 +1371,15 @@ impl PortalExporter {
                 if flagged {
                     continue;
                 }
+                // Parse once for the shared key + ladder; a merge with the
+                // spec failures simply drops the strip.
+                let parsed: Option<crate::campaign::CampaignRollup> =
+                    serde_json::from_value(rollup.clone()).ok();
+                // The sort key comes from the raw fields, so an
+                // unparseable (or sparse) rollup still ranks correctly.
+                let points_v = rollup["points"].as_f64().unwrap_or(0.0);
+                let cost_v = rollup["total_cost_usd"].as_f64().unwrap_or(0.0);
+                let rules_v = rollup["rules_version"].as_str().unwrap_or("").to_string();
                 cells.push(SqlBoardCell {
                     model: rollup["model"].as_str().unwrap_or("?").to_string(),
                     harness: rollup["harness"].as_str().unwrap_or("?").to_string(),
@@ -1371,10 +1387,10 @@ impl PortalExporter {
                     state,
                     reached: rollup["reached"].as_u64().map(|v| v as u32),
                     regression_free: rollup["regression_free_tickets"].as_u64().unwrap_or(0) as u32,
-                    points: rollup["points"].as_f64().unwrap_or(0.0),
+                    points: points_v,
                     max_points: rollup["max_points"].as_f64().unwrap_or(0.0),
-                    rules: rollup["rules_version"].as_str().unwrap_or("").to_string(),
-                    cost: rollup["total_cost_usd"].as_f64().unwrap_or(0.0),
+                    rules: rules_v.clone(),
+                    cost: cost_v,
                     over_budget: rollup["over_budget"].as_bool().unwrap_or(false),
                     over_wall: rollup["over_wall"].as_bool().unwrap_or(false),
                     updated: rollup["finished_at"]
@@ -1382,34 +1398,29 @@ impl PortalExporter {
                         .or_else(|| rollup["started_at"].as_str())
                         .unwrap_or("")
                         .to_string(),
+                    ladder: parsed
+                        .as_ref()
+                        .and_then(|r| {
+                            specs
+                                .entry(r.name.clone())
+                                .or_insert_with(|| {
+                                    crate::campaign::load_campaign(&r.name).ok().map(|l| l.spec)
+                                })
+                                .as_ref()
+                                .map(|spec| crate::campaign::ladder(spec, r))
+                        })
+                        .unwrap_or_default(),
+                    key: crate::campaign::BoardSortKey {
+                        current_rules: rules_v == crate::report::rules::RULES_VERSION,
+                        points: points_v,
+                        per_dollar: (cost_v > 0.0).then(|| points_v / cost_v),
+                        cost: cost_v,
+                    },
                 });
             }
         }
-        // Ranked by difficulty-weighted points (the proposal's headline),
-        // then points per dollar, then the cheaper cell. Cells from a
-        // different `RULES_VERSION` group below the current ones: grading
-        // changes make them incomparable.
-        let current = crate::report::rules::RULES_VERSION;
-        cells.sort_by(|a, b| {
-            (b.rules == current)
-                .cmp(&(a.rules == current))
-                .then_with(|| {
-                    b.points
-                        .partial_cmp(&a.points)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    b.points_per_dollar()
-                        .unwrap_or(0.0)
-                        .partial_cmp(&a.points_per_dollar().unwrap_or(0.0))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    a.cost
-                        .partial_cmp(&b.cost)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
+        // ONE ranking for console, API and board (gui-spec.md §4.1).
+        cells.sort_by(|a, b| crate::campaign::board_order(&a.key, &b.key));
         let out_dir = Path::new(out);
         fs::create_dir_all(out_dir)
             .with_context(|| format!("create portal dir {}", out_dir.display()))?;
@@ -1418,6 +1429,41 @@ impl PortalExporter {
             run_count: cells.len(),
             out_dir: out_dir.to_path_buf(),
         })
+    }
+
+    /// The ladder mini-strip (gui-spec.md §4.1): one square per ticket,
+    /// status-coloured, with the one-line cause on hover. The same Rust
+    /// ladder derivation the console renders.
+    fn ladder_strip_html(ladder: &[crate::campaign::LadderEntry]) -> String {
+        if ladder.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        for e in ladder {
+            let color = match e.status.as_str() {
+                "pass" => "#3fb950",
+                "lite" => "#d29922",
+                "fail" => "#f85149",
+                "fault" => "#8b949e",
+                _ => "transparent",
+            };
+            let tip = format!(
+                "ticket {} · {} · {}{}",
+                e.id,
+                e.title,
+                e.status,
+                e.cause
+                    .as_deref()
+                    .map(|c| format!(" · {c}"))
+                    .unwrap_or_default()
+            );
+            out.push_str(&format!(
+                "<span title=\"{}\" style=\"display:inline-block;width:10px;height:10px;margin-right:2px;border-radius:2px;background:{};border:1px solid #30363d;\"></span>",
+                Self::esc(&tip),
+                color
+            ));
+        }
+        format!("<div style=\"margin-top:3px;\">{out}</div>")
     }
 
     /// The sdb-sql board page: campaign cells only, no legacy task specs,
@@ -1473,8 +1519,9 @@ impl PortalExporter {
                 )
             };
             let updated = Self::esc(c.updated.get(..16).unwrap_or(&c.updated));
+            let strip = Self::ladder_strip_html(&c.ladder);
             rows.push_str(&format!(
-                "<tr><td class=\"num\">{}</td><td><b>{}</b><div class=\"mut\">{} · effort {}{flags}</div></td><td>{reached}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {rules}</td><td class=\"num\">${:.4}</td><td class=\"num\">{ppd}</td><td class=\"num\">{rpd}</td><td>{state}</td><td class=\"mut\">{updated}</td></tr>",
+                "<tr><td class=\"num\">{}</td><td><b>{}</b>{strip}<div class=\"mut\">{} · effort {}{flags}</div></td><td>{reached}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {rules}</td><td class=\"num\">${:.4}</td><td class=\"num\">{ppd}</td><td class=\"num\">{rpd}</td><td>{state}</td><td class=\"mut\">{updated}</td></tr>",
                 i + 1,
                 Self::esc(&c.model),
                 Self::esc(&c.harness),
