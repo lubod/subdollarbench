@@ -1405,8 +1405,30 @@ pub(crate) async fn get_run_log(AxumPath(run_id): AxumPath<String>) -> Response 
 /// live `status.json` (the foreground CLI publishes it at ticket
 /// boundaries) and, once finished, the `campaign.json` rollup.
 /// Newest-first, capped.
+/// The ladder + stop reason for one campaign value, when its spec is
+/// loadable. Cached per call: one spec load per campaign name.
+fn campaign_ladder(
+    v: &serde_json::Value,
+    specs: &mut std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>>,
+) -> Option<(Vec<crate::campaign::LadderEntry>, &'static str)> {
+    let rollup: crate::campaign::CampaignRollup =
+        serde_json::from_value(v.get("rollup")?.clone()).ok()?;
+    let spec = specs
+        .entry(rollup.name.clone())
+        .or_insert_with(|| {
+            crate::campaign::load_campaign(&rollup.name)
+                .ok()
+                .map(|lc| lc.spec)
+        })
+        .clone()?;
+    let ladder = crate::campaign::ladder(&spec, &rollup);
+    Some((ladder, crate::campaign::stop_reason(&rollup)))
+}
+
 pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
     let runs_dir = RunArchiver::resolve_runs_dir();
+    let mut specs: std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>> =
+        std::collections::HashMap::new();
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&runs_dir) {
         for e in rd.flatten() {
@@ -1436,6 +1458,12 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 }
             }
             v["id"] = serde_json::json!(name);
+            // The full ladder (attempted and not) + the stop reason: one
+            // derivation for the console and the board (gui-spec.md §5.3).
+            if let Some((ladder, stop)) = campaign_ladder(&v, &mut specs) {
+                v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
+                v["stop_reason"] = serde_json::json!(stop);
+            }
             out.push(v);
         }
     }
@@ -1449,10 +1477,139 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
     Json(out)
 }
 
+/// One campaign in depth (gui-spec.md §5.4): the rollup with rounds and
+/// classified failures backfilled for old cells, the full ladder (every
+/// ticket, attempted or not) and the caps. This is what the Run view and
+/// the board's mini-strip render.
+pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Response {
+    let clean = match clean_run_id(&id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid campaign id").into_response(),
+    };
+    let dir = RunArchiver::resolve_runs_dir().join(&clean);
+    if !dir.is_dir() {
+        return (StatusCode::NOT_FOUND, "no such campaign").into_response();
+    }
+    let final_rollup = std::fs::read_to_string(dir.join("campaign.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<crate::campaign::CampaignRollup>(&t).ok());
+    let status: Option<serde_json::Value> = std::fs::read_to_string(dir.join("status.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    let state = status
+        .as_ref()
+        .and_then(|s| s["state"].as_str())
+        .unwrap_or(if final_rollup.is_some() {
+            "done"
+        } else {
+            "unknown"
+        })
+        .to_string();
+    let current_stage = status.as_ref().and_then(|s| s["current_stage"].as_u64());
+    let mut rollup = match final_rollup {
+        Some(r) => r,
+        None => match status
+            .as_ref()
+            .and_then(|s| s.get("rollup"))
+            .filter(|r| !r.is_null())
+            .and_then(|r| serde_json::from_value::<crate::campaign::CampaignRollup>(r.clone()).ok())
+        {
+            Some(r) => r,
+            None => return (StatusCode::NOT_FOUND, "no rollup yet").into_response(),
+        },
+    };
+    // Old cells: derive rounds/failures from their manifests (marked
+    // derived) so the Run view renders them too.
+    crate::campaign::backfill_rounds(&mut rollup, &dir);
+    let stop = crate::campaign::stop_reason(&rollup);
+    let budget = rollup.budget_usd;
+    let wall = rollup.wall_min;
+    let ladder = crate::campaign::load_campaign(&rollup.name)
+        .ok()
+        .map(|lc| crate::campaign::ladder(&lc.spec, &rollup));
+    let mut body = serde_json::json!({
+        "id": clean,
+        "state": state,
+        "current_stage": current_stage,
+        "rollup": rollup,
+        "stop_reason": stop,
+        "budget_usd": budget,
+        "wall_min": wall,
+    });
+    if let Some(ladder) = ladder {
+        body["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
+    }
+    Json(body).into_response()
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct CampaignLogQuery {
-    /// Max lines to return (newest). Defaults to 400.
+    /// Max lines to return (newest) when `after` is absent. Defaults to 400.
     tail: Option<usize>,
+    /// Byte offset to resume from (incremental polling; gui-spec.md §4.3).
+    after: Option<u64>,
+    /// Comma-separated kinds to keep: verdict, agent, tools, verifier, setup.
+    kinds: Option<String>,
+}
+
+/// One log line's bucket for the Live view's filter chips (gui-spec.md
+/// §4.3). Unknown lines fall into `verifier` (pipeline output).
+pub(crate) fn log_kind(line: &str) -> &'static str {
+    let t = line.trim_start();
+    if t.starts_with("[THOUGHT]")
+        || t.starts_with("[RESPONSE]")
+        || t.starts_with("[LIVE]")
+        || t.starts_with("[TOKENS]")
+        || t.starts_with("[TELEMETRY]")
+        || t.starts_with("[OMP")
+        || t.starts_with("[WAITING]")
+        || t.starts_with("[LIMIT]")
+        || t.starts_with("[FEEDBACK] ━━━")
+        || (t.starts_with("[FEEDBACK] Round") && t.contains("agent completed"))
+    {
+        "agent"
+    } else if t.starts_with("[ACTION]")
+        || t.starts_with("[RESULT]")
+        || t.starts_with("[PROMPT]")
+        || t.starts_with("[STDERR]")
+    {
+        "tools"
+    } else if t.starts_with("[SETUP]")
+        || t.starts_with("[INFRA]")
+        || t.starts_with("[WARN]")
+        || t.starts_with("[CAMPAIGN]")
+        || t.starts_with("[PORTAL]")
+    {
+        "setup"
+    } else if t.starts_with("[VERIFY]")
+        || t.starts_with("[BENCH]")
+        || t.starts_with("[DIAGNOSTICS]")
+        || t.contains("statements graded")
+    {
+        "verifier"
+    } else if t.starts_with("[UPGRADE]")
+        || t.starts_with("[CRASH]")
+        || t.starts_with("[TXN]")
+        || t.starts_with("[PERF]")
+        || t.starts_with("[FEEDBACK]")
+        || t.starts_with("[ROLLBACK]")
+        || (t.starts_with("Stage ") && t.contains("->"))
+        || t.starts_with("─── ticket")
+        || t.starts_with("=== CAMPAIGN")
+        || t.starts_with("reached:")
+        || t.starts_with("stopped:")
+        || t.starts_with("regression-free")
+        || t.starts_with("rollup:")
+        || (t.starts_with('s')
+            && t.as_bytes()
+                .get(1)
+                .map(|b| b.is_ascii_digit())
+                .unwrap_or(false))
+    {
+        "verdict"
+    } else {
+        "verifier"
+    }
 }
 
 /// Live campaign console: `live.log` while/after a run (append-only, written
@@ -1488,15 +1645,53 @@ pub(crate) async fn get_campaign_log(
             None => return (StatusCode::NOT_FOUND, "no campaign log yet").into_response(),
         }
     }
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let tail = q.tail.unwrap_or(400).max(1);
-            let lines: Vec<&str> = text.lines().collect();
-            let start = lines.len().saturating_sub(tail);
-            lines[start..].join("\n").into_response()
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::NOT_FOUND, "campaign log unreadable").into_response(),
+    };
+    let wanted: Option<Vec<&str>> = q.kinds.as_deref().map(|k| {
+        k.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    let (start, end) = if let Some(after) = q.after {
+        // Incremental: everything after the offset, whole lines only (a
+        // half-written line is re-read next poll).
+        let start = (after as usize).min(bytes.len());
+        let end = bytes[start..]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map(|i| start + i + 1)
+            .unwrap_or(start);
+        (start, end)
+    } else {
+        // Backward-compatible tail: the last `tail` whole lines.
+        let tail = q.tail.unwrap_or(400).max(1);
+        let text = String::from_utf8_lossy(&bytes);
+        let mut cut = 0usize;
+        let mut seen = 0usize;
+        for (i, _) in text.match_indices('\n').rev() {
+            seen += 1;
+            if seen > tail {
+                cut = i + 1;
+                break;
+            }
         }
-        Err(_) => (StatusCode::NOT_FOUND, "campaign log unreadable").into_response(),
-    }
+        (cut, bytes.len())
+    };
+    let chunk = String::from_utf8_lossy(&bytes[start..end]);
+    let lines: Vec<serde_json::Value> = chunk
+        .lines()
+        .filter(|l| {
+            wanted
+                .as_ref()
+                .map(|w| w.contains(&log_kind(l)))
+                .unwrap_or(true)
+        })
+        .map(|l| serde_json::json!({"kind": log_kind(l), "text": l}))
+        .collect();
+    Json(serde_json::json!({"offset": end, "lines": lines})).into_response()
 }
 
 pub(crate) async fn get_run_files(
@@ -4150,6 +4345,7 @@ mod tests {
         fs::write(dir_b.join("console.log"), "Console log for B").unwrap();
 
         let manifest_a = RunManifest {
+            rounds: Vec::new(),
             run_id: run_a_id.to_string(),
             model: "model_a".to_string(),
             task: "redis".to_string(),
@@ -4216,6 +4412,7 @@ mod tests {
             feedback_rounds: None,
         };
         let manifest_b = RunManifest {
+            rounds: Vec::new(),
             run_id: run_b_id.to_string(),
             model: "model_b".to_string(),
             task: "redis".to_string(),
@@ -4988,6 +5185,166 @@ mod tests {
 
         let res = client.get(format!("{base}/nope")).send().await.unwrap();
         assert_eq!(res.status(), 404);
+    }
+
+    /// gui-spec.md §4.3: every log line falls into one of the Live view's
+    /// chips; representative cell-8 lines pin the mapping.
+    #[test]
+    fn test_campaign_log_kinds() {
+        use super::log_kind;
+        let cases = [
+            ("  Stage 8: Joins -> FAIL ErrorClass: expected", "verdict"),
+            ("[UPGRADE] sentinel from stage 4 verified", "verdict"),
+            ("[PERF] point p50 0.2 ms scan vs 0.1 ms index", "verdict"),
+            (
+                "[FEEDBACK] Round 1 test result: 0 of 6 stages passed (0.0%)",
+                "verdict",
+            ),
+            (
+                "  s8  [relational] Joins  FAIL 2/6 ($0.1425, 30 turns)",
+                "verdict",
+            ),
+            (
+                "─── ticket 8 [relational] Joins (acceptance [0, 1, 3]) ───",
+                "verdict",
+            ),
+            ("[THOUGHT] Let me start by understanding", "agent"),
+            ("[LIVE] Turn 6/9 | Spent: $0.0035", "agent"),
+            ("[ACTION] read", "tools"),
+            ("  path: /workspace/server.py:966-1265", "verifier"),
+            ("[RESULT] read (OK)", "tools"),
+            ("[SETUP] Waiting for server port 5480", "setup"),
+            ("[WARN] Port 5480 not responding within 25s", "setup"),
+            ("[VERIFY] Checking anti-cheat compliance", "verifier"),
+            (
+                "    159 statements graded (seed 11663210981208198265)",
+                "verifier",
+            ),
+            (
+                "[DIAGNOSTICS] Candidate container runtime output:",
+                "verifier",
+            ),
+        ];
+        for (line, want) in cases {
+            assert_eq!(log_kind(line), want, "line: {line:?}");
+        }
+    }
+
+    /// gui-spec.md §5.4: the detail endpoint carries the full ladder
+    /// (attempted, skipped and not-reached tickets) and backfills rounds
+    /// and classified failures for a cell that predates them.
+    #[tokio::test]
+    async fn test_campaign_detail_ladder_and_backfill() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let id = format!("campaign_sdb-sql_ut_detail_{}", std::process::id());
+        let dir = crate::report::archive::RunArchiver::resolve_runs_dir().join(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("s8_full")).unwrap();
+        // A cell that passed ticket 0, failed ticket 8 and ran out of
+        // budget before the rest (cell-8-shaped).
+        let rollup = serde_json::json!({
+            "campaign_id": id,
+            "name": "sdb-sql",
+            "model": "ut/model",
+            "harness": "omp",
+            "effort": "high",
+            "task": "sql",
+            "started_at": "2026-10-17T09:25:21Z",
+            "finished_at": "2026-10-17T11:26:00Z",
+            "stages": [
+                {"id": 0, "title": "Genesis", "type": "genesis", "passed": true,
+                 "pass_rate": 100.0, "passed_stages": 1, "total_stages": 1,
+                 "regressed": [], "regression_severity": 0, "effective_cost_usd": 0.1,
+                 "turns": 28, "duration_seconds": 600.0, "status": "passed",
+                 "variant": "full", "tier": 1, "points": 1.0,
+                 "run_id": format!("{id}_s0_full"), "git_commit": null, "git_stat": null},
+                {"id": 8, "title": "Joins", "type": "feature", "passed": false,
+                 "pass_rate": 33.3, "passed_stages": 2, "total_stages": 6,
+                 "regressed": [3, 4, 5], "regression_severity": 3,
+                 "effective_cost_usd": 0.14, "turns": 30, "duration_seconds": 900.0,
+                 "status": "failed", "variant": "full", "tier": 3, "points": 0.0,
+                 "run_id": format!("{id}_s8_full"), "git_commit": null, "git_stat": null}
+            ],
+            "reached": 0,
+            "regression_free_tickets": 1,
+            "total_cost_usd": 0.24,
+            "over_budget": true,
+            "over_wall": false,
+            "rules_version": "2026-10-17.15",
+            "budget_usd": 0.25,
+            "wall_min": 30,
+            "points": 0.24 * 0.0,
+            "max_points": 26.0
+        });
+        std::fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+        // An old-style manifest (no rounds): the backfill derives the round
+        // and classifies the failure.
+        let manifest = serde_json::json!({
+            "run_id": format!("{id}_s8_full"),
+            "model": "ut/model",
+            "task": "sql",
+            "status": "failed_tests",
+            "language": "python",
+            "started_at": "2026-10-17T10:00:00Z",
+            "completed_at": "2026-10-17T10:15:00Z",
+            "duration_seconds": 900.0,
+            "turns": 30,
+            "pass_rate": 33.3,
+            "passed_stages": 2,
+            "total_stages": 6,
+            "stages": [
+                {"stage": 3, "name": "Stage 3", "passed": false,
+                 "error": "Kind: expected OK 2, got OK 0"},
+                {"stage": 8, "name": "Stage 8", "passed": false,
+                 "error": "ErrorClass: expected ERR no_column, got ERR syntax"}
+            ],
+            "throughput_req_sec": null
+        });
+        std::fs::write(
+            dir.join("s8_full").join("manifest.json"),
+            manifest.to_string(),
+        )
+        .unwrap();
+
+        let res = client
+            .get(format!("{base}/api/campaigns/{id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["stop_reason"], "budget cap");
+        assert_eq!(body["budget_usd"], 0.25);
+        let ladder = body["ladder"].as_array().expect("ladder");
+        // The declared ladder grows with the campaign; every declared
+        // ticket is present, attempted or not.
+        assert!(ladder.len() >= 12, "every ticket is on the ladder");
+        assert_eq!(ladder[0]["status"], "pass");
+        assert_eq!(ladder[8]["status"], "fail");
+        // Ticket 8's failure is the manifest's failing stage 8 (owns its
+        // stage) even though the old record carried no rounds.
+        let rec = body["rollup"]["stages"][1].clone();
+        assert_eq!(rec["rounds"][0]["derived"], true);
+        assert_eq!(rec["failure"]["kind"], "own_stage");
+        assert!(rec["failure"]["line"]
+            .as_str()
+            .unwrap()
+            .contains("ERR syntax"));
+        // Ticket 9 needs 3: skipped; ticket 11 needs [3,4]: skipped too;
+        // ticket 1 is runnable but was never reached.
+        let find = |id: u32| {
+            ladder
+                .iter()
+                .find(|e| e["id"] == id)
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(find(1)["status"], "not_reached");
+        assert_eq!(find(1)["cause"], "not reached: budget cap");
+        assert_eq!(find(9)["status"], "skipped");
+        assert_eq!(find(9)["cause"], "skipped: needs 3");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

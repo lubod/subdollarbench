@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use subdollarbench::campaign::{
-    self, CampaignRollup, CampaignRunOptions, CampaignStageConfig, LoadedCampaign, StageOutcome,
-    StageSpec,
+    self, CampaignRollup, CampaignRunOptions, CampaignStageConfig, LoadedCampaign, RoundRecord,
+    StageOutcome, StageSpec,
 };
 use subdollarbench::config::{Harness, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
@@ -591,6 +591,60 @@ async fn run_one_stage(
         };
 
     let br = &output.benchmark_result;
+    // Campaign rounds and the classified cause (gui-spec.md §5.1/§5.2):
+    // recorded from the manifest's per-round data, or derived for attempts
+    // that predate it (eval-only runs, old binaries) so old cells render.
+    let mut rounds: Vec<RoundRecord> = if output.manifest.rounds.is_empty() {
+        vec![RoundRecord {
+            round: 0,
+            passed_stages: br.passed_stages,
+            total_stages: br.total_stages,
+            turns: output.manifest.turns,
+            cost_usd: br.effective_cost_usd.unwrap_or(br.total_cost_usd),
+            duration_seconds: Some(output.manifest.duration_seconds),
+            git_commit: git_commit.clone(),
+            failure: None,
+            derived: true,
+        }]
+    } else {
+        let last = output.manifest.rounds.last().map(|r| r.round).unwrap_or(0);
+        output
+            .manifest
+            .rounds
+            .iter()
+            .map(|r| RoundRecord {
+                round: r.round,
+                passed_stages: r.passed_stages,
+                total_stages: r.total_stages,
+                turns: r.turns,
+                cost_usd: r.cost_usd,
+                duration_seconds: r.duration_seconds,
+                git_commit: (r.round == last).then(|| git_commit.clone()).flatten(),
+                failure: None,
+                derived: false,
+            })
+            .collect()
+    };
+    for (i, round) in rounds.iter_mut().enumerate() {
+        let (stages, tail): (Vec<subdollarbench::verifier::StageResult>, Option<&str>) =
+            if output.manifest.rounds.is_empty() {
+                (output.manifest.stages.clone(), None)
+            } else {
+                (
+                    output.manifest.rounds[i].stage_results.clone(),
+                    output.manifest.rounds[i].candidate_logs_tail.as_deref(),
+                )
+            };
+        round.failure = campaign::classify_failure(
+            stage.id,
+            &job.passed,
+            &stages,
+            output.agent_failed,
+            output.infra_error,
+            tail,
+        );
+    }
+    let failure = rounds.last().and_then(|r| r.failure.clone());
     Ok(StageOutcome {
         run_id,
         passed,
@@ -606,6 +660,8 @@ async fn run_one_stage(
         disqualified: output.disqualified,
         git_commit,
         git_stat,
+        rounds,
+        failure,
     })
 }
 
@@ -723,6 +779,8 @@ mod tests {
             run_id: format!("campaign_fixture_s{id}"),
             git_commit: None,
             git_stat: None,
+            rounds: Vec::new(),
+            failure: None,
         }
     }
 
@@ -750,6 +808,8 @@ mod tests {
             regression_free_tickets: 1,
             total_cost_usd,
             over_budget,
+            budget_usd: 0.0,
+            wall_min: 0,
         }
     }
 

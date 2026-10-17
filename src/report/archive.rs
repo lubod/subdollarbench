@@ -27,6 +27,31 @@ pub struct RunTokenUsage {
     pub total_tokens: u64,
 }
 
+/// One feedback round of a campaign attempt: the initial try and every
+/// repair round, with that round's own verifier results (gui-spec.md §5.1).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CampaignRound {
+    /// 0 = initial, 1.. = repair.
+    pub round: u32,
+    pub passed_stages: u32,
+    pub total_stages: u32,
+    pub pass_rate: f64,
+    pub turns: Option<u32>,
+    /// Equivalent compute cost of this round's own tokens; the attempt's
+    /// `effective_cost_usd` stays the authoritative number.
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    /// Per-round verifier results, same shape as `stages`.
+    #[serde(default)]
+    pub stage_results: Vec<StageResult>,
+    /// Candidate log tail when the server did not come up (the `no_start`
+    /// classifier's evidence).
+    #[serde(default)]
+    pub candidate_logs_tail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
     pub run_id: String,
@@ -51,6 +76,11 @@ pub struct RunManifest {
     pub passed_stages: u32,
     pub total_stages: u32,
     pub stages: Vec<StageResult>,
+    /// Campaign rounds: the initial verification (0) and each repair round,
+    /// in order. Empty for single-shot runs and for manifests written
+    /// before this field existed (the GUI derives a round from `stages`).
+    #[serde(default)]
+    pub rounds: Vec<CampaignRound>,
     /// Advisory robustness probes (redis/http): reported, never scored.
     /// Empty on older rows and non-probed tasks.
     #[serde(default)]
@@ -500,6 +530,7 @@ mod tests {
         assert!(scanned.iter().any(|f| f.name == "src/main.go"));
 
         let manifest = RunManifest {
+            rounds: Vec::new(),
             run_id: "test_run_123".to_string(),
             model: "openrouter/meta/muse-spark-1.3-contributor".to_string(),
             task: "redis".to_string(),
@@ -696,6 +727,7 @@ mod tests {
             passed_stages: 1,
             total_stages: 1,
             stages: vec![],
+            rounds: Vec::new(),
             robustness: Vec::new(),
             throughput_req_sec: None,
             reference_throughput_req_sec: None,

@@ -6,9 +6,9 @@
 use super::portal_proxy::{serve_portal, serve_portal_index};
 use super::server::{
     balance_check_handler, clear_queue, compare_runs, csrf_guard, delete_run, enqueue_run,
-    extend_parent_run, get_active_console, get_campaign_log, get_campaigns, get_env, get_integrity,
-    get_leaderboard, get_models, get_prompt, get_queue, get_run_detail, get_run_file,
-    get_run_files, get_run_log, get_run_review, get_runs, get_sandbox_omp_status,
+    extend_parent_run, get_active_console, get_campaign_detail, get_campaign_log, get_campaigns,
+    get_env, get_integrity, get_leaderboard, get_models, get_prompt, get_queue, get_run_detail,
+    get_run_file, get_run_files, get_run_log, get_run_review, get_runs, get_sandbox_omp_status,
     get_sandbox_opencode_status, get_status, login, logout, me, pause_queue_handler,
     rebuild_portal, remove_queued_run, resume_queue_handler, save_prompt, serve_index,
     serve_shared_js, set_run_poison, set_run_portal_visibility, start_run, stop_run, stream_logs,
@@ -44,6 +44,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/console", get(get_active_console))
         .route("/api/runs", get(get_runs))
         .route("/api/campaigns", get(get_campaigns))
+        .route("/api/campaigns/:id", get(get_campaign_detail))
         .route("/api/campaigns/:id/log", get(get_campaign_log))
         .route("/api/runs/:id", get(get_run_detail))
         .route("/api/runs/:id/log", get(get_run_log))

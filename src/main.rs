@@ -2876,6 +2876,7 @@ mod tests {
             passed_stages: 4,
             total_stages: 4,
             stages: Vec::new(),
+            rounds: Vec::new(),
             robustness: Vec::new(),
             throughput_req_sec: None,
             reference_throughput_req_sec: None,

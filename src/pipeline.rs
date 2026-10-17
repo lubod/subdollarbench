@@ -459,6 +459,13 @@ pub fn perf_gate_verdict(base: Option<f64>, measured: Option<f64>) -> (bool, Str
     }
 }
 
+/// The last `n` non-empty lines of `text` (round evidence tails).
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 fn initial_turn_cap(max_turns: u32, feedback_rounds: u32, reserve_repair: bool) -> Option<u32> {
     if max_turns == 0 {
         None
@@ -3923,6 +3930,10 @@ impl BenchmarkPipeline {
             Harness::Opencode => "OPENCODE",
         };
         let mut agent_failed = false;
+        // Campaign rounds (§5.1 of gui-spec.md): one record per
+        // verification, the initial try and every repair round.
+        let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
+        let mut round_started = std::time::Instant::now();
         let (mut omp_stats, mut prompt_tokens, mut cached_tokens, mut completion_tokens) =
             if !config.eval_only {
                 logger.log(&format!(
@@ -4036,6 +4047,21 @@ impl BenchmarkPipeline {
                 .unwrap_or(&[]),
         )
         .await;
+        campaign_rounds.push(crate::report::archive::CampaignRound {
+            round: 0,
+            passed_stages: v_outcome.passed_stages,
+            total_stages: v_outcome.total_stages,
+            pass_rate: v_outcome.pass_rate,
+            turns: Some(omp_stats.steps_taken),
+            cost_usd: crate::cost::calculator::ModelPricing::compute_cost(
+                round_started.elapsed().as_secs_f64(),
+                prompt_tokens + cached_tokens + completion_tokens,
+                cached_tokens,
+            ),
+            duration_seconds: Some(round_started.elapsed().as_secs_f64()),
+            stage_results: v_outcome.stage_results.clone(),
+            candidate_logs_tail: Some(tail_lines(&v_outcome.candidate_logs, 20)),
+        });
         // The repair agent needs the references again (it probes exact
         // output formats while fixing); the next verification detaches.
         sandbox.reattach_references();
@@ -4096,6 +4122,9 @@ impl BenchmarkPipeline {
                         RepairAllowance::Capped(n) => Some(n),
                     };
                     feedback_rounds_used = round;
+                    round_started = std::time::Instant::now();
+                    let round_tokens_before = (prompt_tokens, cached_tokens, completion_tokens);
+                    let mut round_steps: Option<u32> = None;
 
                     // 1. Stop candidate container to release ports and candidate name
                     let _ = sandbox.stop_candidate();
@@ -4152,6 +4181,7 @@ impl BenchmarkPipeline {
                             completion_tokens += r_stats.completion_tokens;
                             omp_stats.steps_taken += r_stats.steps_taken;
                             omp_stats.total_tokens += r_stats.total_tokens;
+                            round_steps = Some(r_stats.steps_taken);
                             logger.log(&format!(
                             "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
                             round, r_stats.steps_taken, r_stats.prompt_tokens, r_stats.completion_tokens
@@ -4237,6 +4267,25 @@ impl BenchmarkPipeline {
                         next_outcome.total_stages,
                         next_outcome.pass_rate
                     ));
+                    campaign_rounds.push(crate::report::archive::CampaignRound {
+                        round,
+                        passed_stages: next_outcome.passed_stages,
+                        total_stages: next_outcome.total_stages,
+                        pass_rate: next_outcome.pass_rate,
+                        turns: round_steps,
+                        cost_usd: crate::cost::calculator::ModelPricing::compute_cost(
+                            round_started.elapsed().as_secs_f64(),
+                            (prompt_tokens + cached_tokens + completion_tokens).saturating_sub(
+                                round_tokens_before.0
+                                    + round_tokens_before.1
+                                    + round_tokens_before.2,
+                            ),
+                            cached_tokens.saturating_sub(round_tokens_before.1),
+                        ),
+                        duration_seconds: Some(round_started.elapsed().as_secs_f64()),
+                        stage_results: next_outcome.stage_results.clone(),
+                        candidate_logs_tail: Some(tail_lines(&next_outcome.candidate_logs, 20)),
+                    });
 
                     if next_outcome.pass_rate > best_pass_rate {
                         best_pass_rate = next_outcome.pass_rate;
@@ -4673,6 +4722,7 @@ impl BenchmarkPipeline {
             passed_stages,
             total_stages,
             stages: stage_results,
+            rounds: campaign_rounds.clone(),
             robustness: extra_robustness,
             throughput_req_sec: throughput,
             reference_throughput_req_sec: reference_throughput,
@@ -8013,6 +8063,16 @@ main()
             .await
             .expect("the stage-11 fixture run must complete");
         assert!(!out.infra_error, "{:?}", out.manifest.status);
+        // gui-spec.md §5.1: every verification round is recorded in the
+        // manifest (the initial try here; eval-only runs have no repairs).
+        assert!(
+            out.manifest
+                .rounds
+                .iter()
+                .any(|r| r.round == 0 && !r.stage_results.is_empty()),
+            "round 0 recorded with results: {:?}",
+            out.manifest.rounds
+        );
         for needle in [
             "Stage 11: Indexes + perf gate -> PASS",
             "[PERF] gate runs on a fresh scratch store",

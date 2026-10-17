@@ -60,6 +60,7 @@ func main() {
     ];
 
     let manifest = RunManifest {
+        rounds: Vec::new(),
         run_id: run_id.clone(),
         model: "google/gemini-2.5-flash".to_string(),
         task: "redis".to_string(),

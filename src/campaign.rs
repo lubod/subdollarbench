@@ -544,6 +544,10 @@ pub struct StageOutcome {
     pub disqualified: bool,
     pub git_commit: Option<String>,
     pub git_stat: Option<String>,
+    /// Every verification round of this attempt (initial + repairs).
+    pub rounds: Vec<RoundRecord>,
+    /// The classified cause of the final round when the attempt failed.
+    pub failure: Option<FailureSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -576,6 +580,428 @@ pub struct StageRecord {
     pub run_id: String,
     pub git_commit: Option<String>,
     pub git_stat: Option<String>,
+    /// Every verification round of this attempt (initial + repairs), in
+    /// order. Empty on records written before the field existed; the GUI
+    /// then derives one round from the summary.
+    #[serde(default)]
+    pub rounds: Vec<RoundRecord>,
+    /// Classified one-line cause when the attempt failed (None when passed).
+    #[serde(default)]
+    pub failure: Option<FailureSummary>,
+}
+
+/// One feedback round of a campaign attempt (gui-spec.md §5.1): the initial
+/// try (round 0) and every repair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundRecord {
+    pub round: u32,
+    pub passed_stages: u32,
+    pub total_stages: u32,
+    pub turns: Option<u32>,
+    /// Equivalent compute cost of this round's own tokens; the attempt's
+    /// `effective_cost_usd` stays the authoritative number.
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub git_commit: Option<String>,
+    #[serde(default)]
+    pub failure: Option<FailureSummary>,
+    /// True when the round was reconstructed on read (an old cell whose
+    /// manifests predate recorded rounds), never recorded live.
+    #[serde(default)]
+    pub derived: bool,
+}
+
+/// The classified one-line cause of a failed ticket or round
+/// (gui-spec.md §5.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureSummary {
+    /// fault | no_start | regression | late_check | own_stage | agent
+    pub kind: String,
+    /// The verifier stage that failed first, when the round has one.
+    #[serde(default)]
+    pub stage: Option<u32>,
+    /// One line, <= 160 chars, no newlines.
+    pub line: String,
+    /// The full verifier error (reproduction), when available.
+    #[serde(default)]
+    pub detail: String,
+    /// Candidate stderr tail when the server never started.
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+}
+
+fn truncate_line(s: &str, n: usize) -> String {
+    let line = s.lines().next().unwrap_or("").trim().to_string();
+    if line.chars().count() <= n {
+        line
+    } else {
+        let cut: String = line.chars().take(n.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+/// The first stderr-looking error line of a candidate log tail, with its
+/// `File "...", line N` context when present (`IndentationError server.py:101`).
+fn first_error_line(tail: &str) -> Option<String> {
+    let lines: Vec<&str> = tail.lines().map(str::trim).collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("Error:") {
+            continue;
+        }
+        // `File "/app/./server.py", line 101` on the line just above.
+        let place = lines[..i].iter().rev().find_map(|l| {
+            let l = l.trim_start_matches('|').trim();
+            let rest = l.strip_prefix("File \"")?;
+            let file = rest.split('"').next()?;
+            let line_no = rest.split("line ").nth(1)?.trim();
+            let base = std::path::Path::new(file)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| file.to_string());
+            Some(format!("{base}:{line_no}"))
+        });
+        let msg = line.trim_start_matches('|').trim();
+        return Some(match place {
+            Some(p) => format!("{p}: {msg}"),
+            None => msg.to_string(),
+        });
+    }
+    None
+}
+
+/// Classify why an attempt round failed (gui-spec.md §5.2): the first
+/// matching rule wins. `was_green` is the set of stages that had passed
+/// before the attempt; `stage_results` are that round's verifier results.
+pub fn classify_failure(
+    stage_id: u32,
+    was_green: &[u32],
+    stage_results: &[crate::verifier::StageResult],
+    agent_failed: bool,
+    infra_error: bool,
+    candidate_logs_tail: Option<&str>,
+) -> Option<FailureSummary> {
+    let failed: Vec<&crate::verifier::StageResult> =
+        stage_results.iter().filter(|s| !s.passed).collect();
+    let first = failed.first().copied();
+    if failed.is_empty() && !agent_failed && !infra_error {
+        return None;
+    }
+    let detail = first.and_then(|s| s.error.clone()).unwrap_or_default();
+    let stage = first.map(|s| s.stage);
+    let tail = candidate_logs_tail.map(str::to_string);
+    let mk = |kind: &str, stage: Option<u32>, line: String| FailureSummary {
+        kind: kind.to_string(),
+        stage,
+        line: truncate_line(&line, 160),
+        detail: detail.clone(),
+        stderr_tail: tail.clone(),
+    };
+    // 1. fault: a harness or provider fault, never a model verdict.
+    if infra_error {
+        return Some(mk("fault", stage, "harness or provider fault".to_string()));
+    }
+    // 2. no_start: stage 0 could not be reached.
+    if let Some(s0) = stage_results.iter().find(|s| s.stage == 0) {
+        if !s0.passed
+            && s0
+                .error
+                .as_deref()
+                .map(|e| e.starts_with("server unreachable"))
+                .unwrap_or(false)
+        {
+            let line = tail
+                .as_deref()
+                .and_then(first_error_line)
+                .map(|e| format!("server didn't start: {e}"))
+                .unwrap_or_else(|| "server didn't start".to_string());
+            return Some(mk("no_start", Some(0), line));
+        }
+    }
+    // 3. regression: an earlier green ticket fails now.
+    let regressed: Vec<u32> = failed
+        .iter()
+        .filter(|s| s.stage < stage_id && was_green.contains(&s.stage))
+        .map(|s| s.stage)
+        .collect();
+    if !regressed.is_empty() {
+        let list = regressed
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let what = first
+            .and_then(|s| s.error.as_deref())
+            .map(|e| e.lines().next().unwrap_or("").trim().to_string())
+            .unwrap_or_default();
+        let line = if what.is_empty() {
+            format!("broke tickets {list}")
+        } else {
+            format!("broke tickets {list}: {what}")
+        };
+        return Some(mk("regression", stage, line));
+    }
+    // 4. late_check: a pipeline late failure carries its tag.
+    if let Some(tagged) = failed.iter().find_map(|s| {
+        s.error.as_deref().filter(|e| {
+            e.starts_with("[crash]") || e.starts_with("[perf]") || e.starts_with("[upgrade]")
+        })
+    }) {
+        return Some(mk("late_check", stage, tagged.to_string()));
+    }
+    // 5. own_stage: only this ticket's stage failed.
+    if !failed.is_empty() && failed.iter().all(|s| s.stage == stage_id) {
+        let what = first
+            .and_then(|s| s.error.as_deref())
+            .map(|e| e.lines().next().unwrap_or("").trim().to_string())
+            .unwrap_or_default();
+        let line = if what.is_empty() {
+            "own stage failed".to_string()
+        } else {
+            format!("own stage: {what}")
+        };
+        return Some(mk("own_stage", stage, line));
+    }
+    // 6. agent: the agent died or never signalled READY.
+    if agent_failed {
+        return Some(mk(
+            "agent",
+            stage,
+            "agent stopped without READY".to_string(),
+        ));
+    }
+    // A mixed shape no rule names: report the ticket's own stage when it
+    // failed, else the first failing stage, honestly.
+    let own = failed.iter().find(|s| s.stage == stage_id).copied();
+    let what = own
+        .or(first)
+        .and_then(|s| s.error.as_deref())
+        .map(|e| e.lines().next().unwrap_or("").trim().to_string())
+        .unwrap_or_else(|| "failed".to_string());
+    Some(mk("own_stage", own.map(|s| s.stage).or(stage), what))
+}
+
+/// Fill `rounds`/`failure` on records written before they were recorded
+/// (gui-spec.md §6.1): read each attempt's manifest from the campaign dir
+/// and mark the derived rounds. Cells with live rounds are untouched.
+pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Path) {
+    for i in 0..rollup.stages.len() {
+        if !rollup.stages[i].rounds.is_empty() {
+            continue;
+        }
+        // Stages green before this record: the passed records earlier in
+        // the rollup, which is in attempt order.
+        let was_green: Vec<u32> = rollup.stages[..i]
+            .iter()
+            .filter(|r| r.passed)
+            .map(|r| r.id)
+            .collect();
+        let (id, variant) = (rollup.stages[i].id, rollup.stages[i].variant.clone());
+        // Lenient: old manifests may predate fields RunManifest now
+        // requires, and the backfill must still read what is there.
+        let manifest: Option<serde_json::Value> = std::fs::read_to_string(
+            campaign_dir
+                .join(format!("s{id}_{variant}"))
+                .join("manifest.json"),
+        )
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+        let agent_failed = manifest
+            .as_ref()
+            .map(|m| m["status"].as_str() == Some("agent_failed"))
+            .unwrap_or(rollup.stages[i].status == "fault");
+        let stages_of = |m: &serde_json::Value| -> Vec<crate::verifier::StageResult> {
+            m.get("stages")
+                .and_then(|s| serde_json::from_value(s.clone()).ok())
+                .unwrap_or_default()
+        };
+        let recorded_rounds: Vec<crate::report::archive::CampaignRound> = manifest
+            .as_ref()
+            .and_then(|m| m.get("rounds"))
+            .and_then(|r| serde_json::from_value(r.clone()).ok())
+            .unwrap_or_default();
+        let mut rounds: Vec<RoundRecord> = Vec::new();
+        if !recorded_rounds.is_empty() {
+            for r in &recorded_rounds {
+                let failure = classify_failure(
+                    id,
+                    &was_green,
+                    &r.stage_results,
+                    agent_failed,
+                    false,
+                    r.candidate_logs_tail.as_deref(),
+                );
+                rounds.push(RoundRecord {
+                    round: r.round,
+                    passed_stages: r.passed_stages,
+                    total_stages: r.total_stages,
+                    turns: r.turns,
+                    cost_usd: r.cost_usd,
+                    duration_seconds: r.duration_seconds,
+                    git_commit: None,
+                    failure,
+                    derived: true,
+                });
+            }
+        } else if let Some(m) = &manifest {
+            // A manifest from before rounds existed: one derived round
+            // carrying its final results.
+            let stages = stages_of(m);
+            let failure = classify_failure(id, &was_green, &stages, agent_failed, false, None);
+            let rec = &rollup.stages[i];
+            rounds.push(RoundRecord {
+                round: 0,
+                passed_stages: m["passed_stages"]
+                    .as_u64()
+                    .map(|v| v as u32)
+                    .unwrap_or(rec.passed_stages),
+                total_stages: m["total_stages"]
+                    .as_u64()
+                    .map(|v| v as u32)
+                    .unwrap_or(rec.total_stages),
+                turns: m["turns"].as_u64().map(|v| v as u32).or(rec.turns),
+                cost_usd: 0.0,
+                duration_seconds: m["duration_seconds"].as_f64().or(rec.duration_seconds),
+                git_commit: None,
+                failure,
+                derived: true,
+            });
+        }
+        if rounds.is_empty() {
+            // No manifest on disk: the record's own summary is all we have.
+            let rec = &rollup.stages[i];
+            rounds.push(RoundRecord {
+                round: 0,
+                passed_stages: rec.passed_stages,
+                total_stages: rec.total_stages,
+                turns: rec.turns,
+                cost_usd: rec.effective_cost_usd,
+                duration_seconds: rec.duration_seconds,
+                git_commit: rec.git_commit.clone(),
+                failure: None,
+                derived: true,
+            });
+        }
+        let failure = rounds.last().and_then(|r| r.failure.clone());
+        rollup.stages[i].rounds = rounds;
+        if rollup.stages[i].failure.is_none() {
+            rollup.stages[i].failure = failure;
+        }
+    }
+}
+
+/// One ticket on the ladder, attempted or not (gui-spec.md §4.1, §5.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LadderEntry {
+    pub id: u32,
+    pub title: String,
+    /// pass | lite | fail | fault | skipped | not_reached
+    pub status: String,
+    /// full | lite: the variant of the record that decided the status.
+    #[serde(default)]
+    pub variant: String,
+    #[serde(default)]
+    pub points: f64,
+    /// One-line cause for the Run view; None when the ticket passed.
+    #[serde(default)]
+    pub cause: Option<String>,
+}
+
+/// The stop reason for a finished campaign cell (gui-spec.md §4.1).
+pub fn stop_reason(rollup: &CampaignRollup) -> &'static str {
+    if rollup.over_budget {
+        "budget cap"
+    } else if rollup.over_wall {
+        "wall cap"
+    } else {
+        "ladder end"
+    }
+}
+
+/// Derive the full ladder from a rollup and the campaign spec: one
+/// implementation for the console, the API and the public board
+/// (gui-spec.md §5.3). `needs` unmet -> `skipped`; a runnable but
+/// unattempted ticket -> `not reached` (with the stop reason).
+pub fn ladder(spec: &CampaignSpec, rollup: &CampaignRollup) -> Vec<LadderEntry> {
+    let passed: Vec<u32> = rollup
+        .stages
+        .iter()
+        .filter(|r| r.passed)
+        .map(|r| r.id)
+        .collect();
+    let mut out = Vec::new();
+    for stage in &spec.stages {
+        let records: Vec<&StageRecord> =
+            rollup.stages.iter().filter(|r| r.id == stage.id).collect();
+        let passed_full = records.iter().find(|r| r.passed && r.variant != "lite");
+        let passed_any = records.iter().rev().find(|r| r.passed);
+        let entry = if let Some(rec) = passed_any {
+            LadderEntry {
+                id: stage.id,
+                title: stage.title.clone(),
+                status: if passed_full.is_some() {
+                    "pass"
+                } else {
+                    "lite"
+                }
+                .to_string(),
+                variant: rec.variant.clone(),
+                points: passed_full.map(|r| r.points).unwrap_or(rec.points),
+                cause: None,
+            }
+        } else if let Some(rec) = records.last() {
+            let status = match rec.status.as_str() {
+                "fault" => "fault",
+                "skipped" => "skipped",
+                _ => "fail",
+            };
+            LadderEntry {
+                id: stage.id,
+                title: stage.title.clone(),
+                status: status.to_string(),
+                variant: rec.variant.clone(),
+                points: 0.0,
+                cause: rec
+                    .failure
+                    .as_ref()
+                    .map(|f| f.line.clone())
+                    .or_else(|| rec.git_stat.is_some().then(|| "failed".to_string())),
+            }
+        } else {
+            let unmet: Vec<u32> = stage
+                .needs
+                .iter()
+                .copied()
+                .filter(|n| !passed.contains(n))
+                .collect();
+            let (status, cause) = if !unmet.is_empty() {
+                let list = unmet
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ("skipped", format!("skipped: needs {list}"))
+            } else if rollup.over_budget {
+                ("not_reached", "not reached: budget cap".to_string())
+            } else if rollup.over_wall {
+                ("not_reached", "not reached: wall cap".to_string())
+            } else {
+                ("not_reached", "not reached".to_string())
+            };
+            LadderEntry {
+                id: stage.id,
+                title: stage.title.clone(),
+                status: status.to_string(),
+                variant: String::new(),
+                points: 0.0,
+                cause: Some(cause),
+            }
+        };
+        out.push(entry);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -605,6 +1031,13 @@ pub struct CampaignRollup {
     /// different versions never rank on one board).
     #[serde(default)]
     pub rules_version: String,
+    /// Campaign-wide budget cap in USD (0 = uncapped), for the Run view's
+    /// spend bar.
+    #[serde(default)]
+    pub budget_usd: f64,
+    /// Wall-clock cap in minutes (0 = uncapped).
+    #[serde(default)]
+    pub wall_min: u64,
     /// Difficulty-weighted points actually scored (tier x weight per pass).
     #[serde(default)]
     pub points: f64,
@@ -705,6 +1138,8 @@ where
         over_budget: false,
         over_wall: false,
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
+        budget_usd: opts.budget_usd,
+        wall_min: opts.wall_min.unwrap_or(0),
         points: 0.0,
         max_points: max_points(&lc.spec.stages),
     };
@@ -907,6 +1342,8 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         run_id: format!("{}_skipped", stage.id),
         git_commit: None,
         git_stat: None,
+        rounds: Vec::new(),
+        failure: None,
     }
 }
 
@@ -951,6 +1388,8 @@ fn push_attempt_record(
         run_id: out.run_id.clone(),
         git_commit: out.git_commit.clone(),
         git_stat: out.git_stat.clone(),
+        rounds: out.rounds.clone(),
+        failure: out.failure.clone(),
     });
 }
 
@@ -1128,6 +1567,224 @@ mod tests {
     use super::*;
     use crate::verifier::StageResult;
 
+    /// gui-spec.md §5.2: the classifier's six kinds, one fixture each.
+    #[test]
+    fn failure_classifier_kinds() {
+        let result = |id: u32, passed: bool, error: Option<&str>| StageResult {
+            stage: id,
+            name: format!("stage {id}"),
+            passed,
+            error: error.map(str::to_string),
+        };
+        // fault: a harness/provider fault is never a model verdict.
+        let fault = classify_failure(
+            5,
+            &[0],
+            &[result(0, false, Some("ignored"))],
+            false,
+            true,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(fault.kind, "fault");
+        // no_start: stage 0 unreachable, with the stderr cause.
+        let tail = "File \"/app/./server.py\", line 101\n    elif c == \"*\":\nIndentationError: expected an indented block";
+        let no_start = classify_failure(
+            8,
+            &[0, 1, 3, 4, 5],
+            &[result(
+                0,
+                false,
+                Some("server unreachable (candidate at 127.0.0.1:5480 never answered a probe)"),
+            )],
+            false,
+            false,
+            Some(tail),
+        )
+        .expect("classified");
+        assert_eq!(no_start.kind, "no_start");
+        assert!(no_start.line.contains("server.py:101"), "{}", no_start.line);
+        assert!(
+            no_start.line.contains("IndentationError"),
+            "{}",
+            no_start.line
+        );
+        assert!(no_start.line.chars().count() <= 160);
+        // regression: an earlier green ticket fails now.
+        let reg = classify_failure(
+            8,
+            &[0, 1, 3, 4, 5],
+            &[
+                result(0, true, None),
+                result(3, false, Some("Kind: expected OK 2, got OK 0")),
+            ],
+            false,
+            false,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(reg.kind, "regression");
+        assert!(reg.line.starts_with("broke tickets 3"), "{}", reg.line);
+        // late_check: the pipeline's own tag wins over own_stage.
+        let late = classify_failure(
+            13,
+            &[0],
+            &[
+                result(0, true, None),
+                result(
+                    13,
+                    false,
+                    Some("[perf] point lookups: indexed p50 7.2 ms is over the 5 ms budget"),
+                ),
+            ],
+            false,
+            false,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(late.kind, "late_check");
+        assert!(late.line.starts_with("[perf]"), "{}", late.line);
+        // own_stage: only this ticket's stage failed.
+        let own = classify_failure(
+            8,
+            &[0, 1, 3],
+            &[
+                result(0, true, None),
+                result(
+                    8,
+                    false,
+                    Some("ErrorClass: expected ERR no_column, got ERR syntax"),
+                ),
+            ],
+            false,
+            false,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(own.kind, "own_stage");
+        assert!(own.line.starts_with("own stage:"), "{}", own.line);
+        // agent: the agent died or never signalled READY.
+        let agent = classify_failure(8, &[], &[], true, false, None).expect("classified");
+        assert_eq!(agent.kind, "agent");
+        // A passing round has no cause.
+        assert!(classify_failure(8, &[0], &[result(0, true, None)], false, false, None).is_none());
+    }
+
+    /// gui-spec.md §5.3: attempted, lite, failed, skipped and not-reached
+    /// tickets all derive from the rollup and the spec.
+    #[test]
+    fn ladder_derives_every_ticket() {
+        let stage = |id: u32, needs: Vec<u32>| StageSpec {
+            id,
+            kind: "feature".to_string(),
+            title: format!("Ticket {id}"),
+            prompt: format!("stages/{id}/prompt.md"),
+            acceptance: Acceptance {
+                sql_stages: vec![id],
+                ..Default::default()
+            },
+            budget_usd: 0.1,
+            max_turns: 10,
+            feedback_rounds: 1,
+            tier: 1,
+            needs,
+            lite: Some(LiteSpec {
+                prompt: "lite.md".into(),
+                profile: vec![],
+                budget_usd: 0.05,
+                max_turns: 5,
+                weight: 0.4,
+            }),
+        };
+        let spec = CampaignSpec {
+            name: "sdb-sql".to_string(),
+            version: 1,
+            task: "sql".to_string(),
+            ladder: LadderMode::Continue,
+            title: "t".to_string(),
+            description: String::new(),
+            stages: vec![
+                stage(0, vec![]),
+                stage(1, vec![0]),
+                stage(2, vec![1]),
+                stage(3, vec![2]),
+            ],
+        };
+        let record = |id: u32, passed: bool, variant: &str, status: &str| StageRecord {
+            id,
+            title: format!("Ticket {id}"),
+            kind: "feature".to_string(),
+            passed,
+            pass_rate: if passed { 100.0 } else { 0.0 },
+            passed_stages: 1,
+            total_stages: 1,
+            regressed: vec![],
+            regression_severity: 0,
+            effective_cost_usd: 0.01,
+            turns: Some(3),
+            duration_seconds: Some(10.0),
+            status: status.to_string(),
+            variant: variant.to_string(),
+            tier: 1,
+            points: if passed && variant == "lite" {
+                0.4
+            } else if passed {
+                1.0
+            } else {
+                0.0
+            },
+            run_id: format!("r{id}"),
+            git_commit: None,
+            git_stat: None,
+            rounds: vec![],
+            failure: (status == "failed").then(|| FailureSummary {
+                kind: "own_stage".to_string(),
+                stage: Some(id),
+                line: format!("own stage: boom {id}"),
+                detail: String::new(),
+                stderr_tail: None,
+            }),
+        };
+        let mut rollup = CampaignRollup {
+            campaign_id: "c".into(),
+            name: "sdb-sql".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            task: "sql".into(),
+            started_at: String::new(),
+            finished_at: String::new(),
+            stages: vec![record(0, true, "full", "passed")],
+            reached: Some(0),
+            regression_free_tickets: 1,
+            total_cost_usd: 0.01,
+            over_budget: true,
+            over_wall: false,
+            rules_version: crate::report::rules::RULES_VERSION.to_string(),
+            budget_usd: 0.25,
+            wall_min: 30,
+            points: 1.0,
+            max_points: 4.0,
+        };
+        // 1's full attempt failed, its lite attempt passed.
+        rollup.stages.push(record(1, false, "full", "failed"));
+        rollup.stages.push(record(1, true, "lite", "passed"));
+        // Ticket 2 was attempted and failed.
+        rollup.stages.push(record(2, false, "full", "failed"));
+        let entries = ladder(&spec, &rollup);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].status, "pass");
+        assert_eq!(entries[1].status, "lite");
+        assert_eq!(entries[1].points, 0.4);
+        // 2 was attempted, failed, with the recorded one-liner.
+        assert_eq!(entries[2].status, "fail");
+        assert_eq!(entries[2].cause.as_deref(), Some("own stage: boom 2"));
+        // 3 was never attempted: needs 2 unmet beats the budget cap.
+        assert_eq!(entries[3].status, "skipped");
+        assert_eq!(entries[3].cause.as_deref(), Some("skipped: needs 2"));
+        assert_eq!(stop_reason(&rollup), "budget cap");
+    }
+
     fn stage_result(id: u32, passed: bool) -> StageResult {
         StageResult {
             stage: id,
@@ -1153,6 +1810,8 @@ mod tests {
             duration_seconds: Some(60.0),
             agent_failed: false,
             infra_error: false,
+            rounds: Vec::new(),
+            failure: None,
             disqualified: false,
             git_commit: Some("abc1234".into()),
             git_stat: Some("1 file changed".into()),
