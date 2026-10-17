@@ -885,14 +885,22 @@ pub(crate) async fn get_leaderboard(
 fn refresh_portal() {
     let root = crate::config::get_repo_root();
     let out = root.join("portal");
-    let _ = PortalExporter::export_rollup(
-        resolve_results_dir().to_str().unwrap_or("./results"),
+    // The public board is the sdb-sql campaign only: the pre-sdb-sql tasks
+    // are retired (2026-10-17) and their rollups no longer publish.
+    let runs_dir = crate::report::archive::RunArchiver::resolve_runs_dir();
+    let _ = PortalExporter::export_sql_board(
+        runs_dir.to_str().unwrap_or("./runs"),
         out.to_str().unwrap_or("./portal"),
-        "",
     );
-    // Rollup writes index.html only; drop stale per-run artifacts so the
-    // public surface never serves run detail.
-    let _ = std::fs::remove_dir_all(out.join("runs"));
+    // The board writes index.html only; drop stale per-run artifacts so
+    // the public surface never serves run detail. A silent failure here
+    // left a root-owned `runs/` tree serving legacy pages (2026-10-17):
+    // log it instead.
+    match std::fs::remove_dir_all(out.join("runs")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("[PORTAL] stale portal/runs/ not removed: {e}"),
+    }
     let _ = std::fs::remove_file(out.join("results.json"));
 }
 
@@ -1405,6 +1413,14 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             let name = e.file_name().to_string_lossy().to_string();
             let dir = e.path();
             if !name.starts_with("campaign_") || !dir.is_dir() {
+                continue;
+            }
+            // Retired campaigns stay on disk (their runs are history) but
+            // never reach the console: only the active ladder is listed.
+            if !crate::campaign::ACTIVE_CAMPAIGNS
+                .iter()
+                .any(|c| name.starts_with(&format!("campaign_{c}_")))
+            {
                 continue;
             }
             let mut v = std::fs::read_to_string(dir.join("status.json"))

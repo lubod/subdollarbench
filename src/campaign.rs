@@ -248,6 +248,11 @@ pub struct CampaignStageConfig {
     pub spec_md: Option<String>,
 }
 
+/// The campaigns the console and the public board present. The pre-sdb-sql
+/// tasks are retired (2026-10-17): only the differential SQL ladder runs,
+/// so only its campaign history is listed.
+pub const ACTIVE_CAMPAIGNS: &[&str] = &["sdb-sql"];
+
 pub fn campaigns_root() -> PathBuf {
     crate::config::get_repo_root().join("campaigns")
 }

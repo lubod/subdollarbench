@@ -1186,13 +1186,7 @@
         <div class="form-group">
           <label for="task">Benchmark Task</label>
           <select id="task" onchange="onTaskChange(this.value)">
-            <option value="redis">Redis (RESP Key-Value Clone)</option>
-            <option value="http">HTTP/1.1 Web Server</option>
-            <option value="pdf">PDF to Text Extractor (HTTP 8090)</option>
-            <option value="wal">Durable Event Broker (TCP 6390)</option>
-            <option value="proxy">Reverse Proxy & LB (HTTP 8091)</option>
-            <option value="pubsub">WebSocket Fan-Out (TCP 8092)</option>
-            <option value="binproto">Binproto (Binary RPC SDB1)</option>
+            <option value="sql">SQL Database (sdb-sql ladder)</option>
           </select>
         </div>
 
@@ -1204,13 +1198,7 @@
             <div style="display: flex; align-items: center; gap: 10px;">
               <span class="hint" style="font-weight: 600; color: #fff;">Task Spec:</span>
               <select id="promptTaskSelect" onchange="onTaskChange(this.value)" style="padding: 4px 10px; font-size: 0.78rem; font-weight: 600;">
-                <option value="redis">⚡ redis (In-Memory Redis Server)</option>
-                <option value="http">🌐 http (HTTP/1.1 Web Server)</option>
-                <option value="pdf">📄 pdf (PDF to Text Extractor)</option>
-                <option value="wal">📓 wal (Durable Event Broker)</option>
-                <option value="proxy">🔀 proxy (Reverse Proxy & LB)</option>
-                <option value="pubsub">📡 pubsub (WebSocket Fan-Out)</option>
-                <option value="binproto">🔩 binproto (Binary RPC SDB1)</option>
+                <option value="sql">🗄️ sql (Differential SQL Database)</option>
               </select>
               <span id="promptStatusIndicator" style="font-size: 0.72rem; color: var(--text-muted);"></span>
             </div>
@@ -1736,7 +1724,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
         + kpi('Tokens', Number(toks || 0).toLocaleString(), `prompt ${t.prompt_tokens ?? 0} / cached ${t.cached_tokens ?? 0} / completion ${t.completion_tokens ?? 0}`)
         + kpi('Turns', `${t.turns ?? '?'}`, 'Agent steps used')
         + kpi('Duration', (t.duration_seconds ?? 0) >= 1 ? formatDuration(t.duration_seconds) : '-', 'End-to-end wall time')
-        + kpi('Throughput', (t.throughput_req_sec !== undefined && t.throughput_req_sec !== null) ? formatThroughput(t.throughput_req_sec, t.task) : '—', 'Measured rate; scored only for redis/http with a live reference')
+        + kpi('Throughput', (t.throughput_req_sec !== undefined && t.throughput_req_sec !== null) ? formatThroughput(t.throughput_req_sec, t.task) : '—', 'Measured statement rate (the SQL ladder is graded differentially and reports none)')
         + `</div>`
         + stages
         + `<div class="xdet-sec">Files <span id="explorerFilesNote" style="font-weight:400;"></span></div><div id="explorerFiles" style="font-size:0.74rem;"></div>`
@@ -2248,7 +2236,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       const el = document.getElementById('campaignsList');
       if (!el) return;
       if (!campaignsCache.length) {
-        el.innerHTML = '<div class="hint">No campaigns yet. Run one: <code>subdollarbench campaign run --name sdb-kv --model &lt;model&gt;</code></div>';
+        el.innerHTML = '<div class="hint">No campaigns yet. Run one: <code>subdollarbench campaign run --name sdb-sql --model &lt;model&gt;</code></div>';
         return;
       }
       el.innerHTML = campaignsCache.map(c => {
@@ -2870,7 +2858,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     async function loadPrompt(taskOverride) {
       const mainSel = document.getElementById('task');
       const savedTask = localStorage.getItem('selected_benchmark_task');
-      const task = taskOverride || (mainSel ? mainSel.value : null) || savedTask || 'redis';
+      const task = taskOverride || (mainSel ? mainSel.value : null) || savedTask || 'sql';
 
       if (mainSel && mainSel.value !== task) mainSel.value = task;
       const promptSel = document.getElementById('promptTaskSelect');
@@ -2957,7 +2945,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
     }
 
     async function savePrompt() {
-      const task = (document.getElementById('task') && document.getElementById('task').value) || (document.getElementById('promptTaskSelect') && document.getElementById('promptTaskSelect').value) || 'redis';
+      const task = (document.getElementById('task') && document.getElementById('task').value) || (document.getElementById('promptTaskSelect') && document.getElementById('promptTaskSelect').value) || 'sql';
       const content = (document.getElementById('promptEditor') && document.getElementById('promptEditor').value) || currentLoadedPromptText;
       const saveBtn = document.getElementById('promptSaveBtn');
       if (saveBtn) saveBtn.disabled = true;
@@ -3513,7 +3501,9 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
       });
       const qModels = Object.keys(queued).map(k => k.split('\u0001')[0]);
       const models = [...new Set(Object.values(canon).map(r => r.model).concat(qModels))].sort();
-      const tasks = ['redis', 'binproto', 'http', 'pdf', 'proxy', 'pubsub', 'wal'];
+      // One task remains: the differential SQL ladder. The pre-sdb-sql
+      // tasks were retired 2026-10-17.
+      const tasks = ['sql'];
       // Column aggregates: mean P@1, best model, rows run — over cells that ran.
       const colStats = tasks.map(() => ({ sum: 0, n: 0, best: null, bestV: -1 }));
       let rowCount = 0, filledCells = 0, grandSum = 0, grandN = 0;
@@ -4289,7 +4279,7 @@ Select a model, choose reasoning effort, and click "Start Benchmark Run" to begi
             <span class="badge badge-pass">${Math.round(m.throughput_req_sec).toLocaleString()} req/s</span>
           </div>
           <div style="font-size: 0.76rem; color: var(--text-muted);">
-            Measured against official redis benchmark tool suite inside isolated sandbox environment.
+            Measured inside the isolated sandbox.
           </div>
         `;
         container.appendChild(tpCard);
@@ -5230,7 +5220,7 @@ function copyRunId() {
       modelInput.addEventListener('change', (e) => updateEffortControlsForModel(e.target.value.trim(), { applyDefault: true }));
     }
     checkAuth().then(() => fetchModels());
-    const initialSavedTask = localStorage.getItem('selected_benchmark_task') || 'redis';
+    const initialSavedTask = 'sql';
     onTaskChange(initialSavedTask);
     // Log traffic only when the log view is visible (default hidden).
     if (logsShown()) toggleAutoRefresh(true);
@@ -5461,7 +5451,7 @@ function copyRunId() {
           <div class="kpi-val" id="modalInspectTokens">-</div>
           <div class="kpi-lbl">Tokens (P / C)</div>
         </div>
-        <div class="kpi-chip" title="Measured rate; scored only for redis/http with a live reference">
+        <div class="kpi-chip" title="Measured statement rate (the SQL ladder is graded differentially and reports none)">
           <div class="kpi-val" id="modalInspectThroughput" style="color: var(--success);">-</div>
           <div class="kpi-lbl">Throughput</div>
         </div>

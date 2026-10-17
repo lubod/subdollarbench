@@ -59,20 +59,11 @@ function getModelMeta(modelName) {
   return { family: 'Other', icon: '🤖', color: choice.color, bg: choice.bg, border: choice.border };
 }
 
-// Units are not interchangeable: pubsub reports fan-out *deliveries*
-// (200 subs x 20 msgs = 4000 copies from 20 requests), wal reports
-// fsync-bound messages, binproto reports binary ops. Any of those labelled
-// "req/s" invites comparing them against a real request rate, which the
-// numbers do not support. Mirrors throughput_unit() in leaderboard.rs.
-function formatThroughput(tp, task) {
+// The retired tasks' unit spellings (pages/s, msgs/s, ...) went with them;
+// the SQL ladder is graded differentially and never reports a rate.
+function formatThroughput(tp) {
   if (!tp) return 'N/A';
-  const t = (task || '').toLowerCase();
-  const unit = t === 'pdf' ? 'pages/s'
-    : t === 'wal' ? 'msgs/s'
-    : t === 'pubsub' ? 'deliveries/s'
-    : t === 'binproto' ? 'ops/s'
-    : 'req/s';
-  return `${Math.round(tp).toLocaleString()} ${unit}`;
+  return `${Math.round(tp).toLocaleString()} req/s`;
 }
 
 // Pricing tier from data, not names. A weekly key-usage counter that reads

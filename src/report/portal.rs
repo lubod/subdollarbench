@@ -1174,6 +1174,32 @@ const PORTAL_JS: &str = concat!(
 
 pub struct PortalExporter;
 
+/// One campaign run on the public sdb-sql board (2026-10-17: the only
+/// benchmark task; the pre-sdb-sql rollup is retired).
+struct SqlBoardCell {
+    model: String,
+    harness: String,
+    effort: String,
+    state: String,
+    /// Highest ticket whose acceptance suite passed (with the continue
+    /// ladder this is a maximum, not a contiguous prefix).
+    reached: Option<u32>,
+    /// Tickets passed without regressing an earlier ticket.
+    regression_free: u32,
+    cost: f64,
+    passed_tickets: usize,
+    attempts: usize,
+    over_budget: bool,
+    updated: String,
+}
+
+impl SqlBoardCell {
+    /// The headline: regression-free tickets per dollar.
+    fn per_dollar(&self) -> Option<f64> {
+        (self.cost > 0.0).then(|| self.regression_free as f64 / self.cost)
+    }
+}
+
 impl PortalExporter {
     /// Exports a static read-only portal: leaderboard `index.html`, per-run pages
     /// with redacted logs, and a machine-readable `results.json`.
@@ -1261,6 +1287,174 @@ impl PortalExporter {
             run_count: count,
             out_dir: out_dir.to_path_buf(),
         })
+    }
+
+    /// The public board for the sdb-sql campaign: one cell per campaign
+    /// run, ranked by the ticket it reached and then by regression-free
+    /// tickets per dollar. Replaces the pre-sdb-sql per-task rollup on the
+    /// served portal (those tasks are retired and their runs no longer
+    /// publish). Writes ONLY `index.html`.
+    pub fn export_sql_board(runs_dir: &str, out: &str) -> Result<PortalSummary> {
+        let mut cells: Vec<SqlBoardCell> = Vec::new();
+        if let Ok(rd) = fs::read_dir(runs_dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.starts_with("campaign_") || !e.path().is_dir() {
+                    continue;
+                }
+                let read = |f: &str| {
+                    fs::read_to_string(e.path().join(f))
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                };
+                // `campaign.json` is the final rollup; `status.json` keeps
+                // the live one (and the state while the cell runs).
+                let (rollup, state) = match read("campaign.json") {
+                    Some(c) => {
+                        let state = read("status.json")
+                            .and_then(|t| t["state"].as_str().map(str::to_string))
+                            .unwrap_or_else(|| "done".to_string());
+                        (c, state)
+                    }
+                    None => match read("status.json") {
+                        Some(t) => match t.get("rollup").filter(|r| !r.is_null()).cloned() {
+                            Some(r) => {
+                                let state = t["state"].as_str().unwrap_or("unknown").to_string();
+                                (r, state)
+                            }
+                            None => continue,
+                        },
+                        None => continue,
+                    },
+                };
+                // Only the active campaign publishes (one source of truth:
+                // `campaign::ACTIVE_CAMPAIGNS`).
+                if !crate::campaign::ACTIVE_CAMPAIGNS
+                    .iter()
+                    .any(|c| rollup["name"].as_str() == Some(*c))
+                {
+                    continue;
+                }
+                let stages = rollup["stages"].as_array().cloned().unwrap_or_default();
+                cells.push(SqlBoardCell {
+                    model: rollup["model"].as_str().unwrap_or("?").to_string(),
+                    harness: rollup["harness"].as_str().unwrap_or("?").to_string(),
+                    effort: rollup["effort"].as_str().unwrap_or("high").to_string(),
+                    state,
+                    reached: rollup["reached"].as_u64().map(|v| v as u32),
+                    regression_free: rollup["regression_free_tickets"].as_u64().unwrap_or(0) as u32,
+                    cost: rollup["total_cost_usd"].as_f64().unwrap_or(0.0),
+                    passed_tickets: stages
+                        .iter()
+                        .filter(|st| st["passed"].as_bool().unwrap_or(false))
+                        .count(),
+                    attempts: stages.len(),
+                    over_budget: rollup["over_budget"].as_bool().unwrap_or(false),
+                    updated: rollup["finished_at"]
+                        .as_str()
+                        .or_else(|| rollup["started_at"].as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
+        }
+        // Ranked: reached ticket, then regression-free tickets per dollar,
+        // then the cheaper cell.
+        cells.sort_by(|a, b| {
+            b.reached
+                .unwrap_or(0)
+                .cmp(&a.reached.unwrap_or(0))
+                .then_with(|| {
+                    b.per_dollar()
+                        .unwrap_or(0.0)
+                        .partial_cmp(&a.per_dollar().unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.cost
+                        .partial_cmp(&b.cost)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        let out_dir = Path::new(out);
+        fs::create_dir_all(out_dir)
+            .with_context(|| format!("create portal dir {}", out_dir.display()))?;
+        fs::write(out_dir.join("index.html"), Self::render_sql_board(&cells))?;
+        Ok(PortalSummary {
+            run_count: cells.len(),
+            out_dir: out_dir.to_path_buf(),
+        })
+    }
+
+    /// The sdb-sql board page: campaign cells only, no legacy task specs,
+    /// no per-run detail.
+    fn render_sql_board(cells: &[SqlBoardCell]) -> String {
+        let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+        let best = cells
+            .iter()
+            .filter_map(|c| c.reached)
+            .max()
+            .map(|b| format!("ticket {b}"))
+            .unwrap_or_else(|| "—".to_string());
+        let rf: u32 = cells.iter().map(|c| c.regression_free).sum();
+        let spend: f64 = cells.iter().map(|c| c.cost).sum();
+        let mut rows = String::new();
+        for (i, c) in cells.iter().enumerate() {
+            let reached = c
+                .reached
+                .map(|r| format!("ticket {r}"))
+                .unwrap_or_else(|| "—".to_string());
+            let pd = c
+                .per_dollar()
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "—".to_string());
+            let state = match c.state.as_str() {
+                "running" => "<span class=\"b run\">RUNNING</span>".to_string(),
+                "done" => "<span class=\"b ok\">done</span>".to_string(),
+                other => format!("<span class=\"b\">{}</span>", Self::esc(other)),
+            };
+            let ob = if c.over_budget {
+                " · <span class=\"b warn\">over budget</span>"
+            } else {
+                ""
+            };
+            let updated = Self::esc(c.updated.get(..16).unwrap_or(&c.updated));
+            rows.push_str(&format!(
+                "<tr><td class=\"num\">{}</td><td><b>{}</b><div class=\"mut\">{} · effort {}{ob}</div></td><td>{reached}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{pd}</td><td class=\"num\">{}/{}</td><td>{state}</td><td class=\"mut\">{updated}</td></tr>",
+                i + 1,
+                Self::esc(&c.model),
+                Self::esc(&c.harness),
+                Self::esc(&c.effort),
+                c.regression_free,
+                c.passed_tickets,
+                c.cost,
+                c.passed_tickets,
+                c.attempts,
+            ));
+        }
+        let mut h = String::new();
+        h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — sdb-sql campaign</title><style>");
+        h.push_str(include_str!("portal_board.css"));
+        h.push_str("</style></head><body><main>");
+        h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database in the sqlite file format, checked statement by statement against a reference. Ranked by the ticket a model reached, then by regression-free tickets per dollar.</div></div><div class=\"right\"><a href=\"/\">🚀 Benchmark Runner &amp; Console</a>");
+        h.push_str(&format!(
+            "<div class=\"mut\">Updated {}</div></div></header>",
+            Self::esc(&now)
+        ));
+        h.push_str(&format!(
+            "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Cells</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Best reached</div><div class=\"v\">{best}</div></div><div class=\"card\"><div class=\"k\">Regression-free tickets</div><div class=\"v\">{rf}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
+            cells.len()
+        ));
+        h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Reached</th><th>Reg-free</th><th>Passed</th><th>Spend</th><th>Reg-free / $</th><th>Tickets</th><th>State</th><th>Updated</th></tr></thead><tbody>");
+        if rows.is_empty() {
+            h.push_str("<tr><td colspan=\"10\" class=\"mut\">No sdb-sql campaign cells yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
+        } else {
+            h.push_str(&rows);
+        }
+        h.push_str("</tbody></table></div>");
+        h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Reached</b>: the highest ticket whose acceptance suite passed. The ladder continues past a failed ticket (the workspace rolls back), so this is the maximum passed id, not a contiguous prefix.</li><li><b>Regression-free tickets</b>: tickets passed without regressing an earlier ticket's suite. <b>Reg-free / $</b> is that count over the cell's effective spend (API + compute) — the cost headline.</li><li>Ranking: reached ticket desc, then reg-free per $ desc, then the cheaper cell. A cell with $0 spend cannot be ranked per dollar.</li><li><b>Retired 2026-10-17</b>: the pre-sdb-sql tasks (redis/http/pdf/wal/proxy/pubsub/binproto) and their campaigns are no longer part of the benchmark; only the sdb-sql ladder publishes.</li></ul></section>");
+        h.push_str("</main></body></html>");
+        h
     }
 
     /// Model-rollup-only export for the public portal: one row per model
@@ -2627,6 +2821,113 @@ mod tests {
             assert!(!html.contains(id), "run id {id} leaked into rollup");
         }
         assert!(!html.contains("runs/"));
+    }
+
+    /// The sdb-sql board: reached ticket first, then regression-free
+    /// tickets per dollar; retired campaigns never publish; the live cell
+    /// (status.json only) is badged.
+    #[test]
+    fn test_sql_board_ranks_reached_then_per_dollar() {
+        let dir = std::env::temp_dir().join(format!("sql_board_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let runs = dir.join("runs");
+        let out = dir.join("portal");
+        let cell =
+            |name: &str, model: &str, reached: Option<u32>, rf: u32, cost: f64, state: &str| {
+                let d = runs.join(name);
+                fs::create_dir_all(&d).unwrap();
+                let campaign = name.split('_').nth(1).unwrap_or("sdb-sql");
+                let rollup = serde_json::json!({
+                    "campaign_id": name,
+                    "name": campaign,
+                    "model": model,
+                    "harness": "omp",
+                    "effort": "high",
+                    "task": "sql",
+                    "started_at": "2026-10-17T09:00:00Z",
+                    "finished_at": "2026-10-17T10:00:00Z",
+                    "stages": [
+                        {"id": 0, "title": "t0", "passed": true},
+                        {"id": 1, "title": "t1", "passed": false}
+                    ],
+                    "reached": reached,
+                    "regression_free_tickets": rf,
+                    "total_cost_usd": cost,
+                    "over_budget": false,
+                    "points": 1.0,
+                    "max_points": 40.0
+                });
+                fs::write(
+                    d.join("status.json"),
+                    serde_json::json!({"state": state, "current_stage": 1, "rollup": rollup})
+                        .to_string(),
+                )
+                .unwrap();
+                if state == "done" {
+                    fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+                }
+            };
+        cell(
+            "campaign_sdb-sql_m1_20261017",
+            "m1",
+            Some(5),
+            3,
+            0.30,
+            "done",
+        );
+        cell(
+            "campaign_sdb-sql_m2_20261017",
+            "m2",
+            Some(5),
+            2,
+            0.05,
+            "done",
+        );
+        cell(
+            "campaign_sdb-sql_m3_20261017",
+            "m3",
+            Some(6),
+            1,
+            0.90,
+            "done",
+        );
+        cell(
+            "campaign_sdb-sql_m4_20261017",
+            "m4",
+            None,
+            0,
+            0.0,
+            "running",
+        );
+        cell(
+            "campaign_sdb-kv_zzretired_20261017",
+            "zz_retired_model",
+            Some(9),
+            9,
+            0.01,
+            "done",
+        );
+
+        let summary =
+            PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
+                .expect("sql board");
+        assert_eq!(summary.run_count, 4, "retired campaigns never publish");
+        let html = fs::read_to_string(out.join("index.html")).unwrap();
+        let pos = |m: &str| {
+            html.find(m)
+                .unwrap_or_else(|| panic!("missing {m}: {html}"))
+        };
+        // Reached first (m3 at ticket 6), then the better reg-free-per-$
+        // (m2 at 40/$ vs m1 at 10/$).
+        assert!(pos("m3") < pos("m2"), "reached first: {html}");
+        assert!(pos("m2") < pos("m1"), "per-dollar second: {html}");
+        assert!(
+            !html.contains("zz_retired_model"),
+            "retired campaign leaked: {html}"
+        );
+        assert!(html.contains("RUNNING"), "the live cell is badged: {html}");
+        assert!(html.contains("Retired 2026-10-17"), "{html}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

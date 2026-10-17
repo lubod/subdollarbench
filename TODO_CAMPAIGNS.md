@@ -888,6 +888,18 @@ RULES for sdb-sql will be its own stamp when the first verifier lands
   (ALTER on a STRICT table answering `ROWS` instead of `OK 0` is fixed.)
 - [ ] M8. Retirement switch for the old tasks/campaigns, portal labels,
   README rewrite; calibration run; grid on the new stamp.
+  **Public surface is sdb-sql-only (2026-10-17)**: the console's task
+  pickers, leaderboard/matrix task lists, defaults and hints offer only
+  `sql`; `/api/campaigns` lists only the active campaign
+  (`campaign::ACTIVE_CAMPAIGNS = ["sdb-sql"]`); the served portal is a
+  new sdb-sql campaign board (`PortalExporter::export_sql_board`, ranked
+  by reached ticket then regression-free tickets per $) and the stale
+  root-owned `portal/runs/` tree of legacy per-run pages is gone (the
+  silent `remove_dir_all` failure now logs). `tasks/sql/prompt.md` feeds
+  the spec editor. Retired tasks remain runnable from the CLI — their
+  verifiers and campaigns are untouched, so the full code-level removal
+  (a destructive sweep) and the README rewrite are the remaining M8
+  items, with the calibration run and the grid.
 
 **Ticket 11 (indexes + perf gate) — landed (2026-10-17)**: the reverted
 increment was re-applied by hand on top of the round-5 fixes (the stash
