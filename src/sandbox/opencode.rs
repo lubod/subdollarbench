@@ -251,6 +251,24 @@ impl OpenCodeRunner {
         t == "provider.no-route" && msg.contains("Variant unavailable")
     }
 
+    /// The auth/billing reason of a provider error event, if any (round-13
+    /// ops: opencode emits these on stdout as JSON and stderr stays empty, so
+    /// the stderr classifier never sees them — a stale API key surfaced as
+    /// "exited with no further detail" and burned a cell).
+    fn provider_auth_billing_reason(v: &serde_json::Value) -> Option<String> {
+        let t = v.pointer("/error/type").and_then(|t| t.as_str())?;
+        if t != "provider.auth" && t != "provider.billing" {
+            return None;
+        }
+        let msg = v
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("the provider rejected the request");
+        Some(format!(
+            "opencode {t}: {msg} (check the API key: the repo .env is authoritative and scripts/sql-cell.sh exports it)"
+        ))
+    }
+
     /// Max cutoff recoveries per trial: cutoff → resume → cutoff again →
     /// accept the 0% as genuine model failure. Never loop on a model that
     /// won't act.
@@ -795,6 +813,10 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 if Self::is_rate_limit_event(&v, trimmed) {
                                     rate_o.store(true, Ordering::SeqCst);
                                 }
+                                if let Some(reason) = Self::provider_auth_billing_reason(&v) {
+                                    let _ = tx_o.send(format!("[BILLING] {reason}"));
+                                    billing_o.store(true, Ordering::SeqCst);
+                                }
                                 let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
                             }
                         }
@@ -1295,6 +1317,23 @@ mod tests {
         assert!(!OpenCodeRunner::is_variant_unavailable_event(
             &serde_json::Value::Null
         ));
+    }
+
+    /// Round-13 ops: a provider auth/billing event names itself — a stale
+    /// key surfaced as "exited with no further detail" and burned a cell.
+    #[test]
+    fn test_provider_auth_billing_event_names_itself() {
+        let auth = ev(
+            r#"{"type":"error","timestamp":1792326227450,"sessionID":"ses_x","error":{"type":"provider.auth","message":"User not found.","status":401,"response":{"body":"{\"error\":{\"message\":\"User not found.\",\"code\":401}}"}}}"#,
+        );
+        let reason = OpenCodeRunner::provider_auth_billing_reason(&auth).expect("auth reason");
+        assert!(reason.contains("User not found."), "{reason}");
+        assert!(reason.contains("API key"), "{reason}");
+        // Other event classes keep their own paths.
+        let r = ev(r#"{"type":"error","error":{"type":"provider.rate-limit","status":429}}"#);
+        assert!(OpenCodeRunner::provider_auth_billing_reason(&r).is_none());
+        let t = ev(r#"{"type":"text","part":{"type":"text","text":"hi"}}"#);
+        assert!(OpenCodeRunner::provider_auth_billing_reason(&t).is_none());
     }
 
     #[test]

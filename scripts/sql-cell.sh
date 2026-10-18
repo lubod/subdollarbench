@@ -26,6 +26,20 @@ EFFORT="${SDB_CELL_EFFORT:-high}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="$TARGET_DIR/release/subdollarbench"
 
+# The repo's .env is the source of truth for the cell's API key: a stale
+# OPENROUTER_API_KEY exported in the calling shell burned a cell on
+# 2026-10-18 ("User not found." 401 at round 0, ~$0 spend, but a poisoned
+# fault row). Prefer .env; fall back to the environment.
+if [[ -f "$ROOT/.env" ]]; then
+    ENV_KEY="$(grep -m1 '^OPENROUTER_API_KEY=' "$ROOT/.env" | cut -d= -f2- | tr -d '\"' | tr -d "'")"
+    if [[ -n "${ENV_KEY:-}" ]]; then
+        if [[ -n "${OPENROUTER_API_KEY:-}" && "${OPENROUTER_API_KEY}" != "$ENV_KEY" ]]; then
+            echo "[cell] note: the shell's OPENROUTER_API_KEY differs from .env; using .env (…${ENV_KEY: -4})"
+        fi
+        export OPENROUTER_API_KEY="$ENV_KEY"
+    fi
+fi
+
 echo "[cell] building release binary ($BIN)"
 (cd "$ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --bins)
 

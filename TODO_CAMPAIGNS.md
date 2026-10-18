@@ -1020,7 +1020,18 @@ by (model, harness, effort, rules) — incomparable rule sets never share a row
 — and the divider uses the shared `campaign::is_current_rules` predicate
 (unknown rules count as not current); hidden and poisoned *cells* now publish
 nowhere (portal + console), with tests for each. B3: the legend's swatches
-have real CSS colours and list all seven statuses.
+have real CSS colours and list all seven statuses. Ops for opencode cells
+(2026-10-18): the harness works, but two host preconditions — (1) the API key
+must come from `.env`; a stale `OPENROUTER_API_KEY` exported in the calling
+shell made opencode 401 at round 0 and burned a fault cell
+(`scripts/sql-cell.sh` now prefers `.env` and says so); (2) the model must be
+in opencode's catalog — `deepseek/deepseek-v4.1-flash-1017` was not
+(models.dev lags OpenRouter), giving `provider.no-route: Model unavailable`;
+try `opencode models` inside the sandbox and add an entry under
+`provider.openrouter.models` in the host `~/.config/opencode/opencode.json`
+(the sandbox mounts it). A provider auth/billing event on stdout now names
+itself (`[BILLING] opencode provider.auth: … (check the API key …)`) instead
+of "exited with no further detail".
 
 **Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
 cell has run on it)**. **Host ops (O1), read this before starting anything**:
