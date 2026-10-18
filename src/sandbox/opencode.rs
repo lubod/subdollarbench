@@ -725,8 +725,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                         match etype {
                             "step_start" => {
                                 let n = turns_o.fetch_add(1, Ordering::SeqCst) + 1;
-                                let _ = tx_o.send(format!("[LIVE] Turn {} started", n));
                                 if max_turns > 0 && n > max_turns {
+                                    // Round-14 N4: the turn past the cap is
+                                    // killed at its start; it never ran, so
+                                    // it is not counted (it used to cost
+                                    // the repair round one turn).
+                                    turns_o.fetch_sub(1, Ordering::SeqCst);
                                     *limit_msg_o.lock().unwrap() =
                                         Some(format!("max turns {} reached", max_turns));
                                     limit_hit_o.store(true, Ordering::SeqCst);
@@ -735,6 +739,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                         Command::new("docker").args(["rm", "-f", &cname]).output();
                                     break;
                                 }
+                                let _ = tx_o.send(format!("[LIVE] Turn {} started", n));
                             }
                             "tool_use" => {
                                 tools_o.fetch_add(1, Ordering::SeqCst);
@@ -954,6 +959,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                         } else {
                             "opencode timeout reached".to_string()
                         },
+                        started: st.steps_taken > 0 || st.total_tokens > 0,
                         partial_stats: st,
                     }))
                 }
@@ -976,6 +982,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     if !Self::backoff_sleep(attempt, deadline, &cancel_flag) {
                         break Err(anyhow!(OmpExecutionError {
                             message: "opencode backoff interrupted (timeout/cancel)".to_string(),
+                            started: st.steps_taken > 0 || st.total_tokens > 0,
                             partial_stats: st,
                         }));
                     }
@@ -1049,6 +1056,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     if !Self::backoff_sleep(attempt, deadline, &cancel_flag) {
                         break Err(anyhow!(OmpExecutionError {
                             message: "opencode backoff interrupted (timeout/cancel)".to_string(),
+                            started: st.steps_taken > 0 || st.total_tokens > 0,
                             partial_stats: st,
                         }));
                     }
@@ -1085,6 +1093,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 ),
                             }
                         },
+                        started: st.steps_taken > 0 || st.total_tokens > 0,
                         partial_stats: st,
                     }))
                 }
@@ -1952,7 +1961,9 @@ exit 1
         {
             let (res, _) = run_oc_scenario("turn_limit", &root, covtest_limits(1, 1.0, 10), None);
             let st = res.expect("limit stop is a normal conclusion");
-            assert_eq!(st.steps_taken, 2);
+            // Round-14 N4: the turn killed at the cap is not counted, so an
+            // agent stopped at its cap records exactly the cap.
+            assert_eq!(st.steps_taken, 1);
             passed += 1;
         }
 

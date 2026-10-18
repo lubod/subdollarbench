@@ -3171,6 +3171,7 @@ mod tests {
             agent_failed: false,
             disqualified: false,
             infra_error: infra,
+            harness_fault: None,
         };
 
         assert_eq!(trial_accounting(&mk(100.0, false)), (false, true));

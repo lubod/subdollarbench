@@ -94,6 +94,53 @@ pub fn set_poisoned(runs_dir: &Path, run_id: &str, poisoned: bool) -> anyhow::Re
     Ok(poisoned)
 }
 
+/// Round-14 N1: poison or hide a whole campaign cell. The flag lives in the
+/// campaign folder (`runs/<campaign_id>/`), where `export_sql_board` and the
+/// console's `get_campaigns` look; the per-run setters above need a run
+/// `manifest.json`, which a campaign folder never has. The file carries the
+/// reason, so a quarantined cell always says why it is out.
+pub fn set_campaign_flag(
+    runs_dir: &Path,
+    campaign_id: &str,
+    flag_file: &str,
+    on: bool,
+    reason: Option<&str>,
+) -> anyhow::Result<bool> {
+    let clean = clean_id(campaign_id).ok_or_else(|| anyhow::anyhow!("invalid campaign id"))?;
+    if !clean.starts_with("campaign_") {
+        anyhow::bail!("not a campaign id");
+    }
+    if flag_file != POISONED_FILE && flag_file != PORTAL_HIDDEN_FILE {
+        anyhow::bail!("unknown flag");
+    }
+    let dir = runs_dir.join(&clean);
+    if !dir.join("campaign.json").exists() && !dir.join("status.json").exists() {
+        anyhow::bail!("campaign not found");
+    }
+    let flag = dir.join(flag_file);
+    if on {
+        let what = if flag_file == POISONED_FILE {
+            "poisoned"
+        } else {
+            "hidden"
+        };
+        let reason = reason
+            .map(|r| r.trim().chars().take(500).collect::<String>())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "(no reason given)".to_string());
+        std::fs::write(
+            &flag,
+            format!(
+                "{what} {}\nreason: {reason}\n",
+                Utc::now().format("%Y-%m-%d %H:%M UTC")
+            ),
+        )?;
+    } else {
+        let _ = std::fs::remove_file(&flag);
+    }
+    Ok(on)
+}
+
 pub struct PortalSummary {
     pub run_count: usize,
     pub out_dir: PathBuf,
@@ -3739,6 +3786,57 @@ mod tests {
         // Path-ish ids resolve to their final component.
         fs::create_dir_all(runs.join("flag_run")).unwrap();
         assert!(!is_hidden(&runs, "nested/flag_run"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Round-14 N1: a campaign cell (no run manifest) can be poisoned and
+    /// hidden through its own folder, with the reason written down, and the
+    /// sql board drops it until it is unflagged.
+    #[test]
+    fn test_campaign_flag_lifecycle_and_board() {
+        let base = cov_temp("campaign_flags");
+        let runs = base.join("runs");
+        let out = base.join("portal");
+        let id = "campaign_sdb-sql_flagme_20261018";
+        let d = runs.join(id);
+        fs::create_dir_all(&d).unwrap();
+        let rollup = serde_json::json!({
+            "campaign_id": id, "name": "sdb-sql", "model": "flag-model",
+            "harness": "omp", "effort": "high", "task": "sql",
+            "started_at": "2026-10-18T00:00:00Z", "finished_at": "2026-10-18T00:30:00Z",
+            "stages": [], "reached": 0, "regression_free_tickets": 1, "points": 1.0,
+            "max_points": 26.0, "rules_version": crate::report::rules::RULES_VERSION,
+            "total_cost_usd": 0.1, "over_budget": false, "over_wall": false
+        });
+        fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+        let board = || {
+            PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
+                .unwrap();
+            fs::read_to_string(out.join("index.html")).unwrap()
+        };
+        assert!(board().contains("flag-model"));
+        // The per-run setter still refuses a campaign folder (no manifest).
+        assert!(set_poisoned(&runs, id, true).is_err());
+        assert!(set_campaign_flag(&runs, id, POISONED_FILE, true, Some("R1: argv crash")).unwrap());
+        assert!(is_poisoned(&runs, id));
+        let note = fs::read_to_string(d.join(POISONED_FILE)).unwrap();
+        assert!(note.contains("reason: R1: argv crash"), "{note}");
+        assert!(
+            !board().contains("flag-model"),
+            "a poisoned cell never publishes"
+        );
+        assert!(!set_campaign_flag(&runs, id, POISONED_FILE, false, None).unwrap());
+        assert!(board().contains("flag-model"), "unflagged, it comes back");
+        assert!(set_campaign_flag(&runs, id, PORTAL_HIDDEN_FILE, true, None).unwrap());
+        assert!(is_hidden(&runs, id));
+        assert!(fs::read_to_string(d.join(PORTAL_HIDDEN_FILE))
+            .unwrap()
+            .contains("(no reason given)"));
+        assert!(!board().contains("flag-model"));
+        // Only campaign folders, only the two flags, only existing cells.
+        assert!(set_campaign_flag(&runs, "flag_run", POISONED_FILE, true, None).is_err());
+        assert!(set_campaign_flag(&runs, id, "manifest.json", true, None).is_err());
+        assert!(set_campaign_flag(&runs, "campaign_ghost", POISONED_FILE, true, None).is_err());
         let _ = fs::remove_dir_all(&base);
     }
 

@@ -1064,6 +1064,44 @@ pub struct PipelineOutput {
     /// produced nothing runnable - it is recorded as a 0% trial and counted in
     /// the pass@k denominator. Callers must treat it as a non-result.
     pub infra_error: bool,
+    /// Round-14 N2/N3: the run is not a measurement at all - the agent never
+    /// reached its first turn (after one retry), or the provider rejected
+    /// the key/billing. A campaign stops on it and never publishes the cell.
+    pub harness_fault: Option<String>,
+}
+
+/// How an agent session that returned `Err` ended (round-14 N3): its partial
+/// stats, whether the agent ever showed a sign of life, and the provider
+/// billing/auth reason when that was the cause. Both error envelopes carry
+/// stats; anything else (a spawn failure, say) never started.
+struct AgentErrorEnd {
+    partial: crate::sandbox::omp::OmpSessionStats,
+    started: bool,
+    billing: Option<String>,
+}
+
+fn agent_error_end(e: &anyhow::Error) -> AgentErrorEnd {
+    use crate::sandbox::omp::{OmpBillingError, OmpExecutionError};
+    if let Some(be) = e.downcast_ref::<OmpBillingError>() {
+        let p = be.partial_stats.clone();
+        return AgentErrorEnd {
+            started: p.steps_taken > 0 || p.total_tokens > 0,
+            partial: p,
+            billing: Some(be.reason.clone()),
+        };
+    }
+    if let Some(oe) = e.downcast_ref::<OmpExecutionError>() {
+        return AgentErrorEnd {
+            partial: oe.partial_stats.clone(),
+            started: oe.started,
+            billing: None,
+        };
+    }
+    AgentErrorEnd {
+        partial: Default::default(),
+        started: false,
+        billing: None,
+    }
 }
 
 /// Publish the WAL crash-recovery probe: 2000 MSGs on `recovery_probe`,
@@ -3943,6 +3981,10 @@ impl BenchmarkPipeline {
         // Round-13 R1: a harness fault (the agent never reached its first
         // turn) is never a model verdict and its round is not graded.
         let mut agent_never_ran = false;
+        // Round-14 N2/N3: why this run is not a measurement at all (the
+        // agent never started, or the provider rejected the key/billing).
+        // A campaign stops on it and the cell never publishes.
+        let mut harness_fault: Option<String> = None;
         // Campaign rounds (§5.1 of gui-spec.md): one record per
         // verification, the initial try and every repair round.
         let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
@@ -4017,26 +4059,42 @@ impl BenchmarkPipeline {
                                     return Err(anyhow!("Benchmark run was cancelled by user"));
                                 }
                             }
-                            let partial_stats = e
-                                .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
-                                .map(|oe| oe.partial_stats.clone())
-                                .unwrap_or_default();
-                            acc.prompt_tokens += partial_stats.prompt_tokens;
-                            acc.cached_tokens += partial_stats.cached_tokens;
-                            acc.completion_tokens += partial_stats.completion_tokens;
-                            acc.total_tokens += partial_stats.total_tokens;
-                            acc.steps_taken += partial_stats.steps_taken;
-                            let zero_turns = partial_stats.steps_taken == 0;
+                            let end = agent_error_end(&e);
+                            acc.prompt_tokens += end.partial.prompt_tokens;
+                            acc.cached_tokens += end.partial.cached_tokens;
+                            acc.completion_tokens += end.partial.completion_tokens;
+                            acc.total_tokens += end.partial.total_tokens;
+                            acc.steps_taken += end.partial.steps_taken;
                             logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
-                            if zero_turns && attempt_no < 2 {
+                            if let Some(reason) = end.billing {
+                                // Round-14 N3: a dead key or exhausted
+                                // credit fails every retry the same way;
+                                // never retry it, and stop the cell.
+                                logger.log(&format!(
+                                    "[{htag} FAULT] provider billing/auth: {reason}; not retried, and the cell stops"
+                                ));
+                                harness_fault = Some(format!("provider billing/auth: {reason}"));
+                                if end.started {
+                                    agent_failed = true;
+                                } else {
+                                    agent_never_ran = true;
+                                }
+                                break;
+                            }
+                            if !end.started && attempt_no < 2 {
                                 logger.log(&format!(
                                     "[{htag} RETRY] the agent exited before its first turn; retrying the round once"
                                 ));
                                 continue;
                             }
-                            if zero_turns {
+                            if !end.started {
                                 logger.log(&format!(
-                                    "[{htag} FAULT] the agent never reached its first turn (0 steps): a harness fault, and this round is not graded"
+                                    "[{htag} FAULT] the agent never reached its first turn (twice): a harness fault, and this round is not graded"
+                                ));
+                                agent_never_ran = true;
+                                harness_fault = Some(format!(
+                                    "the agent never reached its first turn (twice): {}",
+                                    crate::campaign::truncate_line(&e.to_string(), 160)
                                 ));
                             } else {
                                 agent_failed = true;
@@ -4045,7 +4103,7 @@ impl BenchmarkPipeline {
                         }
                     }
                 }
-                agent_never_ran = !ran;
+                debug_assert!(ran || agent_never_ran || agent_failed);
                 let stats = acc;
                 let p = stats.prompt_tokens;
                 let c = stats.cached_tokens;
@@ -4233,53 +4291,91 @@ impl BenchmarkPipeline {
                     };
 
                     let round_run_id = format!("{}_r{}", run_id, round);
-                    let round_res = Self::run_agent_session(
-                        &config,
-                        &round_run_id,
-                        &feedback_prompt,
-                        round_limits,
-                        &sandbox,
-                        &logger,
-                        cancel_flag.clone(),
-                    )
-                    .await;
-
-                    match round_res {
-                        Ok(r_stats) => {
-                            prompt_tokens += r_stats.prompt_tokens;
-                            cached_tokens += r_stats.cached_tokens;
-                            completion_tokens += r_stats.completion_tokens;
-                            omp_stats.steps_taken += r_stats.steps_taken;
-                            omp_stats.total_tokens += r_stats.total_tokens;
-                            round_steps = Some(r_stats.steps_taken);
-                            logger.log(&format!(
-                            "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
-                            round, r_stats.steps_taken, r_stats.prompt_tokens, r_stats.completion_tokens
-                        ));
-                        }
-                        Err(e) => {
-                            logger.log(&format!(
-                                "[FEEDBACK ERROR] Round {} agent failed: {}",
-                                round, e
-                            ));
-                            // Count partial work against the pool even on failure,
-                            // mirroring the main agent path: a failed round still
-                            // burned turns and tokens.
-                            let partial = e
-                                .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
-                                .map(|oe| &oe.partial_stats)
-                                .or_else(|| {
-                                    e.downcast_ref::<crate::sandbox::omp::OmpBillingError>()
-                                        .map(|be| &be.partial_stats)
-                                });
-                            if let Some(ps) = partial {
-                                prompt_tokens += ps.prompt_tokens;
-                                cached_tokens += ps.cached_tokens;
-                                completion_tokens += ps.completion_tokens;
-                                omp_stats.steps_taken += ps.steps_taken;
-                                omp_stats.total_tokens += ps.total_tokens;
+                    // Round-14 N3: a repair agent that never starts is
+                    // retried once like round 0; a billing trip or a second
+                    // dead start ends the repair loop (nothing new to grade)
+                    // and stops the cell.
+                    let mut round_attempt = 0u32;
+                    let mut round_dead = false;
+                    loop {
+                        round_attempt += 1;
+                        let round_res = Self::run_agent_session(
+                            &config,
+                            &round_run_id,
+                            &feedback_prompt,
+                            round_limits,
+                            &sandbox,
+                            &logger,
+                            cancel_flag.clone(),
+                        )
+                        .await;
+                        match round_res {
+                            Ok(r_stats) => {
+                                prompt_tokens += r_stats.prompt_tokens;
+                                cached_tokens += r_stats.cached_tokens;
+                                completion_tokens += r_stats.completion_tokens;
+                                omp_stats.steps_taken += r_stats.steps_taken;
+                                omp_stats.total_tokens += r_stats.total_tokens;
+                                round_steps = Some(r_stats.steps_taken);
+                                logger.log(&format!(
+                                    "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
+                                    round, r_stats.steps_taken, r_stats.prompt_tokens, r_stats.completion_tokens
+                                ));
+                                break;
+                            }
+                            Err(e) => {
+                                logger.log(&format!(
+                                    "[FEEDBACK ERROR] Round {} agent failed: {}",
+                                    round, e
+                                ));
+                                // Count partial work against the pool even on
+                                // failure, mirroring the main agent path: a
+                                // failed round still burned turns and tokens.
+                                let end = agent_error_end(&e);
+                                prompt_tokens += end.partial.prompt_tokens;
+                                cached_tokens += end.partial.cached_tokens;
+                                completion_tokens += end.partial.completion_tokens;
+                                omp_stats.steps_taken += end.partial.steps_taken;
+                                omp_stats.total_tokens += end.partial.total_tokens;
+                                if let Some(ref cf) = cancel_flag {
+                                    if cf.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                }
+                                if let Some(reason) = end.billing {
+                                    logger.log(&format!(
+                                        "[FEEDBACK FAULT] provider billing/auth: {reason}; not retried, and the cell stops"
+                                    ));
+                                    harness_fault =
+                                        Some(format!("provider billing/auth: {reason}"));
+                                    round_dead = true;
+                                    break;
+                                }
+                                if !end.started && round_attempt < 2 {
+                                    logger.log(&format!(
+                                        "[FEEDBACK RETRY] Round {round} agent exited before its first turn; retrying once"
+                                    ));
+                                    continue;
+                                }
+                                if !end.started {
+                                    logger.log(&format!(
+                                        "[FEEDBACK FAULT] Round {round} agent never reached its first turn (twice): a harness fault; the round is not graded"
+                                    ));
+                                    harness_fault = Some(format!(
+                                        "repair round {round}: the agent never reached its first turn (twice): {}",
+                                        crate::campaign::truncate_line(&e.to_string(), 160)
+                                    ));
+                                    round_dead = true;
+                                }
+                                break;
                             }
                         }
+                    }
+                    if round_dead {
+                        // Not recorded as a round: it never ran, so it
+                        // measured nothing; the previous verdict stands.
+                        feedback_rounds_used = round - 1;
+                        break;
                     }
 
                     if let Some(ref cf) = cancel_flag {
@@ -5094,6 +5190,7 @@ impl BenchmarkPipeline {
             agent_failed,
             disqualified,
             infra_error,
+            harness_fault,
         })
     }
 }
@@ -5101,6 +5198,50 @@ impl BenchmarkPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round-14 N3: how an agent error ended. Billing never reads as "never
+    /// started" by accident, the runner's own sign-of-life flag wins over a
+    /// zero step count, and an unknown error never started.
+    #[test]
+    fn test_agent_error_end_classifies_billing_starts_and_unknowns() {
+        use crate::sandbox::omp::{OmpBillingError, OmpExecutionError, OmpSessionStats};
+        let billing = anyhow::Error::new(OmpBillingError {
+            reason: "provider.auth: User not found.".into(),
+            partial_stats: OmpSessionStats::default(),
+        });
+        let end = agent_error_end(&billing);
+        assert_eq!(
+            end.billing.as_deref(),
+            Some("provider.auth: User not found.")
+        );
+        assert!(!end.started);
+        let billing_mid = anyhow::Error::new(OmpBillingError {
+            reason: "402".into(),
+            partial_stats: OmpSessionStats {
+                steps_taken: 7,
+                total_tokens: 9000,
+                ..Default::default()
+            },
+        });
+        let end = agent_error_end(&billing_mid);
+        assert!(end.started && end.billing.is_some());
+        assert_eq!(end.partial.steps_taken, 7, "partial stats are kept");
+        // A lost session file: 0 steps, but the runner saw stdout.
+        let lost = anyhow::Error::new(OmpExecutionError {
+            message: "exit 1".into(),
+            partial_stats: OmpSessionStats::default(),
+            started: true,
+        });
+        assert!(agent_error_end(&lost).started, "graded, not retried");
+        let argv = anyhow::Error::new(OmpExecutionError {
+            message: "exit 2".into(),
+            partial_stats: OmpSessionStats::default(),
+            started: false,
+        });
+        let end = agent_error_end(&argv);
+        assert!(!end.started && end.billing.is_none());
+        assert!(!agent_error_end(&anyhow::anyhow!("Failed to spawn omp")).started);
+    }
 
     struct DummyLogger;
     impl PipelineLogger for DummyLogger {

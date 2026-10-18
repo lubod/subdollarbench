@@ -732,6 +732,11 @@ pub struct StageOutcome {
     pub rounds: Vec<RoundRecord>,
     /// The classified cause of the final round when the attempt failed.
     pub failure: Option<FailureSummary>,
+    /// Round-14 N2: the attempt measured nothing because of the harness or
+    /// the provider (the agent never started, a billing/auth trip). The
+    /// ladder stops here and the cell is a non-result.
+    #[serde(default)]
+    pub harness_fault: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1401,6 +1406,7 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         points: 0.0,
         max_points: 0.0,
+        harness_fault: None,
     }
 }
 
@@ -1507,7 +1513,9 @@ pub fn board_order(a: &BoardSortKey, b: &BoardSortKey) -> std::cmp::Ordering {
 
 /// The stop reason for a finished campaign cell (gui-spec.md §4.1).
 pub fn stop_reason(rollup: &CampaignRollup) -> &'static str {
-    if rollup.over_budget || rollup.cap_reached {
+    if rollup.harness_fault.is_some() {
+        "harness fault"
+    } else if rollup.over_budget || rollup.cap_reached {
         "budget cap"
     } else if rollup.over_wall {
         "wall cap"
@@ -1594,6 +1602,8 @@ pub fn ladder(
                     .collect::<Vec<_>>()
                     .join(",");
                 ("skipped", format!("skipped: needs {list}"))
+            } else if rollup.harness_fault.is_some() {
+                ("not_reached", "not reached: harness fault".to_string())
             } else if rollup.over_budget || rollup.cap_reached {
                 ("not_reached", "not reached: budget cap".to_string())
             } else if rollup.over_wall {
@@ -1661,6 +1671,11 @@ pub struct CampaignRollup {
     /// Ceiling: every stage full (sum of tiers).
     #[serde(default)]
     pub max_points: f64,
+    /// Round-14 N2: the ladder stopped because an attempt measured nothing
+    /// (the agent never started, or a billing/auth trip). The cell is a
+    /// non-result: the runner poisons it and no board publishes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_fault: Option<String>,
 }
 
 impl CampaignRollup {
@@ -1764,6 +1779,7 @@ where
         wall_min: opts.wall_min.unwrap_or(0),
         points: 0.0,
         max_points: max_points(&lc.spec.stages),
+        harness_fault: None,
     };
 
     for stage in &lc.spec.stages {
@@ -1872,6 +1888,16 @@ where
             regression_severity,
             status,
         );
+        if let Some(reason) = &out.harness_fault {
+            // Round-14 N2: a harness fault is not a ladder step. Stop the
+            // cell instead of letting one crash block its dependants.
+            outcomes.insert(stage.id, LadderOutcome::Failed);
+            stop_on_harness_fault(&mut rollup, stage.id, reason, reached, total_cost);
+            if let Some(cb) = on_stage {
+                cb(&rollup);
+            }
+            break;
+        }
         if out.passed {
             outcomes.insert(stage.id, LadderOutcome::Full);
             liters.remove(&stage.id);
@@ -1945,6 +1971,14 @@ where
                     severity2,
                     status2,
                 );
+                if let Some(reason) = &out2.harness_fault {
+                    outcomes.insert(stage.id, LadderOutcome::Failed);
+                    stop_on_harness_fault(&mut rollup, stage.id, reason, reached, total_cost);
+                    if let Some(cb) = on_stage {
+                        cb(&rollup);
+                    }
+                    break;
+                }
                 if out2.passed {
                     outcomes.insert(stage.id, LadderOutcome::Lite);
                     liters.insert(stage.id, lite.profile.clone());
@@ -1988,6 +2022,26 @@ where
 
     rollup.finished_at = chrono::Utc::now().to_rfc3339();
     Ok(rollup)
+}
+
+/// Round-14 N2: record why the ladder stopped on a harness fault and settle
+/// the rollup's totals (the caller breaks out of the ladder).
+fn stop_on_harness_fault(
+    rollup: &mut CampaignRollup,
+    stage_id: u32,
+    reason: &str,
+    reached: Option<u32>,
+    total_cost: f64,
+) {
+    rollup.harness_fault = Some(format!("ticket {stage_id}: {reason}"));
+    rollup.reached = reached;
+    rollup.total_cost_usd = total_cost;
+    rollup.points = rollup.stages.iter().map(|r| r.points).sum();
+    rollup.regression_free_tickets = rollup
+        .stages
+        .iter()
+        .filter(|r| r.passed && r.regressed.is_empty())
+        .count() as u32;
 }
 
 /// A stage recorded as skipped (`needs` blocked): no attempt, no cost.
@@ -2445,6 +2499,7 @@ mod tests {
             wall_min: 0,
             points: 0.0,
             max_points: 0.0,
+            harness_fault: None,
         };
         // Ticket 3 passed before this attempt: stage 3 failing again is a
         // regression, not an own-stage miss.
@@ -2717,6 +2772,7 @@ mod tests {
             wall_min: 30,
             points: 1.0,
             max_points: 4.0,
+            harness_fault: None,
         };
         // 1's full attempt failed, its lite attempt passed.
         rollup.stages.push(record(1, false, "full", "failed"));
@@ -2765,6 +2821,7 @@ mod tests {
             infra_error: false,
             rounds: Vec::new(),
             failure: None,
+            harness_fault: None,
             disqualified: false,
             git_commit: Some("abc1234".into()),
             git_stat: Some("1 file changed".into()),
@@ -3798,6 +3855,62 @@ mod tests {
         assert_eq!(s1.regressed, vec![1]);
         assert_eq!(s1.status, "fault");
         assert_eq!(rollup.regression_free_tickets, 1);
+    }
+
+    /// Round-14 N2: a harness fault (the agent never started, a billing
+    /// trip) stops the cell. It is not a ladder step that blocks `needs` and
+    /// lets the cell publish as a normal measurement.
+    #[tokio::test]
+    async fn test_orchestrator_stops_on_harness_fault() {
+        let lc = fixture_campaign();
+        assert!(lc.spec.stages.len() > 2, "the fixture needs a ladder");
+        let opts = CampaignRunOptions {
+            campaign_id: "c4".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 10.0,
+            wall_min: None,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = calls.clone();
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            move |attempt| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let out = if attempt.stage.id == 0 {
+                    outcome(true, &[(1, true), (2, true)])
+                } else {
+                    let mut o = outcome(false, &[]);
+                    o.infra_error = true;
+                    o.harness_fault = Some("the agent never reached its first turn".into());
+                    o
+                };
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "no attempt after the fault (no lite, no later ticket)"
+        );
+        assert_eq!(rollup.stages.len(), 2);
+        assert_eq!(rollup.stages[1].status, "fault");
+        let why = rollup
+            .harness_fault
+            .as_deref()
+            .expect("the stop is recorded");
+        assert!(why.starts_with("ticket 1:"), "{why}");
+        assert_eq!(stop_reason(&rollup), "harness fault");
+        assert_eq!(rollup.reached, Some(0));
+        // The rollup round-trips (old rollups have no field).
+        let v = serde_json::to_value(&rollup).unwrap();
+        let back: CampaignRollup = serde_json::from_value(v).unwrap();
+        assert_eq!(back.harness_fault, rollup.harness_fault);
     }
 
     #[test]

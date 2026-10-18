@@ -340,6 +340,11 @@ pub struct AgentRunSpec<'a> {
 pub struct OmpExecutionError {
     pub message: String,
     pub partial_stats: OmpSessionStats,
+    /// The agent produced any sign of life (a session file, stdout, a turn,
+    /// tokens). `false` means it died before its first turn — a harness
+    /// fault, never a model verdict (round-14 N3: `steps_taken == 0` alone
+    /// also matched a real run whose session file was lost).
+    pub started: bool,
 }
 
 /// Provider billing/auth/throttle failure: pause the wave, never score.
@@ -755,14 +760,20 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             Self::tail_session_file(tail_ctx);
         });
 
-        // Spawn thread to read stdout
+        // Spawn thread to read stdout. Any stdout at all is a sign of life:
+        // an argv rejection (round-13 R1) prints only to stderr.
+        let stdout_seen = Arc::new(AtomicBool::new(false));
         if let Some(stdout) = child.stdout.take() {
             let tx_out = tx.clone();
             let ext_flag = extension_feed.clone();
+            let seen = stdout_seen.clone();
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        seen.store(true, Ordering::SeqCst);
+                    }
                     if let Some(tagged) = Self::convert_bench_event(trimmed) {
                         ext_flag.store(true, Ordering::SeqCst);
                         for t in tagged {
@@ -916,9 +927,15 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             if let Some(s) = status {
                 if !s.success() {
                     warn!("OMP agent exited with non-zero status: {:?}", s.code());
+                    let started = final_path.is_some()
+                        || stdout_seen.load(Ordering::SeqCst)
+                        || turn_counter.load(Ordering::SeqCst) > 0
+                        || stats.steps_taken > 0
+                        || stats.total_tokens > 0;
                     return Err(anyhow::Error::new(OmpExecutionError {
                         message: format!("OMP agent exited with non-zero status: {:?}", s.code()),
                         partial_stats: stats,
+                        started,
                     }));
                 }
             }
@@ -3619,6 +3636,11 @@ case "$1" in
         printf '%s\n' 'omp exploded: model not found' >&2
         exit 9
         ;;
+      nonzero_live)
+        printf '%s\n' 'plain progress line'
+        sleep 0.3
+        exit 9
+        ;;
       ready)
         if [ -n "$SDB_COVTEST_WORKDIR" ]; then : > "$SDB_COVTEST_WORKDIR/READY"; fi
         wait_for_kill
@@ -3755,6 +3777,22 @@ exit 1
                 .downcast_ref::<OmpExecutionError>()
                 .expect("OmpExecutionError");
             assert!(exec.message.contains("Some(9)"), "{}", exec.message);
+            // Round-14 N3: stderr only, no session, no stdout - the R1 shape
+            // (an argv rejection). The agent never started.
+            assert!(!exec.started, "a stderr-only exit never started");
+            passed += 1;
+        }
+
+        // 2b. Non-zero exit after real output (a lost session file reads as
+        // 0 steps): it started, so the pipeline grades it, never retries.
+        {
+            let (res, _logs, _, _) =
+                run_omp_scenario("nonzero_live", &root, covtest_limits(10, 1.0, 10), None);
+            let err = res.expect_err("exit 9 must be an error");
+            let exec = err
+                .downcast_ref::<OmpExecutionError>()
+                .expect("OmpExecutionError");
+            assert!(exec.started, "stdout is a sign of life");
             passed += 1;
         }
 

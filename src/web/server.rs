@@ -1395,6 +1395,71 @@ pub(crate) async fn set_run_portal_visibility(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CampaignFlagRequest {
+    /// `poisoned` for /poison, `hidden` for /portal.
+    #[serde(alias = "poisoned", alias = "hidden")]
+    pub on: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+async fn set_campaign_flag_response(
+    campaign_id: String,
+    flag_file: &'static str,
+    payload: CampaignFlagRequest,
+) -> Response {
+    let clean = match clean_run_id(&campaign_id) {
+        Some(c) => c,
+        None => return (StatusCode::BAD_REQUEST, "invalid campaign id").into_response(),
+    };
+    match crate::report::portal::set_campaign_flag(
+        &RunArchiver::resolve_runs_dir(),
+        &clean,
+        flag_file,
+        payload.on,
+        payload.reason.as_deref(),
+    ) {
+        Ok(on) => {
+            refresh_portal();
+            let key = if flag_file == crate::report::portal::POISONED_FILE {
+                "poisoned"
+            } else {
+                "portal_hidden"
+            };
+            Json(serde_json::json!({"campaign_id": clean, key: on})).into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            format!("cannot update campaign: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Round-14 N1: poison a campaign cell (a non-result: excluded from the
+/// portal and the console board). Body: `{"poisoned": true, "reason": "…"}`.
+pub(crate) async fn set_campaign_poison(
+    AxumPath(campaign_id): AxumPath<String>,
+    Json(payload): Json<CampaignFlagRequest>,
+) -> Response {
+    set_campaign_flag_response(campaign_id, crate::report::portal::POISONED_FILE, payload).await
+}
+
+/// Round-14 N1: hide a campaign cell from both boards without calling it a
+/// non-result. Body: `{"hidden": true, "reason": "…"}`.
+pub(crate) async fn set_campaign_portal_visibility(
+    AxumPath(campaign_id): AxumPath<String>,
+    Json(payload): Json<CampaignFlagRequest>,
+) -> Response {
+    set_campaign_flag_response(
+        campaign_id,
+        crate::report::portal::PORTAL_HIDDEN_FILE,
+        payload,
+    )
+    .await
+}
+
 pub(crate) async fn rebuild_portal() -> Response {
     // Public portal is models-summary-only (rollup + prune stale per-run pages).
     refresh_portal();

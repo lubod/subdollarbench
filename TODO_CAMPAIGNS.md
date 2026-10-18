@@ -1035,13 +1035,31 @@ of "exited with no further detail".
 
 **First cell on the fixed argv (2026-10-18 12:27-13:24, opencode · effort
 max · $0.75/120 · rules .17)**: **reached ticket 5, 6 regression-free,
-$0.6077, 9.9 tickets/$** — every attempt ran real turns (no 0-turn faults),
-one ticket below the omp `.16` cell (ticket 7) at a lower cost. Tickets 0-5
-passed; s6/s7/s8 failed with regressions [0..5] (the model's
-transaction/aggregate/join attempts broke the earlier suites — the stage-4/5
-upgrade sentinels caught the store drift on rollback), s9 read 6/7, s10 was
-skipped (needs 9), and s11 failed 0/7 then 6/7 (CREATE INDEX still unparsed
-in both).
+$0.6077, 9.9 tickets/$** — every attempt ran real turns (no 0-turn faults).
+Not comparable with the omp `.16` cell (ticket 7): harness, effort and rules
+all differ. Tickets 0-5 passed; s6/s7/s8 failed with regressions [0..5]: the
+model's transaction/aggregate/join changes crashed every SELECT (`ERR syntax
+internal error: 'list' object has no attribute 'lower'`, reproduced by the
+reviewer against the s8 commit; the stage-5 code answers correctly), so suite
+0 and the stage-4 sentinel failed first. s9 read 6/7, s10 was skipped (needs
+9), and s11 failed 0/7 then 6/7 (CREATE INDEX still unparsed in both). The
+quarantined cells `poisoned_campaign_…_103729` (R1) and `…_122342` (stale
+shell key, opencode 401 at round 0) were restored to their `campaign_` names
+and flagged through `POST /api/campaigns/:id/poison` (round-14 N1).
+
+**Round-14 review fixes (2026-10-18, rules still `2026-10-18.17`)**: N1 —
+campaign cells are poisoned/hidden in their own folder
+(`portal::set_campaign_flag`, `POST /api/campaigns/:id/poison|portal` with a
+reason), honoured by the portal and the console board. N2 — a harness fault
+(the agent never started after one retry, or a provider billing/auth trip)
+stops the cell (`rollup.harness_fault`, stop reason "harness fault") and the
+runner poisons it, instead of a `fault` square that blocks `needs` in a
+published cell. N3 — "never started" is the runner's sign-of-life flag
+(`OmpExecutionError.started`: a session file, stdout, a turn or tokens), not
+`steps_taken == 0`; billing errors are classified on both paths, never
+retried; a repair-round agent that never starts is retried once, then ends
+the repair loop. N4 — opencode no longer counts the turn killed at the cap
+(the repair round got one turn less).
 
 **Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
 cell has run on it)**. **Host ops (O1), read this before starting anything**:

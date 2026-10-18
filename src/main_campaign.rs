@@ -550,6 +550,20 @@ pub async fn run(
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
     print_rollup(&rollup);
     println!("rollup: {}", rollup_path.display());
+    if let Some(reason) = &rollup.harness_fault {
+        // Round-14 N2: the cell stopped on a harness fault, so it measured
+        // the harness, not the model. Poison it before the board rebuild:
+        // the portal and the console both skip a poisoned campaign.
+        let note = format!(
+            "poisoned {} by the campaign runner\nreason: harness fault: {reason}\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+        );
+        let _ = std::fs::write(
+            cdir.join(subdollarbench::report::portal::POISONED_FILE),
+            note,
+        );
+        eprintln!("[campaign] HARNESS FAULT: {reason}; the cell is poisoned and not published");
+    }
     // The public sdb-sql board reads these rollups: rebuild it now so a
     // finished cell is never served as a mid-run snapshot (the engine
     // rebuilds only on demand; a standalone `campaign run` writes the file
@@ -971,6 +985,7 @@ async fn run_one_stage(
         git_stat,
         rounds,
         failure,
+        harness_fault: output.harness_fault.clone(),
     })
 }
 
@@ -1120,6 +1135,7 @@ mod tests {
             cap_reached: false,
             budget_usd: 0.0,
             wall_min: 0,
+            harness_fault: None,
         }
     }
 
