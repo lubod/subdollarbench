@@ -979,6 +979,34 @@ tail, the proxied campaign POST, the merged validation+lock+status
 test; full lib suite 876 green; the CLI refusal and the API 409 were
 verified live.
 
+**Round-10 review fixes landed (2026-10-18, browser pass)**: the console was
+driven with Playwright 1.58 at 1440 and 390 px; nothing mutated. (1) elapsed
+times are honest: the rollup's `finished_at` is empty until the run ends
+(mid-run status carries it blank), a running cell shows `started → running ·
+Xm elapsed` (recomputed on the 4 s board poll), a stalled one `stalled since
+HH:MM · in ticket N`, and the stop reason colours only done cells. (2) the
+Board and Run tables become stacked cards under 700 px: `scrollWidth ==
+innerWidth == 390` on all four tabs, and the header subtitle is dropped
+there. (3) the Live stream is quiet by default: a new `telemetry` kind
+(OMP / TELEMETRY / TOKENS / LIVE Turn / WAITING) is off in the chips (now
+real buttons with `aria-pressed`), `[WAITING]` keepalives collapse to one
+`turn N · thinking · Xs` line, `[THOUGHT]`/`[RESPONSE]` render as prose,
+`[ACTION]` + its output fold into one `<details>`, verdict/test-result lines
+become coloured banners, and the duplicate summary line under the card is
+gone — the card is the summary. (4) the first paint is the log **tail**
+(`tail=400`), not the whole file: a finished cell's 18k-line log used to
+render 3.7 MB of HTML. (5) every ladder square carries its ticket number and
+one legend serves all strips. (6) the header's five badges collapse into one
+health dot whose tooltip lists the versions and integrity; "Rebuild portal"
+moved to Admin. (7) the campaign launcher reads the picker's model and the
+main effort selector (one control each), shows the resolved model/effort and
+disables itself while a cell runs (the server-side lock is the backstop).
+(8) polling needs a visible page, the queue poll only runs on Admin, and the
+tab title tracks the live cell (`▶ t11 · 9/30 · $0.12 — SDB`). (9) a11y:
+tabs are `role=tab` with `aria-selected`, rows are keyboard-openable, chips
+are `aria-pressed` buttons. The one-lock-holder, honest-state and tail-fetch
+fixes were verified against the finished DeepSeek cell in the browser.
+
 **Round-9 review fixes landed (2026-10-18)**: (1) the live block lives in
 memory in `CampaignLogger` and status.json (which now carries the whole
 rollup) is read-modify-written only when a write is due — at most every

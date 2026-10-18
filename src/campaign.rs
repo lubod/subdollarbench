@@ -1546,7 +1546,7 @@ where
         effort: opts.effort.clone(),
         task: lc.spec.task.clone(),
         started_at: started_at.clone(),
-        finished_at: started_at,
+        finished_at: String::new(),
         stages: Vec::new(),
         reached: None,
         regression_free_tickets: 0,

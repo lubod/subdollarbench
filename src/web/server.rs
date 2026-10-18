@@ -1788,6 +1788,10 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
         body["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
     }
     body["live_run"] = serde_json::json!(live);
+    body["updated_at"] = status
+        .as_ref()
+        .map(|s| s["updated_at"].clone())
+        .unwrap_or(serde_json::Value::Null);
     Json(body).into_response()
 }
 
@@ -1820,15 +1824,18 @@ fn strip_log_ts(line: &str) -> &str {
 /// §4.3). Unknown lines fall into `verifier` (pipeline output).
 pub(crate) fn log_kind(line: &str) -> &'static str {
     let t = strip_log_ts(line);
-    if t.starts_with("[THOUGHT]")
-        || t.starts_with("[RESPONSE]")
-        || t.starts_with("[LIVE]")
-        || t.starts_with("[TOKENS]")
+    if t.starts_with("[OMP")
         || t.starts_with("[TELEMETRY]")
-        || t.starts_with("[OMP")
+        || t.starts_with("[TOKENS]")
+        || t.starts_with("[LIVE]")
         || t.starts_with("[WAITING]")
+    {
+        // Per-turn bookkeeping the header card already shows; off by
+        // default in the Live chips (round-10 U1).
+        "telemetry"
+    } else if t.starts_with("[THOUGHT]")
+        || t.starts_with("[RESPONSE]")
         || t.starts_with("[LIMIT]")
-        || t.starts_with("[FEEDBACK] ━━━")
         || (t.starts_with("[FEEDBACK] Round") && t.contains("agent completed"))
     {
         "agent"
@@ -5597,7 +5604,11 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
             ("[11:07:20]   Stage 8: Joins -> FAIL ErrorClass: expected", "verdict"),
             ("[11:17:46] [FEEDBACK] Round 1 test result: 2 of 6 stages passed (33.3%)", "verdict"),
             ("[09:40:12] [THOUGHT] Let me start by understanding", "agent"),
-            ("[09:40:14] [LIVE] Turn 6/9 | Spent: $0.0035", "agent"),
+            ("[09:40:14] [LIVE] Turn 6/9 | Spent: $0.0035", "telemetry"),
+            ("[09:40:14] [TELEMETRY] turn=6 max_turns=15 spent=0.0035 tokens=1000", "telemetry"),
+            ("[09:40:15] [TOKENS] Turn usage - input: 3852, output: 66, cached: 28416", "telemetry"),
+            ("[09:40:15] [OMP] [BENCH-POLICY] turn=6/9 idle=false", "telemetry"),
+            ("[09:40:16] [WAITING] Turn 7/9 in progress: Model is reasoning... (elapsed: 3s)", "telemetry"),
             ("[09:40:15] [ACTION] read", "tools"),
             ("[09:40:16]   > [server.py#2381]", "tools"),
             ("[09:40:17] [RESULT] read (OK)", "tools"),
@@ -5606,7 +5617,6 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
             ("[09:40:20] [VERIFY] Checking anti-cheat compliance", "verifier"),
             ("[09:40:21]     159 statements graded (seed 11663210981208198265)", "verifier"),
             ("[14:31:53] ─── ticket 0 [genesis] Genesis: tables, insert, select (acceptance [0], budget $0.20) ───", "verdict"),
-            ("[14:31:54] [TELEMETRY] turn=0 max_turns=28 spent=0.000000 tokens=0", "agent"),
             // The pre-fix fixtures (no timestamps) still classify.
             ("  Stage 8: Joins -> FAIL ErrorClass: expected", "verdict"),
             ("[UPGRADE] sentinel from stage 4 verified", "verdict"),
@@ -5624,7 +5634,7 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
                 "verdict",
             ),
             ("[THOUGHT] Let me start by understanding", "agent"),
-            ("[LIVE] Turn 6/9 | Spent: $0.0035", "agent"),
+            ("[LIVE] Turn 6/9 | Spent: $0.0035", "telemetry"),
             ("[ACTION] read", "tools"),
             ("  path: /workspace/server.py:966-1265", "verifier"),
             ("[RESULT] read (OK)", "tools"),

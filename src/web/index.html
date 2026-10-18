@@ -70,6 +70,36 @@
     }
     .ladderRun { animation: ladderPulse 1.2s ease-in-out infinite; }
     @keyframes ladderPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+    /* The console is dark-only by design (round-10 bug 5): a light theme
+       would need a second palette for the log colours, and this is an
+       operator tool, not a public page. */
+    .ladderSq {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px; margin-right: 2px; border-radius: 3px;
+      font-size: 9px; color: #0d1117; font-weight: 700; border: 1px solid var(--border);
+    }
+    .ladderStrip { display: flex; flex-wrap: wrap; gap: 2px; }
+    .causeCell {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; max-width: 380px;
+    }
+    .thought { font-family: -apple-system, BlinkMacSystemFont, sans-serif; border-left: 3px solid var(--accent); padding-left: 8px; color: var(--text); }
+    .logTs { color: var(--text-muted); opacity: .75; margin-right: 6px; }
+    /* Phone (< 700 px): Board and Run rows become stacked cards so the page
+       never scrolls sideways (round-10 bug 2). */
+    @media (max-width: 700px) {
+      body { padding: 10px; }
+      .container { max-width: 100%; }
+      header { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .responsive-runs-table thead { display: none; }
+      .responsive-runs-table tr { display: block; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; padding: 6px 8px; }
+      .responsive-runs-table td { display: block; border: none; padding: 2px 0; white-space: normal; }
+      .responsive-runs-table td.cardLine { display: inline-block; margin-right: 10px; }
+      .responsive-runs-table .ladderStrip { margin: 2px 0; }
+      .brand { flex-direction: row; align-items: center; gap: 8px; }
+      .brand h1 { font-size: 1.05rem; }
+      .brand p { display: none; }
+    }
     .status-dot {
       width: 8px;
       height: 8px;
@@ -1014,25 +1044,23 @@
         <h1>⚡ SubDollarBench</h1>
         <p>Autonomous Under-$1 Systems Benchmark for Budget LLMs (Docker + OMP)</p>
       </div>
-      <div style="display: flex; align-items: center; gap: 12px;">
-        <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">🏆 Leaderboard (Portal) ↗</a>
-        <button class="btn-secondary" onclick="rebuildPortalNow()" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 500;" title="Regenerate the static portal from current runs">Rebuild portal</button>
-        <div class="status-badge" id="ompStatusBadge" title="OMP Agent Sandbox Status" style="cursor: pointer;" onclick="checkOrUpdateOmp()">
-          <span class="status-dot" id="ompDot" style="background: var(--primary);"></span>
-          <span id="ompText">OMP: checking...</span>
-        </div>
-        <div class="status-badge" id="opencodeStatusBadge" title="OpenCode harness version (pinned in Dockerfile.sandbox)">
-          <span class="status-dot" id="opencodeDot" style="background: var(--primary);"></span>
-          <span id="opencodeText">opencode: checking...</span>
-        </div>
-        <div class="status-badge">
-          <span class="status-dot" id="statusDot"></span>
-          <span id="statusText">Ready</span>
-        </div>
-        <div class="status-badge" id="integrityBadge" title="Trust summary: orphans, junk rows, refused cells">
-          <span class="status-dot" id="integrityDot" style="background: var(--primary);"></span>
-          <span id="integrityText">integrity: …</span>
-        </div>
+      <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">Leaderboard ↗</a>
+        <span id="healthDot" class="status-dot" style="background: var(--success); width: 12px; height: 12px;" title="health"></span>
+        <span id="healthText" class="hint" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Ready</span>
+        <!-- versions/integrity live in the health tooltip (U5); kept as
+             hidden elements so the fetchers keep working unchanged. -->
+        <span id="ompText" style="display:none"></span>
+        <span id="opencodeText" style="display:none"></span>
+        <span id="statusText" style="display:none"></span>
+        <span id="integrityText" style="display:none"></span>
+        <span id="ompStatusBadge" style="display:none"></span>
+        <span id="opencodeStatusBadge" style="display:none"></span>
+        <span id="integrityBadge" style="display:none"></span>
+        <span class="status-dot" id="ompDot" style="display:none"></span>
+        <span class="status-dot" id="opencodeDot" style="display:none"></span>
+        <span class="status-dot" id="statusDot" style="display:none"></span>
+        <span class="status-dot" id="integrityDot" style="display:none"></span>
       </div>
     </header>
 
@@ -1054,11 +1082,11 @@
 
       <!-- Main Display Tabs -->
       <main class="card" id="appMain" style="display:none;">
-        <div class="tabs">
-          <button class="tab active" data-tab="board" onclick="switchTab('board')">Board</button>
-          <button class="tab" data-tab="run" onclick="switchTab('run')">Run</button>
-          <button class="tab" data-tab="live" onclick="switchTab('live')">Live</button>
-          <button class="tab" data-tab="admin" onclick="switchTab('admin')">Admin</button>
+        <div class="tabs" role="tablist" aria-label="views">
+          <button class="tab active" role="tab" aria-selected="true" data-tab="board" onclick="switchTab('board')">Board</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="run" onclick="switchTab('run')">Run</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="live" onclick="switchTab('live')">Live</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="admin" onclick="switchTab('admin')">Admin</button>
         </div>
       <div id="tab-board" style="flex-direction: column; gap: 16px;">
         <div id="boardHead" style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;"></div>
@@ -1137,6 +1165,11 @@
           <div id="selectedPricePill" class="price-pill" style="display: none; margin-top: 4px;"></div>
         </div>
 
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn-secondary" onclick="rebuildPortalNow()" style="padding:5px 12px;font-size:0.78rem;" title="Regenerate the static portal from current runs">Rebuild portal</button>
+          <span class="hint">the public board is rebuilt automatically when a cell finishes</span>
+        </div>
+
         <!-- Campaign launcher (gui-spec.md §4.4): what scripts/sql-cell.sh runs -->
         <div class="form-group" id="campaignLauncher" style="border:1px solid var(--border);border-radius:8px;padding:12px;">
           <label>
@@ -1144,20 +1177,13 @@
             <span class="hint">the ticket ladder on one living workspace — the same run as <code>scripts/sql-cell.sh</code>; the model comes from the picker above (or type one here)</span>
           </label>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
-            <div><span class="hint">Model (overrides the picker)</span><br>
-              <input type="text" id="campaignModel" placeholder="openrouter/vendor/model" style="min-width:280px;" /></div>
             <div><span class="hint">Budget $</span><br>
               <input type="number" id="campaignBudget" value="0.75" step="0.05" min="0.05" style="width:100px;" /></div>
             <div><span class="hint">Wall min</span><br>
               <input type="number" id="campaignWall" value="120" min="5" style="width:100px;" /></div>
-            <div><span class="hint">Effort</span><br>
-              <select id="campaignEffort">
-                <option value="high" selected>high</option>
-                <option value="medium">medium</option>
-                <option value="low">low</option>
-              </select></div>
-            <button class="btn" onclick="startCampaign()">Start campaign</button>
+            <button class="btn" id="campaignStartBtn" onclick="startCampaign()">Start campaign</button>
           </div>
+          <div class="hint" id="campaignChoice" style="margin-top:6px;">model: <b>—</b> · effort: <b>—</b></div>
           <div id="campaignCmd" class="hint" style="margin-top:8px;"></div>
           <div id="campaignStartMsg" class="hint"></div>
         </div>
@@ -1319,7 +1345,7 @@
         <div style="margin-top: 10px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="font-weight: 600;">Run Queue <span id="queueCount" class="badge">0</span></label>
-            <a href="#" onclick="clearFinishedQueue(); return false;" style="font-size: 0.75rem;" title="Drop finished queue entries">clear finished</a>
+            <a href="#" onclick="clearFinishedQueue(); return false;" style="font-size: 0.75rem; color: var(--primary);" title="Drop finished queue entries">clear finished</a>
           </div>
           <div id="queueList"><div class="hint">Empty — queue runs to run them hands-free.</div></div>
         </div>
@@ -1718,7 +1744,11 @@
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
       });
-      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+      document.querySelectorAll('.tab').forEach(t => {
+        const on = t.dataset.tab === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
       const el = document.getElementById(TAB_IDS[name]);
       if (el) el.style.display = 'flex';
       if (name === 'board') refreshBoard();
@@ -1737,8 +1767,13 @@
 
     function applyHash() {
       const h = decodeURIComponent(location.hash.replace(/^#/, ''));
-      if (h.startsWith('run/')) {
-        const id = h.slice(4);
+      if (h === 'run' || h.startsWith('run/')) {
+        let id = h.startsWith('run/') ? h.slice(4) : '';
+        if (!id) {
+          // No id: the live cell, else the most recent (round-10 U4).
+          const cell = boardCache.find(c => c.state === 'running') || boardCache[0] || null;
+          id = cell ? cell.id : '';
+        }
         if (id && (!currentRunDetail || currentRunDetail.id !== id)) loadRunDetail(id);
         showTab('run');
       } else if (TAB_IDS[h]) {
@@ -1755,6 +1790,9 @@
     let liveRunId = null;
     let liveOffset = 0;
     let liveLines = [];
+    // Bookkeeping (telemetry) is off by default: the header card already
+    // shows it (round-10 U1).
+    const LIVE_KINDS = ['verdict', 'agent', 'tools', 'verifier', 'setup', 'telemetry'];
     let liveKinds = new Set(['verdict', 'agent']);
     let liveFollowing = true;
     let liveBlocks = {};
@@ -1795,45 +1833,86 @@
     }
 
     function liveChips() {
-      return ['verdict', 'agent', 'tools', 'verifier', 'setup'].map(k => {
+      return LIVE_KINDS.map(k => {
         const on = liveKinds.has(k);
-        return `<span onclick="liveKindToggle('${k}')" style="cursor:pointer;padding:2px 10px;border-radius:10px;font-size:.72rem;border:1px solid ${on ? LIVE_KIND_COLORS[k] : 'var(--border)'};color:${on ? LIVE_KIND_COLORS[k] : 'var(--text-muted)'};margin-right:4px;">${k}</span>`;
+        const colour = LIVE_KIND_COLORS[k] || 'var(--text-muted)';
+        return `<button type="button" aria-pressed="${on ? 'true' : 'false'}" onclick="liveKindToggle('${k}')" style="cursor:pointer;padding:2px 10px;border-radius:10px;font-size:.72rem;background:none;border:1px solid ${on ? colour : 'var(--border)'};color:${on ? colour : 'var(--text-muted)'};margin-right:4px;">${k}</button>`;
       }).join('');
     }
 
-    function renderLiveLine(l) {
-      const color = LIVE_KIND_COLORS[l.kind] || 'var(--text)';
-      const text = escapeHtml(l.text);
-      if (l.kind === 'verdict') {
-        return `<div style="color:${color};font-weight:600;">${text}</div>`;
-      }
-      return `<div style="color:${color};white-space:pre-wrap;">${text}</div>`;
+    function splitTs(text) {
+      const m = /^\[(\d\d:\d\d:\d\d)\]\s?(.*)$/s.exec(String(text || ''));
+      return m ? { ts: m[1], rest: m[2] } : { ts: '', rest: String(text || '') };
     }
 
-    // Collapse the prompt/report blocks that are re-logged every round:
-    // a tagged line followed by indented/pipe continuation lines becomes a
-    // <details>, and an identical block seen before collapses to a count.
+    function renderLiveLine(l) {
+      const colour = LIVE_KIND_COLORS[l.kind] || 'var(--text)';
+      const { ts, rest } = splitTs(l.text);
+      const tsHtml = ts ? `<span class="logTs">${escapeHtml(ts)}</span>` : '';
+      const thought = /^\[(THOUGHT|RESPONSE)\]/.test(rest);
+      const verdict = /^\[FEEDBACK\] Round .*test result|^Stage .*-> (PASS|FAIL)|^\[(CRASH|PERF|UPGRADE|TXN)\]/.test(rest);
+      const cls = thought ? ' class="thought"' : '';
+      const style = verdict
+        ? `color:${colour};font-weight:600;background:rgba(88,166,255,0.06);border-left:3px solid ${colour};padding-left:8px;`
+        : `color:${colour};white-space:pre-wrap;`;
+      return `<div${cls} style="display:flex;gap:6px;"><span style="min-width:0;flex:0 0 auto;">${tsHtml}</span><span style="${style}flex:1;">${escapeHtml(rest)}</span></div>`;
+    }
+
+    // Collapse the prompt/report blocks that are re-logged every round, the
+    // tool calls (THOUGHT-style rows with their output folded, round-10
+    // U1/D) and the [WAITING] keepalives into one updating line.
     function collapseLiveBlocks(lines) {
       const out = [];
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
-        const isBlockStart = /^\[(PROMPT|OMP-PROMPT)\]|^\s*\|\s*(# Automated Verification Failure Report|#) /.test(l.text);
-        if (!isBlockStart) { out.push({ type: 'line', line: l }); continue; }
-        let j = i + 1;
-        const body = [];
-        while (j < lines.length && !/^\[[A-Z]/.test(lines[j].text.trimStart())) { body.push(lines[j]); j++; }
-        const sig = l.text.slice(0, 60) + '|' + body.length;
-        if (body.length < 8) {
-          out.push({ type: 'line', line: l });
-          body.forEach(b => out.push({ type: 'line', line: b }));
-        } else {
-          liveBlocks[sig] = (liveBlocks[sig] || 0) + 1;
-          out.push({ type: 'block', name: l.text.trim().slice(0, 70), body, sig });
-          if (liveBlocks[sig] > 1) {
-            out[out.length - 1].repeat = liveBlocks[sig];
+        const raw = splitTs(l.text).rest;
+        // A tool call: [ACTION] plus its indented args and output, up to
+        // the next tagged line that is not [RESULT].
+        if (raw.startsWith('[ACTION]')) {
+          const body = [];
+          let j = i + 1;
+          let result = '';
+          while (j < lines.length) {
+            const r = splitTs(lines[j].text).rest;
+            const tagged = /^\[[A-Z]/.test(r);
+            if (tagged && !r.startsWith('[RESULT]')) break;
+            if (r.startsWith('[RESULT]')) result = r;
+            body.push(lines[j]);
+            j++;
           }
+          out.push({ type: 'action', name: raw, result, body });
+          i = j - 1;
+          continue;
         }
-        i = j - 1;
+        // The re-logged prompt / feedback report blocks.
+        const isBlockStart = /^\[(PROMPT|OMP-PROMPT)\]|^\s*\|\s*(# Automated Verification Failure Report|#) /.test(l.text);
+        if (isBlockStart) {
+          let j = i + 1;
+          const body = [];
+          while (j < lines.length && !/^\[[A-Z]/.test(splitTs(lines[j].text).rest)) { body.push(lines[j]); j++; }
+          const sig = l.text.slice(0, 60) + '|' + body.length;
+          if (body.length < 8) {
+            out.push({ type: 'line', line: l });
+            body.forEach(b => out.push({ type: 'line', line: b }));
+          } else {
+            liveBlocks[sig] = (liveBlocks[sig] || 0) + 1;
+            out.push({ type: 'block', name: splitTs(l.text).rest.trim().slice(0, 70), body, sig, repeat: liveBlocks[sig] > 1 ? liveBlocks[sig] : 0 });
+          }
+          i = j - 1;
+          continue;
+        }
+        // [WAITING] keepalives: one line, updated in place.
+        if (raw.startsWith('[WAITING]')) {
+          let j = i + 1;
+          while (j < lines.length && splitTs(lines[j].text).rest.startsWith('[WAITING]')) j++;
+          const last = splitTs(lines[j - 1].text).rest;
+          const turn = (last.match(/Turn (\d+)\/(\d+)/) || [])[1] || '';
+          const secs = (last.match(/elapsed: (\d+)s/) || [])[1] || '';
+          out.push({ type: 'waiting', turn, secs });
+          i = j - 1;
+          continue;
+        }
+        out.push({ type: 'line', line: l });
       }
       return out;
     }
@@ -1843,102 +1922,20 @@
       if (!el) return;
       const parts = collapseLiveBlocks(liveLines).map(item => {
         if (item.type === 'line') return renderLiveLine(item.line);
-        const inner = item.body.map(b => escapeHtml(b.text)).join('\n');
-        const label = item.repeat ? `${escapeHtml(item.name)} (repeated ×${item.repeat})` : `${escapeHtml(item.name)} (${item.body.length + 1} lines)`;
-        return `<details style="margin:2px 0;"><summary style="cursor:pointer;color:var(--text-muted);font-size:.72rem;">▸ ${label}</summary><pre style="white-space:pre-wrap;font-size:.72rem;color:var(--text-muted);margin:4px 0 4px 14px;">${inner}</pre></details>`;
-      });
-      el.innerHTML = parts.join('') || '<div class="hint">waiting for output…</div>';
-      if (liveFollowing) el.scrollTop = el.scrollHeight;
-    }
-
-    /// The Live/Run header: the runner's live block (round-8 improvement
-    /// A) when present, else a timestamp-anchored scan of the stream.
-    function liveInfo() {
-      const cell = boardCache.find(c => c.id === liveRunId) || null;
-      const live = (cell && cell.live) || {};
-      const roll = cell ? (cell.rollup || {}) : {};
-      if (live.ticket == null && !live.phase && !live.turn) {
-        // Fallback for cells whose runner predates the live block: parse
-        // the stream (timestamps stripped: every real line carries one).
-        const strip = t => String(t || '').replace(/^\[\d\d:\d\d:\d\d\]\s*/, '');
-        let out = {};
-        for (let k = liveLines.length - 1; k >= 0 && out.ticket == null; k--) {
-          const t = strip(liveLines[k].text);
-          let m;
-          if (out.ticket == null && (m = t.match(/^─── ticket (\d+) \[([a-z]+)\]/))) { out.ticket = m[1]; out.type = m[2]; }
-          if (out.turn == null && (m = t.match(/^\[LIVE\] Turn (\d+)\/(\d+)/))) { out.turn = m[1]; out.max_turns = m[2]; }
-          if (out.ticket_spent == null && (m = t.match(/\bspent=([0-9.]+)/))) { out.ticket_spent = parseFloat(m[1]); }
-          if (out.round == null && (m = t.match(/Repair Round (\d+)\//))) { out.round = m[1]; }
+        if (item.type === 'waiting') {
+          return `<div class="hint" style="padding-left:8px;">turn ${escapeHtml(item.turn)} \u00b7 thinking\u2026 ${escapeHtml(item.secs)}s</div>`;
         }
-        return out;
-      }
-      return live;
-    }
-
-    function relAge(rfc) {
-      const t = Date.parse(rfc);
-      if (!isFinite(t)) return String(rfc || '');
-      const s = Math.max(0, (Date.now() - t) / 1000);
-      if (s < 90) return `${Math.round(s)}s ago`;
-      if (s < 5400) return `${Math.round(s / 60)}m ago`;
-      return `${Math.round(s / 3600)}h ago`;
-    }
-
-    function ageSecs(rfc) {
-      const t = Date.parse(rfc);
-      return isFinite(t) ? Math.max(0, (Date.now() - t) / 1000) : null;
-    }
-
-    function clockOf(rfc) {
-      const t = Date.parse(rfc);
-      return isFinite(t)
-        ? new Date(t).toLocaleTimeString([], { hour12: false })
-        : String(rfc || '');
-    }
-
-    function liveSummary(extra) {
-      const live = liveInfo();
-      const cell = boardCache.find(c => c.id === liveRunId) || null;
-      const roll = cell ? (cell.rollup || {}) : {};
-      const d = (currentRunDetail && currentRunDetail.id === liveRunId) ? currentRunDetail : null;
-      const cap = d ? d.budget_usd : roll.budget_usd;
-      const parts = [];
-      if (live.ticket != null) {
-        parts.push(`ticket ${live.ticket}${live.title ? ' ' + live.title : (live.type ? ' [' + live.type + ']' : '')}${live.variant === 'full' ? ' (full)' : live.variant === 'lite' ? ' (lite)' : ''}`);
-      }
-      if (live.round) parts.push(`repair round ${live.round}`);
-      if (live.phase) parts.push(live.phase);
-      if (live.turn != null) parts.push(`turn ${live.turn}${live.max_turns ? '/' + live.max_turns : ''}`);
-      if (live.ticket_spent != null) {
-        // Provider-reported API spend, not the effective cost the budget
-        // bounds (round-9 finding 3): label it.
-        parts.push(`ticket API $${fmtMoney(live.ticket_spent)}${live.ticket_budget ? ' / $' + fmtMoney(live.ticket_budget) + ' budget' : ''}`);
-      }
-      const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
-      if (spent != null) parts.push(`campaign $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) + ' cap (effective)' : ' (effective)'}`);
-      // The latest verification: its pass/total plus the first *real*
-      // failure, never the skipped tail (round-9 finding 2).
-      const frac = live.summary || (live.check_total ? `${live.check_pass || 0}/${live.check_total}` : '');
-      if (frac || live.first_fail) {
-        const tail = live.first_fail || 'all checks passed';
-        parts.push(`last check ${clockOf(live.last_check_at)}${frac ? ' · ' + frac : ''} · ${tail}`);
-      }
-      if (live.last_activity_at) parts.push(`last activity ${relAge(live.last_activity_at)}`);
-      return parts.join(' · ');
-    }
-
-    function renderLiveStrip() {
-      const box = document.getElementById('liveStrip');
-      if (!box) return;
-      const text = liveRunId ? liveSummary(true) : 'no run selected';
-      // A hung agent is the most useful thing to see (round-9 §B): the
-      // strip turns amber after 2 min without activity and red after 5.
-      const live = liveRunId ? liveInfo() : {};
-      const age = ageSecs(live.last_activity_at);
-      let colour = '';
-      if (age != null && age > 300) colour = 'color:var(--danger);font-weight:600;';
-      else if (age != null && age > 120) colour = 'color:var(--warning);font-weight:600;';
-      box.innerHTML = `<span class="hint" style="${colour}">${escapeHtml(text || String(liveRunId || ''))}</span>`;
+        if (item.type === 'action') {
+          const inner = item.body.map(b => escapeHtml(splitTs(b.text).rest)).join('\n');
+          const label = `${item.name}${item.result ? ' \u2014 ' + item.result.replace('[RESULT] ', '') : ''}`;
+          return `<details style="margin:2px 0;"><summary style="cursor:pointer;color:var(--accent);font-size:.74rem;">${escapeHtml(label)}</summary><pre style="white-space:pre-wrap;font-size:.72rem;color:var(--text-muted);margin:4px 0 4px 14px;">${inner}</pre></details>`;
+        }
+        const inner = item.body.map(b => escapeHtml(splitTs(b.text).rest)).join('\n');
+        const label = item.repeat ? `${escapeHtml(item.name)} (repeated \u00d7${item.repeat})` : `${escapeHtml(item.name)} (${item.body.length + 1} lines)`;
+        return `<details style="margin:2px 0;"><summary style="cursor:pointer;color:var(--text-muted);font-size:.72rem;">\u25b8 ${label}</summary><pre style="white-space:pre-wrap;font-size:.72rem;color:var(--text-muted);margin:4px 0 4px 14px;">${inner}</pre></details>`;
+      });
+      el.innerHTML = parts.join('') || '<div class="hint">waiting for output\u2026</div>';
+      if (liveFollowing) el.scrollTop = el.scrollHeight;
     }
 
     function liveBar(label, frac, text, colour) {
@@ -1964,8 +1961,17 @@
       const started = (d && d.rollup && d.rollup.started_at) || roll.started_at || live.started_at;
       const wallSecs = started ? (Date.now() - Date.parse(started)) / 1000 : null;
       const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
+      const state = (cell && cell.state) || (d && d.state) || '';
+      const stop = (cell && cell.stop_reason) || (d && d.stop_reason) || '';
+      const finished = state === 'done' || state === 'stalled';
       const age = ageSecs(live.last_activity_at);
-      const stale = age != null && age > 300 ? 'var(--danger)' : age != null && age > 120 ? 'var(--warning)' : '';
+      // A finished cell is *supposed* to be quiet: no staleness colours.
+      const stale = finished ? '' : age != null && age > 300 ? 'var(--danger)' : age != null && age > 120 ? 'var(--warning)' : '';
+      const stateTag = state === 'done'
+        ? `<span style="color:var(--success);font-weight:600;">finished${stop ? ' \u00b7 ' + escapeHtml(stop) : ''}</span> `
+        : state === 'stalled'
+        ? `<span style="color:var(--danger);font-weight:600;">stalled${live.last_activity_at ? ' since ' + escapeHtml(clockOf(live.last_activity_at)) : ''}</span> `
+        : '';
       const ladder = (cell && cell.ladder) || (d && d.ladder) || [];
       const head = [model,
         live.ticket != null ? `ticket ${live.ticket} ${live.title || live.type || ''}${live.variant === 'lite' ? ' (lite)' : live.variant === 'full' ? ' (full)' : ''}` : '',
@@ -1974,7 +1980,7 @@
         live.turn != null ? `turn ${live.turn}/${live.max_turns ?? '?'}` : '']
         .filter(Boolean).join(' \u00b7 ');
       return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;flex-direction:column;gap:4px;">
-        <div><b>${escapeHtml(head || liveRunId)}</b>${stale ? ` <span style="color:${stale};font-weight:600;" title="a hung agent is the most useful thing to see">no activity for ${escapeHtml(relAge(live.last_activity_at))}</span>` : ''}</div>
+        <div>${stateTag}<b>${escapeHtml(head || liveRunId)}</b>${stale ? ` <span style="color:${stale};font-weight:600;" title="a hung agent is the most useful thing to see">no activity for ${escapeHtml(relAge(live.last_activity_at))}</span>` : ''}${finished ? ' <span class="hint">final tail</span>' : ''}</div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 24px;">
           ${liveBar('turns', live.max_turns ? (live.turn || 0) / live.max_turns : null, `${live.turn ?? 0}/${live.max_turns ?? '?'}`, stale || 'var(--primary)')}
           ${liveBar('ticket API $', live.ticket_budget ? (live.ticket_spent || 0) / live.ticket_budget : null, `${fmtMoney(live.ticket_spent || 0)} / ${live.ticket_budget ? fmtMoney(live.ticket_budget) : '\u2014'}`, stale || 'var(--accent)')}
@@ -1982,15 +1988,27 @@
           ${liveBar('campaign $', cap ? (spent || 0) / cap : null, `${fmtMoney(spent || 0)} / ${cap ? fmtMoney(cap) : '\u2014'}`, stale || 'var(--success)')}
         </div>
         <div class="hint">${escapeHtml(liveSummary(false))}</div>
-        <div style="display:flex;align-items:center;gap:8px;">${ladderStrip(ladder)}<span class="hint">${ladder.length ? 'ladder' : ''}</span></div>
+        ${(() => {
+          const frac = live.summary || (live.check_total ? `${live.check_pass || 0}/${live.check_total}` : '');
+          if (!frac && !live.first_fail && !live.check_total) return '';
+          const ok = live.check_total > 0 && (live.check_pass || 0) === live.check_total;
+          const colour = live.first_fail ? 'var(--danger)' : ok ? 'var(--success)' : 'var(--text-muted)';
+          const text = `last check ${clockOf(live.last_check_at)}${frac ? ' \u00b7 ' + frac : ''} \u00b7 ${live.first_fail || (ok ? 'all checks passed' : 'in flight')}`;
+          return `<div style="border-left:3px solid ${colour};padding:2px 8px;background:rgba(88,166,255,0.05);font-size:.76rem;color:${colour};">${escapeHtml(text)}</div>`;
+        })()}
+        <div style="display:flex;align-items:center;gap:8px;">${ladderStrip(ladder)}</div>
       </div>`;
     }
 
     async function pollLive() {
       if (!liveRunId) return;
       const kinds = [...liveKinds].join(',') || 'verdict';
+      // Round-10 follow-up: the first paint is the *tail*, not the whole
+      // log (a finished cell's log is tens of thousands of lines). After
+      // that every poll transfers only what is new.
+      const q = liveOffset > 0 ? `after=${liveOffset}` : 'tail=400';
       try {
-        const r = await fetch(`/api/campaigns/${encodeURIComponent(liveRunId)}/log?after=${liveOffset}&kinds=${encodeURIComponent(kinds)}`);
+        const r = await fetch(`/api/campaigns/${encodeURIComponent(liveRunId)}/log?${q}&kinds=${encodeURIComponent(kinds)}`);
         if (!r.ok) return;
         const data = await r.json();
         if (data.offset < liveOffset) { liveOffset = 0; liveLines = []; liveBlocks = {}; return; }
@@ -1998,8 +2016,10 @@
         if (data.lines && data.lines.length) {
           liveLines = liveLines.concat(data.lines);
           if (liveLines.length > 1500) liveLines = liveLines.slice(-1500);
-          renderLiveStrip();
           renderLiveStream();
+        } else {
+          const cell = boardCache.find(c => c.id === liveRunId);
+          if (cell && cell.state !== 'running' && liveTimer) { clearInterval(liveTimer); liveTimer = null; }
         }
       } catch (e) { /* transient */ }
     }
@@ -2008,7 +2028,16 @@
       const body = document.getElementById('liveBody');
       if (!body) return;
       const running = boardCache.find(c => c.state === 'running');
-      const wantId = (currentRunDetail && currentRunDetail.state === 'running') ? currentRunDetail.id : (running ? running.id : (currentRunDetail ? currentRunDetail.id : null));
+      // Order of preference (round-10 U4): the open run if it is live, the
+      // running cell, the open run, else the most recently started cell.
+      let wantId = currentRunDetail && currentRunDetail.state === 'running' ? currentRunDetail.id : null;
+      if (!wantId) wantId = running ? running.id : null;
+      if (!wantId) wantId = currentRunDetail ? currentRunDetail.id : null;
+      if (!wantId && boardCache.length) {
+        const latest = boardCache.slice().sort((a, b) =>
+          Date.parse((b.rollup || {}).started_at || 0) - Date.parse((a.rollup || {}).started_at || 0))[0];
+        wantId = latest ? latest.id : null;
+      }
       if (wantId && wantId !== liveRunId) {
         liveRunId = wantId;
         liveOffset = 0;
@@ -2018,7 +2047,7 @@
       body.innerHTML = `
         ${liveCard()}
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-          <div id="liveStrip">${liveRunId ? '' : '<span class="hint">no run selected</span>'}</div>
+          <div>${liveRunId ? '' : '<span class="hint">no run selected</span>'}</div>
           <div style="display:flex;align-items:center;gap:8px;">
             <button id="liveJump" class="btn-secondary" style="display:none;padding:3px 10px;font-size:.72rem;" onclick="liveJump()">jump to live</button>
             <span class="hint">follows automatically while at the bottom</span>
@@ -2065,17 +2094,125 @@
       return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
     }
 
-    function ladderStrip(ladder) {
+    function ageSecs(rfc) {
+      const t = Date.parse(rfc);
+      return isFinite(t) ? Math.max(0, (Date.now() - t) / 1000) : null;
+    }
+
+    function clockOf(rfc) {
+      const t = Date.parse(rfc);
+      return isFinite(t)
+        ? new Date(t).toLocaleTimeString([], { hour12: false })
+        : String(rfc || '');
+    }
+
+    function relAge(rfc) {
+      const t = Date.parse(rfc);
+      if (!isFinite(t)) return String(rfc || '');
+      const s = Math.max(0, (Date.now() - t) / 1000);
+      if (s < 90) return `${Math.round(s)}s ago`;
+      if (s < 5400) return `${Math.round(s / 60)}m ago`;
+      return `${Math.round(s / 3600)}h ago`;
+    }
+
+    function liveInfo() {
+      const cell = boardCache.find(c => c.id === liveRunId) || null;
+      const live = (cell && cell.live) || {};
+      if (live.ticket == null && !live.phase && !live.turn) {
+        // Fallback for cells whose runner predates the live block: parse
+        // the stream (timestamps stripped: every real line carries one).
+        const strip = t => String(t || '').replace(/^\[\d\d:\d\d:\d\d\]\s*/, '');
+        let out = {};
+        for (let k = liveLines.length - 1; k >= 0 && out.ticket == null; k--) {
+          const t = strip(liveLines[k].text);
+          let m;
+          if (out.ticket == null && (m = t.match(/^\u2500\u2500\u2500 ticket (\d+) \[([a-z]+)\]/))) { out.ticket = m[1]; out.type = m[2]; }
+          if (out.turn == null && (m = t.match(/^\[LIVE\] Turn (\d+)\/(\d+)/))) { out.turn = m[1]; out.max_turns = m[2]; }
+          if (out.ticket_spent == null && (m = t.match(/\bspent=([0-9.]+)/))) { out.ticket_spent = parseFloat(m[1]); }
+          if (out.round == null && (m = t.match(/Repair Round (\d+)\//))) { out.round = m[1]; }
+        }
+        return out;
+      }
+      return live;
+    }
+
+    function liveSummary(extra) {
+      const live = liveInfo();
+      const cell = boardCache.find(c => c.id === liveRunId) || null;
+      const roll = cell ? (cell.rollup || {}) : {};
+      const d = (currentRunDetail && currentRunDetail.id === liveRunId) ? currentRunDetail : null;
+      const cap = d ? d.budget_usd : roll.budget_usd;
+      const parts = [];
+      if (live.ticket != null) {
+        parts.push(`ticket ${live.ticket}${live.title ? ' ' + live.title : (live.type ? ' [' + live.type + ']' : '')}${live.variant === 'full' ? ' (full)' : live.variant === 'lite' ? ' (lite)' : ''}`);
+      }
+      if (live.round) parts.push(`repair round ${live.round}`);
+      if (live.phase) parts.push(live.phase);
+      if (live.turn != null) parts.push(`turn ${live.turn}${live.max_turns ? '/' + live.max_turns : ''}`);
+      if (live.ticket_spent != null) {
+        parts.push(`ticket API $${fmtMoney(live.ticket_spent)}${live.ticket_budget ? ' / $' + fmtMoney(live.ticket_budget) + ' budget' : ''}`);
+      }
+      const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
+      if (spent != null) parts.push(`campaign $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) + ' cap (effective)' : ' (effective)'}`);
+      const frac = live.summary || (live.check_total ? `${live.check_pass || 0}/${live.check_total}` : '');
+      if (frac || live.first_fail) {
+        const tail = live.first_fail || 'all checks passed';
+        parts.push(`last check ${clockOf(live.last_check_at)}${frac ? ' \u00b7 ' + frac : ''} \u00b7 ${tail}`);
+      }
+      if (live.last_activity_at) parts.push(`last activity ${relAge(live.last_activity_at)}`);
+      return parts.join(' \u00b7 ');
+    }
+
+    /// The short model name (last path segment) and its meta line.
+    function shortModel(m) {
+      const s = String(m || '?');
+      const parts = s.split('/');
+      return parts[parts.length - 1] || s;
+    }
+    function modelMeta(m, harness, effort) {
+      const s = String(m || '');
+      const parts = s.split('/');
+      const vendor = parts.length > 2 ? parts[parts.length - 2] : (parts.length === 2 ? parts[0] : '');
+      return [vendor, harness, effort].filter(Boolean).join(' \u00b7 ');
+    }
+
+    /// One labelled ladder square: 16 px, the ticket number inside, the full
+    /// story on hover (round-10 U2).
+    function ladderSquare(entry, records) {
+      const st = LADDER_STATUS[entry.status] || LADDER_STATUS.not_reached;
+      const bg = st.stripe
+        ? `repeating-linear-gradient(45deg, ${st.color}, ${st.color} 2px, transparent 2px, transparent 4px)`
+        : st.color;
+      const recs = (records || []).filter(r => r.id === entry.id);
+      const tries = recs.map(r => {
+        const rounds = r.rounds || [];
+        const cell = rounds.length
+          ? rounds.map(rd => `${rd.passed_stages}/${rd.total_stages}`).join(' \u2192 ')
+          : `${r.passed_stages}/${r.total_stages}`;
+        return `${r.variant === 'lite' ? 'lite ' : ''}${cell}`;
+      }).join(' \u00b7 ');
+      const cost = recs.reduce((sum, r) => sum + Number(r.effective_cost_usd || 0), 0);
+      const parts = [`${entry.id} ${entry.title}`, st.label];
+      if (tries) parts.push(tries);
+      if (cost) parts.push(`$${fmtMoney(cost)}`);
+      if (entry.cause) parts.push(entry.cause);
+      const pulse = entry.status === 'running' ? ' ladderRun' : '';
+      return `<span class="ladderSq${pulse}" title="${escapeHtml(parts.join(' \u00b7 '))}" style="background:${bg};">${entry.id}</span>`;
+    }
+
+    function ladderStrip(ladder, cell) {
       if (!ladder || !ladder.length) return '<span class="hint">no ladder</span>';
-      return ladder.map(e => {
-        const st = LADDER_STATUS[e.status] || LADDER_STATUS.not_reached;
-        const bg = st.stripe
-          ? `repeating-linear-gradient(45deg, ${st.color}, ${st.color} 2px, transparent 2px, transparent 4px)`
-          : st.color;
-        const tip = `ticket ${e.id} · ${e.title} · ${st.label}${e.cause ? ' · ' + e.cause : ''}`;
-        const pulse = e.status === 'running' ? ' ladderRun' : '';
-        return `<span class="ladderSq${pulse}" title="${escapeHtml(tip)}" style="display:inline-block;width:11px;height:11px;margin-right:2px;border-radius:2px;background:${bg};border:1px solid var(--border);"></span>`;
-      }).join('');
+      const records = (cell && cell.rollup && cell.rollup.stages) || [];
+      return `<span class="ladderStrip">${ladder.map(e => ladderSquare(e, records)).join('')}</span>`;
+    }
+
+    /// The one legend for every strip (round-10 U2).
+    function ladderLegend() {
+      return '<div class="hint" style="margin-top:4px;">' +
+        Object.entries(LADDER_STATUS).map(([k, v]) =>
+          `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;"><span class="ladderSq" style="background:${v.stripe ? 'var(--text-muted)' : v.color};">\u00b7</span>${escapeHtml(v.label)}</span>`
+        ).join('') +
+        '</div>';
     }
 
     function cellRollup(c) { return c.rollup || {}; }
@@ -2083,18 +2220,33 @@
     function cellCost(c) { return Number(cellRollup(c).total_cost_usd || 0); }
     function cellPerDollar(c) { const v = cellCost(c); return v > 0 ? cellPoints(c) / v : null; }
     function cellRules(c) { return cellRollup(c).rules_version || ''; }
+
+    /// Board state text: running and stalled cells say what is happening
+    /// (round-10 bug 4 / U3), with the Live staleness colour.
     function cellState(c) {
-      const stop = c.stop_reason ? ` · ${c.stop_reason}` : '';
+      const live = c.live || {};
       if (c.state === 'running') {
-        return `running${c.current_stage != null ? ` · ticket ${c.current_stage}` : ''}`;
+        const turn = live.turn != null ? ` \u00b7 turn ${live.turn}${live.max_turns ? '/' + live.max_turns : ''}` : '';
+        const age = live.last_activity_at ? ` \u00b7 ${relAge(live.last_activity_at)}` : '';
+        return { text: `running${live.ticket != null ? ' \u00b7 ticket ' + live.ticket : (c.current_stage != null ? ' \u00b7 ticket ' + c.current_stage : '')}${turn}${age}`, cls: staleClass(live.last_activity_at) };
       }
       if (c.state === 'stalled') {
-        // The writer is gone (round-7 finding 6): never "running" forever.
-        return 'stalled';
+        const since = live.last_activity_at || c.updated_at;
+        const at = since ? clockOf(since) : '';
+        const where = live.ticket != null ? ` \u00b7 in ticket ${live.ticket}` : (c.current_stage != null ? ` \u00b7 in ticket ${c.current_stage}` : '');
+        return { text: `stalled${at ? ' \u00b7 no process since ' + at : ''}${where}`, cls: 'color:var(--danger);' };
       }
-      return `${c.state || '?'}${stop}`;
+      const stop = c.stop_reason ? ` \u00b7 ${c.stop_reason}` : '';
+      return { text: `${c.state || '?'}${stop}`, cls: '' };
     }
 
+    function staleClass(rfc) {
+      const age = ageSecs(rfc);
+      if (age == null) return '';
+      if (age > 300) return 'color:var(--danger);font-weight:600;';
+      if (age > 120) return 'color:var(--warning);font-weight:600;';
+      return '';
+    }
 
     function groupCells(cells) {
       // The API already returns cells in the one Rust board order
@@ -2110,13 +2262,73 @@
       return Object.entries(groups).map(([key, list]) => ({ key, cells: list }));
     }
 
+    function updatePageTitle() {
+      const cell = boardCache.find(c => c.state === 'running') || null;
+      const live = (cell && cell.live) || {};
+      if (cell && live.turn != null) {
+        const stale = ageSecs(live.last_activity_at);
+        const mark = stale != null && stale > 300 ? '\u26a0 ' : '\u25b6 ';
+        document.title = `${mark}t${live.ticket ?? cell.current_stage ?? '?'} \u00b7 ${live.turn}/${live.max_turns ?? '?'} \u00b7 $${fmtMoney(live.campaign_spent)} \u2014 SDB`;
+      } else {
+        document.title = 'SubDollarBench \u2014 LLM Coding Benchmark';
+      }
+    }
+
     async function refreshBoard() {
+      if (document.visibilityState === 'hidden') return;
       try {
         const r = await fetch('/api/campaigns');
         if (!r.ok) return;
         boardCache = await r.json();
       } catch (e) { return; }
       renderBoard();
+      updatePageTitle();
+      updateHealth();
+      updateCampaignLauncher();
+      // Keep the open Run view ticking (elapsed) and live.
+      if (currentRunDetail && location.hash.startsWith('#run/')) {
+        loadRunDetail(currentRunDetail.id, true);
+      }
+    }
+
+    /// U5: one health dot whose tooltip lists the versions and integrity.
+    function updateHealth() {
+      const dot = document.getElementById('healthDot');
+      const text = document.getElementById('healthText');
+      if (!dot || !text) return;
+      const omp = document.getElementById('ompText') ? document.getElementById('ompText').textContent : '';
+      const opencode = document.getElementById('opencodeText') ? document.getElementById('opencodeText').textContent : '';
+      const integrity = document.getElementById('integrityText') ? document.getElementById('integrityText').textContent : '';
+      const status = document.getElementById('statusText') ? document.getElementById('statusText').textContent : 'Ready';
+      const bad = /fail|error|unavailable|stale|drift|violation/i.test(omp + opencode + integrity);
+      dot.style.background = bad ? 'var(--danger)' : (status === 'Running' ? 'var(--primary)' : 'var(--success)');
+      text.textContent = status;
+      dot.title = [omp, opencode, status, integrity].filter(Boolean).join(' \u00b7 ');
+    }
+
+    /// U6: the launcher is aware of the lock: one cell at a time.
+    function updateCampaignLauncher() {
+      const btn = document.getElementById('campaignStartBtn');
+      const note = document.getElementById('campaignStartMsg');
+      const running = boardCache.find(c => c.state === 'running') || null;
+      const chosen = document.getElementById('campaignChoice');
+      if (chosen) {
+        const m = (document.getElementById('model') || {}).value || '\u2014';
+        const e = (document.getElementById('effortSelect') || {}).value || '\u2014';
+        chosen.innerHTML = `model: <b>${escapeHtml(m)}</b> \u00b7 effort: <b>${escapeHtml(e)}</b>`;
+      }
+      if (!btn) return;
+      if (running) {
+        btn.disabled = true;
+        btn.style.opacity = '.5';
+        if (note) {
+          const live = running.live || {};
+          note.innerHTML = `${escapeHtml(shortModel((running.rollup || {}).model || running.id))} is running${live.ticket != null ? ` (ticket ${live.ticket})` : ''} \u2014 one cell at a time \u00b7 <a href="#live" style="color:var(--primary);">Live \u2197</a>`;
+        }
+      } else {
+        btn.disabled = false;
+        btn.style.opacity = '';
+      }
     }
 
     function setBoardRules(v) {
@@ -2140,15 +2352,17 @@
         : '';
       const indent = opts && opts.indent ? 'padding-left:28px;opacity:.8;' : '';
       const extra = (opts && opts.extra) ? opts.extra : '';
-      return `<tr style="cursor:pointer;" onclick="location.hash='run/${encodeURIComponent(cell.id)}'">
-        <td style="text-align:center;color:var(--text-muted);${indent}">${rank}</td>
-        <td style="${indent}"><b>${escapeHtml(r.model || cell.id)}</b>${extra}
-          <div class="hint">${escapeHtml((r.harness || '') + (r.effort ? ' · ' + r.effort : ''))} · ${escapeHtml(cell.id.replace(/^campaign_sdb-sql_/, '').slice(0, 40))}</div></td>
-        <td>${ladderStrip(cell.ladder)}</td>
-        <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt1(cellPoints(cell))}/${Math.round(r.max_points || 0)}</td>
-        <td style="text-align:right;font-variant-numeric:tabular-nums;">$${fmtMoney(r.total_cost_usd)}</td>
-        <td style="text-align:right;font-variant-numeric:tabular-nums;">${pd == null ? '—' : fmt1(pd)}</td>
-        <td>${escapeHtml(cellState(cell))}${stale}</td>
+      const state = cellState(cell);
+      const href = `#run/${encodeURIComponent(cell.id)}`;
+      return `<tr style="${indent}" onclick="location.hash='run/${encodeURIComponent(cell.id)}'" onkeydown="if(event.key==='Enter'){location.hash='run/${encodeURIComponent(cell.id)}';}" tabindex="0" title="${escapeHtml(cell.id)}">
+        <td style="text-align:center;color:var(--text-muted);width:34px;">${rank}</td>
+        <td><a href="${href}" style="color:inherit;text-decoration:none;font-weight:600;" onclick="event.stopPropagation();"><b>${escapeHtml(shortModel(r.model || cell.id))}</b></a>${extra}
+          <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))}</div>
+          <div class="hint" style="${state.cls}">${escapeHtml(state.text)}${stale}</div></td>
+        <td style="width:100%;">${ladderStrip(cell.ladder, cell)}</td>
+        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt1(cellPoints(cell))}/${Math.round(r.max_points || 0)} pts</td>
+        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">$${fmtMoney(r.total_cost_usd)}</td>
+        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${pd == null ? '\u2014' : fmt1(pd)} pts/$</td>
       </tr>`;
     }
 
@@ -2164,27 +2378,27 @@
         ? boardCache.slice()
         : (boardRulesFilter === 'current' ? boardCache.slice() : pickVersion(boardRulesFilter));
       const best = boardCache.reduce((m, c) => {
-        const reached = cellRollup(c).reached;
-        return Math.max(m, reached == null ? -1 : reached);
+        const passed = (c.ladder || []).filter(e => e.status === 'pass' || e.status === 'lite').map(e => e.id);
+        return Math.max(m, passed.length ? Math.max(...passed) : -1);
       }, -1);
       const spend = boardCache.reduce((s, c) => s + cellCost(c), 0);
       head.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
           <h2 style="margin:0;font-size:1.05rem;">sdb-sql</h2>
-          <span class="hint">${boardCache.length} runs · best: ${best >= 0 ? 'ticket ' + best : '—'} · spend $${fmtMoney(spend)}</span>
+          <span class="hint" title="highest ticket passed with all earlier needs green">${boardCache.length} runs \u00b7 best: ${best >= 0 ? 'ticket ' + best : '\u2014'} \u00b7 spend $${fmtMoney(spend)}</span>
         </div>
         <label class="hint" style="display:flex;align-items:center;gap:6px;">rules
-          <select onchange="setBoardRules(this.value)" style="padding:3px 8px;font-size:.75rem;">
+          <select aria-label="rules version filter" onchange="setBoardRules(this.value)" style="padding:3px 8px;font-size:.75rem;">
             <option value="current"${boardRulesFilter === 'current' ? ' selected' : ''}>current${cur ? ' (' + escapeHtml(cur) + ')' : ''}</option>
             <option value="all"${showAll ? ' selected' : ''}>all</option>
             ${versions.filter(v => v !== cur).map(v => `<option value="${escapeHtml(v)}"${boardRulesFilter === v ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}
           </select></label>`;
       const table = inner => `<table class="responsive-runs-table"><thead><tr>
-          <th style="width:36px;">#</th><th>Model</th><th>Ladder</th>
-          <th style="text-align:right;">Points</th><th style="text-align:right;">$</th>
-          <th style="text-align:right;">Pts/$</th><th>State</th>
-        </tr></thead><tbody>${inner}</tbody></table>`;
+          <th style="width:34px;">#</th><th style="width:220px;">Model</th><th>Ladder</th>
+          <th style="text-align:right;width:90px;">Points</th><th style="text-align:right;width:80px;">$</th>
+          <th style="text-align:right;width:90px;">Pts/$</th>
+        </tr></thead><tbody>${inner}</tbody></table>${ladderLegend()}`;
       if (!visible.length) {
-        body.innerHTML = table('<tr><td colspan="7" class="hint" style="padding:18px;">No runs yet. Start one from the Admin tab.</td></tr>');
+        body.innerHTML = table('<tr><td colspan="6" class="hint" style="padding:18px;">No runs yet. Start one from the Admin tab.</td></tr>');
         return;
       }
       let rank = 0;
@@ -2193,21 +2407,21 @@
       groupCells(visible).forEach(({ key, cells }) => {
         const top = cells[0];
         if (boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
-          rows += `<tr><td colspan="7" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
+          rows += `<tr><td colspan="6" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
           dividerDone = true;
         }
         rank += 1;
         const n = cells.length;
         const expanded = !!boardExpandedGroups[key];
         const extra = n > 1
-          ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">×${n} runs ${expanded ? '▾' : '▸'}</a>`
+          ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">\u00d7${n} runs ${expanded ? '\u25be' : '\u25b8'}</a>`
           : '';
         rows += boardRowHtml(top, rank, { extra });
         if (expanded && n > 1) {
           const sorted = cells.map(cellPoints).sort((a, b) => a - b);
           const med = sorted[Math.floor(sorted.length / 2)];
-          rows += `<tr><td colspan="7" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
-          cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '·', { indent: true }); });
+          rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
+          cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
         }
       });
       body.innerHTML = table(rows);
@@ -2227,47 +2441,72 @@
       renderRun();
     }
 
-    function roundCell(round, first) {
-      if (!round) return '·';
+    function roundCell(round) {
+      if (!round) return '\u00b7';
       const score = `${round.passed_stages}/${round.total_stages}`;
       return `${score}${round.derived ? '<span class="hint" title="derived from the manifest (recorded before rounds existed)">*</span>' : ''}`;
     }
 
     function roundsCell(rec) {
-      if (!rec) return '<span class="hint">·</span>';
+      if (!rec) return '<span class="hint">\u00b7</span>';
       const rounds = rec.rounds || [];
       if (!rounds.length) return `${rec.passed_stages}/${rec.total_stages}`;
-      return rounds.map((rd, i) => {
+      const cell = (rd, i) => {
         const worse = i > 0 && rounds[i - 1].passed_stages > rd.passed_stages;
-        const warn = worse ? ' <span title="this round scored lower than the one before" style="color:var(--warning);">⚠</span>' : '';
-        return roundCell(rd, i === 0) + warn;
-      }).join(' → ');
+        const warn = worse ? ' <span title="this round scored lower than the one before" style="color:var(--warning);">\u26a0</span>' : '';
+        return roundCell(rd) + warn;
+      };
+      return rounds.map(cell).join(' \u2192 ');
     }
 
     function runTicketDetail(recs, running) {
       if (!recs.length) {
         return running
-          ? `<div class="hint">running · ${escapeHtml(liveSummary(false))}</div>`
+          ? `<div class="hint">running \u00b7 ${escapeHtml(liveSummary(false))}</div>`
           : '<div class="hint">never attempted</div>';
       }
       return recs.map(rec => {
         const rounds = rec.rounds || [];
-        const roundRows = rounds.map(rd => `<div class="hint" style="margin-left:12px;">
-            round ${rd.round} · ${rd.passed_stages}/${rd.total_stages} · ${rd.turns ?? '?'} turns · <span title="token estimate for this round; the attempt's $ is the bill">≈$${fmtMoney(rd.cost_usd)}</span> · ${fmtDurSec(rd.duration_seconds)}${rd.failure ? ' · ' + escapeHtml(rd.failure.kind) : ''}
-          </div>`).join('');
+        const roundRows = rounds.map(rd => {
+          // Only the known fields (round-10 U4): omitted rather than "?".
+          const bits = [`round ${rd.round}`, `${rd.passed_stages}/${rd.total_stages}`];
+          if (rd.turns != null) bits.push(`${rd.turns} turns`);
+          if (rd.cost_usd) bits.push(`\u2248$${fmtMoney(rd.cost_usd)}`);
+          if (rd.duration_seconds != null) bits.push(fmtDurSec(rd.duration_seconds));
+          if (rd.failure) bits.push(rd.failure.kind);
+          return `<div class="hint" style="margin-left:12px;">${escapeHtml(bits.join(' \u00b7 '))}</div>`;
+        }).join('');
         const f = rec.failure;
         const fail = f ? `<div style="margin:6px 0;">
-            <b>${escapeHtml(f.kind)}</b> · ${escapeHtml(f.line)}
+            <b>${escapeHtml(f.kind)}</b> \u00b7 ${escapeHtml(f.line)}
             ${f.detail ? `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">full verifier error</summary><pre style="white-space:pre-wrap;font-size:.72rem;background:#05070a;border:1px solid var(--border);border-radius:4px;padding:8px;max-height:240px;overflow:auto;">${escapeHtml(f.detail)}</pre></details>` : ''}
             ${f.stderr_tail ? `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">candidate stderr tail</summary><pre style="white-space:pre-wrap;font-size:.72rem;background:#05070a;border:1px solid var(--border);border-radius:4px;padding:8px;max-height:240px;overflow:auto;">${escapeHtml(f.stderr_tail)}</pre></details>` : ''}
           </div>` : '';
         return `<div style="margin-bottom:8px;">
-          <div><b>${escapeHtml(rec.variant)}</b> · ${rec.status} · $${fmtMoney(rec.effective_cost_usd)} · ${rec.turns ?? '?'} turns${rec.git_commit ? ` · <span style="font-family:ui-monospace;">${escapeHtml(String(rec.git_commit).slice(0, 8))}</span>` : ''}
-            ${typeof inspectRun === 'function' ? ` · <a href="#" onclick="event.preventDefault(); inspectRun('${escapeHtml(rec.run_id)}')" style="color:var(--primary);">console</a>` : ''}
+          <div><b>${escapeHtml(rec.variant)}</b> \u00b7 ${rec.status} \u00b7 $${fmtMoney(rec.effective_cost_usd)} \u00b7 ${rec.turns ?? '?'} turns${rec.git_commit ? ` \u00b7 <span style="font-family:ui-monospace;">${escapeHtml(String(rec.git_commit).slice(0, 8))}</span>` : ''}
+            ${typeof inspectRun === 'function' ? ` \u00b7 <a href="#" onclick="event.preventDefault(); inspectRun('${escapeHtml(rec.run_id)}')" style="color:var(--primary);">console</a>` : ''}
           </div>
           ${roundRows}${fail}
         </div>`;
       }).join('');
+    }
+
+    function runTimes(d, r) {
+      const started = Date.parse(r.started_at || '');
+      const finished = r.finished_at ? Date.parse(r.finished_at) : null;
+      const startTxt = isFinite(started) ? clockOf(r.started_at) : '\u2014';
+      if (d.state === 'running') {
+        const elapsed = isFinite(started) ? (Date.now() - started) / 1000 : null;
+        return `${startTxt} \u2192 running${elapsed != null ? ' \u00b7 ' + fmtDurSec(elapsed) + ' elapsed' : ''}${d.wall_min ? ` (${d.wall_min} min wall cap)` : ''}`;
+      }
+      if (d.state === 'stalled') {
+        const live = d.rollup && d.rollup.live ? d.rollup.live : null;
+        const since = (live && live.last_activity_at) || d.updated_at;
+        const where = live && live.ticket != null ? ` \u00b7 in ticket ${live.ticket}` : '';
+        return `${startTxt} \u2192 stalled${since ? ' since ' + clockOf(since) : ''}${where}`;
+      }
+      const elapsed = isFinite(started) && finished != null ? (finished - started) / 1000 : null;
+      return `${startTxt} \u2192 ${r.finished_at ? clockOf(r.finished_at) : '\u2014'}${elapsed != null ? ' \u00b7 ' + fmtDurSec(elapsed) + ' elapsed' : ''}`;
     }
 
     function renderRun() {
@@ -2279,21 +2518,7 @@
       const records = r.stages || [];
       const total = cellCost({ rollup: r });
       const cap = Number(d.budget_usd || 0);
-      const elapsed = (r.started_at && r.finished_at)
-        ? (Date.parse(r.finished_at) - Date.parse(r.started_at)) / 1000
-        : null;
       const turns = records.reduce((s, x) => s + (x.turns || 0), 0);
-      const scale = Math.max(cap || 0, total || 0) || 1;
-      const segs = records.map(rec => {
-        const w = Math.max(1.2, (Number(rec.effective_cost_usd || 0) / scale) * 100);
-        const col = rec.passed ? 'var(--success)'
-          : (rec.status === 'fault' ? 'var(--text-muted)' : 'var(--danger)');
-        const tip = `ticket ${rec.id} ${rec.variant} · $${fmtMoney(rec.effective_cost_usd)} · ${rec.turns ?? '?'} turns · ${rec.status}`;
-        return `<span title="${escapeHtml(tip)}" style="display:inline-block;height:14px;width:${w.toFixed(2)}%;background:${col};"></span>`;
-      }).join('');
-      const capMark = (cap > 0 && total > cap)
-        ? `<span title="cap $${fmtMoney(cap)}" style="position:absolute;left:${Math.min(100, (cap / scale) * 100).toFixed(1)}%;top:-3px;bottom:-3px;width:2px;background:var(--warning);"></span>`
-        : '';
       const byId = {};
       records.forEach(rec => { (byId[rec.id] = byId[rec.id] || []).push(rec); });
       let rows = '';
@@ -2304,30 +2529,41 @@
         const cost = recs.reduce((s, x) => s + Number(x.effective_cost_usd || 0), 0);
         const expanded = !!runExpandedTickets[e.id];
         const cause = e.cause || '';
-        rows += `<tr style="cursor:pointer;" onclick="toggleRunTicket(${e.id})">
+        rows += `<tr style="cursor:pointer;" onclick="toggleRunTicket(${e.id})" onkeydown="if(event.key==='Enter'){toggleRunTicket(${e.id});}" tabindex="0">
           <td>${e.id} ${escapeHtml(e.title)} <span class="hint">${escapeHtml(LADDER_STATUS[e.status] ? LADDER_STATUS[e.status].label : e.status)}</span></td>
-          <td>${full ? roundsCell(full) : '<span class="hint">·</span>'}</td>
-          <td>${lite ? roundsCell(lite) : '<span class="hint">·</span>'}</td>
+          <td>${full ? roundsCell(full) : '<span class="hint">\u00b7</span>'}</td>
+          <td>${lite ? roundsCell(lite) : '<span class="hint">\u00b7</span>'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt1(e.points)}</td>
-          <td style="text-align:right;font-variant-numeric:tabular-nums;">${cost ? '$' + fmtMoney(cost) : '·'}</td>
-          <td class="hint" style="max-width:380px;">${escapeHtml(cause)}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums;">${cost ? '$' + fmtMoney(cost) : '\u00b7'}</td>
+          <td class="hint causeCell" title="${escapeHtml(cause)}">${escapeHtml(cause)}</td>
         </tr>
         <tr style="display:${expanded ? 'table-row' : 'none'};"><td colspan="6" style="background:#0b0f18;">${runTicketDetail(recs, e.status === 'running')}</td></tr>`;
       });
+      const idx = boardCache.findIndex(c => c.id === d.id);
+      const prev = idx > 0 ? boardCache[idx - 1] : null;
+      const next = idx >= 0 && idx < boardCache.length - 1 ? boardCache[idx + 1] : null;
+      const capPct = cap ? Math.min(100, (total / cap) * 100) : 0;
       body.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
           <div>
-            <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(r.model || d.id)}</h2>
-            <div class="hint">${escapeHtml(r.harness || '')}${r.effort ? ' · effort ' + escapeHtml(r.effort) : ''} · rules ${escapeHtml(r.rules_version || '—')} · ${escapeHtml((r.started_at || '').slice(0, 16).replace('T', ' '))} → ${r.finished_at ? escapeHtml(r.finished_at.slice(0, 16).replace('T', ' ')) : 'running'} · ${escapeHtml(d.state || '')}${d.state === 'done' && d.stop_reason ? ' · ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ' · <span style="color:var(--warning);">over budget</span>' : ''}${r.over_wall ? ' · <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(shortModel(r.model || d.id))}</h2>
+            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ' \u00b7 <span style="color:var(--warning);">over budget</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
             ${d.live_run ? `<div class="hint" style="color:var(--primary);">${escapeHtml(liveSummary(false))}</div>` : ''}
           </div>
-          <a href="#" onclick="event.preventDefault(); location.hash='board';" class="hint" style="color:var(--primary);">← Board</a>
+          <div class="hint" style="display:flex;gap:10px;align-items:center;">
+            ${prev ? `<a href="#run/${encodeURIComponent(prev.id)}" style="color:var(--primary);">\u2039 prev</a>` : '<span style="opacity:.4;">\u2039 prev</span>'}
+            <a href="#board" style="color:var(--primary);">Board</a>
+            ${next ? `<a href="#run/${encodeURIComponent(next.id)}" style="color:var(--primary);">next \u203a</a>` : '<span style="opacity:.4;">next \u203a</span>'}
+          </div>
         </div>
-        <div style="position:relative;height:14px;border-radius:3px;overflow:hidden;background:#05070a;border:1px solid var(--border);display:flex;">${segs}${capMark}</div>
-        <div class="hint">$${fmtMoney(total)}${cap > 0 ? ` / $${fmtMoney(cap)} cap` : ''} · ${fmtDurSec(elapsed)} elapsed${d.wall_min ? ` (${d.wall_min} min wall cap)` : ''} · ${turns} turns · ${r.regression_free_tickets || 0} regression-free · reached ${r.reached == null ? '—' : 'ticket ' + r.reached}${(cap > 0 || d.wall_min) ? ' · caps are checked between tickets' : ''}</div>
+        <div>${ladderStrip(ladder, { rollup: r })}${ladderLegend()}</div>
+        <div title="$ / cap (effective)" style="height:8px;border-radius:3px;overflow:hidden;background:#05070a;border:1px solid var(--border);max-width:420px;">
+          <span style="display:block;height:100%;width:${capPct.toFixed(1)}%;background:${total > cap && cap > 0 ? 'var(--warning)' : 'var(--success)'};"></span>
+        </div>
+        <div class="hint">$${fmtMoney(total)}${cap > 0 ? ` / $${fmtMoney(cap)} cap (effective)` : ' (effective)'} \u00b7 ${turns} turns \u00b7 ${r.regression_free_tickets || 0} regression-free \u00b7 <span title="highest ticket passed with all earlier needs green">best: ${r.reached == null ? '\u2014' : 'ticket ' + r.reached}</span></div>
         <div style="width:100%;overflow-x:auto;margin-top:8px;">
           <table class="responsive-runs-table"><thead><tr>
-            <th>Ticket</th><th>First try</th><th>Lite</th>
+            <th>Ticket</th><th title="the initial try and its repairs">Tries</th><th title="the lite variant's tries">Lite tries</th>
             <th style="text-align:right;">Pts</th><th style="text-align:right;">$</th><th>Cause</th>
           </tr></thead><tbody>${rows}</tbody></table>
         </div>
@@ -2339,15 +2575,21 @@
       renderRun();
     }
 
+    /// The one campaign launcher (round-10 U6): model and effort come from
+    /// the picker above, the lock is honoured here and server-side.
     async function startCampaign() {
-      const typed = (document.getElementById('campaignModel').value || '').trim();
-      const model = typed || (document.getElementById('model').value || '').trim();
+      const model = (document.getElementById('model').value || '').trim();
       const budget = parseFloat(document.getElementById('campaignBudget').value || '0');
       const wall = parseInt(document.getElementById('campaignWall').value || '0', 10);
-      const effort = document.getElementById('campaignEffort').value;
+      const effort = (document.getElementById('effortSelect') || {}).value || 'high';
       const msg = document.getElementById('campaignStartMsg');
       const cmd = document.getElementById('campaignCmd');
       if (!model) { msg.textContent = 'Pick a model first.'; return; }
+      const running = boardCache.find(c => c.state === 'running');
+      if (running) {
+        msg.innerHTML = `a cell is already running — one at a time · <a href="#live" style="color:var(--primary);">Live ↗</a>`;
+        return;
+      }
       const resolved = `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 20`;
       cmd.innerHTML = `resolved: <code>${escapeHtml(resolved)}</code>`;
       msg.textContent = 'starting…';
@@ -4130,11 +4372,15 @@ function copyRunId() {
       await fetchOmpStatus();
     }
 
-    setInterval(() => { checkActiveRun(); refreshQueue(); checkBreaker(); }, 5000);
+    // Poll only what the visible tab needs, and never while the page is
+    // hidden (round-10 U8): the Live tab has its own 4 s loop.
     setInterval(() => {
-      const t = document.getElementById('tab-campaigns');
-      if (t && t.style.display !== 'none') refreshBoard();
-    }, 4000);
+      if (document.visibilityState === 'hidden') return;
+      checkActiveRun();
+      const admin = document.getElementById('tab-admin');
+      if (admin && admin.style.display !== 'none') { refreshQueue(); checkBreaker(); }
+    }, 5000);
+    setInterval(refreshBoard, 4000);
 
     async function checkBreaker() {
       try {
