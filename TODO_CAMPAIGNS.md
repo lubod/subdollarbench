@@ -1033,6 +1033,16 @@ try `opencode models` inside the sandbox and add an entry under
 itself (`[BILLING] opencode provider.auth: … (check the API key …)`) instead
 of "exited with no further detail".
 
+**First cell on the fixed argv (2026-10-18 12:27-13:24, opencode · effort
+max · $0.75/120 · rules .17)**: **reached ticket 5, 6 regression-free,
+$0.6077, 9.9 tickets/$** — every attempt ran real turns (no 0-turn faults),
+one ticket below the omp `.16` cell (ticket 7) at a lower cost. Tickets 0-5
+passed; s6/s7/s8 failed with regressions [0..5] (the model's
+transaction/aggregate/join attempts broke the earlier suites — the stage-4/5
+upgrade sentinels caught the store drift on rollback), s9 read 6/7, s10 was
+skipped (needs 9), and s11 failed 0/7 then 6/7 (CREATE INDEX still unparsed
+in both).
+
 **Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
 cell has run on it)**. **Host ops (O1), read this before starting anything**:
 the engine and GUI are systemd units (`subdollarbench-engine` on :3000,
