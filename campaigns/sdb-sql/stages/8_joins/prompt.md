@@ -24,7 +24,7 @@ tables** in one query.
 
 ## What the acceptance suite does
 
-The cumulative suites still run (tickets 0-7), and the differential
+The cumulative suites of the earlier tickets that passed still run, and the differential
 generator now writes join queries: comma joins, `INNER JOIN` and `LEFT
 JOIN` (including 3-way) with `ON` link predicates, qualified references,
 `SELECT *` over the join, and the join error probes (an ambiguous bare

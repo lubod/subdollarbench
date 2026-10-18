@@ -18,7 +18,7 @@ all, across a connection that is killed mid-flight.
 
 ## What the acceptance suite does
 
-The cumulative suites still run (tickets 0-5), and the differential
+The cumulative suites of the earlier tickets that passed still run, and the differential
 generator now writes whole transactions (a `BEGIN`, one or more DML
 statements, then `COMMIT` or `ROLLBACK`) plus the `txn` error probes, so
 your answers must match the reference's for every one. On top:

@@ -20,7 +20,7 @@ every row written before the stop must still answer exactly the same.
 
 ## What the acceptance suite does
 
-The differential suite of tickets 0-3 still runs (cumulative), plus:
+The differential suite of the earlier tickets that passed still runs (cumulative), plus:
 
 1. **Persistence**: the harness writes a seeded dataset, stops the server,
    starts it again on the same `--data`, and re-reads the data. Answers are

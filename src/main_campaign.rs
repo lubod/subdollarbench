@@ -253,8 +253,10 @@ fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
             live["check_pass"] = serde_json::json!(live["check_pass"].as_u64().unwrap_or(0) + 1);
         } else if !t.contains("skipped due to failure") && live["first_fail"].is_null() {
             // The first real failure of this verification, not the skipped
-            // tail that follows it (round-9 finding 2).
-            live["first_fail"] = serde_json::json!(t);
+            // tail that follows it (round-9 finding 2). One line at most:
+            // the repro that follows the first line would flood the card
+            // (round-10 D5).
+            live["first_fail"] = serde_json::json!(campaign::truncate_line(t, 160));
         }
         live["last_check_at"] = serde_json::json!(now);
         return true;
@@ -490,6 +492,7 @@ pub async fn run(
                 lite_profile: attempt.lite_profile.clone(),
                 passed_lite: attempt.passed_lite.clone(),
                 passed: attempt.passed.clone(),
+                outcomes: attempt.outcomes.clone(),
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -562,6 +565,9 @@ struct StageJob {
     /// Every stage passed so far (full or lite); the declared acceptance
     /// list is intersected with it plus the current ticket.
     passed: Vec<u32>,
+    /// Ladder state before this attempt (round-10 D2): drives the collapsed
+    /// SPEC.md sections and the harness note.
+    outcomes: Vec<(u32, campaign::LadderOutcome)>,
     rollback_first: bool,
 }
 
@@ -690,10 +696,36 @@ async fn run_one_stage(
             }
         }
     }
+    // Round-10 D1: the per-round feedback report is harness-owned. Remove
+    // any copy (this ticket's or an earlier ticket's, possibly resurrected
+    // by a rollback) before the agent's first turn so a stale report can
+    // never be read as the current truth; the copy written during this
+    // attempt's repair rounds is removed again before the commit.
+    let feedback_report = workdir.join("FEEDBACK_REPORT.md");
+    let _ = std::fs::remove_file(&feedback_report);
+    // The suite that actually grades this ticket (round-10 D2): the same
+    // list drives the verifier, the log header, and the harness note.
+    let effective = campaign::Acceptance::accepted_for(
+        stage.acceptance.stages_for(&lc.spec.task),
+        &job.passed,
+        stage.id,
+    );
     // sdb-sql: the harness-owned contract so far. The pipeline writes it
     // once the workspace is prepared (genesis wipes it first).
     let spec_md = if lc.spec.task == "sql" {
-        Some(lc.render_spec_md(stage, &job.prompt_path)?)
+        Some(lc.render_spec_md(stage, &job.prompt_path, &job.outcomes)?)
+    } else {
+        None
+    };
+    let preamble = if lc.spec.task == "sql" {
+        campaign::attempt_preamble(
+            &lc.spec.stages,
+            stage,
+            job.variant,
+            job.rollback_first,
+            &job.outcomes,
+            &effective,
+        )
     } else {
         None
     };
@@ -741,10 +773,11 @@ async fn run_one_stage(
         last_status: Mutex::new(std::time::Instant::now()),
     });
     logger.log(&format!(
-        "─── ticket {} [{}] {} (acceptance {:?}, budget ${:.2}) ───",
+        "─── ticket {} [{}] {} (acceptance {:?} effective, declared {:?}, budget ${:.2}) ───",
         stage.id,
         stage.kind,
         stage.title,
+        effective,
         stage.acceptance.stages_for(&lc.spec.task),
         stage.budget_usd
     ));
@@ -776,20 +809,19 @@ async fn run_one_stage(
             // The suite at stage k is the *passed* stages' suites plus k
             // itself: a stage the model failed or skipped contributes
             // nothing, so one failure cannot sink every later ticket.
-            accepted_stages: campaign::Acceptance::accepted_for(
-                stage.acceptance.stages_for(&lc.spec.task),
-                &job.passed,
-                stage.id,
-            ),
+            accepted_stages: effective.clone(),
             lite_profile: job.lite_profile.clone(),
             passed_lite: job.passed_lite.clone(),
             passed_stages: job.passed.clone(),
             spec_md,
+            preamble,
         }),
         baseline_rps,
     };
 
     let output = BenchmarkPipeline::execute(config, logger, cancel).await?;
+    // D1: the report served its repair rounds; it must not enter the commit.
+    let _ = std::fs::remove_file(&feedback_report);
 
     // The genesis stage's measured GET throughput becomes the perf gate's
     // baseline (same bench method every stage; the manifest only carries a
@@ -1110,6 +1142,19 @@ mod tests {
         assert_eq!(live["check_pass"], 0);
         assert!(live["first_fail"].is_null());
         assert!(live["summary"].is_null());
+        // Round-10 D5: a *fresh* verification's first failure is one line,
+        // capped at 160 chars; the multi-line repro that follows the FAIL
+        // line would otherwise flood the header card.
+        apply_live_line(&mut live, "[VERIFY] Checking anti-cheat compliance");
+        let long = format!(
+            "  Stage 11: Indexes -> FAIL Kind: expected OK 0, got ERR syntax\nMinimal reproduction. Start from an empty database and send: {}\n",
+            "CREATE TABLE t (id INTEGER); ".repeat(40)
+        );
+        apply_live_line(&mut live, &long);
+        let f = live["first_fail"].as_str().unwrap_or_default();
+        assert!(!f.contains('\n'), "one line: {f}");
+        assert!(f.chars().count() <= 160, "len {}", f.chars().count());
+        assert!(f.contains("Stage 11"), "{f}");
         // Timestamps are RFC 3339 so the console can show relative ages.
         assert!(live["last_activity_at"]
             .as_str()
@@ -1312,6 +1357,7 @@ mod tests {
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
             passed: Vec::new(),
+            outcomes: Vec::new(),
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));

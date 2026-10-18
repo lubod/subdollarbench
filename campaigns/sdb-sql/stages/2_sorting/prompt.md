@@ -1,6 +1,6 @@
 # Ticket 2 — Sorting and paging
 
-Expressions and `WHERE` work (ticket 1). This ticket adds **`ORDER BY`**,
+Ticket 1's contract is expressions and `WHERE`. This ticket adds **`ORDER BY`**,
 **`LIMIT`/`OFFSET`** and **`DISTINCT`**. Verification stays differential.
 
 ## This ticket's contract

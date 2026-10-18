@@ -24,7 +24,7 @@ Joins (ticket 8) combine tables side by side. This ticket puts a whole
 
 ## What the acceptance suite does
 
-The cumulative suites still run (tickets 0-9), and the differential
+The cumulative suites of the earlier tickets that passed still run, and the differential
 generator now writes subqueries: scalar subqueries as select items and in
 comparisons (result types matched), `[NOT] IN (subquery)`, `IN (list)`
 with anchored values and NULLs, correlated `[NOT] EXISTS`, and

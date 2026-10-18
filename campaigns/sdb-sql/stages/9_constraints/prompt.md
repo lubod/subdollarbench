@@ -24,7 +24,7 @@ foreign keys are enforced.
 
 ## What the acceptance suite does
 
-The cumulative suites still run (tickets 0-8), and the differential
+The cumulative suites of the earlier tickets that passed still run, and the differential
 generator now emits the constrained DDL (`PRIMARY KEY`, `UNIQUE`,
 `NOT NULL`, `DEFAULT`, `REFERENCES`) and works against it: `NULL` and
 omitted primary keys exercise auto-assignment, column-list inserts

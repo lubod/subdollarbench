@@ -190,16 +190,29 @@ impl LoadedCampaign {
     /// contract, protocol or constraints, so the spec is every earlier
     /// ticket in ladder order followed by this attempt's own ticket
     /// (`current_prompt`: the full or the lite text).
-    pub fn render_spec_md(&self, stage: &StageSpec, current_prompt: &Path) -> Result<String> {
+    ///
+    /// Round-10 D2: a ticket that failed or was skipped is *not* contract.
+    /// Its section collapses to a marker line so a later ticket never reads
+    /// a failed predecessor as something it must already satisfy. The
+    /// `outcomes` list is the ladder's state before this attempt.
+    pub fn render_spec_md(
+        &self,
+        stage: &StageSpec,
+        current_prompt: &Path,
+        outcomes: &[(u32, LadderOutcome)],
+    ) -> Result<String> {
         let mut out = format!(
             "# SPEC.md — {}\n\n\
              Harness-owned: rewritten before every ticket, so edits here are \
-             discarded. It is every ticket released so far, oldest first; a \
+             discarded. Tickets that passed appear in full, oldest first; a \
              later ticket extends the earlier ones and wins where they \
-             differ. The last section is the ticket you are working on now.\n",
+             differ. A ticket marked FAILED or SKIPPED was not passed: its \
+             section is collapsed, it is **not graded and not required**, \
+             and no later contract rests on it. The last section is the \
+             ticket you are working on now.\n",
             self.spec.title
         );
-        let mut push = |title: &str, path: &Path| -> Result<()> {
+        fn push(out: &mut String, title: &str, path: &Path) -> Result<()> {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("SPEC.md: read {}", path.display()))?;
             out.push_str(&format!(
@@ -207,19 +220,175 @@ impl LoadedCampaign {
                 text.trim_end()
             ));
             Ok(())
-        };
+        }
+        let outcome_of = |id: u32| outcomes.iter().find(|(s, _)| *s == id).map(|(_, o)| *o);
         for s in self.spec.stages.iter().filter(|s| s.id < stage.id) {
-            push(
-                &format!("ticket {}: {}", s.id, s.title),
-                &self.prompt_path(s),
-            )?;
+            match outcome_of(s.id) {
+                Some(LadderOutcome::Full) => push(
+                    &mut out,
+                    &format!("ticket {}: {} (passed)", s.id, s.title),
+                    &self.prompt_path(s),
+                )?,
+                Some(LadderOutcome::Lite) => push(
+                    &mut out,
+                    &format!("ticket {}: {} (passed on the lite variant)", s.id, s.title),
+                    &self.prompt_path(s),
+                )?,
+                Some(LadderOutcome::Failed) => out.push_str(&format!(
+                    "\n---\n\n<!-- ticket {}: {} - FAILED, rolled back; not graded, not required -->\n\n> Ticket {} ({}) **failed and was rolled back**: it is not graded and not required by this ticket, and the contract below does not include it.\n",
+                    s.id, s.title, s.id, s.title
+                )),
+                Some(LadderOutcome::Skipped) => out.push_str(&format!(
+                    "\n---\n\n<!-- ticket {}: {} - SKIPPED, not attempted; not graded, not required -->\n\n> Ticket {} ({}) was **skipped** (a prerequisite ticket did not pass): it is not graded and not required by this ticket.\n",
+                    s.id, s.title, s.id, s.title
+                )),
+                None => out.push_str(&format!(
+                    "\n---\n\n<!-- ticket {}: {} - not attempted; not graded, not required -->\n\n> Ticket {} ({}) was **not attempted**: it is not graded and not required by this ticket.\n",
+                    s.id, s.title, s.id, s.title
+                )),
+            }
         }
         push(
+            &mut out,
             &format!("ticket {} (current): {}", stage.id, stage.title),
             current_prompt,
         )?;
         Ok(out)
     }
+}
+
+/// Format stage ids for prose: `0, 1, 3-7 and 10`.
+pub fn fmt_stage_ids(ids: &[u32]) -> String {
+    let mut ids: Vec<u32> = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < ids.len() {
+        let start = ids[i];
+        let mut end = start;
+        while i + 1 < ids.len() && ids[i + 1] == end + 1 {
+            i += 1;
+            end = ids[i];
+        }
+        parts.push(if end > start {
+            format!("{start}-{end}")
+        } else {
+            format!("{start}")
+        });
+        i += 1;
+    }
+    match parts.len() {
+        0 => String::new(),
+        1 => parts.pop().unwrap_or_default(),
+        _ => {
+            let last = parts.pop().unwrap_or_default();
+            format!("{} and {}", parts.join(", "), last)
+        }
+    }
+}
+
+/// The budget floor (round-10 D3): a stage is not entered when the cap's
+/// remaining headroom is below this — the ladder stops as "budget cap"
+/// rather than overshooting the cap by one attempt's cost.
+pub const BUDGET_FLOOR_USD: f64 = 0.02;
+
+/// The harness note prepended to an attempt's prompt (round-10 D2, item
+/// 11): what earlier tickets failed or were skipped, that the workspace was
+/// rolled back, and the suite that actually grades this ticket. Generated
+/// from the same `accepted_for` list the verifier runs, so the two cannot
+/// drift. `None` for a clean ladder: a ticket after only passes needs no
+/// note.
+pub fn attempt_preamble(
+    stages: &[StageSpec],
+    stage: &StageSpec,
+    variant: StageVariant,
+    rollback_first: bool,
+    outcomes: &[(u32, LadderOutcome)],
+    accepted: &[u32],
+) -> Option<String> {
+    let title_of = |id: u32| {
+        stages
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.as_str())
+            .unwrap_or("")
+    };
+    let broken = |want: LadderOutcome| -> Vec<u32> {
+        let mut v: Vec<u32> = outcomes
+            .iter()
+            .filter(|(id, o)| *id < stage.id && *o == want)
+            .map(|(id, _)| *id)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let failed = broken(LadderOutcome::Failed);
+    let skipped = broken(LadderOutcome::Skipped);
+    let lite_retry = variant == StageVariant::Lite;
+    if failed.is_empty() && skipped.is_empty() && !lite_retry {
+        return None;
+    }
+    let named = |ids: &[u32]| -> String {
+        let parts: Vec<String> = ids
+            .iter()
+            .map(|id| format!("{id} ({})", title_of(*id)))
+            .collect();
+        match parts.len() {
+            0 => String::new(),
+            1 => parts[0].clone(),
+            _ => {
+                let last = parts.last().cloned().unwrap_or_default();
+                format!("{} and {last}", parts[..parts.len() - 1].join(", "))
+            }
+        }
+    };
+    let mut out = String::from("--- harness note (added by the benchmark, not the ticket) ---\n");
+    if lite_retry {
+        out.push_str(&format!(
+            "Your full attempt at ticket {} ({}) failed; its work was rolled back, and this lite variant's shorter contract below is what is graded.\n",
+            stage.id, stage.title
+        ));
+    }
+    if !failed.is_empty() {
+        out.push_str(&format!(
+            "Ticket{} {} failed and {} rolled back; {} not graded and not required by this ticket, and SPEC.md marks it.\n",
+            if failed.len() == 1 { "" } else { "s" },
+            named(&failed),
+            if failed.len() == 1 { "was" } else { "were" },
+            if failed.len() == 1 { "it is" } else { "they are" },
+        ));
+    }
+    if !skipped.is_empty() {
+        out.push_str(&format!(
+            "Ticket{} {} {} skipped (a prerequisite ticket did not pass); {} not graded and not required.\n",
+            if skipped.len() == 1 { "" } else { "s" },
+            named(&skipped),
+            if skipped.len() == 1 { "was" } else { "were" },
+            if skipped.len() == 1 { "it is" } else { "they are" },
+        ));
+    }
+    if rollback_first {
+        let anchor = outcomes
+            .iter()
+            .filter(|(id, o)| {
+                *id < stage.id && matches!(o, LadderOutcome::Full | LadderOutcome::Lite)
+            })
+            .map(|(id, _)| *id)
+            .max();
+        out.push_str(&match anchor {
+            Some(id) => format!(
+                "The workspace was rolled back to ticket {id}'s commit (the last ticket that passed) before this attempt.\n"
+            ),
+            None => "The workspace was rolled back to the starting state (no ticket has passed yet) before this attempt.\n".to_string(),
+        });
+    }
+    out.push_str(&format!(
+        "This ticket's acceptance suite is tickets {}.\n",
+        fmt_stage_ids(accepted)
+    ));
+    out.push_str("--- end of harness note ---");
+    Some(out)
 }
 
 /// Stage config handed to `BenchmarkPipeline`: prompt override + workspace
@@ -246,6 +415,10 @@ pub struct CampaignStageConfig {
     /// after the pipeline prepares it (a genesis workspace is wiped first,
     /// so the campaign runner cannot write it beforehand).
     pub spec_md: Option<String>,
+    /// Round-10 D2: the harness note for this attempt (failed/skipped
+    /// predecessors, the rollback, the effective acceptance suite). The
+    /// pipeline prepends it to the ticket prompt.
+    pub preamble: Option<String>,
 }
 
 /// The campaigns the console and the public board present. The pre-sdb-sql
@@ -519,6 +692,9 @@ pub struct StageAttempt<'a> {
     /// or skipped contributes nothing, or one failure would sink every
     /// later ticket (docs/PROPOSAL-sdb-sql.md, "the ladder continues").
     pub passed: Vec<u32>,
+    /// Ladder state before this attempt, by stage id (round-10 D2): drives
+    /// the collapsed SPEC.md sections and the rollback note.
+    pub outcomes: Vec<(u32, LadderOutcome)>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
     /// True when the workspace/data must be rolled back to the last green
@@ -646,7 +822,10 @@ fn parse_of_rest(rest: &str) -> Option<(u32, u32)> {
     Some((passed, total))
 }
 
-fn truncate_line(s: &str, n: usize) -> String {
+/// One line, at most `n` chars (round-10 D5): the GUI's failure line and
+/// the live block's `first_fail` both use this, so the Live card can never
+/// hold a multi-line verifier repro.
+pub fn truncate_line(s: &str, n: usize) -> String {
     let line = s.lines().next().unwrap_or("").trim().to_string();
     if line.chars().count() <= n {
         line
@@ -1563,8 +1742,21 @@ where
     for stage in &lc.spec.stages {
         // Caps are checked between tickets; both flags are set when both
         // were crossed at the same boundary (round-7 finding 5; the stop
-        // reason stays budget-first).
-        let over_budget_now = opts.budget_usd > 0.0 && total_cost >= opts.budget_usd;
+        // reason stays budget-first). Round-10 D3: the cap also stops when
+        // the remaining headroom cannot fund a useful attempt (below the
+        // floor), instead of overshooting by one attempt's cost.
+        let over_budget_now = opts.budget_usd > 0.0
+            && (total_cost >= opts.budget_usd || opts.budget_usd - total_cost < BUDGET_FLOOR_USD);
+        let headroom = if opts.budget_usd > 0.0 {
+            opts.budget_usd - total_cost
+        } else {
+            f64::INFINITY
+        };
+        let outcomes_snapshot = |m: &HashMap<u32, LadderOutcome>| -> Vec<(u32, LadderOutcome)> {
+            let mut v: Vec<(u32, LadderOutcome)> = m.iter().map(|(k, o)| (*k, *o)).collect();
+            v.sort_by_key(|(id, _)| *id);
+            v
+        };
         let over_wall_now = opts
             .wall_min
             .map(|m| m > 0 && wall_start.elapsed() >= std::time::Duration::from_secs(m * 60))
@@ -1603,11 +1795,13 @@ where
             stage,
             variant: StageVariant::Full,
             prompt_path: lc.prompt_path(stage),
-            budget_usd: stage.budget_usd,
+            // D3: one attempt can never overshoot the cap on its own.
+            budget_usd: stage.budget_usd.min(headroom),
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
             passed: passed_all.iter().copied().collect(),
+            outcomes: outcomes_snapshot(&outcomes),
             weight: 1.0,
             rollback_first: dirty,
         };
@@ -1651,55 +1845,69 @@ where
         } else if let Some(lite) = &stage.lite {
             // Lite attempt: the workspace rolls back to the last green
             // commit (and the data dir) before the fresh session.
-            let attempt_lite = StageAttempt {
-                stage,
-                variant: StageVariant::Lite,
-                prompt_path: lc.root.join(&lite.prompt),
-                budget_usd: lite.budget_usd,
-                max_turns: lite.max_turns,
-                lite_profile: lite.profile.clone(),
-                passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
-                passed: passed_all.iter().copied().collect(),
-                weight: lite.weight,
-                rollback_first: true,
-            };
-            let out2 = exec(&attempt_lite)
-                .await
-                .with_context(|| format!("stage {} lite", stage.id))?;
-            let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
-            for r in &out2.stage_results {
-                let e = best.entry(r.stage).or_insert(false);
-                *e = *e || r.passed;
-            }
-            total_cost += out2.effective_cost_usd;
-            let fault2 = out2.agent_failed || out2.infra_error;
-            let status2 = if out2.passed {
-                "passed"
-            } else if fault2 {
-                "fault"
+            let headroom2 = if opts.budget_usd > 0.0 {
+                opts.budget_usd - total_cost
             } else {
-                "failed"
+                f64::INFINITY
             };
-            push_attempt_record(
-                &mut rollup,
-                stage,
-                StageVariant::Lite,
-                &out2,
-                regressed2,
-                severity2,
-                status2,
-            );
-            if out2.passed {
-                outcomes.insert(stage.id, LadderOutcome::Lite);
-                liters.insert(stage.id, lite.profile.clone());
-                passed_all.insert(stage.id);
-                if reached.map(|r| stage.id > r).unwrap_or(true) {
-                    reached = Some(stage.id);
-                }
-                dirty = false;
-            } else {
+            if headroom2 < BUDGET_FLOOR_USD {
+                // D3: the full attempt already spent; no lite when the
+                // remaining headroom is below the floor. The stage stays
+                // failed and the next iteration stops on budget.
                 outcomes.insert(stage.id, LadderOutcome::Failed);
                 dirty = true;
+            } else {
+                let attempt_lite = StageAttempt {
+                    stage,
+                    variant: StageVariant::Lite,
+                    prompt_path: lc.root.join(&lite.prompt),
+                    budget_usd: lite.budget_usd.min(headroom2),
+                    max_turns: lite.max_turns,
+                    lite_profile: lite.profile.clone(),
+                    passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                    passed: passed_all.iter().copied().collect(),
+                    outcomes: outcomes_snapshot(&outcomes),
+                    weight: lite.weight,
+                    rollback_first: true,
+                };
+                let out2 = exec(&attempt_lite)
+                    .await
+                    .with_context(|| format!("stage {} lite", stage.id))?;
+                let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
+                for r in &out2.stage_results {
+                    let e = best.entry(r.stage).or_insert(false);
+                    *e = *e || r.passed;
+                }
+                total_cost += out2.effective_cost_usd;
+                let fault2 = out2.agent_failed || out2.infra_error;
+                let status2 = if out2.passed {
+                    "passed"
+                } else if fault2 {
+                    "fault"
+                } else {
+                    "failed"
+                };
+                push_attempt_record(
+                    &mut rollup,
+                    stage,
+                    StageVariant::Lite,
+                    &out2,
+                    regressed2,
+                    severity2,
+                    status2,
+                );
+                if out2.passed {
+                    outcomes.insert(stage.id, LadderOutcome::Lite);
+                    liters.insert(stage.id, lite.profile.clone());
+                    passed_all.insert(stage.id);
+                    if reached.map(|r| stage.id > r).unwrap_or(true) {
+                        reached = Some(stage.id);
+                    }
+                    dirty = false;
+                } else {
+                    outcomes.insert(stage.id, LadderOutcome::Failed);
+                    dirty = true;
+                }
             }
         } else {
             outcomes.insert(stage.id, LadderOutcome::Failed);
@@ -1837,13 +2045,44 @@ pub fn git_commit_stage(
     };
     if !workdir.join(".git").is_dir() {
         git(&["init", "-q"])?;
-        std::fs::write(
-            workdir.join(".gitignore"),
-            // Runtime state (AOF/dumps) is evidence on disk, never source:
-            // committing it bloated the first replay's stage diffs (123k lines).
-            "target/\nnode_modules/\n__pycache__/\n*.o\n*.tmp\nappendonly.log\n*.aof\n*.rdb\n",
-        )?;
     }
+    // Harness-owned artifacts are never source (round-10 D1): the per-round
+    // FEEDBACK_REPORT.md is deleted around every attempt, and the ignore
+    // entry keeps a legacy copy from being re-added or resurrected by a
+    // rollback. Rewriting keeps workspaces created before this rule in step.
+    let ignore = workdir.join(".gitignore");
+    let mut text = std::fs::read_to_string(&ignore).unwrap_or_default();
+    for line in [
+        "target/",
+        "node_modules/",
+        "__pycache__/",
+        "*.o",
+        "*.tmp",
+        // Runtime state (AOF/dumps) is evidence on disk, never source:
+        // committing it bloated the first replay's stage diffs (123k lines).
+        "appendonly.log",
+        "*.aof",
+        "*.rdb",
+        // Per-round verifier feedback, rewritten by the harness (D1).
+        "FEEDBACK_REPORT.md",
+    ] {
+        if !text.lines().any(|l| l.trim() == line) {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    std::fs::write(&ignore, &text)?;
+    // A copy tracked before this rule leaves the index now.
+    git(&[
+        "rm",
+        "--cached",
+        "-q",
+        "--ignore-unmatch",
+        "FEEDBACK_REPORT.md",
+    ])?;
     git(&["add", "-A"])?;
     let msg = format!("stage {stage}: {title} [{verdict}]");
     let commit = std::process::Command::new("git")
@@ -2700,7 +2939,16 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
         let lc = load_campaign_from(&root, "sdb-sql").unwrap();
         let s2 = lc.spec.stages.iter().find(|s| s.id == 2).unwrap();
-        let md = lc.render_spec_md(s2, &lc.prompt_path(s2)).unwrap();
+        let passed_outcomes: Vec<(u32, LadderOutcome)> = lc
+            .spec
+            .stages
+            .iter()
+            .filter(|s| s.id < 2)
+            .map(|s| (s.id, LadderOutcome::Full))
+            .collect();
+        let md = lc
+            .render_spec_md(s2, &lc.prompt_path(s2), &passed_outcomes)
+            .unwrap();
         let pos = |needle: &str| {
             md.find(needle)
                 .unwrap_or_else(|| panic!("SPEC.md misses {needle:?}"))
@@ -2711,8 +2959,210 @@ mod tests {
         assert!(!md.contains("# Ticket 3"), "no later ticket");
         // Genesis has no predecessors: just its own ticket.
         let s0 = lc.spec.stages.iter().find(|s| s.id == 0).unwrap();
-        let md0 = lc.render_spec_md(s0, &lc.prompt_path(s0)).unwrap();
+        let md0 = lc.render_spec_md(s0, &lc.prompt_path(s0), &[]).unwrap();
         assert!(md0.contains("ticket 0 (current)") && !md0.contains("# Ticket 1"));
+    }
+
+    #[test]
+    fn test_render_spec_md_marks_failed_tickets() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+        let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+        let s2 = lc.spec.stages.iter().find(|s| s.id == 2).unwrap();
+        // Ticket 1 failed and was rolled back; ticket 2 is the current one.
+        // Its section collapses and the full contract never appears: a
+        // later ticket must not read a failed predecessor as done.
+        let outcomes = vec![(0, LadderOutcome::Full), (1, LadderOutcome::Failed)];
+        let md = lc
+            .render_spec_md(s2, &lc.prompt_path(s2), &outcomes)
+            .unwrap();
+        assert!(md.contains("FAILED, rolled back"), "{md}");
+        assert!(md.contains("not graded and not required"));
+        assert!(
+            !md.contains("# Ticket 1"),
+            "the failed ticket's contract must be collapsed"
+        );
+        assert!(md.contains("# Ticket 0"), "a passed ticket stays in full");
+        // A lite pass is named as such.
+        let outcomes = vec![(0, LadderOutcome::Full), (1, LadderOutcome::Lite)];
+        let md = lc
+            .render_spec_md(s2, &lc.prompt_path(s2), &outcomes)
+            .unwrap();
+        assert!(md.contains("# Ticket 1"));
+        assert!(md.contains("(passed on the lite variant)"));
+    }
+
+    #[test]
+    fn test_attempt_preamble_names_failed_tickets_and_effective_suite() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+        let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+        let s2 = lc.spec.stages.iter().find(|s| s.id == 2).unwrap();
+        let outcomes = vec![(0, LadderOutcome::Full), (1, LadderOutcome::Failed)];
+        let accepted = Acceptance::accepted_for(s2.acceptance.stages_for("sql"), &[0], 2);
+        let p = attempt_preamble(
+            &lc.spec.stages,
+            s2,
+            StageVariant::Full,
+            true,
+            &outcomes,
+            &accepted,
+        )
+        .expect("a failure needs a note");
+        assert!(p.contains("Ticket 1 ("), "{p}");
+        assert!(p.contains("failed and was rolled back"));
+        assert!(p.contains("not graded and not required"));
+        // The list comes from accepted_for: it cannot drift from the suite
+        // the verifier actually runs.
+        assert!(
+            p.contains(&format!(
+                "acceptance suite is tickets {}",
+                fmt_stage_ids(&accepted)
+            )),
+            "{p}"
+        );
+        assert!(p.contains("rolled back to ticket 0"));
+        // A clean ladder carries no note.
+        let clean = vec![(0, LadderOutcome::Full), (1, LadderOutcome::Full)];
+        assert!(attempt_preamble(
+            &lc.spec.stages,
+            s2,
+            StageVariant::Full,
+            false,
+            &clean,
+            &accepted
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_attempt_preamble_lite_retry_says_rolled_back() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+        let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+        let s11 = lc.spec.stages.iter().find(|s| s.id == 11).unwrap();
+        // Tickets 0-10 passed; the full attempt at 11 failed and the lite
+        // variant is next (item 11: the attempt opens by saying so).
+        let outcomes: Vec<(u32, LadderOutcome)> = lc
+            .spec
+            .stages
+            .iter()
+            .filter(|s| s.id < 11)
+            .map(|s| (s.id, LadderOutcome::Full))
+            .collect();
+        let passed: Vec<u32> = outcomes.iter().map(|(id, _)| *id).collect();
+        let accepted = Acceptance::accepted_for(s11.acceptance.stages_for("sql"), &passed, 11);
+        let p = attempt_preamble(
+            &lc.spec.stages,
+            s11,
+            StageVariant::Lite,
+            true,
+            &outcomes,
+            &accepted,
+        )
+        .expect("a lite retry needs a note");
+        assert!(p.contains("lite variant"), "{p}");
+        assert!(p.contains("failed; its work was rolled back"));
+        assert!(p.contains("acceptance suite is tickets"));
+    }
+
+    #[test]
+    fn test_fmt_stage_ids() {
+        assert_eq!(fmt_stage_ids(&[0, 1, 3, 4, 5, 6, 7, 10]), "0-1, 3-7 and 10");
+        assert_eq!(fmt_stage_ids(&[0]), "0");
+        assert_eq!(fmt_stage_ids(&[0, 2]), "0 and 2");
+        assert_eq!(fmt_stage_ids(&[]), "");
+    }
+
+    #[test]
+    fn test_truncate_line_is_one_line_capped() {
+        let long = format!("{}\nsecond line", "x".repeat(300));
+        let t = truncate_line(&long, 160);
+        assert!(!t.contains('\n'), "one line only");
+        assert!(t.chars().count() <= 160, "len {}", t.chars().count());
+        assert!(t.ends_with('…'));
+        assert_eq!(truncate_line("  short  \nsecond", 160), "short");
+    }
+
+    #[tokio::test]
+    async fn test_ladder_budget_floor_and_cap_clamp() {
+        let lc = ladder_fixture();
+        let opts = CampaignRunOptions {
+            campaign_id: "budget1".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 0.25,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::<(u32, f64)>::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.budget_usd));
+                let id = attempt.stage.id;
+                // The first attempt overshoots its own budget (the pipeline
+                // bounds turns, not the final cent); the rest are cheap.
+                let cost = if id == 0 { 0.20 } else { 0.05 };
+                let mut out = outcome(true, &[(id, true)]);
+                out.effective_cost_usd = cost;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        assert_eq!(seen.len(), 2, "stage 2 was never entered: {seen:?}");
+        assert_eq!(seen[0], (0, 0.10), "stage 0 keeps its own budget");
+        assert_eq!(seen[1].0, 1);
+        assert!(
+            (seen[1].1 - (0.25 - 0.20)).abs() < 1e-9,
+            "stage 1 is clamped to the cap's remaining headroom: {}",
+            seen[1].1
+        );
+        assert!(
+            rollup.over_budget,
+            "the floor stops the ladder as budget cap"
+        );
+        assert!((rollup.total_cost_usd - 0.25).abs() < 1e-9);
+        assert_eq!(rollup.stages.len(), 2);
+    }
+
+    #[test]
+    fn test_git_commit_stage_never_tracks_feedback_report() {
+        let dir = std::env::temp_dir().join(format!("sdb-git-d1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A legacy workspace: the report was tracked before this rule.
+        std::fs::write(dir.join("FEEDBACK_REPORT.md"), "stale round 0").unwrap();
+        std::fs::write(dir.join("main.go"), "package main").unwrap();
+        git_commit_stage(&dir, 0, "genesis", "pass").unwrap();
+        let tracked = || {
+            String::from_utf8_lossy(
+                &std::process::Command::new("git")
+                    .args(["ls-files"])
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .to_string()
+        };
+        assert!(tracked().contains("main.go"));
+        assert!(
+            !tracked().contains("FEEDBACK_REPORT.md"),
+            "tracked: {}",
+            tracked()
+        );
+        // The pipeline rewrites it for the next repair round; the next
+        // commit must not pick it up either.
+        std::fs::write(dir.join("FEEDBACK_REPORT.md"), "round 1").unwrap();
+        git_commit_stage(&dir, 1, "next", "pass").unwrap();
+        assert!(!tracked().contains("FEEDBACK_REPORT.md"));
+        assert!(std::fs::read_to_string(dir.join(".gitignore"))
+            .unwrap()
+            .contains("FEEDBACK_REPORT.md"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3171,7 +3621,9 @@ mod tests {
             model: "m".into(),
             harness: "omp".into(),
             effort: "high".into(),
-            budget_usd: 0.005, // one stage costs 0.01; the second never starts
+            // One stage costs 0.01; after it the remaining 0.01 is under
+            // the $0.02 floor, so the second never starts (round-10 D3).
+            budget_usd: 0.02,
             wall_min: None,
         };
         let rollup = run_campaign(

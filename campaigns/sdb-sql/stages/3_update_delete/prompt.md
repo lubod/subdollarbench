@@ -1,6 +1,6 @@
 # Ticket 3 — UPDATE and DELETE
 
-Sorting and paging work (ticket 2). This ticket adds **`UPDATE`** and
+Ticket 2's contract is sorting and paging. This ticket adds **`UPDATE`** and
 **`DELETE`**, including the affected-count contract. Verification stays
 differential.
 

@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-18.17`: round-10 harness fixes — the per-round
+///   `FEEDBACK_REPORT.md` is deleted before and after every attempt and
+///   never committed (a stale report used to greet later tickets and be
+///   believed); a failed or skipped ticket no longer reads as contract
+///   (`SPEC.md` collapses its section with a FAILED/SKIPPED marker and the
+///   report is regenerated from the ladder's outcomes), every attempt
+///   after a failure opens with a harness note naming the broken tickets
+///   and the *effective* acceptance suite the verifier runs, and an
+///   attempt's budget is clamped to the cap's remaining headroom (the
+///   ladder stops as "budget cap" below a $0.02 floor).
 /// - `2026-10-17.16`: the perf gate compares *net work* over the
 ///   round-trip floor (indexed work <= scan work / 10, or <= 0.05 ms
 ///   absolute), so a constant per-statement overhead cannot lift the
@@ -468,7 +478,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-17.16";
+pub const RULES_VERSION: &str = "2026-10-18.17";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

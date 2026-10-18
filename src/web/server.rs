@@ -5059,7 +5059,11 @@ mod tests {
             "function ladderStrip(",
             "function applyHash(",
             "function loadRunDetail(",
-            "?after=",
+            // The live log is fetched tail-first, then incrementally by
+            // offset (round-10 follow-up: a finished cell's log is tens of
+            // thousands of lines).
+            "tail=400",
+            "after=${liveOffset}",
         ] {
             assert!(html.contains(marker), "console must contain {marker}");
         }

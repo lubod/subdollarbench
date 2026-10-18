@@ -3916,6 +3916,17 @@ impl BenchmarkPipeline {
                 config.worker,
             )
         };
+        // Round-10 D2: the harness note (failed/skipped predecessors, the
+        // rollback, the effective acceptance suite) leads the prompt so it
+        // cannot be missed; the templating above only touches ports.
+        let prompt_content = match config
+            .campaign_stage
+            .as_ref()
+            .and_then(|c| c.preamble.as_deref())
+        {
+            Some(note) => format!("{note}\n\n{prompt_content}"),
+            None => prompt_content,
+        };
         let prompt_content = format!(
             "{}\n\n### READY FOR VERIFICATION SIGNAL\nWhen you believe your implementation is complete and properly running on the requested port, signal that you are ready for evaluation by creating `/workspace/READY` (for example, run `touch READY` or `touch /workspace/READY`), or simply conclude your session. The benchmark framework will immediately detect this and run the automated verification suite!\n",
             prompt_content
@@ -7390,6 +7401,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7446,6 +7458,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7499,6 +7512,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7548,6 +7562,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7604,6 +7619,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7661,6 +7677,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7720,6 +7737,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: Some("# SPEC.md fixture\n".to_string()),
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7778,6 +7796,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7833,6 +7852,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7888,6 +7908,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -7948,6 +7969,7 @@ main()
             passed_lite: vec![(5, vec!["crash-acked-only".to_string()])],
             passed_stages: (0..=5).collect(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8006,6 +8028,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: vec![0, 1, 2, 3, 4],
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8057,6 +8080,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: (0..11).collect(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8120,6 +8144,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: (0..10).collect(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8171,6 +8196,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8222,6 +8248,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8272,6 +8299,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: (0..11).collect(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8323,6 +8351,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8370,6 +8399,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8422,6 +8452,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8476,6 +8507,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8531,6 +8563,7 @@ main()
             passed_lite: Vec::new(),
             passed_stages: Vec::new(),
             spec_md: None,
+            preamble: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)

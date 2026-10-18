@@ -1,6 +1,6 @@
 # Ticket 7 — Aggregates
 
-The core grammar is in place (tickets 0-6). This ticket adds **aggregate
+Tickets 0-6 are the core grammar. This ticket adds **aggregate
 queries**: `COUNT`, `SUM`, `MIN`, `MAX`, with `GROUP BY` and `HAVING`.
 
 ## This ticket's contract
@@ -25,7 +25,7 @@ queries**: `COUNT`, `SUM`, `MIN`, `MAX`, with `GROUP BY` and `HAVING`.
 
 ## What the acceptance suite does
 
-The cumulative suites still run (tickets 0-6), and the differential
+The cumulative suites of the earlier tickets that passed still run, and the differential
 generator now writes aggregate queries — scalar aggregates, grouped ones
 with a total `ORDER BY` on the key, and `HAVING` predicates over
 `COUNT(*)`, `SUM`/`MIN`/`MAX` and the key — plus the aggregate error

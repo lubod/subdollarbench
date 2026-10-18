@@ -22,7 +22,7 @@ three tables** with the *inner* forms; `LEFT JOIN` is not required.
 
 ## What the suite does
 
-The cumulative suites still run (tickets 0-7), with the join grammar
+The cumulative suites of the earlier tickets that passed still run, with the join grammar
 narrowed to comma and `INNER JOIN` shapes — no `LEFT JOIN` — plus the join
 error probes (an ambiguous bare name in a self-join, an unknown qualifier,
 a missing column in `ON`, an unknown table).

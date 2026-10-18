@@ -4,7 +4,7 @@ Persistence (ticket 4) survives a *clean* stop. This lite ticket survives
 **kill -9** for the rows it acknowledged. The full ticket also requires a
 big `UPDATE` to be all-or-nothing under a kill and a torn tail to recover;
 this variant does not test those two, so do not spend turns on them — the
-cumulative suites of tickets 0-4 all still run.
+cumulative suites of the earlier tickets that passed all still run.
 
 ## What this suite checks
 

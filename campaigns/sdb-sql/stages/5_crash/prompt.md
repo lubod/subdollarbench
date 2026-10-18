@@ -7,7 +7,7 @@ and nothing it did not acknowledge may be half-applied.
 
 ## What the acceptance suite does
 
-The cumulative suite still runs (tickets 0-4), plus:
+The cumulative suite of the earlier tickets that passed still runs, plus:
 
 1. **Acked rows survive a kill -9.** The harness sends single-row inserts,
    counts the acks, and kills the server right after one. After a restart,

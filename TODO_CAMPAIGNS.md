@@ -979,6 +979,31 @@ tail, the proxied campaign POST, the merged validation+lock+status
 test; full lib suite 876 green; the CLI refusal and the API 409 were
 verified live.
 
+**Round-10 harness fixes landed (2026-10-18, D1-D5, RULES 2026-10-18.17)**:
+(1, D1 HIGH) the per-round `FEEDBACK_REPORT.md` is now deleted before every
+attempt's first turn and again after its verification, is ignore-listed in
+the workspace `.gitignore` the harness rewrites, and `git rm --cached`s a
+legacy tracked copy — ticket 1's stale "0 of 2, undefined: coerceNum" report
+used to be committed by five later tickets and believed by the model. (2,
+D2 HIGH) a failed or skipped ticket no longer reads as contract:
+`render_spec_md` collapses its section to a FAILED/SKIPPED marker line, the
+log header prints the **effective** acceptance list, and every attempt after
+a failure carries a harness note on its prompt (failed/skipped tickets
+named, the rollback point, the `accepted_for` suite) — generated from the
+same list the verifier runs, so it cannot drift; the static prompts' "Sorting
+and paging work (ticket 2)" / "suites still run (tickets 0-9)" claims became
+outcome-neutral. (3, D3) an attempt's budget is clamped to
+`min(ticket budget, cap − spent)`, and the ladder stops as `budget cap` when
+the remaining headroom is under `BUDGET_FLOOR_USD` ($0.02) — the DeepSeek
+cell overshot $0.75 by $0.0184 on a $0.0115-headroom lite attempt. (4, D5)
+`live.first_fail` is one line, ≤160 chars (`campaign::truncate_line`, the
+same rule as `FailureSummary.line`). Tests: SPEC markers, preamble naming +
+suite-from-`accepted_for` (incl. a lite retry), the id formatter, the
+truncation, the budget floor + clamp with a mock executor, and a git test
+proving a legacy tracked report never re-enters `git ls-files`. D4 (the
+compute floor dominates cheap cells' cost) is an operator decision, not a
+code change.
+
 **Round-10 review fixes landed (2026-10-18, browser pass)**: the console was
 driven with Playwright 1.58 at 1440 and 390 px; nothing mutated. (1) elapsed
 times are honest: the rollup's `finished_at` is empty until the run ends
