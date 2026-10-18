@@ -1,6 +1,6 @@
 # Ticket 10 — Subqueries
 
-Joins (ticket 8) combine tables side by side. This ticket puts a whole
+Ticket 8's contract is joins: tables combined side by side. This ticket puts a whole
 **query inside an expression**: subqueries.
 
 ## This ticket's contract

@@ -979,6 +979,38 @@ tail, the proxied campaign POST, the merged validation+lock+status
 test; full lib suite 876 green; the CLI refusal and the API 409 were
 verified live.
 
+**Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
+cell has run on it)**. **Host ops (O1), read this before starting anything**:
+the engine and GUI are systemd units (`subdollarbench-engine` on :3000,
+`subdollarbench-gui` on :3001). After every rebuild run
+`sudo systemctl restart subdollarbench-engine subdollarbench-gui`; never
+start `./target/release/subdollarbench ui` by hand. A hand-started pair held
+the ports while both units crash-looped ~19k times (each retry ran the queue
+pump, the reconcile sweep and the OMP updater before a failing bind), and the
+served page silently went stale. `UiServer::start` now binds first and exits
+with `cannot bind … (held by pid N)` before any side effect (unit-tested via
+`UI_STARTS`), and the unit drop-ins add `RestartSec=10` +
+`StartLimitIntervalSec=300`/`StartLimitBurst=5` so a misconfiguration stops
+instead of looping. Rest of round 11: (1) the cap clamp converts *effective*
+headroom into the API dollars OMP enforces, using the cell's observed
+api/effective ratio (0.25 before the first attempt) — a 3.4x floor can no
+longer turn $0.05 of headroom into a $0.17 overshoot; the floor stays in
+effective dollars; (2) `over_budget` (spent ≥ cap) and `cap_reached` (floor
+stop below it) are separate flags, labelled `over budget by $X` vs
+`budget cap reached` on the Run header and `budget cap` on the portal; (3)
+the four remaining prompt openers ("Aggregates (ticket 7) read one table",
+…) name a ticket as contract instead of claiming it passed; (4) the Cause
+clamp moved to an inner div so the td stays a table cell; (5) an interrupted
+ticket reads `interrupted` (not `running`/`not reached`), the stalled wall
+bar measures start → finished_at/last activity, and stalled stamps carry the
+date when it is not today (`17 Oct 16:16`); (6) the Admin legacy controls
+(review judge, single run + prompt editor, run queue) sit in one "Legacy (not
+campaigns)" disclosure, with effort/harness left as the campaign's controls.
+O2: `log_mtime` (the newest console log's mtime) joins `updated_at` and
+`live.last_activity_at` in the stalled-since derivation, and a cancelled
+campaign writes `state: "cancelled"` + `stop_reason: "on request"` on its way
+out.
+
 **Round-10 harness fixes landed (2026-10-18, D1-D5, RULES 2026-10-18.17)**:
 (1, D1 HIGH) the per-round `FEEDBACK_REPORT.md` is now deleted before every
 attempt's first turn and again after its verification, is ignore-listed in

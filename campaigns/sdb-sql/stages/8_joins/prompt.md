@@ -1,6 +1,6 @@
 # Ticket 8 — Joins
 
-Aggregates (ticket 7) read one table. This ticket joins **two or three
+Ticket 7's contract is aggregates over one table. This ticket joins **two or three
 tables** in one query.
 
 ## This ticket's contract

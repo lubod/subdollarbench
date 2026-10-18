@@ -1,6 +1,6 @@
 # Ticket 8 (lite) — Joins, inner only
 
-Aggregates (ticket 7) read one table. This shorter ticket joins **two or
+Ticket 7's contract is aggregates over one table. This shorter ticket joins **two or
 three tables** with the *inner* forms; `LEFT JOIN` is not required.
 
 ## This ticket's contract

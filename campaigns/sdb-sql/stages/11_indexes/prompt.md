@@ -1,6 +1,6 @@
 # Ticket 11 — Indexes and the perf gate
 
-Constraints (ticket 9) made the schema enforce invariants. This ticket
+Ticket 9's contract is constraints that make the schema enforce invariants. This ticket
 adds **indexes**: named physical structures that must change *speed*
 without changing a single answer.
 

@@ -1188,13 +1188,6 @@
           <div id="campaignStartMsg" class="hint"></div>
         </div>
 
-        <!-- Review Judge Model -->
-        <div class="form-group">
-          <label for="reviewModel">Review Judge Model (end-of-run code review)</label>
-          <input type="text" id="reviewModel" value="openrouter/meta/muse-spark-1.3-contributor" />
-          <span class="hint">Clear to fall back to the default judge. Judging uses the OpenRouter key.</span>
-        </div>
-
         <!-- Reasoning Effort / Thinking Level Selector -->
         <div class="form-group">
           <label for="effortSelect">
@@ -1229,6 +1222,18 @@
             <option value="opencode">opencode (OpenCode CLI — effort is request-only)</option>
           </select>
           <span class="hint">Ranks never mix harnesses: compare within one harness.</span>
+        </div>
+
+        <!-- Legacy (not campaigns): round-11 finding 6 — everything below
+             predates the campaign launcher above. -->
+        <details class="form-group" id="legacySection">
+          <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;">Legacy (not campaigns) <span class="hint">(single run, prompt editor, review judge, run queue)</span></summary>
+          <div style="display:flex;flex-direction:column;gap:16px;margin-top:10px;">
+        <!-- Review Judge Model -->
+        <div class="form-group">
+          <label for="reviewModel">Review Judge Model (end-of-run code review)</label>
+          <input type="text" id="reviewModel" value="openrouter/meta/muse-spark-1.3-contributor" />
+          <span class="hint">Clear to fall back to the default judge. Judging uses the OpenRouter key.</span>
         </div>
 
         <details class="form-group" id="singleRunSection">
@@ -1349,6 +1354,8 @@
           </div>
           <div id="queueList"><div class="hint">Empty — queue runs to run them hands-free.</div></div>
         </div>
+          </div>
+        </details>
 
               </div>
 
@@ -1959,18 +1966,39 @@
       const cap = d ? d.budget_usd : roll.budget_usd;
       const wall = d ? d.wall_min : roll.wall_min;
       const started = (d && d.rollup && d.rollup.started_at) || roll.started_at || live.started_at;
-      const wallSecs = started ? (Date.now() - Date.parse(started)) / 1000 : null;
       const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
       const state = (cell && cell.state) || (d && d.state) || '';
       const stop = (cell && cell.stop_reason) || (d && d.stop_reason) || '';
       const finished = state === 'done' || state === 'stalled';
+      // Round-11 finding 5: for a cell that is not running, wall time is
+      // start -> finished_at (or the last activity), not now - start. A
+      // legacy rollup wrote finished_at == started_at, so an end that is
+      // not after the start falls back to the last activity.
+      const startMs = Date.parse(started);
+      let endMs = NaN;
+      if (finished) {
+        const cand = (d && d.rollup && d.rollup.finished_at) || (cell && cell.rollup && cell.rollup.finished_at) || live.last_activity_at;
+        endMs = Date.parse(cand);
+        if (!isFinite(endMs) || !isFinite(startMs) || endMs <= startMs) {
+          // The live block can be empty (cells recorded before it existed):
+          // the newest of the real activity stamps stands in.
+          endMs = Date.parse(latestStamp(
+            live.last_activity_at,
+            d && d.log_mtime, cell && cell.log_mtime,
+            d && d.updated_at, cell && cell.updated_at,
+          ) || '');
+        }
+      }
+      const wallSecs = started
+        ? ((isFinite(endMs) ? endMs : Date.now()) - startMs) / 1000
+        : null;
       const age = ageSecs(live.last_activity_at);
       // A finished cell is *supposed* to be quiet: no staleness colours.
       const stale = finished ? '' : age != null && age > 300 ? 'var(--danger)' : age != null && age > 120 ? 'var(--warning)' : '';
       const stateTag = state === 'done'
         ? `<span style="color:var(--success);font-weight:600;">finished${stop ? ' \u00b7 ' + escapeHtml(stop) : ''}</span> `
         : state === 'stalled'
-        ? `<span style="color:var(--danger);font-weight:600;">stalled${live.last_activity_at ? ' since ' + escapeHtml(clockOf(live.last_activity_at)) : ''}</span> `
+        ? `<span style="color:var(--danger);font-weight:600;">stalled${(() => { const since = latestStamp(live.last_activity_at, cell && cell.updated_at, d && d.updated_at, d && d.log_mtime); return since ? ' since ' + escapeHtml(stampOf(since)) : ''; })()}</span> `
         : '';
       const ladder = (cell && cell.ladder) || (d && d.ladder) || [];
       const head = [model,
@@ -2106,6 +2134,36 @@
         : String(rfc || '');
     }
 
+    /// HH:MM:SS for today, a fixed-order `17 Oct 16:16` otherwise
+    /// (round-11 finding 5: a stalled cell can be days old, and
+    /// "since 16:16:02" reads as today; the order must not follow the
+    /// browser locale).
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    function stampOf(rfc) {
+      const t = Date.parse(rfc || '');
+      if (!isFinite(t)) return String(rfc || '');
+      const d = new Date(t);
+      const now = new Date();
+      const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+      if (sameDay) return d.toLocaleTimeString([], { hour12: false });
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${d.getDate()} ${MONTHS[d.getMonth()]} ${hh}:${mm}`;
+    }
+
+    /// The latest of the candidate stamps (round-11 O2: status.json is
+    /// written at most every 5 s, so a cancel can land 13 minutes after the
+    /// last status write; the live block and the log mtime know better).
+    function latestStamp(...vals) {
+      let best = null;
+      let bestMs = -Infinity;
+      for (const v of vals) {
+        const ms = Date.parse(v || '');
+        if (isFinite(ms) && ms > bestMs) { bestMs = ms; best = v; }
+      }
+      return best;
+    }
+
     function relAge(rfc) {
       const t = Date.parse(rfc);
       if (!isFinite(t)) return String(rfc || '');
@@ -2231,8 +2289,8 @@
         return { text: `running${live.ticket != null ? ' \u00b7 ticket ' + live.ticket : (c.current_stage != null ? ' \u00b7 ticket ' + c.current_stage : '')}${turn}${age}`, cls: staleClass(live.last_activity_at) };
       }
       if (c.state === 'stalled') {
-        const since = live.last_activity_at || c.updated_at;
-        const at = since ? clockOf(since) : '';
+        const since = latestStamp(live.last_activity_at, c.updated_at, c.log_mtime);
+        const at = since ? stampOf(since) : '';
         const where = live.ticket != null ? ` \u00b7 in ticket ${live.ticket}` : (c.current_stage != null ? ` \u00b7 in ticket ${c.current_stage}` : '');
         return { text: `stalled${at ? ' \u00b7 no process since ' + at : ''}${where}`, cls: 'color:var(--danger);' };
       }
@@ -2441,6 +2499,13 @@
       renderRun();
     }
 
+    /// A ticket the verifier never reached because the cell died mid-flight
+    /// reads `interrupted`, not `running` (round-11 finding 5).
+    function statusLabel(status, cellState) {
+      if (status === 'running' && cellState && cellState !== 'running') return 'interrupted';
+      return LADDER_STATUS[status] ? LADDER_STATUS[status].label : status;
+    }
+
     function roundCell(round) {
       if (!round) return '\u00b7';
       const score = `${round.passed_stages}/${round.total_stages}`;
@@ -2501,9 +2566,9 @@
       }
       if (d.state === 'stalled') {
         const live = d.rollup && d.rollup.live ? d.rollup.live : null;
-        const since = (live && live.last_activity_at) || d.updated_at;
+        const since = latestStamp(live && live.last_activity_at, d.updated_at, d.log_mtime);
         const where = live && live.ticket != null ? ` \u00b7 in ticket ${live.ticket}` : '';
-        return `${startTxt} \u2192 stalled${since ? ' since ' + clockOf(since) : ''}${where}`;
+        return `${startTxt} \u2192 stalled${since ? ' since ' + stampOf(since) : ''}${where}`;
       }
       const elapsed = isFinite(started) && finished != null ? (finished - started) / 1000 : null;
       return `${startTxt} \u2192 ${r.finished_at ? clockOf(r.finished_at) : '\u2014'}${elapsed != null ? ' \u00b7 ' + fmtDurSec(elapsed) + ' elapsed' : ''}`;
@@ -2521,8 +2586,15 @@
       const turns = records.reduce((s, x) => s + (x.turns || 0), 0);
       const byId = {};
       records.forEach(rec => { (byId[rec.id] = byId[rec.id] || []).push(rec); });
+      // The ticket the cell was in when it stopped: the runner's live block
+      // when it exists, else the status's current_stage (round-11 O2: the
+      // muse cell predates the live block).
+      const liveTicket = d.live_run && d.live_run.ticket != null
+        ? Number(d.live_run.ticket)
+        : (d.current_stage != null ? Number(d.current_stage) : null);
       let rows = '';
       ladder.forEach(e => {
+        const interrupted = e.status === 'not_reached' && d.state !== 'running' && liveTicket === e.id;
         const recs = byId[e.id] || [];
         const full = recs.find(x => x.variant !== 'lite');
         const lite = recs.find(x => x.variant === 'lite');
@@ -2530,12 +2602,12 @@
         const expanded = !!runExpandedTickets[e.id];
         const cause = e.cause || '';
         rows += `<tr style="cursor:pointer;" onclick="toggleRunTicket(${e.id})" onkeydown="if(event.key==='Enter'){toggleRunTicket(${e.id});}" tabindex="0">
-          <td>${e.id} ${escapeHtml(e.title)} <span class="hint">${escapeHtml(LADDER_STATUS[e.status] ? LADDER_STATUS[e.status].label : e.status)}</span></td>
+          <td>${e.id} ${escapeHtml(e.title)} <span class="hint">${escapeHtml(interrupted ? 'interrupted' : statusLabel(e.status, d.state))}</span></td>
           <td>${full ? roundsCell(full) : '<span class="hint">\u00b7</span>'}</td>
           <td>${lite ? roundsCell(lite) : '<span class="hint">\u00b7</span>'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt1(e.points)}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums;">${cost ? '$' + fmtMoney(cost) : '\u00b7'}</td>
-          <td class="hint causeCell" title="${escapeHtml(cause)}">${escapeHtml(cause)}</td>
+          <td class="hint" title="${escapeHtml(cause)}"><div class="causeCell">${escapeHtml(cause)}</div></td>
         </tr>
         <tr style="display:${expanded ? 'table-row' : 'none'};"><td colspan="6" style="background:#0b0f18;">${runTicketDetail(recs, e.status === 'running')}</td></tr>`;
       });
@@ -2547,7 +2619,7 @@
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
           <div>
             <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(shortModel(r.model || d.id))}</h2>
-            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ' \u00b7 <span style="color:var(--warning);">over budget</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ` \u00b7 <span style="color:var(--warning);">over budget by $${fmtMoney(total - cap)}</span>` : ''}${r.cap_reached ? ' \u00b7 <span style="color:var(--warning);">budget cap reached</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
             ${d.live_run ? `<div class="hint" style="color:var(--primary);">${escapeHtml(liveSummary(false))}</div>` : ''}
           </div>
           <div class="hint" style="display:flex;gap:10px;align-items:center;">

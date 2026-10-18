@@ -412,12 +412,85 @@ pub fn workdir_for_run(run_id: &str) -> PathBuf {
 
 pub struct UiServer;
 
+/// How many times `UiServer::start` got past a successful bind (round-11
+/// O1's test: a failed bind must leave this unchanged — no queue pump, no
+/// reconcile, no OMP updater).
+pub static UI_STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Best-effort lookup of the process holding a TCP listen port, for the
+/// "cannot bind" message (round-11 O1). Reads /proc/net/tcp{,6} for the
+/// listening socket inode, then scans /proc/*/fd for that inode. Returns
+/// None when /proc is unavailable or the holder is not visible.
+pub fn port_holder(port: u16) -> Option<u32> {
+    let mut inodes: Vec<String> = Vec::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 10 || cols[3] != "0A" {
+                continue; // 0A = LISTEN
+            }
+            let Some((_, hex_port)) = cols[1].rsplit_once(':') else {
+                continue;
+            };
+            if u16::from_str_radix(hex_port, 16) != Ok(port) {
+                continue;
+            }
+            inodes.push(cols[9].to_string());
+        }
+    }
+    if inodes.is_empty() {
+        return None;
+    }
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(link) = std::fs::read_link(fd.path()) {
+                let target = link.to_string_lossy();
+                if let Some(rest) = target.strip_prefix("socket:[") {
+                    let ino = rest.trim_end_matches(']');
+                    if inodes.iter().any(|i| i == ino) {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 impl UiServer {
     pub fn build_app(state: AppState) -> Router {
         super::routes::build_app(state)
     }
 
     pub async fn start(host: &str, port: u16, engine_url: &str) -> anyhow::Result<()> {
+        // Round-11 O1: bind before every side effect. A second `ui` on a
+        // taken port used to run the queue pump, the startup reconcile and
+        // the OMP updater every 3 s in a systemd crash loop (~19k times
+        // each). A held port now exits here with who holds it.
+        let addr = format!("{host}:{port}");
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                let holder = port_holder(port)
+                    .map(|p| format!(" (held by pid {p})"))
+                    .unwrap_or_default();
+                anyhow::bail!("cannot bind {addr}: {e}{holder}");
+            }
+        };
+        UI_STARTS.fetch_add(1, Ordering::SeqCst);
         let repo = crate::config::get_repo_root();
         if repo.exists() {
             let _ = std::env::set_current_dir(&repo);
@@ -630,7 +703,6 @@ impl UiServer {
             );
         }
 
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app).await?;
 
         Ok(())
@@ -1457,7 +1529,15 @@ fn campaign_board_view(
     let ladder = crate::campaign::ladder(&spec, &rollup, current);
     let mut key = crate::campaign::BoardSortKey::of(&rollup);
     key.live = live;
-    let stop = if live || !running && v["state"].as_str() != Some("done") {
+    let stop = if live {
+        String::new()
+    } else if v["state"].as_str() == Some("cancelled") {
+        // O2: the runner wrote why (a rollup stop reason does not exist).
+        v["stop_reason"]
+            .as_str()
+            .unwrap_or("on request")
+            .to_string()
+    } else if !running && v["state"].as_str() != Some("done") {
         String::new()
     } else {
         crate::campaign::stop_reason(&rollup).to_string()
@@ -1506,6 +1586,11 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 }
             }
             v["id"] = serde_json::json!(name);
+            // O2 (round-11): the last log write is the most recent activity
+            // a cancelled cell has; status.json can be 13 minutes older.
+            v["log_mtime"] = campaign_log_mtime(&dir)
+                .map(|t| serde_json::json!(t))
+                .unwrap_or(serde_json::Value::Null);
             // The full ladder (attempted and not) + the stop reason: one
             // derivation for the console and the board (gui-spec.md §5.3).
             if let Some((ladder, stop, key)) = campaign_board_view(&v, &mut specs, &name) {
@@ -1792,6 +1877,9 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
         .as_ref()
         .map(|s| s["updated_at"].clone())
         .unwrap_or(serde_json::Value::Null);
+    body["log_mtime"] = campaign_log_mtime(&dir)
+        .map(|t| serde_json::json!(t))
+        .unwrap_or(serde_json::Value::Null);
     Json(body).into_response()
 }
 
@@ -1889,6 +1977,36 @@ pub(crate) fn log_kind(line: &str) -> &'static str {
     }
 }
 
+/// The campaign's console log: `live.log`, else the newest stage
+/// `console.log` (campaigns recorded before live logging existed).
+fn campaign_log_path(dir: &Path) -> Option<std::path::PathBuf> {
+    let live = dir.join("live.log");
+    if live.is_file() {
+        return Some(live);
+    }
+    let mut best: Option<(u32, std::path::PathBuf)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if let Some(rest) = n.strip_prefix('s') {
+            if let Ok(stage) = rest.parse::<u32>() {
+                let p = e.path().join("console.log");
+                if p.is_file() && best.as_ref().map(|(b, _)| stage > *b).unwrap_or(true) {
+                    best = Some((stage, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// RFC 3339 mtime of that log: the latest activity a cancelled or stalled
+/// cell has (round-11 O2; status.json can be minutes behind).
+fn campaign_log_mtime(dir: &Path) -> Option<String> {
+    let path = campaign_log_path(dir)?;
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
+}
+
 /// Live campaign console: `live.log` while/after a run (append-only, written
 /// by the campaign CLI), falling back to the newest stage `console.log`
 /// (campaigns recorded before live logging existed).
@@ -1901,27 +2019,10 @@ pub(crate) async fn get_campaign_log(
         None => return (StatusCode::BAD_REQUEST, "invalid campaign id").into_response(),
     };
     let dir = RunArchiver::resolve_runs_dir().join(&clean);
-    let mut path = dir.join("live.log");
-    if !path.is_file() {
-        let mut best: Option<(u32, std::path::PathBuf)> = None;
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let n = e.file_name().to_string_lossy().to_string();
-                if let Some(rest) = n.strip_prefix('s') {
-                    if let Ok(stage) = rest.parse::<u32>() {
-                        let p = e.path().join("console.log");
-                        if p.is_file() && best.as_ref().map(|(b, _)| stage > *b).unwrap_or(true) {
-                            best = Some((stage, p));
-                        }
-                    }
-                }
-            }
-        }
-        match best {
-            Some((_, p)) => path = p,
-            None => return (StatusCode::NOT_FOUND, "no campaign log yet").into_response(),
-        }
-    }
+    let path = match campaign_log_path(&dir) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, "no campaign log yet").into_response(),
+    };
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "campaign log unreadable").into_response(),
@@ -3066,6 +3167,27 @@ mod tests {
     const TEST_UI_TOKEN: &str = "sdb-test-ui-token";
     use crate::report::RunTokenUsage;
     use tokio::net::TcpListener;
+
+    /// Round-11 O1: a taken port must fail the bind *before* any side
+    /// effect — no queue pump, no reconcile, no OMP updater. The systemd
+    /// units crash-looped ~19k times doing those before a failing bind.
+    #[tokio::test]
+    async fn test_ui_start_fails_before_side_effects_on_a_taken_port() {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let before = UI_STARTS.load(Ordering::SeqCst);
+        let err = UiServer::start("127.0.0.1", port, "")
+            .await
+            .expect_err("a taken port must refuse to start");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cannot bind"), "{msg}");
+        assert!(msg.contains(&port.to_string()), "{msg}");
+        assert_eq!(
+            UI_STARTS.load(Ordering::SeqCst),
+            before,
+            "a failed bind must not start background work"
+        );
+    }
 
     #[tokio::test]
     async fn test_dispatch_clears_stale_cancel_flag() {
@@ -5121,23 +5243,30 @@ mod tests {
 const fs = require('fs');
 const path = require('path');
 const dir = __dirname;
-function makeEl() {
+// Elements are keyed by id so the render checks can read back what the
+// console put in them (round-11: this smoke caught a TDZ reference in the
+// Live card and a wall bar that fell back to "now" for a dead cell).
+const els = {};
+function makeEl(id) {
   return {
-    style: {}, dataset: {}, children: [], value: '', textContent: '', innerHTML: '',
+    id: id || '', style: {}, dataset: {}, children: [], value: '', textContent: '', innerHTML: '',
+    className: '', checked: false, disabled: false,
     classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
     appendChild(){}, removeChild(){}, remove(){}, addEventListener(){}, removeEventListener(){},
-    querySelector(){ return makeEl(); }, querySelectorAll(){ return []; },
+    querySelector(){ return makeEl('q'); }, querySelectorAll(){ return []; },
     setAttribute(){}, getAttribute(){ return null; }, focus(){}, click(){}, insertBefore(){},
     scrollTo(){}, closest(){ return null; }, contains(){ return false; },
     getBoundingClientRect(){ return { top:0,left:0,width:0,height:0,bottom:0,right:0 }; },
-    open(){}, close(){}, reset(){}, submit(){},
+    open(){}, close(){}, reset(){}, submit(){}, removeAttribute(){},
   };
 }
+function el(id) { if (!els[id]) els[id] = makeEl(id); return els[id]; }
 const store = {};
 global.localStorage = { getItem: k => (k in store ? store[k] : null), setItem: (k,v)=>{store[k]=String(v);}, removeItem: k=>{delete store[k];} };
 global.document = {
-  getElementById(){ return makeEl(); }, querySelector(){ return makeEl(); }, querySelectorAll(){ return []; },
-  createElement(){ return makeEl(); }, addEventListener(){}, body: makeEl(), documentElement: makeEl(), cookie: '',
+  visibilityState: 'visible',
+  getElementById: el, querySelector(){ return makeEl('q'); }, querySelectorAll(){ return []; },
+  createElement(){ return makeEl('c'); }, addEventListener(){}, body: makeEl('body'), documentElement: makeEl('html'), cookie: '',
 };
 global.addEventListener = () => {};
 global.removeEventListener = () => {};
@@ -5194,7 +5323,71 @@ try {
   const r = checkActiveRun();
   if (r && typeof r.then === 'function') r.catch(e => { console.log('RUNNING BRANCH FAILED:', e.message); process.exit(1); });
 } catch (e) { console.log('RUNNING BRANCH CALL FAILED:', e.message); process.exit(1); }
-setTimeout(() => { console.log('smoke OK'); }, 300);
+
+// ---------------------------------------------------------------------------
+// Fixture-driven render smoke: a *stalled, legacy* cell (no live block,
+// finished_at == started_at, no records for the ticket it died in). The
+// Board, Run and Live views must render it without throwing and with the
+// round-11 fixes: dated stalls, an honest wall bar, `interrupted`, and the
+// Cause clamp inside a td.
+// ---------------------------------------------------------------------------
+const cell = {
+  id: 'campaign_fixture', state: 'stalled', stop_reason: '', current_stage: 8,
+  updated_at: '2026-10-17T16:16:02Z', log_mtime: '2026-10-17T16:29:33Z',
+  live: {},
+  rollup: {
+    model: 'openrouter/meta/muse-spark-1.3-contributor', harness: 'omp', effort: 'high',
+    rules_version: '2026-10-17.16', total_cost_usd: 0.5455, budget_usd: 0.75, wall_min: 120,
+    started_at: '2026-10-17T14:31:53Z', finished_at: '2026-10-17T14:31:53Z',
+    points: 4.8, max_points: 26, reached: 5, regression_free_tickets: 4,
+    over_budget: false, cap_reached: false,
+    stages: [{
+      id: 7, variant: 'full', status: 'failed', effective_cost_usd: 0.11, turns: 30,
+      rounds: [{ round: 0, passed_stages: 7, total_stages: 8, turns: 20, cost_usd: 0.04 }],
+      failure: { kind: 'regression', line: 'broke ticket 4', detail: 'long detail', stderr_tail: 'tail' },
+    }],
+  },
+  ladder: [
+    { id: 0, title: 'Genesis', status: 'pass', points: 1 },
+    { id: 7, title: 'Aggregates', status: 'fail', points: 0, cause: 'broke ticket 4' },
+    { id: 8, title: 'Joins', status: 'not_reached', points: 0, cause: 'not reached' },
+  ],
+};
+const detail = Object.assign({}, cell, { budget_usd: 0.75, wall_min: 120, live_run: null });
+global.fetch = async (url) => {
+  const u = String(url || '');
+  let body = {};
+  if (u.includes('/log')) body = { offset: 0, lines: [] };
+  else if (/\/api\/campaigns\/[^/?]+$/.test(u)) body = detail;
+  else if (u.includes('/api/campaigns')) body = [cell];
+  else if (u.includes('/api/status')) body = { is_running: false };
+  else if (u.includes('/api/queue')) body = [];
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => body, text: async () => '' };
+};
+(async () => {
+  try {
+    await refreshBoard();
+    await loadRunDetail('campaign_fixture');
+    renderLive();
+    renderRun();
+    renderBoard();
+  } catch (e) {
+    console.log('RENDER THREW:', e.stack.split('\n').slice(0, 3).join(' | '));
+    process.exit(1);
+  }
+  const run = el('runBody').innerHTML;
+  const live = el('liveBody').innerHTML;
+  const board = el('boardBody').innerHTML;
+  const fail = [];
+  if (!run.includes('interrupted')) fail.push('run-interrupted');
+  if (!run.includes('class="causeCell"')) fail.push('cause-inner-div');
+  if (/td class="hint causeCell"/.test(run)) fail.push('cause-td-clamped');
+  if (!live.includes('17 Oct')) fail.push('live-dated-stall');
+  if (/wall 0s|wall 19h|wall 2[0-9]h/.test(live)) fail.push('live-wall-now');
+  if (!board.includes('17 Oct')) fail.push('board-dated-stall');
+  if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
+  console.log('smoke OK');
+})();
 "#;
 
     // ---------------------------------------------------------------------

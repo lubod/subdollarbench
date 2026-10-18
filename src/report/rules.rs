@@ -17,7 +17,13 @@ use std::hash::{Hash, Hasher};
 ///   after a failure opens with a harness note naming the broken tickets
 ///   and the *effective* acceptance suite the verifier runs, and an
 ///   attempt's budget is clamped to the cap's remaining headroom (the
-///   ladder stops as "budget cap" below a $0.02 floor).
+///   ladder stops as "budget cap" below a $0.02 floor; the clamp converts
+///   the cap's *effective* headroom into the API dollars OMP enforces,
+///   using the cell's observed api/effective ratio — 0.25 before the first
+///   attempt — so a 3.4x floor can no longer turn a $0.05 headroom into a
+///   $0.17 effective overshoot (round-11 findings 1-2), and the four
+///   remaining prompt openers name a ticket as contract rather than claim
+///   it passed (round-11 finding 3).
 /// - `2026-10-17.16`: the perf gate compares *net work* over the
 ///   round-trip floor (indexed work <= scan work / 10, or <= 0.05 ms
 ///   absolute), so a constant per-statement overhead cannot lift the

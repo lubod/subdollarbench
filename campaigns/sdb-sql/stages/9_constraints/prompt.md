@@ -1,6 +1,6 @@
 # Ticket 9 — Constraints
 
-Joins (ticket 8) read many tables. This ticket makes the schema **mean
+Ticket 8's contract is joins over many tables. This ticket makes the schema **mean
 something**: primary keys, uniqueness, required columns, defaults and
 foreign keys are enforced.
 

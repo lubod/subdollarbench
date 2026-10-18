@@ -1195,6 +1195,8 @@ struct SqlBoardCell {
     rules: String,
     cost: f64,
     over_budget: bool,
+    /// Stopped with headroom under the floor (round-11 finding 2).
+    cap_reached: bool,
     over_wall: bool,
     updated: String,
     /// The full ladder (attempted and not): the same Rust derivation the
@@ -1392,6 +1394,7 @@ impl PortalExporter {
                     rules: rules_v.clone(),
                     cost: cost_v,
                     over_budget: rollup["over_budget"].as_bool().unwrap_or(false),
+                    cap_reached: rollup["cap_reached"].as_bool().unwrap_or(false),
                     over_wall: rollup["over_wall"].as_bool().unwrap_or(false),
                     updated: rollup["finished_at"]
                         .as_str()
@@ -1503,6 +1506,10 @@ impl PortalExporter {
                 let mut f = String::new();
                 if c.over_budget {
                     f.push_str(" · <span class=\"b warn\">over budget</span>");
+                }
+                if c.cap_reached {
+                    // A floor stop is planned, not an overshoot.
+                    f.push_str(" · <span class=\"b\">budget cap</span>");
                 }
                 if c.over_wall {
                     f.push_str(" · <span class=\"b warn\">over wall</span>");

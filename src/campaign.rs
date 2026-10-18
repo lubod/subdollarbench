@@ -713,6 +713,11 @@ pub struct StageOutcome {
     pub total_stages: u32,
     pub stage_results: Vec<crate::verifier::StageResult>,
     pub effective_cost_usd: f64,
+    /// Provider-billed API spend. The campaign cap bounds *effective* cost,
+    /// but OMP enforces an attempt's budget on API spend only, so the cap's
+    /// remaining headroom is converted into this unit before it is handed
+    /// to an attempt (round-11 finding 1).
+    pub api_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
     pub agent_failed: bool,
@@ -1386,6 +1391,7 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         regression_free_tickets: 0,
         total_cost_usd: live["campaign_spent"].as_f64().unwrap_or(0.0),
         over_budget: false,
+        cap_reached: false,
         over_wall: false,
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
@@ -1491,7 +1497,7 @@ pub fn board_order(a: &BoardSortKey, b: &BoardSortKey) -> std::cmp::Ordering {
 
 /// The stop reason for a finished campaign cell (gui-spec.md §4.1).
 pub fn stop_reason(rollup: &CampaignRollup) -> &'static str {
-    if rollup.over_budget {
+    if rollup.over_budget || rollup.cap_reached {
         "budget cap"
     } else if rollup.over_wall {
         "wall cap"
@@ -1578,7 +1584,7 @@ pub fn ladder(
                     .collect::<Vec<_>>()
                     .join(",");
                 ("skipped", format!("skipped: needs {list}"))
-            } else if rollup.over_budget {
+            } else if rollup.over_budget || rollup.cap_reached {
                 ("not_reached", "not reached: budget cap".to_string())
             } else if rollup.over_wall {
                 ("not_reached", "not reached: wall cap".to_string())
@@ -1617,8 +1623,14 @@ pub struct CampaignRollup {
     /// Tickets passed without any regression in their acceptance suite.
     pub regression_free_tickets: u32,
     pub total_cost_usd: f64,
-    /// Budget cap reached before the ladder finished (never a model failure).
+    /// Spent *at or above* the campaign cap (round-11 finding 2: this stays
+    /// strictly "over budget"; the floor stop is `cap_reached`).
     pub over_budget: bool,
+    /// The ladder stopped because the cap's remaining headroom fell below
+    /// `BUDGET_FLOOR_USD` without actually crossing the cap (round-11
+    /// finding 2). The stop reason is still "budget cap".
+    #[serde(default)]
+    pub cap_reached: bool,
     /// Optional wall-clock cap reached before the ladder finished.
     #[serde(default)]
     pub over_wall: bool,
@@ -1707,6 +1719,10 @@ where
     let mut best: HashMap<u32, bool> = HashMap::new();
     let mut reached: Option<u32> = None;
     let mut total_cost = 0.0f64;
+    // API spend of the same attempts: OMP enforces budgets on API dollars,
+    // the cap bounds effective dollars, so the clamp converts (round-11
+    // finding 1).
+    let mut api_cost = 0.0f64;
     // Ladder bookkeeping (continue mode): per-stage outcome + whether the
     // last attempt left the workspace dirty (needs a rollback first).
     let mut outcomes: HashMap<u32, LadderOutcome> = HashMap::new();
@@ -1731,6 +1747,7 @@ where
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
         over_budget: false,
+        cap_reached: false,
         over_wall: false,
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         budget_usd: opts.budget_usd,
@@ -1744,13 +1761,24 @@ where
         // were crossed at the same boundary (round-7 finding 5; the stop
         // reason stays budget-first). Round-10 D3: the cap also stops when
         // the remaining headroom cannot fund a useful attempt (below the
-        // floor), instead of overshooting by one attempt's cost.
-        let over_budget_now = opts.budget_usd > 0.0
-            && (total_cost >= opts.budget_usd || opts.budget_usd - total_cost < BUDGET_FLOOR_USD);
+        // floor), instead of overshooting by one attempt's cost. Round-11
+        // finding 2: crossing the cap (`over_budget`) and stopping on the
+        // floor short of it (`cap_reached`) are separate flags.
+        let over_budget_now = opts.budget_usd > 0.0 && total_cost >= opts.budget_usd;
+        let floor_now = opts.budget_usd > 0.0 && opts.budget_usd - total_cost < BUDGET_FLOOR_USD;
         let headroom = if opts.budget_usd > 0.0 {
             opts.budget_usd - total_cost
         } else {
             f64::INFINITY
+        };
+        // Effective dollars -> API dollars (round-11 finding 1). Before the
+        // first attempt the observed ratio is unknown: 0.25 is conservative
+        // (the DeepSeek cell's was ~0.29; a smaller share gives a smaller
+        // API budget). An uncapped campaign passes INFINITY through.
+        let api_ratio = if total_cost > 0.0 && api_cost > 0.0 {
+            (api_cost / total_cost).clamp(0.01, 1.0)
+        } else {
+            0.25
         };
         let outcomes_snapshot = |m: &HashMap<u32, LadderOutcome>| -> Vec<(u32, LadderOutcome)> {
             let mut v: Vec<(u32, LadderOutcome)> = m.iter().map(|(k, o)| (*k, *o)).collect();
@@ -1761,8 +1789,9 @@ where
             .wall_min
             .map(|m| m > 0 && wall_start.elapsed() >= std::time::Duration::from_secs(m * 60))
             .unwrap_or(false);
-        if over_budget_now || over_wall_now {
+        if over_budget_now || floor_now || over_wall_now {
             rollup.over_budget |= over_budget_now;
+            rollup.cap_reached |= floor_now && !over_budget_now;
             rollup.over_wall |= over_wall_now;
             if let Some(cb) = on_stage {
                 cb(&rollup);
@@ -1795,8 +1824,9 @@ where
             stage,
             variant: StageVariant::Full,
             prompt_path: lc.prompt_path(stage),
-            // D3: one attempt can never overshoot the cap on its own.
-            budget_usd: stage.budget_usd.min(headroom),
+            // D3 + finding 1: the cap's effective headroom converts to the
+            // API dollars OMP actually enforces.
+            budget_usd: stage.budget_usd.min(headroom * api_ratio),
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -1808,6 +1838,7 @@ where
         let out = exec(&attempt_full)
             .await
             .with_context(|| format!("stage {} ({})", stage.id, stage.title))?;
+        api_cost += out.api_cost_usd;
         let (regressed, regression_severity) = detect_regressions(&best, &out.stage_results);
         for r in &out.stage_results {
             let e = best.entry(r.stage).or_insert(false);
@@ -1857,11 +1888,18 @@ where
                 outcomes.insert(stage.id, LadderOutcome::Failed);
                 dirty = true;
             } else {
+                // The full attempt just moved the ratio; recompute for it.
+                let api_ratio2 = if total_cost > 0.0 && api_cost > 0.0 {
+                    (api_cost / total_cost).clamp(0.01, 1.0)
+                } else {
+                    0.25
+                };
                 let attempt_lite = StageAttempt {
                     stage,
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
-                    budget_usd: lite.budget_usd.min(headroom2),
+                    // Round-11 finding 1: effective headroom -> API dollars.
+                    budget_usd: lite.budget_usd.min(headroom2 * api_ratio2),
                     max_turns: lite.max_turns,
                     lite_profile: lite.profile.clone(),
                     passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -1873,6 +1911,7 @@ where
                 let out2 = exec(&attempt_lite)
                     .await
                     .with_context(|| format!("stage {} lite", stage.id))?;
+                api_cost += out2.api_cost_usd;
                 let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
                 for r in &out2.stage_results {
                     let e = best.entry(r.stage).or_insert(false);
@@ -2389,6 +2428,7 @@ mod tests {
             regression_free_tickets: 0,
             total_cost_usd: 0.0,
             over_budget: false,
+            cap_reached: false,
             over_wall: false,
             rules_version: String::new(),
             budget_usd: 0.0,
@@ -2660,6 +2700,7 @@ mod tests {
             regression_free_tickets: 1,
             total_cost_usd: 0.01,
             over_budget: true,
+            cap_reached: false,
             over_wall: false,
             rules_version: crate::report::rules::RULES_VERSION.to_string(),
             budget_usd: 0.25,
@@ -2707,6 +2748,7 @@ mod tests {
                 .map(|(id, p)| stage_result(*id, *p))
                 .collect(),
             effective_cost_usd: 0.01,
+            api_cost_usd: 0.01,
             turns: Some(10),
             duration_seconds: Some(60.0),
             agent_failed: false,
@@ -3082,14 +3124,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ladder_budget_floor_and_cap_clamp() {
+    async fn test_ladder_cap_converts_headroom_to_api_dollars() {
+        // Round-11 finding 1: OMP enforces attempt budgets on API spend
+        // while the cap bounds effective cost. A naive effective-dollar
+        // budget lets an attempt spend 0.10 API — 0.34 effective at the
+        // DeepSeek cell's ~3.4x ratio — against a 0.20 cap.
         let lc = ladder_fixture();
         let opts = CampaignRunOptions {
             campaign_id: "budget1".into(),
             model: "m".into(),
             harness: "omp".into(),
             effort: "high".into(),
-            budget_usd: 0.25,
+            budget_usd: 0.20,
             wall_min: None,
         };
         let seen = std::cell::RefCell::new(Vec::<(u32, f64)>::new());
@@ -3097,14 +3143,15 @@ mod tests {
             &lc,
             &opts,
             |attempt| {
-                seen.borrow_mut()
-                    .push((attempt.stage.id, attempt.budget_usd));
                 let id = attempt.stage.id;
-                // The first attempt overshoots its own budget (the pipeline
-                // bounds turns, not the final cent); the rest are cheap.
-                let cost = if id == 0 { 0.20 } else { 0.05 };
+                seen.borrow_mut().push((id, attempt.budget_usd));
+                // The attempt spends its whole API budget; the floor adds
+                // the rest (the observed 3.4x relationship).
+                let api = attempt.budget_usd;
+                let eff = api * 3.4;
                 let mut out = outcome(true, &[(id, true)]);
-                out.effective_cost_usd = cost;
+                out.api_cost_usd = api;
+                out.effective_cost_usd = eff;
                 async move { Ok(out) }
             },
             None,
@@ -3112,20 +3159,59 @@ mod tests {
         .await
         .unwrap();
         let seen = seen.into_inner();
-        assert_eq!(seen.len(), 2, "stage 2 was never entered: {seen:?}");
-        assert_eq!(seen[0], (0, 0.10), "stage 0 keeps its own budget");
-        assert_eq!(seen[1].0, 1);
+        assert_eq!(seen.len(), 2, "the cap stops the ladder: {seen:?}");
+        // No observation yet: the conservative 0.25 default converts the
+        // whole 0.20 headroom into a 0.05 API budget.
+        assert!((seen[0].1 - 0.05).abs() < 1e-9, "first: {}", seen[0].1);
+        // Then the cell's own ratio (0.05 API / 0.17 effective) converts
+        // the remaining 0.03 effective.
+        let expect = (0.20 - 0.17) * (0.05 / 0.17);
         assert!(
-            (seen[1].1 - (0.25 - 0.20)).abs() < 1e-9,
-            "stage 1 is clamped to the cap's remaining headroom: {}",
+            (seen[1].1 - expect).abs() < 1e-9,
+            "second: {} vs {expect}",
             seen[1].1
         );
         assert!(
-            rollup.over_budget,
-            "the floor stops the ladder as budget cap"
+            rollup.total_cost_usd <= 0.20 + 1e-6,
+            "the cap is respected: {}",
+            rollup.total_cost_usd
         );
-        assert!((rollup.total_cost_usd - 0.25).abs() < 1e-9);
-        assert_eq!(rollup.stages.len(), 2);
+        assert!(rollup.over_budget && !rollup.cap_reached);
+    }
+
+    #[tokio::test]
+    async fn test_ladder_floor_stop_sets_cap_reached_not_over_budget() {
+        // Round-11 finding 2: stopping with headroom below the floor is
+        // "cap reached", not "over budget".
+        let lc = ladder_fixture();
+        let opts = CampaignRunOptions {
+            campaign_id: "budget2".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 0.05,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let id = attempt.stage.id;
+                let mut out = outcome(true, &[(id, true)]);
+                out.effective_cost_usd = 0.04; // overshoots its tiny budget
+                out.api_cost_usd = 0.012;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rollup.cap_reached && !rollup.over_budget,
+            "a floor stop is not an overshoot: {rollup:?}"
+        );
+        assert_eq!(stop_reason(&rollup), "budget cap");
+        assert_eq!(rollup.stages.len(), 1);
     }
 
     #[test]
@@ -3634,7 +3720,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(rollup.over_budget);
+        // Round-11 finding 2: this is the floor stop, not an overshoot.
+        assert!(rollup.cap_reached && !rollup.over_budget);
+        assert_eq!(stop_reason(&rollup), "budget cap");
         assert_eq!(rollup.stages.len(), 1);
         assert_eq!(rollup.reached, Some(0));
     }

@@ -527,7 +527,23 @@ pub async fn run(
         },
         Some(&on_stage),
     )
-    .await?;
+    .await;
+    let rollup = match rollup {
+        Ok(r) => r,
+        Err(e) => {
+            // Round-11 O2: a cancel (SIGINT/SIGTERM sets the flag) leaves an
+            // honest state instead of reading as a crashed cell. A dead
+            // writer — a crash or kill -9 — cannot write anything and reads
+            // as stalled, which is what "stalled" means.
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                write_status(&cdir, "cancelled", None, None);
+                update_status(&cdir, |v| {
+                    v["stop_reason"] = serde_json::json!("on request");
+                });
+            }
+            return Err(e);
+        }
+    };
 
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
@@ -943,6 +959,9 @@ async fn run_one_stage(
         total_stages: br.total_stages,
         stage_results: output.manifest.stages.clone(),
         effective_cost_usd: br.effective_cost_usd.unwrap_or(br.total_cost_usd),
+        // The provider-billed share: the cap's headroom converts into this
+        // unit before it becomes an attempt budget (round-11 finding 1).
+        api_cost_usd: br.total_cost_usd,
         turns: output.manifest.turns,
         duration_seconds: Some(output.manifest.duration_seconds),
         agent_failed: output.agent_failed,
@@ -1098,6 +1117,7 @@ mod tests {
             regression_free_tickets: 1,
             total_cost_usd,
             over_budget,
+            cap_reached: false,
             budget_usd: 0.0,
             wall_min: 0,
         }
