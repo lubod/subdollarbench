@@ -3547,6 +3547,81 @@ mod live_docker_cov_tests {
         }
     }
 
+    /// Round-13 R1: both harnesses take the prompt as a *positional*
+    /// argument, so a prompt that starts with `-` (the campaign's harness
+    /// note used to start with `---`) is parsed as an unknown flag unless it
+    /// follows `--`. The agent then ran 0 turns and the verifier graded the
+    /// previous ticket's code. This drives the real parsers in the sandbox
+    /// image, in both directions.
+    #[test]
+    fn live_test_harness_cli_parses_a_dash_leading_prompt_after_separator() {
+        let image = "subdollar-sandbox";
+        if !Command::new("docker")
+            .args(["image", "inspect", image])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            eprintln!("{image} missing; skipping the harness argv live proof");
+            return;
+        }
+        let run = |args: &[&str]| -> String {
+            let out = Command::new("docker")
+                .args(["run", "--rm", image])
+                .args(args)
+                .output()
+                .expect("docker run");
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let prompt = "--- harness note (added by the benchmark, not the ticket) ---";
+        // omp: the bare positional is a flag (the bug)...
+        let bare = run(&["omp", "-p", "--model=foo/bar", prompt]);
+        assert!(
+            bare.contains("unknown flag"),
+            "the live omp parser should reject a bare dash prompt: {bare}"
+        );
+        // ...and `--` fixes it (the next error is about the model, not argv).
+        let fixed = run(&["omp", "-p", "--model=foo/bar", "--", prompt]);
+        assert!(
+            !fixed.contains("unknown flag"),
+            "`omp -p -- <prompt>` must parse the note: {fixed}"
+        );
+        // opencode: the bare form only prints usage; `--` reaches execution.
+        let oc: &[&str] = &[
+            "opencode",
+            "run",
+            "--standalone",
+            "--format",
+            "json",
+            "--session",
+            "probe",
+            "--title",
+            "t",
+            "-m",
+            "foo/bar",
+            "--auto",
+        ];
+        let mut bare_args = oc.to_vec();
+        bare_args.push(prompt);
+        let bare = run(&bare_args);
+        assert!(
+            bare.contains("DESCRIPTION"),
+            "the bare opencode form should not run: {bare}"
+        );
+        let mut fixed_args = oc.to_vec();
+        fixed_args.push("--");
+        fixed_args.push(prompt);
+        let fixed = run(&fixed_args);
+        assert!(
+            !fixed.contains("DESCRIPTION"),
+            "`opencode run ... -- <prompt>` must parse: {fixed}"
+        );
+    }
+
     /// ensure_network creates the run network plus the anchor that keeps the
     /// network from looking stale; cleanup reaps the anchor but the age gate
     /// deliberately keeps the young empty network; the explicit own-network

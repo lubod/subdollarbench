@@ -1369,6 +1369,12 @@ impl PortalExporter {
                 // A cell whose stage runs were hidden or poisoned is not a
                 // measurement: never publish it.
                 let runs_path = Path::new(runs_dir);
+                // Round-13: a hidden or poisoned *cell* never publishes. The
+                // flag lives in the campaign dir; the stage run ids a rollup
+                // carries are synthetic for campaign cells.
+                if is_hidden(runs_path, &name) || is_poisoned(runs_path, &name) {
+                    continue;
+                }
                 let flagged = rollup["stages"]
                     .as_array()
                     .map(|ss| {
@@ -1426,7 +1432,7 @@ impl PortalExporter {
                         .unwrap_or_default(),
                     key: crate::campaign::BoardSortKey {
                         live: false,
-                        current_rules: rules_v == crate::report::rules::RULES_VERSION,
+                        current_rules: crate::campaign::is_current_rules(&rules_v),
                         points: points_v,
                         per_dollar: (cost_v > 0.0).then(|| points_v / cost_v),
                         cost: cost_v,
@@ -1492,7 +1498,7 @@ impl PortalExporter {
 
     /// The one legend for every strip (round-12 P3), the console's labels.
     fn ladder_legend_html() -> &'static str {
-        "<div class=\"legend\"><span class=\"sq pass\">·</span>pass<span class=\"sq lite\">·</span>lite<span class=\"sq fail\">·</span>fail<span class=\"sq skip\">·</span>skipped<span class=\"sq na\">·</span>not reached</div>"
+        "<div class=\"legend\"><span class=\"sq pass\">·</span>pass<span class=\"sq lite\">·</span>lite<span class=\"sq fail\">·</span>fail<span class=\"sq fault\">·</span>fault<span class=\"sq skip\">·</span>skipped<span class=\"sq run\">·</span>running<span class=\"sq na\">·</span>not reached</div>"
     }
 
     /// The sdb-sql board page: campaign cells only, no legacy task specs,
@@ -1561,10 +1567,14 @@ impl PortalExporter {
         // board_order already put the best cell first.
         let mut groups: Vec<(&SqlBoardCell, Vec<&SqlBoardCell>)> = Vec::new();
         for c in cells {
-            match groups
-                .iter_mut()
-                .find(|(h, _)| h.model == c.model && h.harness == c.harness && h.effort == c.effort)
-            {
+            // Round-13 B1: runs under incomparable rule sets must never share
+            // a row — the invalid `.17` cell used to hide the valid `.16` one.
+            match groups.iter_mut().find(|(h, _)| {
+                h.model == c.model
+                    && h.harness == c.harness
+                    && h.effort == c.effort
+                    && h.rules == c.rules
+            }) {
                 Some((_, g)) => g.push(c),
                 None => groups.push((c, Vec::new())),
             }
@@ -1572,12 +1582,9 @@ impl PortalExporter {
         let mut rows = String::new();
         let mut divider_done = false;
         for (i, (c, extra)) in groups.iter().enumerate() {
-            // Round-12 P3: the console's divider between comparable and
-            // older-rule cells (board_order already sorts current first).
-            if !divider_done
-                && !c.rules.is_empty()
-                && c.rules != crate::report::rules::RULES_VERSION
-            {
+            // Round-12 P3 + round-13 B2: the console's divider, through the
+            // shared predicate (unknown rules count as not current).
+            if !divider_done && !c.key.current_rules {
                 rows.push_str(
                     "<tr class=\"divider\"><td colspan=\"10\">older rule sets (incomparable)</td></tr>",
                 );
@@ -3227,6 +3234,88 @@ mod tests {
         assert!(
             pos("m5") < pos("older rule sets"),
             "current rules before the divider: {html}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Round-13 B1/B2: runs under incomparable rule sets never share a row,
+    /// unknown rules count as not current, and a poisoned cell never
+    /// publishes at all.
+    #[test]
+    fn test_sql_board_separates_runs_by_rules_version() {
+        use crate::report::rules::RULES_VERSION;
+        let dir = std::env::temp_dir().join(format!("sql_board_rules_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let runs = dir.join("runs");
+        let out = dir.join("portal");
+        let cell = |name: &str, model: &str, points: f64, rules: &str| {
+            let d = runs.join(name);
+            fs::create_dir_all(&d).unwrap();
+            let rollup = serde_json::json!({
+                "campaign_id": name,
+                "name": "sdb-sql",
+                "model": model,
+                "harness": "omp",
+                "effort": "high",
+                "task": "sql",
+                "started_at": "2026-10-18T00:00:00Z",
+                "finished_at": "2026-10-18T00:30:00Z",
+                "stages": [],
+                "reached": 1,
+                "regression_free_tickets": 1,
+                "points": points,
+                "max_points": 36.0,
+                "rules_version": rules,
+                "total_cost_usd": 0.10,
+                "over_budget": false,
+                "over_wall": false
+            });
+            fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+        };
+        cell("campaign_sdb-sql_a_20261018", "m", 12.0, RULES_VERSION);
+        cell("campaign_sdb-sql_b_20261018", "m", 9.0, "2026-10-16.12");
+        cell("campaign_sdb-sql_c_20261018", "m", 8.0, "2026-10-16.12");
+        cell("campaign_sdb-sql_d_20261018", "m", 7.0, "");
+        cell(
+            "campaign_sdb-sql_e_20261018",
+            "poisoned-model",
+            99.0,
+            RULES_VERSION,
+        );
+        fs::write(
+            runs.join("campaign_sdb-sql_e_20261018").join(".poisoned"),
+            "",
+        )
+        .unwrap();
+        PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
+            .expect("sql board");
+        let html = fs::read_to_string(out.join("index.html")).unwrap();
+        let pos = |m: &str| {
+            html.find(m)
+                .unwrap_or_else(|| panic!("missing {m}: {html}"))
+        };
+        // A poisoned cell never publishes.
+        assert!(!html.contains("poisoned-model"), "{html}");
+        // The current-rules run sits above the divider; the stale and the
+        // unknown-rules runs sit below it (the head rows carry their points).
+        assert!(pos("12/36") < pos("older rule sets"), "{html}");
+        assert!(pos("older rule sets") < pos("9/36"), "{html}");
+        assert!(pos("older rule sets") < pos("7/36"), "{html}");
+        // Same model, same stale rules: the second run folds into the first.
+        assert!(html.contains("×2 runs"), "stale runs fold: {html}");
+        assert!(
+            !html.contains("×3 runs") && !html.contains("×4 runs"),
+            "different rule sets never fold together: {html}"
+        );
+        // Three head rows: current, the stale pair, and the unknown one.
+        assert_eq!(
+            html.matches("<b>m</b>").count(),
+            3,
+            "one row per (model, rules) group: {html}"
+        );
+        assert!(
+            html.contains("campaign_sdb-sql_c"),
+            "the folded run is named"
         );
         let _ = fs::remove_dir_all(&dir);
     }

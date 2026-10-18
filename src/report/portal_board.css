@@ -42,10 +42,15 @@ code { background: rgba(110,118,129,0.25); border-radius: 3px; padding: 1px 4px;
 .sq { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
       border-radius: 3px; font-size: 9px; font-weight: 700; color: #0d1117; border: 1px solid var(--line);
       margin-right: 2px; }
+/* The strip colours its squares inline; the legend needs the same table as
+   classes (round-13 B3: pass/lite/fail rendered as empty boxes). */
+.sq.pass { background: #3fb950; color: #0d1117; }
+.sq.lite { background: #d29922; color: #0d1117; }
+.sq.fail { background: #f85149; color: #0d1117; }
+.sq.fault { background: repeating-linear-gradient(45deg,#8b949e,#8b949e 2px,transparent 2px,transparent 4px); color: var(--text); }
+.sq.run { background: var(--pri); color: #0d1117; }
 .sq.na { background: #21262d; color: var(--mut); }
 .sq.skip { background: var(--line); color: var(--text); }
-.sq.fault { color: var(--text); }
-.sq.run { background: var(--pri); }
 .strip { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 3px; }
 .legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 8px 12px;
           font-size: 0.72rem; color: var(--mut); border-top: 1px solid var(--line); }

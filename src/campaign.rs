@@ -343,7 +343,10 @@ pub fn attempt_preamble(
             }
         }
     };
-    let mut out = String::from("--- harness note (added by the benchmark, not the ticket) ---\n");
+    // Round-13 R1: the note is prepended to a *positional* prompt; a
+    // leading `-` made both harnesses' parsers read it as an unknown flag
+    // (0-turn agents). The note opens with a plain line, never a dash.
+    let mut out = String::from("Harness note (added by the benchmark, not the ticket):\n");
     if lite_retry {
         out.push_str(&format!(
             "Your full attempt at ticket {} ({}) failed; its work was rolled back, and this lite variant's shorter contract below is what is graded.\n",
@@ -387,7 +390,7 @@ pub fn attempt_preamble(
         "This ticket's acceptance suite is tickets {}.\n",
         fmt_stage_ids(accepted)
     ));
-    out.push_str("--- end of harness note ---");
+    out.push_str("End of harness note.");
     Some(out)
 }
 
@@ -1459,7 +1462,7 @@ pub struct BoardSortKey {
 
 impl BoardSortKey {
     pub fn of(rollup: &CampaignRollup) -> Self {
-        let current = rollup.rules_version == crate::report::rules::RULES_VERSION;
+        let current = is_current_rules(&rollup.rules_version);
         Self {
             live: false,
             current_rules: current,
@@ -1469,6 +1472,13 @@ impl BoardSortKey {
             cost: rollup.total_cost_usd,
         }
     }
+}
+
+/// The one "current rules" predicate (round-13 B2): the console, the API and
+/// the portal must agree on what is comparable. An unknown (empty) version is
+/// *not* current.
+pub fn is_current_rules(rules: &str) -> bool {
+    rules == crate::report::rules::RULES_VERSION
 }
 
 /// The board order: current rules first, then points desc, then points per
@@ -3103,6 +3113,33 @@ mod tests {
         assert!(p.contains("lite variant"), "{p}");
         assert!(p.contains("failed; its work was rolled back"));
         assert!(p.contains("acceptance suite is tickets"));
+    }
+
+    /// Round-13 R1: the note must never start with a dash — both harnesses
+    /// take the prompt as a positional argument and a `-`-leading value was
+    /// read as a flag, so the agent ran 0 turns.
+    #[test]
+    fn test_attempt_preamble_never_starts_with_a_dash() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+        let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+        let s2 = lc.spec.stages.iter().find(|s| s.id == 2).unwrap();
+        let outcomes = vec![(0, LadderOutcome::Full), (1, LadderOutcome::Failed)];
+        let accepted = Acceptance::accepted_for(s2.acceptance.stages_for("sql"), &[0], 2);
+        let p = attempt_preamble(
+            &lc.spec.stages,
+            s2,
+            StageVariant::Full,
+            true,
+            &outcomes,
+            &accepted,
+        )
+        .expect("a failure needs a note");
+        assert!(p.starts_with("Harness note"), "{p}");
+        assert!(
+            !p.starts_with('-'),
+            "a dash-leading prompt is an unknown flag: {p}"
+        );
+        assert!(p.trim_end().ends_with("End of harness note."), "{p}");
     }
 
     #[test]

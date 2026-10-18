@@ -545,32 +545,41 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     .arg(format!("SDB_BENCH_MAX_TURNS={}", max_turns));
             }
 
-            cmd.arg("subdollar-sandbox")
-                .arg("opencode")
-                .arg("run")
-                .arg("--standalone")
-                .arg("--format")
-                .arg("json")
-                .arg("--session")
-                .arg(&session_id)
-                .arg("--title")
-                .arg(format!("sdb-{}", container_id))
-                .arg("-m")
-                .arg(if variant_disabled.load(Ordering::SeqCst) {
-                    effective_model.clone()
-                } else {
-                    match &variant_id {
-                        Some(v) => format!("{effective_model}#{v}"),
-                        None => effective_model.clone(),
-                    }
-                })
-                .arg("--auto")
-                .arg(if cutoff_recoveries.load(Ordering::SeqCst) > 0 {
-                    // Recovery attempt: same session, tool-first nudge.
-                    &recovery_nudge
-                } else {
-                    &effective_prompt
-                });
+            let model_arg = if variant_disabled.load(Ordering::SeqCst) {
+                effective_model.clone()
+            } else {
+                match &variant_id {
+                    Some(v) => format!("{effective_model}#{v}"),
+                    None => effective_model.clone(),
+                }
+            };
+            let prompt_arg: &str = if cutoff_recoveries.load(Ordering::SeqCst) > 0 {
+                // Recovery attempt: same session, tool-first nudge.
+                &recovery_nudge
+            } else {
+                &effective_prompt
+            };
+            let mut oc_args: Vec<String> = vec![
+                "subdollar-sandbox".to_string(),
+                "opencode".to_string(),
+                "run".to_string(),
+                "--standalone".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "--session".to_string(),
+                session_id.clone(),
+                "--title".to_string(),
+                format!("sdb-{container_id}"),
+                "-m".to_string(),
+                model_arg,
+                "--auto".to_string(),
+            ];
+            // Round-13 R1: the prompt is positional; `--` keeps a prompt
+            // that starts with `-` from being parsed as an option.
+            crate::sandbox::push_prompt_args(&mut oc_args, prompt_arg);
+            for a in oc_args {
+                cmd.arg(a);
+            }
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             cmd
         };

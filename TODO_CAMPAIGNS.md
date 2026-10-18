@@ -995,15 +995,32 @@ ladder squares + one legend, repeat runs collapsed into `<details>×N runs`
 0.25 API-ratio default makes a $0.75 campaign's ticket 0 start at $0.1875 —
 the cap's effective ceiling binds, by design. Note B: after every rebuild,
 `sudo systemctl restart subdollarbench-engine subdollarbench-gui` (done; the
-units serve the current binary). The DeepSeek re-run on `.17` finished at
-10:59: **reached ticket 3, 3 regression-free, $0.4279, 7.0 tickets/$** —
-worse than its own `.16` cell (ticket 7, $0.7684), because ticket 4 failed
-and the `needs` chains skipped 5, 6, 10 and 11 outright; tickets 2/4/7/8/9
-failed on their own stages (2 and 9 by dataset drift after a write, 7/8 by
-`ERR syntax`), and ticket 3 "passed" while its agent stopped without READY
-(recorded as a fault summary beside a green suite). The `.16`-vs-`.17`
-comparison is the reviewer's; the harness note and SPEC collapse were in force
-for every `.17` attempt.
+units serve the current binary). **The DeepSeek `.17` re-run (10:37-10:59) is
+INVALID and must not be read as a model result**: the round-10 harness note
+started with `---`, and `omp -p <note>` parsed it as an unknown flag, so
+every attempt after ticket 2's failure crashed at round 0 (0 turns) and the
+verifier graded the previous ticket's code (round-13 R1). Ticket 2 is the
+only genuine model failure in that cell. The cell is poisoned ("R1: omp argv
+crash, invalid") and is not graded; re-run after R1.
+
+**Round-13 review fixes landed (2026-10-18, rules still `2026-10-18.17`)**:
+R1 (CRITICAL) — both harness builders end their argv with `--` and then the
+positional prompt (`sandbox::push_prompt_args`; `omp_task_args` returns the
+pure tail), the harness note opens with a plain line ("Harness note (added by
+the benchmark, not the ticket):") and closes with "End of harness note.", so
+a `-`-leading prompt can never be read as a flag again; a live proof drives
+the real `omp` and `opencode` parsers in the sandbox image in both directions
+(`live_test_harness_cli_parses_a_dash_leading_prompt_after_separator`), and
+the source guard test forbids `.arg(&effective_prompt)` coming back. An agent
+that exits before its first turn is now a **harness fault**: the round is
+retried once, and if it still never ran, the round is not graded at all
+(`[FAULT] verification skipped`, outcome `infra_error`), so a 0-turn crash
+can never again be recorded as a stage result. B1/B2: the portal groups runs
+by (model, harness, effort, rules) — incomparable rule sets never share a row
+— and the divider uses the shared `campaign::is_current_rules` predicate
+(unknown rules count as not current); hidden and poisoned *cells* now publish
+nowhere (portal + console), with tests for each. B3: the legend's swatches
+have real CSS colours and list all seven statuses.
 
 **Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
 cell has run on it)**. **Host ops (O1), read this before starting anything**:

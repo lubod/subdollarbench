@@ -3940,6 +3940,9 @@ impl BenchmarkPipeline {
             Harness::Opencode => "OPENCODE",
         };
         let mut agent_failed = false;
+        // Round-13 R1: a harness fault (the agent never reached its first
+        // turn) is never a model verdict and its round is not graded.
+        let mut agent_never_ran = false;
         // Campaign rounds (§5.1 of gui-spec.md): one record per
         // verification, the initial try and every repair round.
         let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
@@ -3971,46 +3974,83 @@ impl BenchmarkPipeline {
                     },
                 };
 
-                match Self::run_agent_session(
-                    &config,
-                    &run_id,
-                    &prompt_content,
-                    limits,
-                    &sandbox,
-                    &logger,
-                    cancel_flag.clone(),
-                )
-                .await
-                {
-                    Ok(stats) => {
-                        logger.log(&format!(
-                            "[{htag}] Finished! Tokens: prompt={}, cached={}, completion={}",
-                            stats.prompt_tokens, stats.cached_tokens, stats.completion_tokens
-                        ));
-                        let p = stats.prompt_tokens;
-                        let c = stats.cached_tokens;
-                        let comp = stats.completion_tokens;
-                        (stats, p, c, comp)
-                    }
-                    Err(e) => {
-                        if let Some(ref cf) = cancel_flag {
-                            if cf.load(Ordering::SeqCst) {
-                                sandbox.cleanup();
-                                return Err(anyhow!("Benchmark run was cancelled by user"));
-                            }
+                // Round-13 R1: an agent that exits before its first turn
+                // measured nothing. That is a harness fault, never a model
+                // verdict: retry once, and if it never runs, record a fault
+                // and grade nothing. Before this, `omp -p <note>` read the
+                // note as a flag, so every post-failure attempt "graded" the
+                // previous ticket's code with 0 turns.
+                let mut attempt_no = 0u32;
+                let mut acc = OmpSessionStats::default();
+                let mut ran = false;
+                loop {
+                    attempt_no += 1;
+                    match Self::run_agent_session(
+                        &config,
+                        &run_id,
+                        &prompt_content,
+                        limits,
+                        &sandbox,
+                        &logger,
+                        cancel_flag.clone(),
+                    )
+                    .await
+                    {
+                        Ok(stats) => {
+                            logger.log(&format!(
+                                "[{htag}] Finished! Tokens: prompt={}, cached={}, completion={}",
+                                stats.prompt_tokens, stats.cached_tokens, stats.completion_tokens
+                            ));
+                            acc.prompt_tokens += stats.prompt_tokens;
+                            acc.cached_tokens += stats.cached_tokens;
+                            acc.completion_tokens += stats.completion_tokens;
+                            acc.total_tokens += stats.total_tokens;
+                            acc.steps_taken += stats.steps_taken;
+                            acc.effort_effective = stats.effort_effective.clone();
+                            ran = true;
+                            break;
                         }
-                        logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
-                        agent_failed = true;
-                        let partial_stats = e
-                            .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
-                            .map(|oe| oe.partial_stats.clone())
-                            .unwrap_or_default();
-                        let p = partial_stats.prompt_tokens;
-                        let c = partial_stats.cached_tokens;
-                        let comp = partial_stats.completion_tokens;
-                        (partial_stats, p, c, comp)
+                        Err(e) => {
+                            if let Some(ref cf) = cancel_flag {
+                                if cf.load(Ordering::SeqCst) {
+                                    sandbox.cleanup();
+                                    return Err(anyhow!("Benchmark run was cancelled by user"));
+                                }
+                            }
+                            let partial_stats = e
+                                .downcast_ref::<crate::sandbox::omp::OmpExecutionError>()
+                                .map(|oe| oe.partial_stats.clone())
+                                .unwrap_or_default();
+                            acc.prompt_tokens += partial_stats.prompt_tokens;
+                            acc.cached_tokens += partial_stats.cached_tokens;
+                            acc.completion_tokens += partial_stats.completion_tokens;
+                            acc.total_tokens += partial_stats.total_tokens;
+                            acc.steps_taken += partial_stats.steps_taken;
+                            let zero_turns = partial_stats.steps_taken == 0;
+                            logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
+                            if zero_turns && attempt_no < 2 {
+                                logger.log(&format!(
+                                    "[{htag} RETRY] the agent exited before its first turn; retrying the round once"
+                                ));
+                                continue;
+                            }
+                            if zero_turns {
+                                logger.log(&format!(
+                                    "[{htag} FAULT] the agent never reached its first turn (0 steps): a harness fault, and this round is not graded"
+                                ));
+                            } else {
+                                agent_failed = true;
+                            }
+                            break;
+                        }
                     }
                 }
+                agent_never_ran = !ran;
+                let stats = acc;
+                let p = stats.prompt_tokens;
+                let c = stats.cached_tokens;
+                let comp = stats.completion_tokens;
+                (stats, p, c, comp)
             } else {
                 logger.log(&format!("[{htag}] Skipped (--eval-only)"));
                 (OmpSessionStats::default(), 0, 0, 0)
@@ -4032,31 +4072,51 @@ impl BenchmarkPipeline {
         // References are only for the agent and the bench: detach them
         // while verifying so a candidate cannot proxy to `ref-*`.
         sandbox.detach_references();
-        let mut v_outcome = Self::run_verification(
-            config.task,
-            &config.workdir,
-            &sandbox,
-            port,
-            &verifier_seed,
-            agent_failed,
-            config.worker,
-            &logger,
-            config
-                .campaign_stage
-                .as_ref()
-                .map(|c| c.accepted_stages.as_slice()),
-            config
-                .campaign_stage
-                .as_ref()
-                .map(|c| c.lite_profile.as_slice())
-                .unwrap_or(&[]),
-            config
-                .campaign_stage
-                .as_ref()
-                .map(|c| c.passed_lite.as_slice())
-                .unwrap_or(&[]),
-        )
-        .await;
+        let mut v_outcome = if agent_never_ran {
+            // Round-13 R1: nothing the agent touched exists to grade; a
+            // fault outcome carries no stage results.
+            logger.log(&format!(
+                "[{htag} FAULT] verification skipped: the agent never ran, so there is nothing to grade"
+            ));
+            VerificationOutcome {
+                pass_rate: 0.0,
+                passed_stages: 0,
+                total_stages: 0,
+                stage_results: Vec::new(),
+                extra_robustness: Vec::new(),
+                extra_throughput: None,
+                candidate_logs: String::new(),
+                disqualified: false,
+                disqualification_reason: None,
+                infra_error: true,
+            }
+        } else {
+            Self::run_verification(
+                config.task,
+                &config.workdir,
+                &sandbox,
+                port,
+                &verifier_seed,
+                agent_failed,
+                config.worker,
+                &logger,
+                config
+                    .campaign_stage
+                    .as_ref()
+                    .map(|c| c.accepted_stages.as_slice()),
+                config
+                    .campaign_stage
+                    .as_ref()
+                    .map(|c| c.lite_profile.as_slice())
+                    .unwrap_or(&[]),
+                config
+                    .campaign_stage
+                    .as_ref()
+                    .map(|c| c.passed_lite.as_slice())
+                    .unwrap_or(&[]),
+            )
+            .await
+        };
         campaign_rounds.push(crate::report::archive::CampaignRound {
             round: 0,
             passed_stages: v_outcome.passed_stages,

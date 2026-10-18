@@ -45,6 +45,37 @@ pub struct OmpSessionStats {
     pub effort_effective: Option<String>,
 }
 
+/// The `omp` argv after its runner flags: every option, then `--`, then the
+/// positional prompt (round-13 R1: a note starting with `---` was parsed as
+/// an unknown flag, the agent ran 0 turns, and the verifier graded the
+/// previous ticket's code). Pure so a unit test can pin the shape.
+fn omp_task_args(
+    prompt: &str,
+    model: &str,
+    session_dir: &str,
+    policy: Option<&str>,
+    timeout_seconds: Option<u64>,
+    thinking: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        format!("--model={model}"),
+        "--cwd=/workspace".to_string(),
+        format!("--session-dir={session_dir}"),
+    ];
+    // Spike: bench policy extension (opt-out via SDB_BENCH_POLICY=0).
+    if let Some(p) = policy {
+        args.push("-e".to_string());
+        args.push(p.to_string());
+    }
+    if let Some(secs) = timeout_seconds {
+        args.push(format!("--max-time={secs}s"));
+    }
+    args.push(format!("--thinking={thinking}"));
+    args.push("--print-thoughts".to_string());
+    crate::sandbox::push_prompt_args(&mut args, prompt);
+    args
+}
+
 /// Embedded spike extension: bench anti-cheat policy, turn budget steer,
 /// per-turn telemetry. Shipped inside the binary and written to the shared
 /// OMP agent dir at launch so it is visible inside the sandbox container.
@@ -627,29 +658,24 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             .arg("omp")
             .arg("--approval-mode=yolo")
             .arg("--tools=read,bash,edit,write,grep,glob,lsp")
-            .arg("-p")
-            .arg(&effective_prompt)
-            .arg(format!("--model={}", effective_model))
-            .arg("--cwd=/workspace")
-            // Scoped per run. Every concurrent run shares /home/ubuntu/.omp, so
-            // a shared session dir means the tailer cannot tell whose session
-            // it is reading - and takes another run's, importing its tokens.
-            .arg(format!(
-                "--session-dir=/home/ubuntu/.omp/agent/sessions/{container_id}"
-            ));
-
-        // Spike: bench policy extension (opt-out via SDB_BENCH_POLICY=0).
-        if let Some(policy_path) = bench_policy_path {
-            cmd.arg("-e").arg(&policy_path);
-        }
-
-        if let Some(max_secs) = limits.timeout_seconds {
-            cmd.arg(format!("--max-time={}s", max_secs));
-        }
+            .arg("-p");
 
         let (eff_level, eff_note) = resolve_thinking_level(effort, &effective_model);
-        cmd.arg(format!("--thinking={}", eff_level));
-        cmd.arg("--print-thoughts");
+        // Scoped per run. Every concurrent run shares /home/ubuntu/.omp, so
+        // a shared session dir means the tailer cannot tell whose session it
+        // is reading - and takes another run's, importing its tokens.
+        let session_dir = format!("/home/ubuntu/.omp/agent/sessions/{container_id}");
+        let tail = omp_task_args(
+            &effective_prompt,
+            &effective_model,
+            &session_dir,
+            bench_policy_path.as_deref(),
+            limits.timeout_seconds,
+            &eff_level,
+        );
+        for a in tail {
+            cmd.arg(a);
+        }
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -2070,6 +2096,36 @@ mod session_disconnect_tests {
 }
 #[cfg(test)]
 mod tests {
+    /// Round-13 R1: the prompt is the last argv element, right after `--`.
+    #[test]
+    fn test_omp_task_args_keep_a_dash_leading_prompt_positional() {
+        let prompt = "--- harness note (added by the benchmark, not the ticket) ---\nbody";
+        let args = omp_task_args(
+            prompt,
+            "openrouter/x/y",
+            "/tmp/sessions/c1",
+            None,
+            Some(600),
+            "high",
+        );
+        assert_eq!(args.last().map(String::as_str), Some(prompt));
+        assert_eq!(
+            args[args.len() - 2],
+            "--",
+            "the separator precedes the prompt"
+        );
+        assert_eq!(
+            args.iter().filter(|a| a.as_str() == prompt).count(),
+            1,
+            "the prompt is one value: {args:?}"
+        );
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert!(
+            args[..sep].iter().all(|a| a.starts_with('-')),
+            "everything before `--` is an option: {args:?}"
+        );
+    }
+
     use super::*;
 
     #[test]

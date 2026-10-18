@@ -1565,6 +1565,13 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             {
                 continue;
             }
+            // Round-13: a hidden or poisoned cell never reaches the console
+            // either (the same rule the portal exporter applies).
+            if crate::report::portal::is_hidden(&runs_dir, &name)
+                || crate::report::portal::is_poisoned(&runs_dir, &name)
+            {
+                continue;
+            }
             let mut v = std::fs::read_to_string(dir.join("status.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -5894,6 +5901,48 @@ global.fetch = async (url) => {
     /// Serializes the two tests that exercise the campaign lock protocol:
     /// they share the isolated runs dir, so they must not overlap.
     static CAMPAIGN_LOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Round-13: the console board applies the same hide/poison rule as the
+    /// portal exporter (a poisoned cell is not a measurement anywhere).
+    #[tokio::test]
+    async fn test_campaign_board_skips_hidden_and_poisoned_cells() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let make = |name: &str| {
+            let d = runs.join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join("campaign.json"),
+                serde_json::json!({
+                    "campaign_id": name, "name": "sdb-sql", "model": "m", "harness": "omp",
+                    "effort": "high", "task": "sql", "started_at": "2026-10-18T00:00:00Z",
+                    "finished_at": "2026-10-18T00:30:00Z", "stages": [], "reached": 1,
+                    "regression_free_tickets": 1, "points": 1.0, "max_points": 36.0,
+                    "rules_version": crate::report::rules::RULES_VERSION,
+                    "total_cost_usd": 0.01, "over_budget": false, "over_wall": false
+                })
+                .to_string(),
+            )
+            .unwrap();
+            d
+        };
+        let vis = make("campaign_sdb-sql_vis_20261018");
+        let poisoned = make("campaign_sdb-sql_poison_20261018");
+        let hidden = make("campaign_sdb-sql_hide_20261018");
+        fs::write(poisoned.join(crate::report::portal::POISONED_FILE), "").unwrap();
+        fs::write(hidden.join(crate::report::portal::PORTAL_HIDDEN_FILE), "").unwrap();
+        let Json(cells) = get_campaigns().await;
+        let ids: Vec<String> = cells
+            .iter()
+            .filter_map(|c| c["id"].as_str().map(str::to_string))
+            .collect();
+        assert!(ids.iter().any(|i| i.contains("vis")), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.contains("poison")), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.contains("hide")), "{ids:?}");
+        for d in [vis, poisoned, hidden] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
 
     /// Round-12 P1: the portal output is isolated the same way, so no test
     /// can overwrite the served board (the legacy exporter used to blank it

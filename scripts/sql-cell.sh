@@ -18,6 +18,10 @@ BUDGET="${1:-0.25}"
 shift || true
 WALL="${1:-40}"
 shift || true
+# Harness/effort are cell configuration like the caps: env, not extra argv,
+# so the flags can never clash with the ones this script sets.
+HARNESS="${SDB_CELL_HARNESS:-omp}"
+EFFORT="${SDB_CELL_EFFORT:-high}"
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="$TARGET_DIR/release/subdollarbench"
@@ -57,13 +61,13 @@ if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':5480 '; then
     exit 1
 fi
 
-echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min root=$ROOT"
+echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT root=$ROOT"
 if [[ "${CELL_DRY_RUN:-0}" == "1" ]]; then
     echo "[cell] dry run: would exec: campaign run --name sdb-sql --model $MODEL" \
-        "--budget-usd $BUDGET --wall-min $WALL --timeout-min 20 $*"
+        "--effort $EFFORT --harness $HARNESS --budget-usd $BUDGET --wall-min $WALL --timeout-min 20 $*"
     exit 0
 fi
 
 exec env SDB_HOME="$ROOT" "$BIN" campaign run \
-    --name sdb-sql --model "$MODEL" --effort high \
+    --name sdb-sql --model "$MODEL" --effort "$EFFORT" --harness "$HARNESS" \
     --budget-usd "$BUDGET" --wall-min "$WALL" --timeout-min 20 "$@"
