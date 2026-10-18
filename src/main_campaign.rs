@@ -29,6 +29,10 @@ struct CampaignLogger {
     /// The campaign dir: the live status block is written here (round-8
     /// improvement A).
     cdir: std::path::PathBuf,
+    /// The live block, kept in memory and merged into status.json only
+    /// when a write is due (round-9 finding 1: re-reading and re-parsing
+    /// the whole rollup per log line was gigabytes of JSON per cell).
+    live_state: Mutex<serde_json::Value>,
     /// When the live block was last written; the throttle keeps a chatty
     /// agent from rewriting status.json per line.
     last_status: Mutex<std::time::Instant>,
@@ -51,35 +55,41 @@ impl PipelineLogger for CampaignLogger {
                 let _ = writeln!(f, "[{ts}] {msg}");
             }
         }
-        // The live status block: merge-write at most every 5 s, plus
-        // immediately on a verdict or a phase change (round-8
-        // improvement A).
+        // The live status block: update the in-memory copy per line, and
+        // merge-write at most every 5 s plus immediately on a verdict or a
+        // phase change. status.json (which carries the whole rollup) is
+        // read only when a write is actually due (round-9 finding 1).
+        let immediate = {
+            let mut live = self.live_state.lock().unwrap_or_else(|e| e.into_inner());
+            apply_live_line(&mut live, msg)
+        };
         let due = {
             let mut last = self.last_status.lock().unwrap_or_else(|e| e.into_inner());
-            let due = last.elapsed() >= std::time::Duration::from_secs(5);
+            let due = immediate || last.elapsed() >= std::time::Duration::from_secs(5);
             if due {
                 *last = std::time::Instant::now();
             }
             due
         };
-        let immediate = {
-            let _guard = STATUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let path = status_path(&self.cdir);
-            let mut v = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-            if v["live"].is_null() {
-                v["live"] = serde_json::json!({});
-            }
-            let immediate = apply_live_line(&mut v["live"], msg);
-            if immediate || due {
-                v["updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-                atomic_write_json(&path, &v);
-            }
-            immediate
-        };
-        let _ = immediate;
+        if due {
+            let snapshot = self
+                .live_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            update_status(&self.cdir, |v| {
+                // Merge, so fields the logger does not track (the variant,
+                // model and budgets written at attempt setup) survive.
+                if v["live"].is_null() {
+                    v["live"] = serde_json::json!({});
+                }
+                if let Some(obj) = snapshot.as_object() {
+                    for (k, val) in obj {
+                        v["live"][k] = val.clone();
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -138,10 +148,21 @@ fn update_status(cdir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
 
 /// Apply one log line to the live block; true when it is a verdict or a
 /// phase change worth an immediate status write (round-8 improvement A).
+/// Apply one log line to the in-memory live block; true when a status
+/// write is due immediately (verdicts, phase changes). Timestamps are RFC
+/// 3339: the console renders relative ages (round-9 findings 2 and 4).
 fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
     let t = msg.trim_start();
-    let now = chrono::Utc::now().format("%H:%M:%S").to_string();
+    let now = chrono::Utc::now().to_rfc3339();
     live["last_activity_at"] = serde_json::json!(now);
+    // A fresh verification starts here: clear the check counters and the
+    // first failure, so "last check" never shows a stale or skipped line.
+    let reset_checks = |live: &mut serde_json::Value| {
+        live["check_pass"] = serde_json::json!(0);
+        live["check_total"] = serde_json::json!(0);
+        live["summary"] = serde_json::Value::Null;
+        live["first_fail"] = serde_json::Value::Null;
+    };
     let num = |s: &str, key: &str| -> Option<f64> {
         s.split_whitespace()
             .find_map(|w| w.strip_prefix(key))
@@ -163,12 +184,13 @@ fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
             live["max_turns"] = serde_json::json!(v as u64);
         }
         if let Some(v) = num(rest, "spent=") {
+            // Provider-reported *API* spend, not the effective cost the
+            // budgets bound (round-9 finding 3; the console labels it).
             live["ticket_spent"] = serde_json::json!(v);
         }
         return false;
     }
     if t.starts_with("─── ticket ") {
-        // ─── ticket N [type] TITLE (acceptance …, budget $X) ───
         let rest = t.trim_start_matches("─── ticket ");
         let (id_part, tail) = rest.split_once(" [").unwrap_or((rest, ""));
         live["ticket"] = serde_json::json!(id_part.trim().parse::<u64>().unwrap_or(0));
@@ -177,7 +199,15 @@ fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
             if let Some((title, rest)) = tail.split_once(" (acceptance") {
                 live["title"] = serde_json::json!(title.trim());
                 if let Some(budget) = rest.rsplit_once("budget $") {
-                    if let Ok(v) = budget.1.trim_end_matches(')').trim().parse::<f64>() {
+                    // The line ends `budget $0.20) ───`: take the numeric
+                    // prefix.
+                    let digits: String = budget
+                        .1
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(v) = digits.parse::<f64>() {
                         live["ticket_budget"] = serde_json::json!(v);
                     }
                 }
@@ -186,6 +216,8 @@ fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
         live["round"] = serde_json::json!(0);
         live["ticket_spent"] = serde_json::json!(0.0);
         live["phase"] = serde_json::json!("agent");
+        live["phase_started_at"] = serde_json::json!(now);
+        reset_checks(live);
         return true;
     }
     if t.starts_with("[FEEDBACK] ━━━ Repair Round ") {
@@ -194,20 +226,45 @@ fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
         live["round"] = serde_json::json!(round.parse::<u64>().unwrap_or(1));
         live["phase"] = serde_json::json!("repair");
         live["phase_started_at"] = serde_json::json!(now);
+        reset_checks(live);
         return true;
     }
-    if t.starts_with("[FEEDBACK] Round ") {
-        // The round's verdict: "Round 1 test result: 2 of 6 stages passed".
-        live["last_verdict"] = serde_json::json!({"at": now, "passed": null, "line": t});
+    // "Initial attempt passed 5 of 6 stages" / "Round 1 test result: 2 of 6
+    // stages passed": the pass/total summary (round-9 finding 2).
+    if t.starts_with("[FEEDBACK] Initial attempt ") || t.starts_with("[FEEDBACK] Round ") {
+        if let Some((a, b)) = t
+            .split_once(" passed ")
+            .or_else(|| t.split_once(" test result: "))
+            .and_then(|(_, rest)| rest.split_once(" of "))
+        {
+            let pass = a.trim().trim_start_matches('(').trim();
+            let total = b.split_whitespace().next().unwrap_or("");
+            if let (Ok(_), Ok(_)) = (pass.parse::<u64>(), total.parse::<u64>()) {
+                live["summary"] = serde_json::json!(format!("{pass}/{total}"));
+            }
+        }
+        live["last_check_at"] = serde_json::json!(now);
         return true;
     }
     if t.starts_with("Stage ") && t.contains("-> ") {
-        let passed = t.contains("-> PASS");
-        live["last_verdict"] = serde_json::json!({"at": now, "passed": passed, "line": t});
-        live["phase"] = serde_json::json!("verifying");
+        let total = live["check_total"].as_u64().unwrap_or(0) + 1;
+        live["check_total"] = serde_json::json!(total);
+        if t.contains("-> PASS") {
+            live["check_pass"] = serde_json::json!(live["check_pass"].as_u64().unwrap_or(0) + 1);
+        } else if !t.contains("skipped due to failure") && live["first_fail"].is_null() {
+            // The first real failure of this verification, not the skipped
+            // tail that follows it (round-9 finding 2).
+            live["first_fail"] = serde_json::json!(t);
+        }
+        live["last_check_at"] = serde_json::json!(now);
         return true;
     }
-    if t.starts_with("[VERIFY]") || t.starts_with("[SETUP]") || t.starts_with("[DIAGNOSTICS]") {
+    if t.starts_with("[VERIFY]") {
+        reset_checks(live);
+        live["phase"] = serde_json::json!("verifying");
+        return false;
+    }
+    if t.starts_with("[SETUP]") || t.starts_with("[DIAGNOSTICS]") {
         live["phase"] = serde_json::json!("verifying");
         return false;
     }
@@ -680,6 +737,7 @@ async fn run_one_stage(
         buf: buf.clone(),
         live: cdir.join("live.log"),
         cdir: cdir.to_path_buf(),
+        live_state: Mutex::new(serde_json::json!({})),
         last_status: Mutex::new(std::time::Instant::now()),
     });
     logger.log(&format!(
@@ -1014,6 +1072,51 @@ mod tests {
     }
 
     /// The tee logger feeds the stage console buffer and the live tail file.
+    /// Round-9 findings 1-3: the in-memory live block tracks the current
+    /// verification — the first *real* failure, the running counters, the
+    /// pass/total summary — and resets at the next [VERIFY].
+    #[test]
+    fn apply_live_line_tracks_the_current_check() {
+        let mut live = serde_json::json!({});
+        let lines = [
+            "─── ticket 6 [storage] Transactions (acceptance [0, 1, 3], budget $0.20) ───",
+            "[TELEMETRY] turn=3 max_turns=30 spent=0.012 tokens=1000",
+            "[VERIFY] Checking anti-cheat compliance",
+            "  Stage 0: Genesis -> PASS",
+            "  Stage 1: Expressions -> FAIL Kind: expected OK 0, got ERR syntax",
+            "  Stage 3: UPDATE -> FAIL skipped due to failure in earlier stages",
+            "  Stage 4: Persistence -> FAIL skipped due to failure in earlier stages",
+            "[FEEDBACK] Initial attempt passed 2 of 3 stages (66.7%). Starting interactive repair loop (max 1 rounds)...",
+        ];
+        for l in lines {
+            apply_live_line(&mut live, l);
+        }
+        assert_eq!(live["ticket"], 6);
+        assert_eq!(live["type"], "storage");
+        assert_eq!(live["ticket_budget"], 0.2);
+        assert_eq!(live["ticket_spent"], 0.012);
+        assert_eq!(live["turn"], 3);
+        assert_eq!(live["check_total"], 4);
+        assert_eq!(live["check_pass"], 1);
+        assert_eq!(live["summary"], "2/3");
+        let first = live["first_fail"].as_str().unwrap_or_default();
+        assert!(
+            first.contains("Stage 1"),
+            "first real failure, not skipped: {first}"
+        );
+        // A new verification resets the counters and the failure.
+        apply_live_line(&mut live, "[VERIFY] Checking anti-cheat compliance");
+        assert_eq!(live["check_total"], 0);
+        assert_eq!(live["check_pass"], 0);
+        assert!(live["first_fail"].is_null());
+        assert!(live["summary"].is_null());
+        // Timestamps are RFC 3339 so the console can show relative ages.
+        assert!(live["last_activity_at"]
+            .as_str()
+            .unwrap_or("")
+            .contains('T'));
+    }
+
     #[test]
     fn test_campaign_logger_buffer_and_live_log() {
         let dir = tmp("logger");
@@ -1022,6 +1125,7 @@ mod tests {
             buf: buf.clone(),
             live: dir.join("live.log"),
             cdir: dir.clone(),
+            live_state: Mutex::new(serde_json::json!({})),
             last_status: Mutex::new(std::time::Instant::now()),
         };
         logger.log("ticket 0 started");

@@ -942,7 +942,7 @@ impl CampaignLock {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(holder) = live_lock_holder_at(&path) {
                         return Err(format!(
-                            "campaign {} (pid {}) is already running — if that process is gone,                              delete {}",
+                            "campaign {} (pid {}) is already running — if that process is gone, delete {}",
                             holder.campaign_id,
                             holder.pid,
                             path.display()

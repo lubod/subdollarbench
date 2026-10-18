@@ -68,6 +68,8 @@
       background: #21262d;
       border: 1px solid var(--border);
     }
+    .ladderRun { animation: ladderPulse 1.2s ease-in-out infinite; }
+    @keyframes ladderPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
     .status-dot {
       width: 8px;
       height: 8px;
@@ -1873,6 +1875,27 @@
       return live;
     }
 
+    function relAge(rfc) {
+      const t = Date.parse(rfc);
+      if (!isFinite(t)) return String(rfc || '');
+      const s = Math.max(0, (Date.now() - t) / 1000);
+      if (s < 90) return `${Math.round(s)}s ago`;
+      if (s < 5400) return `${Math.round(s / 60)}m ago`;
+      return `${Math.round(s / 3600)}h ago`;
+    }
+
+    function ageSecs(rfc) {
+      const t = Date.parse(rfc);
+      return isFinite(t) ? Math.max(0, (Date.now() - t) / 1000) : null;
+    }
+
+    function clockOf(rfc) {
+      const t = Date.parse(rfc);
+      return isFinite(t)
+        ? new Date(t).toLocaleTimeString([], { hour12: false })
+        : String(rfc || '');
+    }
+
     function liveSummary(extra) {
       const live = liveInfo();
       const cell = boardCache.find(c => c.id === liveRunId) || null;
@@ -1881,19 +1904,26 @@
       const cap = d ? d.budget_usd : roll.budget_usd;
       const parts = [];
       if (live.ticket != null) {
-        parts.push(`ticket ${live.ticket}${live.title ? ' ' + live.title : (live.type ? ' [' + live.type + ']' : '')}${live.variant ? ' (full)' : ''}`.replace('(full)', live.variant === 'full' ? '(full)' : live.variant === 'lite' ? '(lite)' : ''));
+        parts.push(`ticket ${live.ticket}${live.title ? ' ' + live.title : (live.type ? ' [' + live.type + ']' : '')}${live.variant === 'full' ? ' (full)' : live.variant === 'lite' ? ' (lite)' : ''}`);
       }
       if (live.round) parts.push(`repair round ${live.round}`);
       if (live.phase) parts.push(live.phase);
       if (live.turn != null) parts.push(`turn ${live.turn}${live.max_turns ? '/' + live.max_turns : ''}`);
-      if (live.ticket_spent != null) parts.push(`ticket $${fmtMoney(live.ticket_spent)}${live.ticket_budget ? ' / $' + fmtMoney(live.ticket_budget) : ''}`);
-      const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
-      if (spent != null) parts.push(`campaign $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) : ''}`);
-      if (live.last_verdict && live.last_verdict.line) {
-        parts.push(`last check ${live.last_verdict.at || ''} ${String(live.last_verdict.line).slice(0, 120)}`);
+      if (live.ticket_spent != null) {
+        // Provider-reported API spend, not the effective cost the budget
+        // bounds (round-9 finding 3): label it.
+        parts.push(`ticket API $${fmtMoney(live.ticket_spent)}${live.ticket_budget ? ' / $' + fmtMoney(live.ticket_budget) + ' budget' : ''}`);
       }
-      if (live.last_activity_at) parts.push(`last activity ${live.last_activity_at}`);
-      if (extra && cell && cell.state) parts.push(cell.state);
+      const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
+      if (spent != null) parts.push(`campaign $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) + ' cap (effective)' : ' (effective)'}`);
+      // The latest verification: its pass/total plus the first *real*
+      // failure, never the skipped tail (round-9 finding 2).
+      const frac = live.summary || (live.check_total ? `${live.check_pass || 0}/${live.check_total}` : '');
+      if (frac || live.first_fail) {
+        const tail = live.first_fail || 'all checks passed';
+        parts.push(`last check ${clockOf(live.last_check_at)}${frac ? ' · ' + frac : ''} · ${tail}`);
+      }
+      if (live.last_activity_at) parts.push(`last activity ${relAge(live.last_activity_at)}`);
       return parts.join(' · ');
     }
 
@@ -1901,7 +1931,59 @@
       const box = document.getElementById('liveStrip');
       if (!box) return;
       const text = liveRunId ? liveSummary(true) : 'no run selected';
-      box.innerHTML = `<span class="hint">${escapeHtml(text || String(liveRunId || ''))}</span>`;
+      // A hung agent is the most useful thing to see (round-9 §B): the
+      // strip turns amber after 2 min without activity and red after 5.
+      const live = liveRunId ? liveInfo() : {};
+      const age = ageSecs(live.last_activity_at);
+      let colour = '';
+      if (age != null && age > 300) colour = 'color:var(--danger);font-weight:600;';
+      else if (age != null && age > 120) colour = 'color:var(--warning);font-weight:600;';
+      box.innerHTML = `<span class="hint" style="${colour}">${escapeHtml(text || String(liveRunId || ''))}</span>`;
+    }
+
+    function liveBar(label, frac, text, colour) {
+      const pct = frac == null ? 0 : Math.max(0, Math.min(100, frac * 100));
+      return `<div class="hint" style="display:flex;align-items:center;gap:6px;">
+        <span style="width:76px;text-align:right;">${escapeHtml(label)}</span>
+        <span style="flex:1;max-width:200px;height:10px;background:#05070a;border:1px solid var(--border);border-radius:3px;overflow:hidden;display:inline-block;"><span style="display:block;height:100%;width:${pct.toFixed(1)}%;background:${colour || 'var(--primary)'};"></span></span>
+        <span>${escapeHtml(text)}</span></div>`;
+    }
+
+    /// The Live header card (round-9 §B): what the run is doing right now,
+    /// with bars for turns, ticket API spend, wall and campaign spend, the
+    /// latest check, the staleness colour and the pulsing ladder.
+    function liveCard() {
+      if (!liveRunId) return '';
+      const live = liveInfo();
+      const cell = boardCache.find(c => c.id === liveRunId) || null;
+      const d = (currentRunDetail && currentRunDetail.id === liveRunId) ? currentRunDetail : null;
+      const roll = cell ? (cell.rollup || {}) : {};
+      const model = live.model || roll.model || '';
+      const cap = d ? d.budget_usd : roll.budget_usd;
+      const wall = d ? d.wall_min : roll.wall_min;
+      const started = (d && d.rollup && d.rollup.started_at) || roll.started_at || live.started_at;
+      const wallSecs = started ? (Date.now() - Date.parse(started)) / 1000 : null;
+      const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
+      const age = ageSecs(live.last_activity_at);
+      const stale = age != null && age > 300 ? 'var(--danger)' : age != null && age > 120 ? 'var(--warning)' : '';
+      const ladder = (cell && cell.ladder) || (d && d.ladder) || [];
+      const head = [model,
+        live.ticket != null ? `ticket ${live.ticket} ${live.title || live.type || ''}${live.variant === 'lite' ? ' (lite)' : live.variant === 'full' ? ' (full)' : ''}` : '',
+        live.round ? `REPAIR round ${live.round}` : '',
+        live.phase || '',
+        live.turn != null ? `turn ${live.turn}/${live.max_turns ?? '?'}` : '']
+        .filter(Boolean).join(' \u00b7 ');
+      return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;flex-direction:column;gap:4px;">
+        <div><b>${escapeHtml(head || liveRunId)}</b>${stale ? ` <span style="color:${stale};font-weight:600;" title="a hung agent is the most useful thing to see">no activity for ${escapeHtml(relAge(live.last_activity_at))}</span>` : ''}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 24px;">
+          ${liveBar('turns', live.max_turns ? (live.turn || 0) / live.max_turns : null, `${live.turn ?? 0}/${live.max_turns ?? '?'}`, stale || 'var(--primary)')}
+          ${liveBar('ticket API $', live.ticket_budget ? (live.ticket_spent || 0) / live.ticket_budget : null, `${fmtMoney(live.ticket_spent || 0)} / ${live.ticket_budget ? fmtMoney(live.ticket_budget) : '\u2014'}`, stale || 'var(--accent)')}
+          ${liveBar('wall', wall && wallSecs != null ? wallSecs / (wall * 60) : null, wallSecs != null ? `${fmtDurSec(wallSecs)} / ${wall}m` : '\u2014', stale || 'var(--primary)')}
+          ${liveBar('campaign $', cap ? (spent || 0) / cap : null, `${fmtMoney(spent || 0)} / ${cap ? fmtMoney(cap) : '\u2014'}`, stale || 'var(--success)')}
+        </div>
+        <div class="hint">${escapeHtml(liveSummary(false))}</div>
+        <div style="display:flex;align-items:center;gap:8px;">${ladderStrip(ladder)}<span class="hint">${ladder.length ? 'ladder' : ''}</span></div>
+      </div>`;
     }
 
     async function pollLive() {
@@ -1934,6 +2016,7 @@
         liveBlocks = {};
       }
       body.innerHTML = `
+        ${liveCard()}
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
           <div id="liveStrip">${liveRunId ? '' : '<span class="hint">no run selected</span>'}</div>
           <div style="display:flex;align-items:center;gap:8px;">
@@ -1990,7 +2073,8 @@
           ? `repeating-linear-gradient(45deg, ${st.color}, ${st.color} 2px, transparent 2px, transparent 4px)`
           : st.color;
         const tip = `ticket ${e.id} · ${e.title} · ${st.label}${e.cause ? ' · ' + e.cause : ''}`;
-        return `<span title="${escapeHtml(tip)}" style="display:inline-block;width:11px;height:11px;margin-right:2px;border-radius:2px;background:${bg};border:1px solid var(--border);"></span>`;
+        const pulse = e.status === 'running' ? ' ladderRun' : '';
+        return `<span class="ladderSq${pulse}" title="${escapeHtml(tip)}" style="display:inline-block;width:11px;height:11px;margin-right:2px;border-radius:2px;background:${bg};border:1px solid var(--border);"></span>`;
       }).join('');
     }
 

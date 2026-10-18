@@ -979,6 +979,25 @@ tail, the proxied campaign POST, the merged validation+lock+status
 test; full lib suite 876 green; the CLI refusal and the API 409 were
 verified live.
 
+**Round-9 review fixes landed (2026-10-18)**: (1) the live block lives in
+memory in `CampaignLogger` and status.json (which now carries the whole
+rollup) is read-modify-written only when a write is due — at most every
+5 s plus verdicts — instead of twice per log line (cell 8's ~17k lines
+meant gigabytes of JSON parsing under one mutex). (2) "last check" is
+honest: `check_pass`/`check_total` counters plus the **first real
+failure** of the current verification (reset on `[VERIFY]`, a ticket or
+repair header), the pass/total summary from the FEEDBACK lines, so a
+skipped tail is no longer shown as the cause; unit-pinned from real
+lines. (3) the header labels the provider-reported spend `ticket API $`
+against the effective-cost budget and `campaign $ … (effective)`. (4)
+the lock-conflict message lost its 30 literal spaces, `last_activity_at`
+is RFC 3339 and the console renders "4s/12m ago", and the real-log kind
+check is commented as the suite's one intentional runs/ read. Console
+improvement B landed with them: a Live header card (turns, ticket API $,
+wall and campaign-$ bars, the last check, the staleness colour amber
+> 2 min / red > 5 min, and a pulsing ladder square) and a stalled cell no
+longer marks its current ticket `running` or reports a stop reason.
+
 **Round-8 review fixes landed (2026-10-17)**: (1, MEDIUM-HIGH) the suite
 no longer touches the real `runs/` directory: `resolve_runs_dir()` honours
 `SDB_RUNS_DIR` and every web/campaign test runs against an isolated temp

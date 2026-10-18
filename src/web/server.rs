@@ -1447,11 +1447,17 @@ fn campaign_board_view(
                 .map(|lc| lc.spec)
         })
         .clone()?;
-    let current = v["current_stage"].as_u64().map(|c| c as u32);
+    // Only a *running* cell marks its current ticket running: a stalled
+    // cell must not read `running` anywhere.
+    let running = v["state"].as_str() == Some("running");
+    let current = v["current_stage"]
+        .as_u64()
+        .filter(|_| running)
+        .map(|c| c as u32);
     let ladder = crate::campaign::ladder(&spec, &rollup, current);
     let mut key = crate::campaign::BoardSortKey::of(&rollup);
     key.live = live;
-    let stop = if live || v["state"].as_str() == Some("running") {
+    let stop = if live || !running && v["state"].as_str() != Some("done") {
         String::new()
     } else {
         crate::campaign::stop_reason(&rollup).to_string()
@@ -1755,16 +1761,17 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
     // Old cells: derive rounds/failures from their manifests (marked
     // derived) so the Run view renders them too.
     crate::campaign::backfill_rounds(&mut rollup, &dir);
-    let stop = if live || state == "running" {
-        // A running cell has no stop reason yet, even with a partial
-        // rollup: the Run header hides it for running cells anyway.
+    let stop = if live || state != "done" {
+        // Only a finished cell has a stop reason; running and stalled ones
+        // show their state instead.
         String::new()
     } else {
         crate::campaign::stop_reason(&rollup).to_string()
     };
     let budget = rollup.budget_usd;
     let wall = rollup.wall_min;
-    let current = current_stage.map(|c| c as u32);
+    let running = state == "running";
+    let current = current_stage.filter(|_| running).map(|c| c as u32);
     let ladder = crate::campaign::load_campaign(&rollup.name)
         .ok()
         .map(|lc| crate::campaign::ladder(&lc.spec, &rollup, current));
@@ -5638,7 +5645,10 @@ setTimeout(() => { console.log('smoke OK'); }, 300);
         }
         // A real live.log must yield both default chips (round-8 finding 6:
         // the default Live view was blank because every line classified as
-        // verifier). Skips when no campaign log is on disk.
+        // verifier). This is the suite's one *intentional* read of the real
+        // runs/ directory (read-only, never locking); everything else is
+        // isolated via SDB_RUNS_DIR (round-9 finding 4). Skips when no
+        // campaign log is on disk.
         let runs = crate::config::get_repo_root().join("runs");
         let real = std::fs::read_dir(&runs).ok().and_then(|rd| {
             rd.flatten().find_map(|e| {
