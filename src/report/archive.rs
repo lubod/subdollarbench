@@ -226,6 +226,18 @@ impl RunManifest {
 pub struct RunArchiver;
 
 impl RunArchiver {
+    /// Where the public portal is written. `SDB_PORTAL_DIR` overrides
+    /// (`isolate_test_runs_dir` points it at a temp dir so a `cargo test`
+    /// run can never overwrite the served board — round-12 P1).
+    pub fn resolve_portal_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("SDB_PORTAL_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+        crate::config::get_repo_root().join("portal")
+    }
+
     pub fn resolve_runs_dir() -> PathBuf {
         // Tests (and tools) point this at a temp dir via SDB_RUNS_DIR: the
         // real runs/ directory holds live cells whose locks and campaign

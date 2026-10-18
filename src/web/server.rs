@@ -969,8 +969,8 @@ pub(crate) async fn get_leaderboard(
 /// Refresh the PUBLIC portal: models summary only (no per-run pages).
 /// Per-run detail lives in the GUI (Runs + Leaderboard tabs), never on disk here.
 fn refresh_portal() {
-    let root = crate::config::get_repo_root();
-    let out = root.join("portal");
+    // Round-12 P1: one resolver for every writer (SDB_PORTAL_DIR-aware).
+    let out = crate::report::archive::RunArchiver::resolve_portal_dir();
     // The public board is the sdb-sql campaign only: the pre-sdb-sql tasks
     // are retired (2026-10-17) and their rollups no longer publish.
     let runs_dir = crate::report::archive::RunArchiver::resolve_runs_dir();
@@ -3369,6 +3369,13 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             let _ = std::fs::create_dir_all(&dir);
             std::env::set_var("SDB_RUNS_DIR", &dir);
+            // Round-12 P1: the portal output is isolated the same way, or a
+            // test that runs the pipeline would overwrite the served board.
+            let portal =
+                std::env::temp_dir().join(format!("sdb_test_portal_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&portal);
+            let _ = std::fs::create_dir_all(&portal);
+            std::env::set_var("SDB_PORTAL_DIR", &portal);
         });
     }
 
@@ -5887,6 +5894,19 @@ global.fetch = async (url) => {
     /// Serializes the two tests that exercise the campaign lock protocol:
     /// they share the isolated runs dir, so they must not overlap.
     static CAMPAIGN_LOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Round-12 P1: the portal output is isolated the same way, so no test
+    /// can overwrite the served board (the legacy exporter used to blank it
+    /// from an isolated runs dir after any pipeline run).
+    #[test]
+    fn test_tests_write_the_portal_to_a_temp_dir() {
+        isolate_test_runs_dir();
+        let dir = crate::report::archive::RunArchiver::resolve_portal_dir();
+        assert!(
+            dir.starts_with(std::env::temp_dir()),
+            "tests must not write the real portal: {dir:?}"
+        );
+    }
 
     /// Round-8 finding 1: the suite points at an isolated runs dir, so a
     /// server request never reads, writes or deletes anything in the real

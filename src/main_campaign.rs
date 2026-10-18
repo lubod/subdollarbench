@@ -554,11 +554,11 @@ pub async fn run(
     // finished cell is never served as a mid-run snapshot (the engine
     // rebuilds only on demand; a standalone `campaign run` writes the file
     // directly).
-    let root = subdollarbench::config::get_repo_root();
     let runs = subdollarbench::report::archive::RunArchiver::resolve_runs_dir();
+    let portal = subdollarbench::report::archive::RunArchiver::resolve_portal_dir();
     let _ = subdollarbench::report::portal::PortalExporter::export_sql_board(
         runs.to_str().unwrap_or("./runs"),
-        root.join("portal").to_str().unwrap_or("./portal"),
+        portal.to_str().unwrap_or("./portal"),
     );
     Ok(())
 }

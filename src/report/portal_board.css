@@ -37,3 +37,21 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .methodology ul { margin-left: 18px; font-size: 0.8rem; color: var(--mut); line-height: 1.55; }
 .methodology b { color: var(--text); }
 code { background: rgba(110,118,129,0.25); border-radius: 3px; padding: 1px 4px; font-size: 0.78rem; }
+
+/* Ladder squares + legend (round-12 P3): the console's shape, one renderer. */
+.sq { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+      border-radius: 3px; font-size: 9px; font-weight: 700; color: #0d1117; border: 1px solid var(--line);
+      margin-right: 2px; }
+.sq.na { background: #21262d; color: var(--mut); }
+.sq.skip { background: var(--line); color: var(--text); }
+.sq.fault { color: var(--text); }
+.sq.run { background: var(--pri); }
+.strip { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 3px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 8px 12px;
+          font-size: 0.72rem; color: var(--mut); border-top: 1px solid var(--line); }
+.legend .sq { margin-right: 3px; }
+tr.divider td { border-top: 2px solid var(--line); color: var(--mut); font-size: 0.72rem;
+                text-transform: uppercase; letter-spacing: .04em; }
+details.more { margin-top: 4px; font-size: 0.72rem; color: var(--mut); }
+details.more summary { cursor: pointer; }
+details.more .line { margin: 2px 0 0 12px; }

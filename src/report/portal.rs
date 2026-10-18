@@ -1177,6 +1177,8 @@ pub struct PortalExporter;
 /// One campaign run on the public sdb-sql board (2026-10-17: the only
 /// benchmark task; the pre-sdb-sql rollup is retired).
 struct SqlBoardCell {
+    /// The campaign dir name; the `×N runs` disclosure names each run.
+    campaign_id: String,
     model: String,
     harness: String,
     effort: String,
@@ -1330,14 +1332,19 @@ impl PortalExporter {
                 };
                 // `campaign.json` is the final rollup; `status.json` keeps
                 // the live one (and the state while the cell runs).
+                let status_doc = read("status.json");
+                let updated_at = status_doc
+                    .as_ref()
+                    .and_then(|t| t["updated_at"].as_str().map(str::to_string));
                 let (rollup, state) = match read("campaign.json") {
                     Some(c) => {
-                        let state = read("status.json")
+                        let state = status_doc
+                            .as_ref()
                             .and_then(|t| t["state"].as_str().map(str::to_string))
                             .unwrap_or_else(|| "done".to_string());
                         (c, state)
                     }
-                    None => match read("status.json") {
+                    None => match status_doc {
                         Some(t) => match t.get("rollup").filter(|r| !r.is_null()).cloned() {
                             Some(r) => {
                                 let state = t["state"].as_str().unwrap_or("unknown").to_string();
@@ -1348,6 +1355,9 @@ impl PortalExporter {
                         None => continue,
                     },
                 };
+                // Round-12 P2: the same derivation the console uses — a dead
+                // writer is stalled, never published as RUNNING.
+                let state = crate::campaign::effective_state(&name, &state, updated_at.as_deref());
                 // Only the active campaign publishes (one source of truth:
                 // `campaign::ACTIVE_CAMPAIGNS`).
                 if !crate::campaign::ACTIVE_CAMPAIGNS
@@ -1383,6 +1393,7 @@ impl PortalExporter {
                 let cost_v = rollup["total_cost_usd"].as_f64().unwrap_or(0.0);
                 let rules_v = rollup["rules_version"].as_str().unwrap_or("").to_string();
                 cells.push(SqlBoardCell {
+                    campaign_id: name.clone(),
                     model: rollup["model"].as_str().unwrap_or("?").to_string(),
                     harness: rollup["harness"].as_str().unwrap_or("?").to_string(),
                     effort: rollup["effort"].as_str().unwrap_or("high").to_string(),
@@ -1435,39 +1446,53 @@ impl PortalExporter {
         })
     }
 
-    /// The ladder mini-strip (gui-spec.md §4.1): one square per ticket,
-    /// status-coloured, with the one-line cause on hover. The same Rust
-    /// ladder derivation the console renders.
+    /// One labelled ladder square (round-12 P3): the ticket number inside,
+    /// the full story on hover — the console's square, one renderer shape.
+    fn ladder_square_html(e: &crate::campaign::LadderEntry) -> String {
+        let (bg, fg, cls) = match e.status.as_str() {
+            "pass" => ("background:#3fb950;", "color:#0d1117;", "pass"),
+            "lite" => ("background:#d29922;", "color:#0d1117;", "lite"),
+            "fail" => ("background:#f85149;", "color:#0d1117;", "fail"),
+            "running" => ("background:#58a6ff;", "color:#0d1117;", "run"),
+            "fault" => (
+                "background:repeating-linear-gradient(45deg,#8b949e,#8b949e 2px,transparent 2px,transparent 4px);",
+                "color:#c9d1d9;",
+                "fault",
+            ),
+            "skipped" => ("", "", "skip"),
+            _ => ("", "", "na"),
+        };
+        let tip = format!(
+            "ticket {} · {} · {}{}",
+            e.id,
+            e.title,
+            e.status,
+            e.cause
+                .as_deref()
+                .map(|c| format!(" · {c}"))
+                .unwrap_or_default()
+        );
+        format!(
+            "<span class=\"sq {cls}\" title=\"{}\" style=\"{bg}{fg}\">{}</span>",
+            Self::esc(&tip),
+            e.id
+        )
+    }
+
+    /// The ladder mini-strip (gui-spec.md §4.1): one labelled square per
+    /// ticket, status-coloured, with the one-line cause on hover. The same
+    /// Rust ladder derivation the console renders.
     fn ladder_strip_html(ladder: &[crate::campaign::LadderEntry]) -> String {
         if ladder.is_empty() {
             return String::new();
         }
-        let mut out = String::new();
-        for e in ladder {
-            let color = match e.status.as_str() {
-                "pass" => "#3fb950",
-                "lite" => "#d29922",
-                "fail" => "#f85149",
-                "fault" => "#8b949e",
-                _ => "transparent",
-            };
-            let tip = format!(
-                "ticket {} · {} · {}{}",
-                e.id,
-                e.title,
-                e.status,
-                e.cause
-                    .as_deref()
-                    .map(|c| format!(" · {c}"))
-                    .unwrap_or_default()
-            );
-            out.push_str(&format!(
-                "<span title=\"{}\" style=\"display:inline-block;width:10px;height:10px;margin-right:2px;border-radius:2px;background:{};border:1px solid #30363d;\"></span>",
-                Self::esc(&tip),
-                color
-            ));
-        }
-        format!("<div style=\"margin-top:3px;\">{out}</div>")
+        let inner: String = ladder.iter().map(Self::ladder_square_html).collect();
+        format!("<div class=\"strip\">{inner}</div>")
+    }
+
+    /// The one legend for every strip (round-12 P3), the console's labels.
+    fn ladder_legend_html() -> &'static str {
+        "<div class=\"legend\"><span class=\"sq pass\">·</span>pass<span class=\"sq lite\">·</span>lite<span class=\"sq fail\">·</span>fail<span class=\"sq skip\">·</span>skipped<span class=\"sq na\">·</span>not reached</div>"
     }
 
     /// The sdb-sql board page: campaign cells only, no legacy task specs,
@@ -1483,40 +1508,44 @@ impl PortalExporter {
         let best_points = cells.iter().map(|c| c.points).fold(0.0f64, f64::max);
         let rf: u32 = cells.iter().map(|c| c.regression_free).sum();
         let spend: f64 = cells.iter().map(|c| c.cost).sum();
-        let mut rows = String::new();
-        for (i, c) in cells.iter().enumerate() {
-            let reached = c
-                .reached
+        // Per-cell renderings, shared by the head row and the `×N runs`
+        // disclosure (round-12 P3: the portal renders what the console does).
+        let reached_of = |c: &SqlBoardCell| {
+            c.reached
                 .map(|r| format!("ticket {r}"))
-                .unwrap_or_else(|| "—".to_string());
-            let ppd = c
-                .points_per_dollar()
+                .unwrap_or_else(|| "—".to_string())
+        };
+        let ppd_of = |c: &SqlBoardCell| {
+            c.points_per_dollar()
                 .map(|v| format!("{v:.1}"))
-                .unwrap_or_else(|| "—".to_string());
-            let rpd = c
-                .reg_free_per_dollar()
+                .unwrap_or_else(|| "—".to_string())
+        };
+        let rpd_of = |c: &SqlBoardCell| {
+            c.reg_free_per_dollar()
                 .map(|v| format!("{v:.1}"))
-                .unwrap_or_else(|| "—".to_string());
-            let state = match c.state.as_str() {
-                "running" => "<span class=\"b run\">RUNNING</span>".to_string(),
-                "done" => "<span class=\"b ok\">done</span>".to_string(),
-                other => format!("<span class=\"b\">{}</span>", Self::esc(other)),
-            };
-            let flags = {
-                let mut f = String::new();
-                if c.over_budget {
-                    f.push_str(" · <span class=\"b warn\">over budget</span>");
-                }
-                if c.cap_reached {
-                    // A floor stop is planned, not an overshoot.
-                    f.push_str(" · <span class=\"b\">budget cap</span>");
-                }
-                if c.over_wall {
-                    f.push_str(" · <span class=\"b warn\">over wall</span>");
-                }
-                f
-            };
-            let rules = if c.rules == crate::report::rules::RULES_VERSION {
+                .unwrap_or_else(|| "—".to_string())
+        };
+        let state_of = |c: &SqlBoardCell| match c.state.as_str() {
+            "running" => "<span class=\"b run\">RUNNING</span>".to_string(),
+            "done" => "<span class=\"b ok\">done</span>".to_string(),
+            other => format!("<span class=\"b\">{}</span>", Self::esc(other)),
+        };
+        let flags_of = |c: &SqlBoardCell| {
+            let mut f = String::new();
+            if c.over_budget {
+                f.push_str(" · <span class=\"b warn\">over budget</span>");
+            }
+            if c.cap_reached {
+                // A floor stop is planned, not an overshoot.
+                f.push_str(" · <span class=\"b\">budget cap</span>");
+            }
+            if c.over_wall {
+                f.push_str(" · <span class=\"b warn\">over wall</span>");
+            }
+            f
+        };
+        let rules_of = |c: &SqlBoardCell| {
+            if c.rules == crate::report::rules::RULES_VERSION {
                 format!("<span class=\"mut\">{}</span>", Self::esc(&c.rules))
             } else if c.rules.is_empty() {
                 "<span class=\"b warn\">rules —</span>".to_string()
@@ -1525,19 +1554,86 @@ impl PortalExporter {
                     "<span class=\"b warn\" title=\"graded under a different rule set\">stale {}</span>",
                     Self::esc(&c.rules)
                 )
+            }
+        };
+        // Repeat runs of one model collapse into one row with a `×N runs`
+        // disclosure (round-12 P3), first-seen order preserved: the shared
+        // board_order already put the best cell first.
+        let mut groups: Vec<(&SqlBoardCell, Vec<&SqlBoardCell>)> = Vec::new();
+        for c in cells {
+            match groups
+                .iter_mut()
+                .find(|(h, _)| h.model == c.model && h.harness == c.harness && h.effort == c.effort)
+            {
+                Some((_, g)) => g.push(c),
+                None => groups.push((c, Vec::new())),
+            }
+        }
+        let mut rows = String::new();
+        let mut divider_done = false;
+        for (i, (c, extra)) in groups.iter().enumerate() {
+            // Round-12 P3: the console's divider between comparable and
+            // older-rule cells (board_order already sorts current first).
+            if !divider_done
+                && !c.rules.is_empty()
+                && c.rules != crate::report::rules::RULES_VERSION
+            {
+                rows.push_str(
+                    "<tr class=\"divider\"><td colspan=\"10\">older rule sets (incomparable)</td></tr>",
+                );
+                divider_done = true;
+            }
+            let more = if extra.is_empty() {
+                String::new()
+            } else {
+                let mut sorted: Vec<f64> = std::iter::once(*c)
+                    .chain(extra.iter().copied())
+                    .map(|x| x.points)
+                    .collect();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median = sorted[sorted.len() / 2];
+                let mut inner = format!(
+                    "<div class=\"line\">median {median:.1} pts across {} runs</div>",
+                    extra.len() + 1
+                );
+                for x in extra {
+                    inner.push_str(&format!(
+                        "<div class=\"line\">{}{} · {} · {} pts · ${:.4} · {} · {} <span class=\"mut\">{}</span></div>",
+                        rules_of(x),
+                        flags_of(x),
+                        reached_of(x),
+                        x.points,
+                        x.cost,
+                        ppd_of(x),
+                        state_of(x),
+                        Self::esc(&x.campaign_id),
+                    ));
+                }
+                format!(
+                    " <details class=\"more\"><summary>×{} runs ▸</summary>{inner}</details>",
+                    extra.len() + 1
+                )
             };
-            let updated = Self::esc(c.updated.get(..16).unwrap_or(&c.updated));
             let strip = Self::ladder_strip_html(&c.ladder);
             rows.push_str(&format!(
-                "<tr><td class=\"num\">{}</td><td><b>{}</b>{strip}<div class=\"mut\">{} · effort {}{flags}</div></td><td>{reached}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {rules}</td><td class=\"num\">${:.4}</td><td class=\"num\">{ppd}</td><td class=\"num\">{rpd}</td><td>{state}</td><td class=\"mut\">{updated}</td></tr>",
+                "<tr><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{} · effort {}{}</div>{strip}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
                 i + 1,
                 Self::esc(&c.model),
+                more,
                 Self::esc(&c.harness),
                 Self::esc(&c.effort),
+                flags_of(c),
+                reached_of(c),
                 c.regression_free,
                 c.points,
                 c.max_points as u32,
+                rules_of(c),
                 c.cost,
+                ppd_of(c),
+                rpd_of(c),
+                state_of(c),
+                "",
+                Self::esc(c.updated.get(..16).unwrap_or(&c.updated)),
             ));
         }
         let mut h = String::new();
@@ -1559,8 +1655,10 @@ impl PortalExporter {
         } else {
             h.push_str(&rows);
         }
-        h.push_str("</tbody></table></div>");
-        h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Points</b>: the campaign's difficulty-weighted score (each ticket contributes its tier x weight when it passes), so a cell that skips a hard ticket cannot outrank one that passed it. <b>Pts / $</b> divides by the cell's effective spend (API + compute).</li><li>Ranking: points desc, then points per $ desc, then the cheaper cell, with cells graded under a different RULES_VERSION grouped below the current ones (grading changes make them incomparable).</li><li><b>Reached</b> is the highest ticket whose suite passed; with the continue ladder this is a maximum, not a contiguous prefix. <b>Regression-free tickets</b> passed without regressing an earlier ticket's suite, and <b>Reg-free / $</b> is that count over the spend.</li><li>Cells whose stage runs were hidden or poisoned are never published; over-budget and over-wall cells are badged.</li><li><b>Retired 2026-10-17</b>: the pre-sdb-sql tasks (redis/http/pdf/wal/proxy/pubsub/binproto) and their campaigns are no longer part of the benchmark; only the sdb-sql ladder publishes.</li></ul></section>");
+        h.push_str("</tbody></table>");
+        h.push_str(Self::ladder_legend_html());
+        h.push_str("</div>");
+        h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Points</b>: the campaign's difficulty-weighted score (each ticket contributes its tier x weight when it passes), so a cell that skips a hard ticket cannot outrank one that passed it. <b>Pts / $</b> divides by the cell's effective spend (API + compute).</li><li>Ranking: points desc, then points per $ desc, then the cheaper cell, with cells graded under a different RULES_VERSION grouped below the current ones (grading changes make them incomparable).</li><li><b>Reached</b> is the highest ticket whose suite passed; with the continue ladder this is a maximum, not a contiguous prefix. <b>Regression-free tickets</b> passed without regressing an earlier ticket's suite, and <b>Reg-free / $</b> is that count over the spend.</li><li>Repeat runs of one model, harness and effort collapse into one row with a <b>&times;N runs</b> disclosure (best run shown, median noted); the ladder squares carry the ticket numbers and the legend sits under the table.</li><li>Cells whose stage runs were hidden or poisoned are never published; over-budget, budget-cap and over-wall cells are badged.</li><li><b>Retired 2026-10-17</b>: the pre-sdb-sql tasks (redis/http/pdf/wal/proxy/pubsub/binproto) and their campaigns are no longer part of the benchmark; only the sdb-sql ladder publishes.</li></ul></section>");
         h.push_str("</main></body></html>");
         h
     }
@@ -2965,8 +3063,18 @@ mod tests {
                 "started_at": "2026-10-17T09:00:00Z",
                 "finished_at": "2026-10-17T10:00:00Z",
                 "stages": [
-                    {"id": 0, "title": "t0", "passed": true, "run_id": run_id},
-                    {"id": 1, "title": "t1", "passed": false, "run_id": run_id}
+                    {
+                        "id": 0, "title": "t0", "type": "genesis", "passed": true,
+                        "pass_rate": 100.0, "passed_stages": 1, "total_stages": 1,
+                        "regressed": [], "regression_severity": 0,
+                        "effective_cost_usd": 0.01, "status": "passed", "run_id": run_id
+                    },
+                    {
+                        "id": 1, "title": "t1", "type": "feature", "passed": false,
+                        "pass_rate": 0.0, "passed_stages": 0, "total_stages": 1,
+                        "regressed": [], "regression_severity": 0,
+                        "effective_cost_usd": 0.01, "status": "failed", "run_id": run_id
+                    }
                 ],
                 "reached": reached,
                 "regression_free_tickets": rf,
@@ -2979,8 +3087,16 @@ mod tests {
             });
             fs::write(
                 d.join("status.json"),
-                serde_json::json!({"state": state, "current_stage": 1, "rollup": rollup})
-                    .to_string(),
+                serde_json::json!({
+                    "state": state,
+                    "current_stage": 1,
+                    "rollup": rollup,
+                    // A running cell is only live while its writer is fresh
+                    // (round-12 P2; the exporter derives the console's
+                    // effective state).
+                    "updated_at": chrono::Utc::now().to_rfc3339(),
+                })
+                .to_string(),
             )
             .unwrap();
             if state == "done" {
@@ -3042,6 +3158,19 @@ mod tests {
             "running",
             "run_m5",
         );
+        // A second run of m2 (round-12 P3: repeat runs collapse into the
+        // best row with a `×N runs` disclosure).
+        cell(
+            "campaign_sdb-sql_m2b_20261017",
+            "m2",
+            Some(4),
+            2,
+            8.0,
+            0.04,
+            RULES_VERSION,
+            "done",
+            "run_m2b",
+        );
         cell(
             "campaign_sdb-kv_zzretired_20261017",
             "zz_retired_model",
@@ -3061,7 +3190,7 @@ mod tests {
             PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
                 .expect("sql board");
         assert_eq!(
-            summary.run_count, 4,
+            summary.run_count, 5,
             "poisoned and retired cells never publish"
         );
         let html = fs::read_to_string(out.join("index.html")).unwrap();
@@ -3081,6 +3210,107 @@ mod tests {
         );
         assert!(html.contains("stale 2026-10-16.12"), "{html}");
         assert!(html.contains("RUNNING"), "the live cell is badged: {html}");
+        // Round-12 P3: the console's strip, legend, `×N runs` and the
+        // older-rules divider.
+        assert!(html.contains("class=\"sq "), "labelled squares: {html}");
+        assert!(html.contains("class=\"legend\""), "one legend: {html}");
+        assert!(html.contains("class=\"strip\""), "{html}");
+        assert!(html.contains("×2 runs"), "repeat runs collapse: {html}");
+        assert!(
+            pos("m2") < pos("m2b") && pos("m2b") < pos("m1"),
+            "the duplicate run folds under its best: {html}"
+        );
+        assert!(
+            pos("older rule sets") < pos("m3"),
+            "the stale cell sits under the divider: {html}"
+        );
+        assert!(
+            pos("m5") < pos("older rule sets"),
+            "current rules before the divider: {html}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Round-12 P2: the portal derives the console's effective state — a
+    /// running cell whose writer is gone is stalled, never RUNNING.
+    #[test]
+    fn test_sql_board_marks_dead_running_cells_stalled() {
+        let dir = std::env::temp_dir().join(format!("sql_board_p2_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let runs = dir.join("runs");
+        let out = dir.join("portal");
+        let cell = |name: &str, model: &str, state: &str, updated: &str| {
+            let d = runs.join(name);
+            fs::create_dir_all(&d).unwrap();
+            let rollup = serde_json::json!({
+                "campaign_id": name,
+                "name": "sdb-sql",
+                "model": model,
+                "harness": "omp",
+                "effort": "high",
+                "task": "sql",
+                "started_at": "2026-10-17T09:00:00Z",
+                "finished_at": "2026-10-17T10:00:00Z",
+                "stages": [],
+                "reached": 1,
+                "regression_free_tickets": 1,
+                "points": 1.0,
+                "max_points": 36.0,
+                "rules_version": crate::report::rules::RULES_VERSION,
+                "total_cost_usd": 0.10,
+                "over_budget": false,
+                "over_wall": false
+            });
+            fs::write(
+                d.join("status.json"),
+                serde_json::json!({
+                    "state": state,
+                    "current_stage": 1,
+                    "updated_at": updated,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+        };
+        cell(
+            "campaign_sdb-sql_dead_20261017",
+            "dead-model",
+            "running",
+            &(chrono::Utc::now() - chrono::Duration::hours(20)).to_rfc3339(),
+        );
+        cell(
+            "campaign_sdb-sql_live_20261017",
+            "live-model",
+            "running",
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
+            .expect("sql board");
+        let html = fs::read_to_string(out.join("index.html")).unwrap();
+        let pos = |m: &str| {
+            html.find(m)
+                .unwrap_or_else(|| panic!("missing {m}: {html}"))
+        };
+        let row_end = |at: usize| {
+            html[at..]
+                .find("</tr>")
+                .map(|i| at + i + 5)
+                .unwrap_or(html.len())
+        };
+        let dead = pos("dead-model");
+        let seg = &html[dead..row_end(dead)];
+        assert!(
+            seg.contains("stalled"),
+            "a dead writer is stalled, not RUNNING: {seg}"
+        );
+        assert!(
+            !seg.contains("RUNNING"),
+            "a dead writer must not be RUNNING: {seg}"
+        );
+        let live = pos("live-model");
+        let seg = &html[live..row_end(live)];
+        assert!(seg.contains("RUNNING"), "a fresh writer stays live: {seg}");
         let _ = fs::remove_dir_all(&dir);
     }
 

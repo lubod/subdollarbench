@@ -979,6 +979,32 @@ tail, the proxied campaign POST, the merged validation+lock+status
 test; full lib suite 876 green; the CLI refusal and the API 409 were
 verified live.
 
+**Round-12 review fixes landed (2026-10-18, portal + ops; rules still
+`2026-10-18.17`)**. P1 (HIGH, the board kept getting wiped): pipeline step 13
+is deleted — the retired legacy exporter no longer runs after saved runs — and
+every writer now goes through `RunArchiver::resolve_portal_dir()`
+(`SDB_PORTAL_DIR`-aware, set by `isolate_test_runs_dir`), so `cargo test`
+cannot overwrite the served `portal/` (proved by hashing `portal/index.html`
+across a full suite run). The CLI `portal` command and `regen-reviews` now
+publish `export_sql_board` too; no code path can write the legacy page.
+P2: `export_sql_board` derives `campaign::effective_state` (muse shows
+`stalled`, not RUNNING). P3: the portal board matches the console — labelled
+ladder squares + one legend, repeat runs collapsed into `<details>×N runs`
+(folded runs named by campaign id, median noted), the "older rule sets
+(incomparable)" divider. Note A is folded into the `.17` rules history: the
+0.25 API-ratio default makes a $0.75 campaign's ticket 0 start at $0.1875 —
+the cap's effective ceiling binds, by design. Note B: after every rebuild,
+`sudo systemctl restart subdollarbench-engine subdollarbench-gui` (done; the
+units serve the current binary). The DeepSeek re-run on `.17` finished at
+10:59: **reached ticket 3, 3 regression-free, $0.4279, 7.0 tickets/$** —
+worse than its own `.16` cell (ticket 7, $0.7684), because ticket 4 failed
+and the `needs` chains skipped 5, 6, 10 and 11 outright; tickets 2/4/7/8/9
+failed on their own stages (2 and 9 by dataset drift after a write, 7/8 by
+`ERR syntax`), and ticket 3 "passed" while its agent stopped without READY
+(recorded as a fault summary beside a green suite). The `.16`-vs-`.17`
+comparison is the reviewer's; the harness note and SPEC collapse were in force
+for every `.17` attempt.
+
 **Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
 cell has run on it)**. **Host ops (O1), read this before starting anything**:
 the engine and GUI are systemd units (`subdollarbench-engine` on :3000,

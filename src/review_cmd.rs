@@ -80,19 +80,13 @@ pub async fn handle_regen_reviews(
             }
         }
     }
-    let summary = if rollup_only {
-        PortalExporter::export_sql_board(&runs_dir, &out)?
-    } else {
-        PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?
-    };
+    // Round-12 P1: both paths publish the sdb-sql board; the legacy page is
+    // retired (its flags stay accepted for CLI compatibility).
+    let _ = (&results_dir, &base_url, keep, rollup_only);
+    let summary = PortalExporter::export_sql_board(&runs_dir, &out)?;
     println!(
-        "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} {}",
+        "reviews: {done} regenerated, {skipped} skipped, {failed} failed; portal: {} cells",
         summary.run_count,
-        if rollup_only {
-            "models (rollup-only)"
-        } else {
-            "runs"
-        },
     );
     Ok(())
 }
@@ -622,8 +616,10 @@ mod tests {
         .unwrap();
 
         assert!(out.join("index.html").exists());
-        assert!(out.join("results.json").exists());
-        assert!(out.join("runs").is_dir());
+        // Round-12 P1: the regen path publishes the sdb-sql board; the
+        // legacy per-run pages and results.json are gone for good.
+        assert!(!out.join("results.json").exists());
+        assert!(!out.join("runs").is_dir());
         assert!(runs.join("job_skip/review.json").exists());
         assert!(!runs.join("job_batch/review.json").exists());
         assert!(!runs.join("job_nomanifest/review.json").exists());

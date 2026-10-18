@@ -20,8 +20,11 @@ use std::hash::{Hash, Hasher};
 ///   ladder stops as "budget cap" below a $0.02 floor; the clamp converts
 ///   the cap's *effective* headroom into the API dollars OMP enforces,
 ///   using the cell's observed api/effective ratio — 0.25 before the first
-///   attempt — so a 3.4x floor can no longer turn a $0.05 headroom into a
-///   $0.17 effective overshoot (round-11 findings 1-2), and the four
+///   attempt, which is *deliberately* conservative: a $0.75 campaign's
+///   ticket 0 starts with $0.1875 rather than its $0.20 ticket budget,
+///   because the cap's effective ceiling binds — so a 3.4x floor can no
+///   longer turn a $0.05 headroom into a $0.17 effective overshoot
+///   (round-11 findings 1-2), and the four
 ///   remaining prompt openers name a ticket as contract rather than claim
 ///   it passed (round-11 finding 3).
 /// - `2026-10-17.16`: the perf gate compares *net work* over the

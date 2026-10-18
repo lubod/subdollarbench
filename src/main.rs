@@ -1642,18 +1642,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             force,
         } => review_cmd::handle_review_run(run_id, runs_dir, model, api_key, force).await?,
 
-        Commands::Portal {
-            runs_dir,
-            results_dir,
-            out,
-            base_url,
-            keep,
-        } => {
-            println!("{}", "Exporting static portal...".bold().cyan());
-            let summary = PortalExporter::export(&runs_dir, &results_dir, &out, &base_url, keep)?;
+        Commands::Portal { runs_dir, out, .. } => {
+            // Round-12 P1: the legacy pre-sdb-sql page is retired; the
+            // public surface is the sdb-sql board (same as the engine's
+            // rebuild endpoint and the campaign finish).
+            println!("{}", "Exporting the sdb-sql board...".bold().cyan());
+            let summary = PortalExporter::export_sql_board(&runs_dir, &out)?;
             println!("{}", "✅ Portal exported!".bold().green());
             println!("  Output: {}", out);
-            println!("  Runs:   {}", summary.run_count);
+            println!("  Cells:  {}", summary.run_count);
             println!("  Deploy: rsync -az --delete {}/ <vps>:/srv/bench/", out);
         }
 
@@ -2750,7 +2747,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::Duration;
-    use subdollarbench::report::{BenchmarkRunResult, RunManifest, RunTokenUsage};
+    use subdollarbench::report::{BenchmarkRunResult, RunManifest};
 
     #[tokio::test]
     async fn test_main_cli_leaderboard() {
@@ -2887,6 +2884,9 @@ mod tests {
         }
     }
 
+    /// Round-12 P1: `portal` exports the sdb-sql board. The legacy pre-
+    /// sdb-sql page (with its per-run pages, console logs and
+    /// results.json) can no longer be written anywhere.
     #[tokio::test]
     async fn test_main_cli_portal_export() {
         let temp_dir =
@@ -2894,102 +2894,36 @@ mod tests {
         let runs_dir = temp_dir.join("runs");
         let results_dir = temp_dir.join("results");
         let out_dir = temp_dir.join("portal");
-        let run_id = "redis_test_model_20260910_000000";
-        let run_dir = runs_dir.join(run_id);
-        let _ = fs::create_dir_all(run_dir.join("workspace"));
-        fs::write(run_dir.join("workspace/main.py"), "print(1)").unwrap();
-        let manifest = RunManifest {
-            run_id: run_id.to_string(),
-            model: "test_model".to_string(),
-            task: "redis".to_string(),
-            status: "completed".to_string(),
-            language: "Python".to_string(),
-            effort: Some("low".to_string()),
-            effort_effective: None,
-            harness: None,
-            started_at: "2026-09-04T12:00:00Z".to_string(),
-            completed_at: "2026-09-04T12:01:00Z".to_string(),
-            duration_seconds: 60.0,
-            turns: Some(3),
-            pass_rate: 100.0,
-            passed_stages: 4,
-            total_stages: 4,
-            stages: Vec::new(),
-            rounds: Vec::new(),
-            robustness: Vec::new(),
-            throughput_req_sec: None,
-            reference_throughput_req_sec: None,
-            baseline_source: None,
-            ref_drift: None,
-            ref_image: None,
-            egress_enforced: None,
-            tokens: RunTokenUsage {
-                prompt_tokens: 100,
-                cached_tokens: 50,
-                completion_tokens: 20,
-                total_tokens: 120,
-            },
-            cost_usd: 0.01,
-            cost_source: None,
-            cost_formula_usd: None,
-            effective_cost_usd: Some(0.015),
-            savings_percent: 10.0,
-            efficiency_score: 66.6,
-            throughput_score: Some(66.6),
-            files: Vec::new(),
-            canary_echoed: None,
-            cutoff_turn1: None,
-            env: None,
-            git_commit: None,
-            total_trials: None,
-            pass_at_1: None,
-            pass_at_1_lo: None,
-            pass_at_1_hi: None,
-            stability: None,
-            trial_pass_rates: Vec::new(),
-            is_published: None,
-            method_version: Some("0.1.0".to_string()),
-            temperature: None,
-            top_p: None,
-            seed: None,
-            prompt_sha: None,
-            omp_version: None,
-            harness_version: None,
-
-            rules_version: None,
-            protocol: None,
-            solved: None,
-            solved_at: None,
-            best_stage_score: None,
-            repaired: None,
-            repair_attempted: None,
-            feedback_rounds: None,
-        };
+        // A legacy redis run must never publish...
+        let legacy = runs_dir.join("redis_test_model_20260910_000000");
+        fs::create_dir_all(legacy.join("workspace")).unwrap();
+        fs::write(legacy.join("workspace/main.py"), "print(1)").unwrap();
+        fs::write(legacy.join("console.log"), "key=sk-or-v1-SECRET123 done").unwrap();
+        // ...a campaign cell must.
+        let cell = runs_dir.join("campaign_sdb-sql_test_model_20261018_000000");
+        fs::create_dir_all(&cell).unwrap();
         fs::write(
-            run_dir.join("manifest.json"),
-            serde_json::to_string(&manifest).unwrap(),
-        )
-        .unwrap();
-        fs::write(run_dir.join("console.log"), "key=sk-or-v1-SECRET123 done").unwrap();
-        let _ = fs::create_dir_all(&results_dir);
-        let result = serde_json::json!({
-            "id": run_id, "model": "test_model", "task": "redis",
-            "language": "Python", "effort": "low",
-            "pass_rate": 100.0, "passed_stages": 4, "total_stages": 4,
-            "throughput_req_sec": null, "reference_throughput_req_sec": null,
-            "prompt_tokens": 100, "cached_tokens": 50, "completion_tokens": 20,
-            "total_cost_usd": 0.01, "effective_cost_usd": 0.015,
-            "duration_seconds": 60.0, "turns": 3, "savings_percent": 10.0,
-            "efficiency_score": 66.6, "throughput_score": 66.6,
-            // Must be >= portal::PUBLISH_FREEZE_TS or the exporter drops the row
-            // by design and the index assertion below cannot pass. Naive ISO,
-            // matching the row format the freeze is stored in.
-            "timestamp": "2026-09-28T12:01:00", "method_version": "0.1.0",
-            "total_trials": 1
-        });
-        fs::write(
-            results_dir.join(format!("{}.json", run_id)),
-            serde_json::to_string(&result).unwrap(),
+            cell.join("campaign.json"),
+            serde_json::json!({
+                "campaign_id": "campaign_sdb-sql_test_model_20261018_000000",
+                "name": "sdb-sql",
+                "model": "test-model",
+                "harness": "omp",
+                "effort": "high",
+                "task": "sql",
+                "started_at": "2026-10-18T00:00:00Z",
+                "finished_at": "2026-10-18T00:30:00Z",
+                "stages": [],
+                "reached": 2,
+                "regression_free_tickets": 2,
+                "points": 3.0,
+                "max_points": 36.0,
+                "rules_version": subdollarbench::report::rules::RULES_VERSION,
+                "total_cost_usd": 0.05,
+                "over_budget": false,
+                "over_wall": false
+            })
+            .to_string(),
         )
         .unwrap();
 
@@ -3005,11 +2939,14 @@ mod tests {
         assert!(run_cli(cli).await.is_ok());
 
         let index = fs::read_to_string(out_dir.join("index.html")).unwrap();
-        assert!(index.contains(run_id));
-        let log =
-            fs::read_to_string(out_dir.join("runs").join(run_id).join("console.log")).unwrap();
-        assert!(!log.contains("SECRET123"));
-
+        assert!(index.contains("sdb-sql campaign"), "{index}");
+        assert!(index.contains("test-model"), "{index}");
+        assert!(
+            !index.contains("redis_test_model"),
+            "legacy runs never publish: {index}"
+        );
+        assert!(!out_dir.join("runs").exists(), "no per-run pages any more");
+        assert!(!out_dir.join("results.json").exists());
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

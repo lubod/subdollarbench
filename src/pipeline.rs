@@ -13,7 +13,6 @@ use crate::cost::ModelPricing;
 use crate::report::archive::{RunArchiver, RunManifest, RunTokenUsage};
 use crate::report::judge::RunJudge;
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
-use crate::report::portal::PortalExporter;
 use crate::sandbox::docker::{RunGuard, SandboxManager, PROXY_UPSTREAM_PORTS};
 
 /// Upstream pool ports for a worker (base pool + worker*100 offset).
@@ -5008,15 +5007,11 @@ impl BenchmarkPipeline {
                     }
                 }
             }
-            // 13. Refresh the static portal mirror (includes any new review)
-            let portal_out = get_repo_root().join("portal");
-            let _ = PortalExporter::export(
-                runs_dir.to_str().unwrap_or("./runs"),
-                results_dir.to_str().unwrap_or("./results"),
-                portal_out.to_str().unwrap_or("./portal"),
-                "",
-                200,
-            );
+            // Round-12 P1: the static portal is the sdb-sql board now, and
+            // only `campaign run`, the engine's rebuild endpoint and
+            // hide/poison publish it. Step 13 wrote the retired legacy page
+            // into the real portal/ after every saved run — in tests it
+            // wiped the served board from an isolated runs dir.
         }
         // Revoke the capped run key on the happy path. Early returns above
         // (cancel/infra-error) revoke via the same call — see the helper:
