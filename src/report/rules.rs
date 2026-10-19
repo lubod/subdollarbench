@@ -8,6 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.25`: ticket 18 (hostile input and limits) — a scenario-only
+///   stage: the candidate is restarted with `SDB_SQL_PASSWORD` on a fresh
+///   scratch store; the harness checks AUTH (and that the password never
+///   reaches an error or a log), byte fuzzing and grammar mutations, a
+///   10,000-deep expression, a statement over 16 MiB, a 5 s statement
+///   cancellation, a slow-loris client, and the 256-connection cap. The
+///   candidate container gets room for 256 connection threads. The ladder
+///   is 19 tickets (max_points 56 -> 62).
 /// - `2026-10-19.24`: round-15 review — ticket 13 maps SQLite's PRIMARY
 ///   KEY/UNIQUE drop refusals to `constraint` and namespaces rename targets
 ///   and missing-table probes (H1/H2); ticket 16's memory cap also disables
@@ -548,7 +556,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.24";
+pub const RULES_VERSION: &str = "2026-10-19.25";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

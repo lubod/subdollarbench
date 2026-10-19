@@ -173,9 +173,30 @@ class-only stored expectations drift.
     refused the write and never applied it`, retry after freeing succeeds).
     Full suite green serialized (`--test-threads=1`: 938 passed /
     6 ignored, bins 60); fmt/clippy clean.
-- [ ] **T18. Hostile input and limits** (tier 6, needs 0)
-  - `AUTH`/`SDB_SQL_PASSWORD`, fuzz/mutation, 10k-deep nesting, 16 MiB
-    statements, 5 s cancel, slow-loris, 256-connection cap
+- [x] **T18. Hostile input and limits** (tier 6, needs 0)
+  — **landed 2026-10-19, rules `2026-10-19.25`**
+  - `security.rs`: scenario-only 18. The pipeline restarts the candidate on
+    a fresh scratch store with `SDB_SQL_PASSWORD` and `--pids-limit=1024`;
+    a raw authenticated client checks: missing/wrong AUTH -> `ERR auth`
+    with no password in the text; 60 deterministic byte-fuzz lines and 30
+    grammar mutations survive; a 10,001-deep expression -> `ERR limit`; a
+    16 MiB+1 statement -> `ERR limit` and the connection recovers; a
+    four-way join with 1e9 matches is cancelled at ~5 s with `ERR limit`;
+    a partial-line slow-loris does not delay another connection; the first
+    256 held connections are accepted, the 257th is refused, an existing
+    one answers, and the cap releases after closes. The pipeline also greps
+    the candidate's container logs for the password.
+  - the Python reference implements AUTH, the 16 MiB/nesting checks, a
+    SQLite progress-handler 5 s cancellation, slow-loris-safe threads and
+    the 256-connection cap; the candidate launch gained `--pids-limit`.
+  - campaign stage ($0.15/30, tier 6, needs 0, no lite) + prompt; ladder 19
+    tickets (max_points 62).
+  - gates: five mock tests (faithful, no auth, password leak, no limits,
+    uncapped) and the **stage-18 live eval-only proof** (19/19,
+    `Stage 18: Hostile input and limits -> PASS`, `[SECURITY] auth
+    enforced; ... 256-connection cap enforced`). Full suite serialized
+    (`--test-threads=1`: 947 passed / 6 ignored, bins 60); fmt/clippy
+    clean.
 - [ ] **T19. Replication and failover** (tier 7, needs 6; lite 2 nodes)
   - 3 nodes 7101-7103, `--replicaof`, `SHOW ROLE`/LSN, sync ack, failover
     and rejoin; the campaign harness runs one candidate container today, so

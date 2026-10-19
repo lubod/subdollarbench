@@ -23,6 +23,7 @@ import socket
 import sqlite3
 import sys
 import threading
+import time
 
 
 def mask_quoted(s):
@@ -134,6 +135,16 @@ STATS = {
     "connections_total": 0,
 }
 
+# Ticket 18: hostile input and limits. A password is optional (the
+# differential suites run without one); the limits apply always.
+PASSWORD = os.environ.get("SDB_SQL_PASSWORD", "")
+MAX_STMT = 16 * 1024 * 1024
+MAX_DEPTH = 10000
+MAX_CONNS = 256
+STMT_TIMEOUT = 5.0
+CONN_LOCK = threading.Lock()
+CONNS_CURRENT = 0
+
 
 def stats_bump(sql):
     if not sql.strip():
@@ -206,6 +217,8 @@ def classify(msg):
         return "full"
     if "attempt to write a readonly database" in msg:
         return "readonly"
+    if "interrupted" in msg:
+        return "limit"
     if "too many" in msg:
         return "limit"
     return None
@@ -351,7 +364,61 @@ def answer(conn, sql):
     return ("OK %d\n" % n).encode()
 
 
+def nesting_too_deep(sql):
+    depth = 0
+    in_q = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'":
+            if in_q and i + 1 < len(sql) and sql[i + 1] == "'":
+                i += 2
+                continue
+            in_q = not in_q
+        elif not in_q:
+            if ch == "(":
+                depth += 1
+                if depth >= MAX_DEPTH:
+                    return True
+            elif ch == ")":
+                depth -= 1
+        i += 1
+    return False
+
+
+def read_line_capped(f):
+    """One line, at most MAX_STMT+2 bytes; drain an oversized line."""
+    raw = f.readline(MAX_STMT + 2)
+    if not raw:
+        return None, False
+    # The statement is the line without its trailing newline. `readline`
+    # can overshoot the requested size by its final chunk, so compare the
+    # actual length rather than trusting the limit.
+    if len(raw) > MAX_STMT + 1:
+        if not raw.endswith(b"\n"):
+            while True:
+                chunk = f.readline(65536)
+                if not chunk or chunk.endswith(b"\n"):
+                    break
+        return raw, True
+    return raw, False
+
+
+def timed_answer(conn, sql):
+    start = time.monotonic()
+
+    def progress():
+        return 1 if time.monotonic() - start > STMT_TIMEOUT else 0
+
+    conn.set_progress_handler(progress, 1000)
+    try:
+        return answer(conn, sql)
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
 def serve(sock, db_path):
+    global CONNS_CURRENT
     conn = sqlite3.connect(db_path, isolation_level=None)
     with STATS_LOCK:
         STATS["connections_current"] += 1
@@ -365,11 +432,35 @@ def serve(sock, db_path):
     conn.execute("PRAGMA synchronous=FULL")
     f = sock.makefile("rwb")
     try:
-        for raw in f:
+        if PASSWORD:
+            raw = f.readline(65536)
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            if not line.startswith("AUTH ") or line[5:] != PASSWORD:
+                f.write(b"ERR auth authentication required\n")
+                f.flush()
+                return
+            f.write(b"OK 0\n")
+            f.flush()
+        while True:
+            raw, too_long = read_line_capped(f)
+            if raw is None:
+                break
+            if too_long:
+                stats_error()
+                f.write(b"ERR limit statement too large\n")
+                f.flush()
+                continue
             sql = raw.decode("utf-8", "replace").rstrip("\n")
+            if not sql.strip():
+                continue
             stats_bump(sql)
+            if nesting_too_deep(sql):
+                stats_error()
+                f.write(b"ERR limit nesting too deep\n")
+                f.flush()
+                continue
             try:
-                reply = answer(conn, sql)
+                reply = timed_answer(conn, sql)
             except Exception as e:
                 stats_error()
                 msg = str(e).replace("\n", " ")
@@ -384,6 +475,8 @@ def serve(sock, db_path):
     finally:
         with STATS_LOCK:
             STATS["connections_current"] -= 1
+        with CONN_LOCK:
+            CONNS_CURRENT -= 1
         try:
             conn.close()
         except Exception:
@@ -419,9 +512,19 @@ def main():
     keeper.execute("PRAGMA journal_mode=WAL")
     keeper.execute("PRAGMA synchronous=FULL")
     print("sdb-sql reference listening on %d (db %s)" % (port, db_path), flush=True)
+    global CONNS_CURRENT
     while True:
         conn, _ = srv.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        with CONN_LOCK:
+            if CONNS_CURRENT >= MAX_CONNS:
+                try:
+                    conn.sendall(b"ERR limit too many connections\n")
+                except Exception:
+                    pass
+                conn.close()
+                continue
+            CONNS_CURRENT += 1
         threading.Thread(target=serve, args=(conn, db_path), daemon=True).start()
 
 

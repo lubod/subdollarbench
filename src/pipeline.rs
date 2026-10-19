@@ -3866,6 +3866,103 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Ticket 18's hardening: the candidate is
+                            // restarted on a fresh scratch store with a
+                            // password and room for 256 connection threads,
+                            // then driven through AUTH, fuzzing, the
+                            // nesting/size/time limits, a slow-loris client
+                            // and the connection cap (docs/PROPOSAL-sdb-sql.md,
+                            // "18. Hostile input and limits"). The password
+                            // must not reach an error or the container logs.
+                            if late_failure.is_none() && wanted.contains(&18) {
+                                scenario_ran.push(18);
+                                let password = format!(
+                                    "sdb-sec-{:x}",
+                                    crate::verifier::sql::driver::stage_seed(verifier_seed, 18)
+                                );
+                                let scratch = sql_data.as_ref().map(|data| {
+                                    data.with_file_name(format!(
+                                        "{}-sec",
+                                        data.file_name()
+                                            .map(|n| n.to_string_lossy())
+                                            .unwrap_or_default()
+                                    ))
+                                });
+                                let mut sec_extras = extras.clone();
+                                if let Some(scratch) = &scratch {
+                                    let real_src = sql_data
+                                        .as_ref()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    for b in sec_extras.binds.iter_mut() {
+                                        if b.0 == real_src {
+                                            b.0 = scratch.display().to_string();
+                                        }
+                                    }
+                                }
+                                sec_extras
+                                    .env
+                                    .push(("SDB_SQL_PASSWORD".to_string(), password.clone()));
+                                sec_extras.pids_limit = Some("1024".to_string());
+                                let run = |e: &crate::sandbox::docker::CandidateRunExtras| {
+                                    restart_candidate(&sandbox.instance_id, workdir, port, e, true)
+                                };
+                                let container = sandbox.candidate_container_name();
+                                let body: Result<String, String> = (|| {
+                                    if let Some(scratch) = &scratch {
+                                        let _ = std::fs::remove_dir_all(scratch);
+                                        std::fs::create_dir_all(scratch)
+                                            .map_err(|e| format!("scratch store: {e}"))?;
+                                        logger.log(
+                                            "  [SECURITY] scenario runs on a fresh scratch store with SDB_SQL_PASSWORD set",
+                                        );
+                                    }
+                                    run(&sec_extras)?;
+                                    let addr = format!("127.0.0.1:{port}");
+                                    let report = crate::verifier::sql::security::scenario(
+                                        &addr,
+                                        &crate::verifier::sql::security::SecurityConfig::full(
+                                            password.clone(),
+                                        ),
+                                    )?;
+                                    // The password may not leak into logs either
+                                    // (the container is still the security one).
+                                    let out = std::process::Command::new("docker")
+                                        .args(["logs", &container])
+                                        .output()
+                                        .map_err(|e| format!("docker logs: {e}"))?;
+                                    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+                                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                                    if text.contains(&password) {
+                                        return Err(
+                                            "the password appeared in the candidate's logs"
+                                                .to_string(),
+                                        );
+                                    }
+                                    Ok(report)
+                                })(
+                                );
+                                let restored = run(&extras);
+                                if let Some(scratch) = &scratch {
+                                    let _ = std::fs::remove_dir_all(scratch);
+                                }
+                                match body {
+                                    Ok(report) => logger.log(&format!("  [SECURITY] {report}")),
+                                    Err(e) => {
+                                        logger.log(&format!("  [SECURITY] FAILED: {e}"));
+                                        late_failure = Some((18, format!("[security] {e}")));
+                                    }
+                                }
+                                if let Err(e) = restored {
+                                    logger.log(&format!(
+                                        "  [SECURITY] FAILED: back on the real store: {e}"
+                                    ));
+                                    if late_failure.is_none() {
+                                        late_failure =
+                                            Some((18, format!("[security] restart: {e}")));
+                                    }
+                                }
+                            }
                         }
                         // L1: a scenario-only ticket whose check never ran
                         // (an earlier differential stage or late check
@@ -9241,6 +9338,80 @@ main()
             (18, 18)
         );
         cleanup_covtest_network("sqldisk");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 18 live proof (eval-only, no model): the reference runs the
+    /// cumulative suite through stage 18; the hardening extra restarts it
+    /// with a password on a fresh scratch store and drives AUTH, fuzzing,
+    /// the nesting/size/time limits, a slow-loris client and the
+    /// 256-connection cap.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage18_security_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 76u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqlsec");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqlsec");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-18 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlsec");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 18,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=18).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..18).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-18 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 18: Hostile input and limits -> PASS",
+            "Stage 17: Incident: disk full -> PASS",
+            "Stage 16: Larger than memory -> PASS",
+            "[SECURITY] scenario runs on a fresh scratch store with SDB_SQL_PASSWORD set",
+            "[SECURITY] auth enforced; fuzz/mutations survived; nesting, 16777216-byte, 5s and slow-loris limits held; 256-connection cap enforced",
+            "[UPGRADE] sentinel for stage 18 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (19, 19)
+        );
+        cleanup_covtest_network("sqlsec");
         let _ = fs::remove_dir_all(&dir);
     }
 

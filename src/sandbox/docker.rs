@@ -131,6 +131,11 @@ pub struct CandidateRunExtras {
     /// data directory so restarts and the upgrade check see the same
     /// store). Values are harness-generated and shell-safe.
     pub launch_args: Vec<String>,
+    /// `--pids-limit` for the container. None means the default 256. The
+    /// security stage holds 256 connections (one thread each in the
+    /// reference), so it raises the limit to leave room for the server
+    /// process itself.
+    pub pids_limit: Option<String>,
 }
 
 impl Default for SandboxManager {
@@ -1507,6 +1512,7 @@ impl SandboxManager {
                 memory: None,
                 binds: Vec::new(),
                 launch_args: Vec::new(),
+                pids_limit: None,
             },
         )
     }
@@ -1703,7 +1709,13 @@ impl SandboxManager {
         if extras.memory.is_some() {
             args.push(format!("--memory-swap={memory}"));
         }
-        args.extend(["--cpus=2.0".into(), "--pids-limit=256".into()]);
+        args.extend([
+            "--cpus=2.0".into(),
+            format!(
+                "--pids-limit={}",
+                extras.pids_limit.as_deref().unwrap_or("256")
+            ),
+        ]);
         args.extend(Self::candidate_extras_args(extras));
         args.extend([
             "-v".into(),
@@ -2484,6 +2496,7 @@ mod tests {
             memory: Some("64m".to_string()),
             binds: vec![("/tmp/host-data".to_string(), "/data".to_string())],
             launch_args: Vec::new(),
+            pids_limit: None,
         };
         let args = SandboxManager::candidate_extras_args(&extras);
         assert!(args.windows(2).any(|w| w == ["--tmpfs", "/data:size=8m"]));
@@ -3768,6 +3781,7 @@ mod live_docker_cov_tests {
             memory: None,
             binds: Vec::new(),
             launch_args: Vec::new(),
+            pids_limit: None,
         };
         assert!(sm
             .start_candidate_in_docker_with(&ws, port, &extras)
@@ -3848,6 +3862,7 @@ mod live_docker_cov_tests {
                 bind_host.to_string_lossy().to_string(),
                 "/bound".to_string(),
             )],
+            pids_limit: None,
         };
         assert!(sm
             .start_candidate_in_docker_with(&ws, port, &extras)
