@@ -80,9 +80,26 @@ class-only stored expectations drift.
     whose create had failed, so the drop succeeded and the generator's
     schema model silently diverged (the probe now uses only non-unique
     indexes, guaranteed live).
-- [ ] **T14. Observability** (tier 5, needs 11)
-  - `EXPLAIN <select>` names `SCAN`/`INDEX` as appropriate; `SHOW STATS`
-    exact counter deltas after scripted traffic
+- [x] **T14. Observability** (tier 5, needs 11) — **landed 2026-10-19,
+  rules `2026-10-19.20`**
+  - `observability.rs`: `EXPLAIN <select>` must name `INDEX
+    <table>.<index>` for an indexed equality and `SCAN <table>` without
+    one (and not both); `SHOW STATS` (name/value rows) must move exactly
+    after a scripted mix of SELECT/INSERT/UPDATE/DELETE/BEGIN/COMMIT/
+    ROLLBACK plus one failing SELECT — `statements` counts every line
+    (the final SHOW included), kinds by first keyword even on failure,
+    `errors` counts ERR answers, and the connection gauge follows opens and
+    closes (a short retry absorbs TCP EOF latency).
+  - scenario-only: `scenario_only(14)`, a pipeline late-failure check, the
+    campaign stage ($0.12/24, tier 5, needs 11, no lite, acceptance
+    `0..=14`) and the prompt; the ladder is 15 tickets (max_points 39).
+  - the Python reference answers both statements (SQLite's planner is
+    translated into `INDEX t.ix`/`SCAN t`; the counters live in one
+    locked server-wide table).
+  - gates: four mock-server tests (faithful server, an index-ignoring plan
+    and silent counters both fail, five repeats), the **stage-14 live
+    eval-only proof** (15/15, `Stage 14: Observability -> PASS`), and the
+    unchanged 0/3000 differential soak (stage 14 adds no grammar).
 - [ ] **T15. Tests and CI gate** (tier 5, needs 7, 8; lite 60 % coverage)
   - `./test.sh` twice, coverage, sensitivity reverts of tickets 7/8; the CI
     stage machinery already exists (pipeline.rs, retired campaigns)

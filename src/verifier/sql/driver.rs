@@ -69,7 +69,7 @@ pub fn differential_supported(stage: u32) -> bool {
 /// grammar. Ticket 12 (concurrency) is the first; later tickets extend this
 /// as their scenarios land.
 pub fn scenario_only(stage: u32) -> bool {
-    stage == 12
+    matches!(stage, 12 | 14)
 }
 
 /// Whether the verifier can grade this stage at all: the differential

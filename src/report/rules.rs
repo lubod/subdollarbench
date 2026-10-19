@@ -8,6 +8,17 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.20`: ticket 14 (observability) — a scenario-only stage
+///   (no new grammar): `EXPLAIN <select>` answers a plan that names
+///   `INDEX <table>.<index>` for an indexed equality and `SCAN <table>`
+///   without one, and `SHOW STATS` answers the ten counters
+///   (statements/selects/inserts/updates/deletes/commits/rollbacks/errors/
+///   connections_current/connections_total) whose deltas after scripted
+///   traffic are exact: statements counts every line (the SHOW itself
+///   included), statement kinds are counted by first keyword even on
+///   failure, errors counts ERR answers, and the connection gauge counts
+///   open/accepted connections. The ladder is 15 tickets (max_points
+///   34 -> 39).
 /// - `2026-10-19.19`: ticket 13 (schema change) — differential grammar:
 ///   `ALTER TABLE ADD [COLUMN] [IF NOT EXISTS] name TYPE [DEFAULT lit]`
 ///   (existing rows read the default), `DROP [COLUMN] [IF EXISTS]`
@@ -508,7 +519,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.19";
+pub const RULES_VERSION: &str = "2026-10-19.20";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

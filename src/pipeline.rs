@@ -3323,6 +3323,28 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Stage 14's suite: EXPLAIN plans and exact
+                            // SHOW STATS counters (docs/PROPOSAL-sdb-sql.md,
+                            // "14. Observability").
+                            if late_failure.is_none() && wanted.contains(&14) {
+                                let ns =
+                                    crate::verifier::sql::driver::stage_seed(verifier_seed, 14)
+                                        ^ 0x5E27_1E10_0000_000E;
+                                let addr = format!("127.0.0.1:{port}");
+                                match crate::verifier::sql::observability::scenario(
+                                    &addr,
+                                    std::time::Duration::from_secs(10),
+                                    ns,
+                                ) {
+                                    Ok(()) => logger.log(
+                                        "  [OBSERVABILITY] EXPLAIN names the index/scan; SHOW STATS deltas are exact",
+                                    ),
+                                    Err(e) => {
+                                        logger.log(&format!("  [OBSERVABILITY] FAILED: {e}"));
+                                        late_failure = Some((14, format!("[observability] {e}")));
+                                    }
+                                }
+                            }
                             // Stage 11's perf gate: an index must change
                             // speed, not answers (docs/PROPOSAL-sdb-sql.md,
                             // "11. Indexes"). Timing is not part of the
@@ -8321,8 +8343,80 @@ main()
     /// Ticket 13 live proof: the reference (SQLite) runs the whole accepted
     /// suite through stage 13, including the ALTER-heavy differential
     /// script, the schema-change stage and the cumulative extras.
+    /// Ticket 14 live proof: the reference answers the plan and the counter
+    /// statements, and the cumulative suite through stage 14 passes.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage14_observability_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 90u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqlobs");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqlobs");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-14 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlobs");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 14,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=14).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..14).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-14 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 14: Observability -> PASS",
+            "Stage 13: Schema change -> PASS",
+            "Stage 12: Concurrency and isolation -> PASS",
+            "Stage 11: Indexes + perf gate -> PASS",
+            "[OBSERVABILITY] EXPLAIN names the index/scan",
+            "[UPGRADE] sentinel for stage 14 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (15, 15)
+        );
+        cleanup_covtest_network("sqlobs");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage13_schema_change_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let worker = 89u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         // A previous failed run's reference holds this worker's host port;
@@ -8388,8 +8482,16 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The SQL live proofs through stage 11 each run the cumulative suite,
+    /// including the perf gate (which needs an idle host) and their own
+    /// reference container. Run them one at a time; three parallel gates
+    /// turn timing into noise.
+    static SQL_PERF_LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage11_indexes_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let worker = 88u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlidx");

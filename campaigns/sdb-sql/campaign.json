@@ -3,7 +3,7 @@
   "version": 1,
   "task": "sql",
   "title": "sdb-sql: a SQL database, verified differentially",
-  "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition ships tickets 0-13 (query core, storage and transactions, relational features, concurrency, schema change); later tickets land as their verifiers do.",
+  "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition ships tickets 0-14 (query core, storage and transactions, relational features, concurrency, schema change, observability); later tickets land as their verifiers do.",
   "ladder": "continue",
   "stages": [
     {
@@ -364,6 +364,37 @@
       "id": 13,
       "budget_usd": 0.12,
       "max_turns": 30
+    },
+    {
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "prompt": "stages/14_observability/prompt.md",
+      "type": "ops",
+      "tier": 5,
+      "needs": [
+        11
+      ],
+      "title": "Observability",
+      "id": 14,
+      "budget_usd": 0.12,
+      "max_turns": 24
     }
   ]
 }

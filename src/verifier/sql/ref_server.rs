@@ -118,6 +118,46 @@ def translate_ddl(sql):
     return head + "(" + ", ".join(cols) + ") " + options
 
 
+# Ticket 14: exact service counters for SHOW STATS. One lock for the whole
+# server; each connection thread bumps it.
+STATS_LOCK = threading.Lock()
+STATS = {
+    "statements": 0,
+    "selects": 0,
+    "inserts": 0,
+    "updates": 0,
+    "deletes": 0,
+    "commits": 0,
+    "rollbacks": 0,
+    "errors": 0,
+    "connections_current": 0,
+    "connections_total": 0,
+}
+
+
+def stats_bump(sql):
+    if not sql.strip():
+        return
+    first = sql.split(None, 1)[0].upper()
+    kind = {
+        "SELECT": "selects",
+        "INSERT": "inserts",
+        "UPDATE": "updates",
+        "DELETE": "deletes",
+        "COMMIT": "commits",
+        "ROLLBACK": "rollbacks",
+    }.get(first)
+    with STATS_LOCK:
+        STATS["statements"] += 1
+        if kind:
+            STATS[kind] += 1
+
+
+def stats_error():
+    with STATS_LOCK:
+        STATS["errors"] += 1
+
+
 def classify(msg):
     if msg.startswith("no such table") or msg.startswith("no such index"):
         return "no_table"
@@ -238,6 +278,36 @@ def answer(conn, sql):
         return b"OK 0\n"
     sql = rewritten
     cur = conn.cursor()
+    first = sql.split(None, 1)[0].upper() if sql.split() else ""
+    if first == "SHOW":
+        parts = sql.split(None, 1)
+        if len(parts) < 2 or parts[1].strip().upper() != "STATS":
+            raise ValueError("syntax error")
+        with STATS_LOCK:
+            items = sorted(STATS.items())
+        lines = ["ROWS 2", "name\tvalue"]
+        lines.extend("%s\t%d" % (k, v) for k, v in items)
+        lines.append("END %d" % len(items))
+        return ("\n".join(lines) + "\n").encode()
+    if first == "EXPLAIN":
+        parts = sql.split(None, 1)
+        if len(parts) < 2:
+            raise ValueError("syntax error")
+        # The dialect's plan names INDEX <table>.<index> or SCAN <table>;
+        # SQLite's planner supplies the decision.
+        cur.execute("EXPLAIN QUERY PLAN " + parts[1])
+        plan = []
+        for row in cur.fetchall():
+            detail = str(row[-1])
+            m = re.match(r"SEARCH (\S+) USING (?:COVERING )?INDEX (\S+)", detail, re.I)
+            if m:
+                plan.append("INDEX %s.%s" % (m.group(1), m.group(2)))
+            else:
+                plan.append(detail)
+        lines = ["ROWS 1", "plan"]
+        lines.extend(plan)
+        lines.append("END %d" % len(plan))
+        return ("\n".join(lines) + "\n").encode()
     before = conn.total_changes
     # The dialect's statement atomicity: a failing statement changes
     # nothing. The host's SQLite (3.45) keeps the rows a failed multi-row
@@ -279,6 +349,9 @@ def answer(conn, sql):
 
 def serve(sock, db_path):
     conn = sqlite3.connect(db_path, isolation_level=None)
+    with STATS_LOCK:
+        STATS["connections_current"] += 1
+        STATS["connections_total"] += 1
     conn.execute("PRAGMA foreign_keys=ON")
     # Ticket 5's crash ladder: acked commits must survive SIGKILL (FULL
     # fsyncs the WAL on commit) and a torn *newest* file must recover; WAL
@@ -290,9 +363,11 @@ def serve(sock, db_path):
     try:
         for raw in f:
             sql = raw.decode("utf-8", "replace").rstrip("\n")
+            stats_bump(sql)
             try:
                 reply = answer(conn, sql)
             except Exception as e:
+                stats_error()
                 msg = str(e).replace("\n", " ")
                 cls = classify(msg)
                 if cls is None:
@@ -303,6 +378,8 @@ def serve(sock, db_path):
             f.write(reply)
             f.flush()
     finally:
+        with STATS_LOCK:
+            STATS["connections_current"] -= 1
         try:
             conn.close()
         except Exception:
