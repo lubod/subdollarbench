@@ -50,11 +50,36 @@ mean of the two middles for even counts: 7 + 13 -> 10.0, tested); N5
 sentinel compares `ERR` answers by class, because the N5 text made the
 class-only stored expectations drift.
 
-- [ ] **T13. Schema change** (tier 4, needs 4; differential)
-  - generator/oracle: `ALTER TABLE ADD/DROP/RENAME COLUMN`, `RENAME TO`,
-    `IF [NOT] EXISTS`; `DROP COLUMN` on an indexed column is
-    `ERR constraint`; every change survives restart and keeps indexes valid
-  - raise `MAX_DIFFERENTIAL_STAGE` to 13; sweep + agreement + soak through 13
+- [x] **T13. Schema change** (tier 4, needs 4; differential) — **landed
+  2026-10-19, rules `2026-10-19.19`**
+  - grammar: `ALTER TABLE ADD [COLUMN] [IF NOT EXISTS] name TYPE
+    [DEFAULT lit]` (existing rows read the default), `DROP [COLUMN]
+    [IF EXISTS]` (PK/UNIQUE/indexed refused as `constraint`, missing column
+    `no_column`, a missing name under `IF EXISTS` is OK 0), `RENAME COLUMN
+    old TO new`, `RENAME TO new` (taken names `exists`, unknown
+    `no_column`/`no_table`); indexes and foreign keys follow renames; every
+    change survives restart. `MAX_DIFFERENTIAL_STAGE` is 13.
+  - the live schema matters: SQLite has no ALTER `IF [NOT] EXISTS`, so the
+    oracle (Rust) emulates the existence check from `sqlite_master` /
+    `pragma_table_info`, and the Python reference twin does the same (it
+    also strips a trailing `;` before parsing — a stale `name;` token made
+    one DROP silently no-op and was the only live-proof failure).
+  - the toy engine (the soak/agreement reference) parses and executes all
+    four forms, including the `if_[not]_exists` no-ops and the
+    PK/UNIQUE/indexed drop refusals; names follow indexes and references.
+  - spec: stage 13 ($0.12/30, tier 4, needs 4, no lite, acceptance
+    `0..=13`) and the prompt; the ladder is 14 tickets (max_points 34).
+  - gates: the toy↔oracle agreement and mutant sweeps pass with the new
+    profile (129 `verifier::sql` tests); the reference passes every stage
+    20×; the stage-13 live eval-only proof passes (14/14, stage-13 PASS,
+    sentinel written); **0/3000 soak through stage 13 passes**
+    (`clean_toy_soak`, 55.6 s) — it found two more bugs, both fixed and
+    pinned: the toy skipped an `INSERT ... SELECT` width check when the
+    SELECT had zero rows (SQLite checks it at prepare time), and the
+    generator's "drop an indexed column" probe could pick a UNIQUE index
+    whose create had failed, so the drop succeeded and the generator's
+    schema model silently diverged (the probe now uses only non-unique
+    indexes, guaranteed live).
 - [ ] **T14. Observability** (tier 5, needs 11)
   - `EXPLAIN <select>` names `SCAN`/`INDEX` as appropriate; `SHOW STATS`
     exact counter deltas after scripted traffic

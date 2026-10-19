@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.19`: ticket 13 (schema change) — differential grammar:
+///   `ALTER TABLE ADD [COLUMN] [IF NOT EXISTS] name TYPE [DEFAULT lit]`
+///   (existing rows read the default), `DROP [COLUMN] [IF EXISTS]`
+///   (PK/UNIQUE/indexed refused as `constraint`, missing column `no_column`,
+///   a missing name under `IF EXISTS` is OK 0), `RENAME COLUMN old TO new`
+///   and `RENAME TO new` (taken names are `exists`, unknown names
+///   `no_column`/`no_table`); SQLite has no ALTER `IF [NOT] EXISTS`, so the
+///   oracle and the reference emulate the existence check from the live
+///   schema. Indexes and foreign keys follow renames; every change survives
+///   restart. The ladder is 14 tickets (max_points 30 -> 34).
 /// - `2026-10-19.18`: ticket 12 (concurrency and isolation) — a
 ///   scenario-only stage (no new grammar): the lost-update check
 ///   (16 clients x 50 read-modify-write transactions must end at exactly
@@ -498,7 +508,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.18";
+pub const RULES_VERSION: &str = "2026-10-19.19";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

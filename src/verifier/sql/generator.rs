@@ -24,7 +24,7 @@
 //!   DEFAULT only appear when the profile enables `constraints`.
 
 use super::oracle::{Oracle, OracleOutcome};
-use super::schema::{self, Rng, Schema, Table, Ty};
+use super::schema::{self, DefaultVal, Rng, Schema, Table, Ty};
 use std::collections::HashMap;
 
 /// Grammar features unlocked by passed stages. Cumulative via [`union`].
@@ -53,6 +53,9 @@ pub struct Profile {
     pub subqueries: bool,
     /// `CREATE [UNIQUE] INDEX` / `DROP INDEX` (ticket 11).
     pub indexes: bool,
+    /// `ALTER TABLE` schema changes (ticket 13): add/drop/rename columns
+    /// and tables, with the `IF [NOT] EXISTS` forms.
+    pub alter: bool,
     /// `LEFT [OUTER] JOIN` (stage 8 full only; the lite variant keeps
     /// inner/comma joins).
     pub left_join: bool,
@@ -87,6 +90,8 @@ impl Profile {
             }
             10 => p.subqueries = true,
             11 => p.indexes = true,
+            12 => {}
+            13 => p.alter = true,
             9 => p.constraints = true,
             _ => {}
         }
@@ -110,6 +115,7 @@ impl Profile {
             left_join: self.left_join || o.left_join,
             subqueries: self.subqueries || o.subqueries,
             indexes: self.indexes || o.indexes,
+            alter: self.alter || o.alter,
             constraints: self.constraints || o.constraints,
         }
     }
@@ -1023,6 +1029,344 @@ impl Generator {
         let sql = format!("{create}{uniq}{index} {name} {on} {tname} ({col})");
         self.indexes.push((name, tname, col, unique));
         self.stmt(sql, Kind::Create, false)
+    }
+
+    /// `ALTER TABLE` schema changes (ticket 13). The model learns every
+    /// successful change and ignores the deliberate-error probes; SQLite's
+    /// rules bound what is emittable (no dropping a UNIQUE/PK/indexed
+    /// column, at least two columns stay).
+    pub fn alter_stmt(&mut self) -> Statement {
+        if self.rng.chance(30) {
+            return self.alter_probe();
+        }
+        match self.rng.below(6) {
+            0 | 1 => self.alter_add(),
+            2 => self.alter_drop(),
+            3 | 4 => self.alter_rename_column(),
+            _ => self.alter_rename_table(),
+        }
+    }
+
+    /// `ALTER TABLE <table> <tail>` with randomized keyword case. All
+    /// keyword draws happen before the call (two mutable borrows of self in
+    /// one expression do not compile).
+    fn alter_kw_sql(&mut self, table: &str, tail: &str) -> String {
+        let alter = self.kw("ALTER");
+        let table_kw = self.kw("TABLE");
+        format!("{alter} {table_kw} {table} {tail}")
+    }
+
+    /// A column name no table uses (bounds/seen are keyed by name globally,
+    /// so a shared name would blur them).
+    fn fresh_column_name(&mut self) -> String {
+        loop {
+            self.uniq += 1;
+            let cand = format!("c{}", self.uniq);
+            if self
+                .schema
+                .tables
+                .iter()
+                .all(|t| t.columns.iter().all(|c| c.name != cand))
+            {
+                return cand;
+            }
+        }
+    }
+
+    /// A table name no table or index uses (they share SQLite's namespace).
+    fn fresh_table_name(&mut self, skip: &str) -> String {
+        loop {
+            self.uniq += 1;
+            let cand = format!("t{}", self.uniq);
+            if cand != skip
+                && self.schema.tables.iter().all(|t| t.name != cand)
+                && !self.indexes.iter().any(|(n, _, _, _)| n == &cand)
+            {
+                return cand;
+            }
+        }
+    }
+
+    fn alter_add(&mut self) -> Statement {
+        let ti = self.pick_table();
+        let tname = self.schema.tables[ti].name.clone();
+        let if_not_exists = self.rng.chance(30);
+        let ty = if self.rng.chance(50) {
+            Ty::Integer
+        } else {
+            Ty::Text
+        };
+        // Half of the IF NOT EXISTS forms name a live column: a no-op the
+        // dialect defines (and a probe the candidate must answer OK 0).
+        let (name, creates) = if if_not_exists && self.rng.chance(50) {
+            let cols = &self.schema.tables[ti].columns;
+            let c = cols[self.rng.below(cols.len() as u64) as usize]
+                .name
+                .clone();
+            (c, false)
+        } else {
+            (self.fresh_column_name(), true)
+        };
+        let default = if creates && self.rng.chance(40) {
+            Some(match ty {
+                Ty::Integer => DefaultVal::Int(self.int_value()),
+                Ty::Text => DefaultVal::Text(format!("v{}", self.uniq)),
+            })
+        } else {
+            None
+        };
+        let mut parts = vec![
+            self.kw("ALTER"),
+            self.kw("TABLE"),
+            tname,
+            self.kw("ADD"),
+            self.kw("COLUMN"),
+        ];
+        if if_not_exists {
+            parts.push(self.kw("IF"));
+            parts.push(self.kw("NOT"));
+            parts.push(self.kw("EXISTS"));
+        }
+        parts.push(name.clone());
+        parts.push(ty.sql().to_string());
+        if let Some(d) = &default {
+            parts.push(self.kw("DEFAULT"));
+            parts.push(d.sql());
+        }
+        if creates {
+            self.schema.tables[ti].columns.push(schema::Column {
+                name: name.clone(),
+                ty,
+                primary_key: false,
+                unique: false,
+                not_null: false,
+                default: default.clone(),
+                references: None,
+            });
+            if let Some(d) = &default {
+                let b = match d {
+                    DefaultVal::Int(v) => u128::from(v.unsigned_abs()),
+                    DefaultVal::Text(s) => s.chars().count() as u128,
+                };
+                let e = self.bounds.entry(name.clone()).or_insert(0);
+                *e = (*e).max(b);
+                // Existing rows hold the default, so comparisons may use it.
+                self.seen.entry(name.clone()).or_default().push(d.sql());
+            }
+        }
+        self.stmt(parts.join(" "), Kind::Create, false)
+    }
+
+    fn alter_drop(&mut self) -> Statement {
+        let mut cands: Vec<(usize, String)> = Vec::new();
+        for (ti, t) in self.schema.tables.iter().enumerate() {
+            if t.columns.len() <= 2 {
+                continue;
+            }
+            for c in &t.columns {
+                if c.primary_key || c.unique {
+                    continue;
+                }
+                if self
+                    .indexes
+                    .iter()
+                    .any(|(_, it, ic, _)| it == &t.name && ic == &c.name)
+                {
+                    continue;
+                }
+                cands.push((ti, c.name.clone()));
+            }
+        }
+        if cands.is_empty() {
+            return self.alter_add();
+        }
+        let (ti, col) = cands[self.rng.below(cands.len() as u64) as usize].clone();
+        let tname = self.schema.tables[ti].name.clone();
+        let if_exists = self.rng.chance(30);
+        // Sometimes name a missing column: `IF EXISTS` makes it OK 0.
+        let (col, drops) = if if_exists && self.rng.chance(40) {
+            (self.fresh_column_name(), false)
+        } else {
+            (col, true)
+        };
+        let mut parts = vec![
+            self.kw("ALTER"),
+            self.kw("TABLE"),
+            tname,
+            self.kw("DROP"),
+            self.kw("COLUMN"),
+        ];
+        if if_exists {
+            parts.push(self.kw("IF"));
+            parts.push(self.kw("EXISTS"));
+        }
+        parts.push(col.clone());
+        if drops {
+            let cols = &mut self.schema.tables[ti].columns;
+            if let Some(pos) = cols.iter().position(|c| c.name == col) {
+                cols.remove(pos);
+            }
+        }
+        self.stmt(parts.join(" "), Kind::Create, false)
+    }
+
+    fn alter_rename_column(&mut self) -> Statement {
+        let ti = self.pick_table();
+        let tname = self.schema.tables[ti].name.clone();
+        let cols = &self.schema.tables[ti].columns;
+        let old = cols[self.rng.below(cols.len() as u64) as usize]
+            .name
+            .clone();
+        let new = self.fresh_column_name();
+        // SQLite follows the rename in indexes and foreign keys.
+        if let Some(c) = self.schema.tables[ti]
+            .columns
+            .iter_mut()
+            .find(|c| c.name == old)
+        {
+            c.name = new.clone();
+        }
+        for (_, t, c, _) in self.indexes.iter_mut() {
+            if t == &tname && c == &old {
+                *c = new.clone();
+            }
+        }
+        for other in self.schema.tables.iter_mut() {
+            for c in other.columns.iter_mut() {
+                if let Some((pt, pc)) = &mut c.references {
+                    if pt == &tname && pc == &old {
+                        *pc = new.clone();
+                    }
+                }
+            }
+        }
+        // Keep the column's known values available under its new name.
+        if let Some(v) = self.seen.get(&old).cloned() {
+            self.seen.entry(new.clone()).or_default().extend(v);
+        }
+        if let Some(b) = self.bounds.get(&old).copied() {
+            let e = self.bounds.entry(new.clone()).or_insert(0);
+            *e = (*e).max(b);
+        }
+        let rename = self.kw("RENAME");
+        let column_kw = self.kw("COLUMN");
+        let to = self.kw("TO");
+        let sql = self.alter_kw_sql(&tname, &format!("{rename} {column_kw} {old} {to} {new}"));
+        self.stmt(sql, Kind::Create, false)
+    }
+
+    fn alter_rename_table(&mut self) -> Statement {
+        let ti = self.pick_table();
+        let old = self.schema.tables[ti].name.clone();
+        let new = self.fresh_table_name(&old);
+        self.schema.tables[ti].name = new.clone();
+        if let Some(v) = self.rows.remove(&old) {
+            self.rows.insert(new.clone(), v);
+        }
+        for (_, t, _, _) in self.indexes.iter_mut() {
+            if t == &old {
+                *t = new.clone();
+            }
+        }
+        // A renamed table keeps its columns; only `references` in other
+        // tables name tables, and SQLite updates those too.
+        for other in self.schema.tables.iter_mut() {
+            for c in other.columns.iter_mut() {
+                if let Some((pt, _)) = &mut c.references {
+                    if pt == &old {
+                        *pt = new.clone();
+                    }
+                }
+            }
+        }
+        let rename = self.kw("RENAME");
+        let to = self.kw("TO");
+        let sql = self.alter_kw_sql(&old, &format!("{rename} {to} {new}"));
+        self.stmt(sql, Kind::Create, false)
+    }
+
+    /// The ticket-13 error probes: duplicate add, missing drop, dropping an
+    /// indexed column (constraint), a missing table, a taken rename target.
+    fn alter_probe(&mut self) -> Statement {
+        match self.rng.below(5) {
+            0 => {
+                let ti = self.pick_table();
+                let (tname, cols) = self.table_infos(ti);
+                let col = cols[self.rng.below(cols.len() as u64) as usize]
+                    .name
+                    .clone();
+                let ty = if self.rng.chance(50) {
+                    Ty::Integer
+                } else {
+                    Ty::Text
+                };
+                let add = self.kw("ADD");
+                let column_kw = self.kw("COLUMN");
+                let sql =
+                    self.alter_kw_sql(&tname, &format!("{add} {column_kw} {col} {}", ty.sql()));
+                self.stmt(sql, Kind::Probe, false)
+            }
+            1 => {
+                let ti = self.pick_table();
+                let tname = self.schema.tables[ti].name.clone();
+                let missing = self.fresh_column_name();
+                let drop = self.kw("DROP");
+                let column_kw = self.kw("COLUMN");
+                let sql = self.alter_kw_sql(&tname, &format!("{drop} {column_kw} {missing}"));
+                self.stmt(sql, Kind::Probe, false)
+            }
+            2 => {
+                // Only a *non-unique* index is certainly live: a UNIQUE
+                // create over duplicate values fails but the registry keeps
+                // it (safe for value choice), so probing that column's drop
+                // would be refused by the model and accepted by the database.
+                let live: Vec<(String, String)> = self
+                    .indexes
+                    .iter()
+                    .filter(|(_, _, _, unique)| !unique)
+                    .map(|(_, t, c, _)| (t.clone(), c.clone()))
+                    .collect();
+                match live.get(self.rng.below(live.len().max(1) as u64) as usize) {
+                    Some((tname, col)) => {
+                        let (tname, col) = (tname.clone(), col.clone());
+                        let drop = self.kw("DROP");
+                        let column_kw = self.kw("COLUMN");
+                        let sql = self.alter_kw_sql(&tname, &format!("{drop} {column_kw} {col}"));
+                        self.stmt(sql, Kind::Probe, false)
+                    }
+                    None => self.alter_probe_missing_table(),
+                }
+            }
+            3 => self.alter_probe_missing_table(),
+            _ => {
+                if self.schema.tables.len() >= 2 {
+                    let a = self.rng.below(self.schema.tables.len() as u64) as usize;
+                    let mut b = self.rng.below(self.schema.tables.len() as u64) as usize;
+                    if b == a {
+                        b = (b + 1) % self.schema.tables.len();
+                    }
+                    let from = self.schema.tables[a].name.clone();
+                    let to_name = self.schema.tables[b].name.clone();
+                    let rename = self.kw("RENAME");
+                    let to = self.kw("TO");
+                    let sql = self.alter_kw_sql(&from, &format!("{rename} {to} {to_name}"));
+                    self.stmt(sql, Kind::Probe, false)
+                } else {
+                    self.alter_probe_missing_table()
+                }
+            }
+        }
+    }
+
+    fn alter_probe_missing_table(&mut self) -> Statement {
+        let missing = self.fresh_table_name("none");
+        let add = self.kw("ADD");
+        let column_kw = self.kw("COLUMN");
+        let sql = self.alter_kw_sql(
+            &missing,
+            &format!("{add} {column_kw} c0 {}", Ty::Integer.sql()),
+        );
+        self.stmt(sql, Kind::Probe, false)
     }
 
     /// True when a live UNIQUE index covers `tname (col)`. Such a column
@@ -2234,13 +2578,23 @@ impl Generator {
         let w_insert = 24u64;
         let w_insert_select = if self.profile.subqueries { 12 } else { 0 };
         let w_index = if self.profile.indexes { 8 } else { 0 };
+        // Ticket 13's schema changes stay outside transactions: the
+        // generator's schema model stays exact without a txn snapshot.
+        let w_alter = if self.profile.alter { 10 } else { 0 };
         let w_select = 40u64;
         let w_update = if self.profile.update { 14 } else { 0 };
         let w_delete = if self.profile.delete { 6 } else { 0 };
         let w_probe = 10u64;
         let w_txn = if self.profile.txn { 10 } else { 0 };
-        let total =
-            w_insert + w_insert_select + w_index + w_select + w_update + w_delete + w_probe + w_txn;
+        let total = w_insert
+            + w_insert_select
+            + w_index
+            + w_alter
+            + w_select
+            + w_update
+            + w_delete
+            + w_probe
+            + w_txn;
         let mut roll = self.rng.below(total);
         if roll < w_insert {
             let ti = self.pick_table();
@@ -2255,6 +2609,10 @@ impl Generator {
             return self.index_stmt();
         }
         roll -= w_index;
+        if roll < w_alter {
+            return self.alter_stmt();
+        }
+        roll -= w_alter;
         if roll < w_select {
             return self.select_stmt();
         }

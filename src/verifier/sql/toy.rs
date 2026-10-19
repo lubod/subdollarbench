@@ -354,6 +354,31 @@ enum Stmt {
     /// `CREATE [UNIQUE] INDEX name ON table (col)`; the flag is `UNIQUE`.
     CreateIndex(String, String, String, bool),
     DropIndex(String),
+    /// `ALTER TABLE t ADD [COLUMN] [IF NOT EXISTS] name TYPE [DEFAULT lit]`.
+    AlterAdd {
+        table: String,
+        if_not_exists: bool,
+        name: String,
+        ty: Ty,
+        default: Option<V>,
+    },
+    /// `ALTER TABLE t DROP [COLUMN] [IF EXISTS] name`.
+    AlterDrop {
+        table: String,
+        if_exists: bool,
+        name: String,
+    },
+    /// `ALTER TABLE t RENAME COLUMN old TO new`.
+    AlterRenameColumn {
+        table: String,
+        old: String,
+        new: String,
+    },
+    /// `ALTER TABLE t RENAME TO new`.
+    AlterRenameTable {
+        old: String,
+        new: String,
+    },
     /// `INSERT INTO t [(cols)] SELECT ...`.
     InsertSelect(String, Option<Vec<String>>, Box<Sel>),
     Insert(String, Option<Vec<String>>, Vec<Vec<Expr>>),
@@ -369,7 +394,9 @@ const RESERVED: &[&str] = &[
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "FROM", "WHERE", "ORDER", "BY", "LIMIT",
     "OFFSET", "DISTINCT", "VALUES", "SET", "INTO", "AS", "AND", "OR", "NOT", "IS", "ASC", "DESC",
     "TABLE", "JOIN", "INNER", "LEFT", "OUTER", "ON", "GROUP", "HAVING", "NULL", "UNIQUE", "INDEX",
-    "DROP",
+    // `EXISTS` is deliberately not reserved: the expression parser
+    // recognises it as the subquery operator (ticket 10).
+    "DROP", "ALTER", "RENAME", "TO", "IF", "COLUMN", "ADD",
 ];
 
 // ----- parser ----------------------------------------------------------------
@@ -471,6 +498,8 @@ impl P {
         } else if self.eat_kw("DROP") {
             self.expect_kw("INDEX")?;
             Stmt::DropIndex(self.ident()?)
+        } else if self.eat_kw("ALTER") {
+            self.alter()?
         } else if self.eat_kw("BEGIN") {
             Stmt::Begin
         } else if self.eat_kw("COMMIT") {
@@ -486,6 +515,70 @@ impl P {
         } else {
             Err(ErrClass::Syntax)
         }
+    }
+
+    /// `ALTER TABLE` (ticket 13): add/drop/rename columns and tables, with
+    /// the `IF [NOT] EXISTS` forms.
+    fn alter(&mut self) -> R<Stmt> {
+        self.expect_kw("TABLE")?;
+        let table = self.ident()?;
+        if self.eat_kw("ADD") {
+            self.eat_kw("COLUMN");
+            let if_not_exists = if self.eat_kw("IF") {
+                self.expect_kw("NOT")?;
+                self.expect_kw("EXISTS")?;
+                true
+            } else {
+                false
+            };
+            let name = self.ident()?;
+            let ty = if self.eat_kw("INTEGER") {
+                Ty::Int
+            } else if self.eat_kw("TEXT") {
+                Ty::Text
+            } else {
+                return Err(ErrClass::Syntax);
+            };
+            let mut default = None;
+            if self.eat_kw("DEFAULT") {
+                default = Some(self.literal()?);
+            }
+            return Ok(Stmt::AlterAdd {
+                table,
+                if_not_exists,
+                name,
+                ty,
+                default,
+            });
+        }
+        if self.eat_kw("DROP") {
+            self.eat_kw("COLUMN");
+            let if_exists = if self.eat_kw("IF") {
+                self.expect_kw("EXISTS")?;
+                true
+            } else {
+                false
+            };
+            return Ok(Stmt::AlterDrop {
+                table,
+                if_exists,
+                name: self.ident()?,
+            });
+        }
+        if self.eat_kw("RENAME") {
+            if self.eat_kw("COLUMN") {
+                let old = self.ident()?;
+                self.expect_kw("TO")?;
+                let new = self.ident()?;
+                return Ok(Stmt::AlterRenameColumn { table, old, new });
+            }
+            self.expect_kw("TO")?;
+            return Ok(Stmt::AlterRenameTable {
+                old: table,
+                new: self.ident()?,
+            });
+        }
+        Err(ErrClass::Syntax)
     }
 
     fn create(&mut self) -> R<Stmt> {
@@ -1977,6 +2070,120 @@ impl Toy {
             Stmt::CreateIndex(name, table, col, unique) => {
                 self.create_index(&name, &table, &col, unique)
             }
+            Stmt::AlterAdd {
+                table,
+                if_not_exists,
+                name,
+                ty,
+                default,
+            } => {
+                let Some(tbl) = self.tables.get_mut(&table) else {
+                    return Err(ErrClass::NoTable);
+                };
+                if tbl.cols.iter().any(|(c, _)| c == &name) {
+                    if if_not_exists {
+                        return Ok(Response::Ok(0));
+                    }
+                    return Err(ErrClass::Exists);
+                }
+                tbl.cols.push((name, ty));
+                tbl.cons.push(Cons {
+                    default: default.clone(),
+                    ..Cons::default()
+                });
+                let fill = default.unwrap_or(V::Null);
+                for row in tbl.rows.iter_mut() {
+                    row.push(fill.clone());
+                }
+                Ok(Response::Ok(0))
+            }
+            Stmt::AlterDrop {
+                table,
+                if_exists,
+                name,
+            } => {
+                let Some(tbl) = self.tables.get_mut(&table) else {
+                    return Err(ErrClass::NoTable);
+                };
+                let Some(idx) = tbl.cols.iter().position(|(c, _)| c == &name) else {
+                    if if_exists {
+                        return Ok(Response::Ok(0));
+                    }
+                    return Err(ErrClass::NoColumn);
+                };
+                // SQLite refuses PK/UNIQUE/indexed columns and the last
+                // column of a table.
+                let cons = &tbl.cons[idx];
+                if cons.pk || cons.unique {
+                    return Err(ErrClass::Constraint);
+                }
+                if self
+                    .indexes
+                    .values()
+                    .any(|(t, c, _)| t == &table && c == &name)
+                {
+                    return Err(ErrClass::Constraint);
+                }
+                if tbl.cols.len() <= 1 {
+                    return Err(ErrClass::Constraint);
+                }
+                tbl.cols.remove(idx);
+                tbl.cons.remove(idx);
+                for row in tbl.rows.iter_mut() {
+                    row.remove(idx);
+                }
+                Ok(Response::Ok(0))
+            }
+            Stmt::AlterRenameColumn { table, old, new } => {
+                let Some(tbl) = self.tables.get_mut(&table) else {
+                    return Err(ErrClass::NoTable);
+                };
+                let Some(idx) = tbl.cols.iter().position(|(c, _)| c == &old) else {
+                    return Err(ErrClass::NoColumn);
+                };
+                if tbl.cols.iter().any(|(c, _)| c == &new) {
+                    return Err(ErrClass::Exists);
+                }
+                tbl.cols[idx].0 = new.clone();
+                // SQLite follows the rename in indexes and foreign keys.
+                for (_, (t, c, _)) in self.indexes.iter_mut() {
+                    if t == &table && c == &old {
+                        *c = new.clone();
+                    }
+                }
+                for other in self.tables.values_mut() {
+                    for cons in other.cons.iter_mut() {
+                        if cons.references == Some((table.clone(), old.clone())) {
+                            cons.references = Some((table.clone(), new.clone()));
+                        }
+                    }
+                }
+                Ok(Response::Ok(0))
+            }
+            Stmt::AlterRenameTable { old, new } => {
+                if self.tables.contains_key(&new) || self.indexes.contains_key(&new) {
+                    return Err(ErrClass::Exists);
+                }
+                let Some(tbl) = self.tables.remove(&old) else {
+                    return Err(ErrClass::NoTable);
+                };
+                self.tables.insert(new.clone(), tbl);
+                for (_, (t, _, _)) in self.indexes.iter_mut() {
+                    if t == &old {
+                        *t = new.clone();
+                    }
+                }
+                for other in self.tables.values_mut() {
+                    for cons in other.cons.iter_mut() {
+                        if let Some((pt, _)) = &mut cons.references {
+                            if pt == &old {
+                                *pt = new.clone();
+                            }
+                        }
+                    }
+                }
+                Ok(Response::Ok(0))
+            }
             Stmt::DropIndex(name) => {
                 if self.indexes.remove(&name).is_none() {
                     return Err(ErrClass::NoTable);
@@ -2128,7 +2335,13 @@ impl Toy {
                 })
                 .collect::<R<_>>()?,
         };
-        let (_, rows) = self.run_sel(sel, None)?;
+        // SQLite checks the SELECT's declared width at prepare time, so a
+        // zero-row SELECT still fails with `arity` when the widths differ.
+        // The row loop below only sees actual rows; check the headers first.
+        let (headers, rows) = self.run_sel(sel, None)?;
+        if headers.len() != targets.len() {
+            return Err(ErrClass::Arity);
+        }
         let defaults = self.insert_defaults(name)?;
         let mut built: Vec<Vec<V>> = Vec::new();
         let mut failure: Option<ErrClass> = None;
@@ -2732,6 +2945,19 @@ mod tests {
     /// Long soak of the same agreement check (run on demand:
     /// `cargo test --lib clean_toy_soak -- --ignored`). Rare divergences,
     /// such as an overflow path the bounds miss, only show up at volume.
+    /// Ticket 13's soak found this: SQLite checks an `INSERT ... SELECT`'s
+    /// declared width at prepare time, so a zero-row SELECT whose width is
+    /// wrong is still `arity`.
+    #[test]
+    fn insert_select_width_is_checked_before_rows() {
+        let mut t = Toy::new(None);
+        assert!(t.exec("CREATE TABLE src (a INTEGER)").is_ok());
+        assert!(t.exec("CREATE TABLE dst (a INTEGER, b INTEGER)").is_ok());
+        assert!(t.exec("CREATE TABLE empty (a INTEGER)").is_ok());
+        let got = format!("{:?}", t.exec("INSERT INTO dst SELECT a, a, a FROM empty"));
+        assert!(got.contains("arity"), "{got}");
+    }
+
     #[test]
     #[ignore]
     fn clean_toy_soak() {

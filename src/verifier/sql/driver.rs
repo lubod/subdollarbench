@@ -56,10 +56,13 @@ pub fn stage_title(stage: u32) -> &'static str {
 /// adds transactions.
 /// The highest stage whose suite the differential generator covers. The
 /// soak derives from it, so it cannot fall behind a ticket again.
-pub const MAX_DIFFERENTIAL_STAGE: u32 = 11;
+pub const MAX_DIFFERENTIAL_STAGE: u32 = 13;
 
 pub fn differential_supported(stage: u32) -> bool {
-    stage <= MAX_DIFFERENTIAL_STAGE
+    // Stage 12 is scenario-only: it sits below the ceiling but has no
+    // grammar of its own, so its suite is the earlier differential profile
+    // plus the concurrency checks.
+    stage <= MAX_DIFFERENTIAL_STAGE && !scenario_only(stage)
 }
 
 /// Stages whose contract is a scripted scenario rather than new differential

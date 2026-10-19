@@ -102,6 +102,13 @@ pub fn classify(message: &str) -> Option<ErrClass> {
     let m = message;
     let starts = |p: &str| m.starts_with(p);
     let contains = |p: &str| m.contains(p);
+    if contains("duplicate column name")
+        || contains("already another table or index with this name")
+    {
+        // ALTER TABLE renames/adds that would take an existing name: a
+        // schema object's name is `exists`, like CREATE TABLE's.
+        return Some(ErrClass::Exists);
+    }
     if starts("no such table") || starts("no such index") {
         // An index is a schema object like a table: the dialect has no
         // separate class for it.
@@ -194,6 +201,12 @@ pub fn discard_reason(message: &str) -> Option<String> {
 }
 
 /// The SQLite-backed reference.
+enum AlterRewrite {
+    AsIs,
+    Noop,
+    Run(String),
+}
+
 pub struct Oracle {
     conn: Connection,
 }
@@ -394,7 +407,91 @@ impl Oracle {
     /// Execute one statement (DDL translated) and classify the outcome.
     pub fn exec(&self, stmt: &str) -> OracleOutcome {
         let stmt_trimmed = stmt.trim().trim_end_matches(';').trim();
-        self.run(&translate_ddl(stmt_trimmed))
+        // SQLite has no `IF [NOT] EXISTS` on ALTER; the dialect does. The
+        // rewrite needs the live schema, so it runs here, not in
+        // `translate_ddl`.
+        match self.alter_if_exists(stmt_trimmed) {
+            AlterRewrite::Noop => OracleOutcome::Affected(0),
+            AlterRewrite::Run(sql) => self.run(&translate_ddl(&sql)),
+            AlterRewrite::AsIs => self.run(&translate_ddl(stmt_trimmed)),
+        }
+    }
+
+    /// `ALTER TABLE ... ADD [COLUMN] IF NOT EXISTS c ...` and
+    /// `... DROP [COLUMN] IF EXISTS c` (ticket 13). A no-op when the
+    /// existence condition already holds; otherwise the plain statement runs.
+    fn alter_if_exists(&self, stmt: &str) -> AlterRewrite {
+        let toks: Vec<&str> = stmt.split_whitespace().collect();
+        let kw = |i: usize| toks.get(i).copied().unwrap_or("");
+        if !kw(0).eq_ignore_ascii_case("ALTER") || !kw(1).eq_ignore_ascii_case("TABLE") {
+            return AlterRewrite::AsIs;
+        }
+        let table = kw(2);
+        let table_exists = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1 COLLATE NOCASE",
+                [table],
+                |_| Ok(()),
+            )
+            .is_ok();
+        let column_exists = |name: &str| {
+            self.conn
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE",
+                    [table, name],
+                    |_| Ok(()),
+                )
+                .is_ok()
+        };
+        let mut i = 3;
+        if kw(i).eq_ignore_ascii_case("ADD") {
+            i += 1;
+            if kw(i).eq_ignore_ascii_case("COLUMN") {
+                i += 1;
+            }
+            if !(kw(i).eq_ignore_ascii_case("IF")
+                && kw(i + 1).eq_ignore_ascii_case("NOT")
+                && kw(i + 2).eq_ignore_ascii_case("EXISTS"))
+            {
+                return AlterRewrite::AsIs;
+            }
+            let Some(name) = toks.get(i + 3) else {
+                return AlterRewrite::AsIs;
+            };
+            let rest = toks[i + 3..].join(" ");
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {rest}");
+            if !table_exists {
+                return AlterRewrite::Run(sql);
+            }
+            if column_exists(name) {
+                AlterRewrite::Noop
+            } else {
+                AlterRewrite::Run(sql)
+            }
+        } else if kw(i).eq_ignore_ascii_case("DROP") {
+            i += 1;
+            if kw(i).eq_ignore_ascii_case("COLUMN") {
+                i += 1;
+            }
+            if !(kw(i).eq_ignore_ascii_case("IF") && kw(i + 1).eq_ignore_ascii_case("EXISTS")) {
+                return AlterRewrite::AsIs;
+            }
+            let Some(name) = toks.get(i + 2) else {
+                return AlterRewrite::AsIs;
+            };
+            let sql = format!("ALTER TABLE {table} DROP COLUMN {name}");
+            if !table_exists {
+                return AlterRewrite::Run(sql);
+            }
+            if column_exists(name) {
+                AlterRewrite::Run(sql)
+            } else {
+                AlterRewrite::Noop
+            }
+        } else {
+            AlterRewrite::AsIs
+        }
     }
 
     /// Run one statement. Whether it is a query is decided by SQLite itself
@@ -928,6 +1025,90 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Ticket 13: SQLite has no `IF [NOT] EXISTS` on ALTER; the oracle
+    /// emulates it from the live schema (no-op or plain statement), and the
+    /// ALTER error classes are mapped.
+    #[test]
+    fn alter_if_not_exists_is_emulated_from_the_schema() {
+        let o = Oracle::new().unwrap();
+        assert!(matches!(
+            o.exec("CREATE TABLE t (a INTEGER)"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("INSERT INTO t VALUES (1)"),
+            OracleOutcome::Affected(1)
+        ));
+        // ADD COLUMN without IF NOT EXISTS: a real column.
+        assert!(matches!(
+            o.exec("ALTER TABLE t ADD COLUMN b TEXT DEFAULT 'x'"),
+            OracleOutcome::Affected(0)
+        ));
+        // Existing rows read the default.
+        let seen = o.exec("SELECT b FROM t");
+        match seen {
+            OracleOutcome::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec!(Value::Text("x".to_string()))]);
+            }
+            other => panic!("expected the default in the new column: {other:?}"),
+        }
+        // IF NOT EXISTS on the live column is a no-op; on a missing one it
+        // adds the column.
+        assert!(matches!(
+            o.exec("ALTER TABLE t ADD COLUMN IF NOT EXISTS b INTEGER"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("ALTER TABLE t ADD COLUMN IF NOT EXISTS c INTEGER"),
+            OracleOutcome::Affected(0)
+        ));
+        // A duplicate add without IF is `exists`.
+        assert!(matches!(
+            o.exec("ALTER TABLE t ADD COLUMN c INTEGER"),
+            OracleOutcome::Error(ErrClass::Exists)
+        ));
+        // DROP IF EXISTS: a no-op for a missing column, plain otherwise.
+        assert!(matches!(
+            o.exec("ALTER TABLE t DROP COLUMN IF EXISTS zz"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("ALTER TABLE t DROP COLUMN c"),
+            OracleOutcome::Affected(0)
+        ));
+        // A missing table is still `no_table`, IF or not.
+        assert!(matches!(
+            o.exec("ALTER TABLE nope ADD COLUMN IF NOT EXISTS c INTEGER"),
+            OracleOutcome::Error(ErrClass::NoTable)
+        ));
+        // Renames; a taken name is `exists`.
+        assert!(matches!(
+            o.exec("ALTER TABLE t RENAME COLUMN b TO b2"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("ALTER TABLE t RENAME TO t2"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("CREATE TABLE t3 (x INTEGER)"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("ALTER TABLE t2 RENAME TO t3"),
+            OracleOutcome::Error(ErrClass::Exists)
+        ));
+        // Dropping an indexed column is `constraint`.
+        assert!(matches!(
+            o.exec("CREATE INDEX ix ON t2 (b2)"),
+            OracleOutcome::Affected(0)
+        ));
+        assert!(matches!(
+            o.exec("ALTER TABLE t2 DROP COLUMN b2"),
+            OracleOutcome::Error(ErrClass::Constraint)
+        ));
     }
 
     /// ALTER TABLE on a STRICT table compiles a nested quick_check SELECT,

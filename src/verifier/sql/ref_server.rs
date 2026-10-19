@@ -127,6 +127,9 @@ def classify(msg):
         return "no_column"
     if msg.startswith("ambiguous column name"):
         return "ambiguous"
+    if ("duplicate column name" in msg
+            or "already another table or index" in msg):
+        return "exists"
     if "already exists" in msg:
         return "exists"
     if msg.startswith("datatype mismatch") or "cannot store" in msg:
@@ -174,7 +177,66 @@ def encode_cell(v):
     raise ValueError("REAL/BLOB outside the dialect: %r" % (v,))
 
 
+def rewrite_alter_if_exists(conn, sql):
+    # SQLite has no IF [NOT] EXISTS on ALTER; the dialect does (ticket 13).
+    # The generator sometimes ends a statement with ';', and the oracle
+    # trims it before parsing; without the same trim a DROP's last token
+    # would be "col;" and the existence check would miss.
+    stripped = sql.strip().rstrip(";").strip()
+    toks = stripped.split()
+    if len(toks) < 5 or toks[0].lower() != "alter" or toks[1].lower() != "table":
+        return sql
+
+    def table_exists():
+        try:
+            return conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? COLLATE NOCASE",
+                (toks[2],)).fetchone() is not None
+        except Exception:
+            return False
+
+    def column_exists(name):
+        try:
+            return conn.execute(
+                "SELECT 1 FROM pragma_table_info(?) WHERE name = ? COLLATE NOCASE",
+                (toks[2], name)).fetchone() is not None
+        except Exception:
+            return False
+
+    def kw(j):
+        return toks[j].lower() if j < len(toks) else ""
+
+    i = 3
+    if kw(i) == "add":
+        i += 1
+        if kw(i) == "column":
+            i += 1
+        if (kw(i), kw(i + 1), kw(i + 2)) != ("if", "not", "exists") or i + 3 >= len(toks):
+            return sql
+        name = toks[i + 3]
+        out = "ALTER TABLE %s ADD COLUMN %s" % (toks[2], " ".join(toks[i + 3:]))
+        if not table_exists():
+            return out
+        return None if column_exists(name) else out
+    if kw(i) == "drop":
+        i += 1
+        if kw(i) == "column":
+            i += 1
+        if (kw(i), kw(i + 1)) != ("if", "exists") or i + 2 >= len(toks):
+            return sql
+        name = toks[i + 2]
+        out = "ALTER TABLE %s DROP COLUMN %s" % (toks[2], name)
+        if not table_exists():
+            return out
+        return None if not column_exists(name) else out
+    return sql
+
+
 def answer(conn, sql):
+    rewritten = rewrite_alter_if_exists(conn, sql)
+    if rewritten is None:
+        return b"OK 0\n"
+    sql = rewritten
     cur = conn.cursor()
     before = conn.total_changes
     # The dialect's statement atomicity: a failing statement changes

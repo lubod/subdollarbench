@@ -8318,6 +8318,76 @@ main()
     /// server driven through the real pipeline with acceptance [0..11],
     /// including the perf gate (two 200k-row tables, an indexed copy, 500
     /// alternating lookups, a restart, and the measured ratios).
+    /// Ticket 13 live proof: the reference (SQLite) runs the whole accepted
+    /// suite through stage 13, including the ALTER-heavy differential
+    /// script, the schema-change stage and the cumulative extras.
+    #[tokio::test]
+    async fn test_pipeline_eval_only_sql_stage13_schema_change_live() {
+        let worker = 89u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        // A previous failed run's reference holds this worker's host port;
+        // a new run would silently talk to that stale binary. Clear it.
+        cleanup_covtest_network("sqlschema");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqlschema");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-13 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlschema");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 13,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=13).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..13).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-13 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 13: Schema change -> PASS",
+            "Stage 12: Concurrency and isolation -> PASS",
+            "Stage 11: Indexes + perf gate -> PASS",
+            "Stage 4: Persistence -> PASS",
+            "[UPGRADE] sentinel for stage 13 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (14, 14)
+        );
+        cleanup_covtest_network("sqlschema");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage11_indexes_live() {
         let worker = 88u8;
