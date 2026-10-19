@@ -764,6 +764,153 @@ fn run_tests_ci_blocking(
     }
 }
 
+/// Ticket 15 (tests & CI gate, sdb-sql): the ticket ships `./test.sh`
+/// (offline, under 120 s), a coverage signal (Go measured here; other
+/// stacks self-report `coverage: NN.N%` in coverage.txt) and tests that
+/// catch regressions: reverting the stage-7 (aggregates) and stage-8
+/// (joins) commits in a scratch copy must make the suite red. The lite
+/// variant lowers the coverage gate to 60% and keeps sensitivity.
+fn run_tests_gate_blocking(
+    sandbox: SandboxManager,
+    workdir: PathBuf,
+    logger: Arc<dyn PipelineLogger>,
+    lite: bool,
+) -> crate::verifier::StageResult {
+    let name = "Stage 15: Tests and CI gate".to_string();
+    let fail = |e: String| crate::verifier::StageResult {
+        stage: 15,
+        name: name.clone(),
+        passed: false,
+        error: Some(e),
+    };
+    if !workdir.join("test.sh").is_file() {
+        return fail("./test.sh is missing at the repo root".to_string());
+    }
+    let run_suite = |dir: &Path| {
+        sandbox.run_workspace_command(
+            dir,
+            "if [ -x ./test.sh ]; then ./test.sh; else bash ./test.sh; fi",
+            120,
+        )
+    };
+    for attempt in 1..=2u32 {
+        match run_suite(&workdir) {
+            Ok((true, _)) => logger.log(&format!(
+                "  [TESTS] ./test.sh green (run {attempt}/2, offline, <= 120s)"
+            )),
+            Ok((false, out)) => {
+                return fail(format!(
+                    "./test.sh exited non-zero (run {attempt}/2): {}",
+                    output_tail(&out, 500)
+                ))
+            }
+            Err(e) => return fail(format!("./test.sh could not run (run {attempt}/2): {e}")),
+        }
+    }
+    let coverage = if workdir.join("go.mod").is_file() {
+        match sandbox.run_workspace_command(
+            &workdir,
+            "go test ./... -coverprofile=/tmp/sdb-cov.out >/dev/null 2>&1; go tool cover -func=/tmp/sdb-cov.out | tail -n 1",
+            120,
+        ) {
+            Ok((_, out)) => parse_go_coverage_total(&out),
+            Err(e) => return fail(format!("coverage measurement failed: {e}")),
+        }
+    } else {
+        std::fs::read_to_string(workdir.join("coverage.txt"))
+            .ok()
+            .and_then(|t| parse_self_coverage(&t))
+    };
+    let Some(cov) = coverage else {
+        return fail(
+            "no coverage signal: Go projects are measured by the harness via `go test -coverprofile`; other languages must write a `coverage: NN.N%` line into coverage.txt"
+                .to_string(),
+        );
+    };
+    let gate = if lite { 60.0 } else { 80.0 };
+    logger.log(&format!("  [TESTS] coverage {cov:.1}% (gate {gate}%)"));
+    if cov < gate {
+        return fail(format!("coverage {cov:.1}% is below the {gate}% gate"));
+    }
+
+    // Sensitivity: the stage-7 and stage-8 features must be covered by the
+    // candidate's own tests. Restore the parent's version of every file the
+    // commit changed, in a git-free scratch copy, and require the suite red.
+    let Some(parent) = workdir.parent() else {
+        return fail("workspace has no parent directory".to_string());
+    };
+    let log = match git_in(&workdir, &["log", "--format=%H %s"]) {
+        Ok(l) => l,
+        Err(e) => return fail(format!("git log failed: {e}")),
+    };
+    for stage in [7u32, 8u32] {
+        let Some(commit) = parse_stage_commit(&log, stage) else {
+            return fail(format!(
+                "no `stage {stage}` commit in the workspace history (the sensitivity check needs the feature it reverts)"
+            ));
+        };
+        let parent_commit = match git_in(&workdir, &["rev-parse", &format!("{commit}^")]) {
+            Ok(p) => p.trim().to_string(),
+            Err(e) => return fail(format!("stage {stage}: parent commit: {e}")),
+        };
+        let changed = match git_in(&workdir, &["diff", "--name-only", &parent_commit, &commit]) {
+            Ok(c) => c,
+            Err(e) => return fail(format!("stage {stage}: changed files: {e}")),
+        };
+        let scenario = parent.join(format!("s15-stage{stage}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scenario);
+        if let Err(e) = crate::campaign::copy_dir_excluding_git(&workdir, &scenario) {
+            let _ = std::fs::remove_dir_all(&scenario);
+            return fail(format!("stage {stage}: scratch copy failed: {e}"));
+        }
+        let revert = (|| -> Result<(), String> {
+            for f in changed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let target = scenario.join(f);
+                match git_in(&workdir, &["show", &format!("{parent_commit}:{f}")]) {
+                    Ok(content) => {
+                        if let Some(p) = target.parent() {
+                            let _ = std::fs::create_dir_all(p);
+                        }
+                        std::fs::write(&target, content)
+                            .map_err(|e| format!("write {}: {e}", target.display()))?;
+                    }
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&target);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = revert {
+            let _ = std::fs::remove_dir_all(&scenario);
+            return fail(format!("stage {stage}: sensitivity setup failed: {e}"));
+        }
+        let red = run_suite(&scenario);
+        let _ = std::fs::remove_dir_all(&scenario);
+        match red {
+            Ok((false, _)) => logger.log(&format!(
+                "  [TESTS] sensitivity ok: the suite goes red with the stage-{stage} feature reverted"
+            )),
+            Ok((true, _)) => {
+                return fail(format!(
+                    "./test.sh stayed green with the stage-{stage} feature reverted — the tests do not catch regressions"
+                ))
+            }
+            Err(e) => {
+                return fail(format!(
+                    "stage-{stage} sensitivity run could not execute: {e}"
+                ))
+            }
+        }
+    }
+    crate::verifier::StageResult {
+        stage: 15,
+        name,
+        passed: true,
+        error: None,
+    }
+}
+
 /// Stage 13 runner: three-node HA (ticket 10, operator decision Q1).
 /// Owns the whole cluster lifecycle: start ha1 master + ha2/ha3 replicas,
 /// check replication + sync-ack, SIGKILL the master, require automatic
@@ -3342,6 +3489,47 @@ impl BenchmarkPipeline {
                                     Err(e) => {
                                         logger.log(&format!("  [OBSERVABILITY] FAILED: {e}"));
                                         late_failure = Some((14, format!("[observability] {e}")));
+                                    }
+                                }
+                            }
+                            // Ticket 15's suite: the candidate's own
+                            // tests, coverage and sensitivity
+                            // (docs/PROPOSAL-sdb-sql.md, "15. Tests and CI
+                            // gate"). `./test.sh` runs in the sandbox.
+                            if late_failure.is_none() && wanted.contains(&15) {
+                                let lite = if wanted.iter().copied().max() == Some(15) {
+                                    lite_profile.iter().any(|p| p == "coverage-60")
+                                } else {
+                                    passed_lite.iter().any(|(s, p)| {
+                                        *s == 15 && p.iter().any(|f| f == "coverage-60")
+                                    })
+                                };
+                                let sandbox15 =
+                                    SandboxManager::with_id(&format!("s15-w{}", worker));
+                                let workdir15 = workdir.to_path_buf();
+                                let logger15 = logger.clone();
+                                match tokio::task::spawn_blocking(move || {
+                                    run_tests_gate_blocking(sandbox15, workdir15, logger15, lite)
+                                })
+                                .await
+                                {
+                                    Ok(st) if st.passed => logger.log(
+                                        "  [TESTS] the candidate's suite is green, covered, and sensitive to stage 7/8 regressions",
+                                    ),
+                                    Ok(st) => {
+                                        let why = st.error.unwrap_or_default();
+                                        logger.log(&format!("  [TESTS] FAILED: {why}"));
+                                        late_failure =
+                                            Some((15, format!("[tests] {why}")));
+                                    }
+                                    Err(e) => {
+                                        logger.log(&format!(
+                                            "  [TESTS] FAILED: the gate task failed: {e}"
+                                        ));
+                                        late_failure = Some((
+                                            15,
+                                            format!("[tests] the gate task failed: {e}"),
+                                        ));
                                     }
                                 }
                             }
@@ -7046,6 +7234,111 @@ main()
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Ticket 15's gate end-to-end against a real fixture (Docker + the
+    /// sandbox image): a repo with stage-6/7/8 commits, a green offline
+    /// `test.sh` and a coverage line passes (both reverts go red); a
+    /// toothless suite fails; the lite gate accepts 65% where the full gate
+    /// does not.
+    #[test]
+    fn test_tests_gate_sensitivity_end_to_end() {
+        // The perf-gate live proofs measure ratios; keep the extra Docker
+        // load out of their windows (same serialization as the SQL proofs).
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!("s15-ci-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let good = root.join("good");
+        std::fs::create_dir_all(&good).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&good)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(good.join("engine.py"), "BASE = True\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 6: Transactions [pass]"]);
+        std::fs::write(good.join("engine.py"), "BASE = True\nAGG = True\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 7: Aggregates [pass]"]);
+        std::fs::write(
+            good.join("engine.py"),
+            "BASE = True\nAGG = True\nJOIN = True\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 8: Joins [pass]"]);
+        std::fs::write(good.join("coverage.txt"), "coverage: 85.0%\n").unwrap();
+        let good_suite = "#!/bin/sh\nset -e\ngrep -q '^AGG = True' engine.py\ngrep -q '^JOIN = True' engine.py\n";
+        std::fs::write(good.join("test.sh"), good_suite).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                good.join("test.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+
+        let st = run_tests_gate_blocking(
+            SandboxManager::with_id(&format!("s15-good-{}", std::process::id())),
+            good.clone(),
+            Arc::new(DummyLogger),
+            false,
+        );
+        assert!(st.passed, "good fixture must pass: {:?}", st.error);
+
+        // Toothless: always green, so neither revert can fail it.
+        std::fs::write(good.join("test.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let st = run_tests_gate_blocking(
+            SandboxManager::with_id(&format!("s15-bad-{}", std::process::id())),
+            good.clone(),
+            Arc::new(DummyLogger),
+            false,
+        );
+        assert_eq!(st.stage, 15);
+        assert!(!st.passed, "toothless suite must fail");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("stayed green"),
+            "expected 'stayed green': {:?}",
+            st.error
+        );
+
+        // Coverage: 65% fails the full 80% gate but passes the lite 60% one.
+        std::fs::write(good.join("test.sh"), good_suite).unwrap();
+        std::fs::write(good.join("coverage.txt"), "coverage: 65.0%\n").unwrap();
+        let st = run_tests_gate_blocking(
+            SandboxManager::with_id(&format!("s15-cov-{}", std::process::id())),
+            good.clone(),
+            Arc::new(DummyLogger),
+            false,
+        );
+        assert!(!st.passed, "65% must fail the 80% gate");
+        assert!(
+            st.error.as_deref().unwrap_or("").contains("below the 80%"),
+            "expected the 80% verdict: {:?}",
+            st.error
+        );
+        let st = run_tests_gate_blocking(
+            SandboxManager::with_id(&format!("s15-lite-{}", std::process::id())),
+            good.clone(),
+            Arc::new(DummyLogger),
+            true,
+        );
+        assert!(st.passed, "65% must pass the lite 60% gate: {:?}", st.error);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn test_perf_gate_verdict() {
         // 1.3x boundary: exactly 130 passes, 129 fails with the ratio shown.
@@ -8410,6 +8703,144 @@ main()
             (15, 15)
         );
         cleanup_covtest_network("sqlobs");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 15 live proof (eval-only, no model): the reference workspace
+    /// ships an offline `test.sh`, a coverage line and stage-7/8 commits; the
+    /// real pipeline runs the cumulative suite through stage 15 and the gate
+    /// (two green runs, coverage, both sensitivity reverts) passes.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage15_tests_ci_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 86u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqltests");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqltests");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        // A stage-7/8 history the sensitivity check can revert: each commit
+        // adds a marker the suite greps for.
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&workdir)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "ref@example.com"]);
+        git(&["config", "user.name", "reference"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 6: Transactions [pass]"]);
+        // Keep `sql_server.py` byte-identical to the harness reference: the
+        // anti-cheat check recognizes that exact file and skips it.
+        std::fs::write(workdir.join("feature_aggregates.py"), "AGG = True\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 7: Aggregates [pass]"]);
+        std::fs::write(workdir.join("feature_joins.py"), "JOIN = True\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "stage 8: Joins [pass]"]);
+        std::fs::write(workdir.join("coverage.txt"), "coverage: 85.0%\n").unwrap();
+        let suite = format!(
+            "#!/bin/sh\n\
+             set -eu\n\
+             grep -q '^AGG = True' feature_aggregates.py\n\
+             grep -q '^JOIN = True' feature_joins.py\n\
+             ./start.sh &\n\
+             pid=$!\n\
+             trap 'kill $pid 2>/dev/null || true' EXIT\n\
+             python3 - {port} <<'PY'\n\
+             import socket, sys, time\n\
+             port = int(sys.argv[1])\n\
+             for _ in range(100):\n\
+             \x20   try:\n\
+             \x20       s = socket.create_connection((\"127.0.0.1\", port), 1)\n\
+             \x20       break\n\
+             \x20   except OSError:\n\
+             \x20       time.sleep(0.05)\n\
+             else:\n\
+             \x20   raise SystemExit(\"server did not start\")\n\
+             s.sendall(b\"SELECT 1;\\n\")\n\
+             line = s.makefile(\"rb\").readline()\n\
+             s.close()\n\
+             if not line.startswith(b\"ROWS\"):\n\
+             \x20   raise SystemExit(\"unexpected answer: %r\" % line)\n\
+             PY\n"
+        );
+        std::fs::write(workdir.join("test.sh"), suite).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                workdir.join("test.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-15 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqltests");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 15,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=15).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..15).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-15 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 15: Tests and CI gate -> PASS",
+            "Stage 14: Observability -> PASS",
+            "[TESTS] ./test.sh green (run 1/2, offline, <= 120s)",
+            "[TESTS] ./test.sh green (run 2/2, offline, <= 120s)",
+            "[TESTS] coverage 85.0% (gate 80%)",
+            "[TESTS] sensitivity ok: the suite goes red with the stage-7 feature reverted",
+            "[TESTS] sensitivity ok: the suite goes red with the stage-8 feature reverted",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (16, 16)
+        );
+        cleanup_covtest_network("sqltests");
         let _ = fs::remove_dir_all(&dir);
     }
 

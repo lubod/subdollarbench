@@ -100,9 +100,29 @@ class-only stored expectations drift.
     and silent counters both fail, five repeats), the **stage-14 live
     eval-only proof** (15/15, `Stage 14: Observability -> PASS`), and the
     unchanged 0/3000 differential soak (stage 14 adds no grammar).
-- [ ] **T15. Tests and CI gate** (tier 5, needs 7, 8; lite 60 % coverage)
-  - `./test.sh` twice, coverage, sensitivity reverts of tickets 7/8; the CI
-    stage machinery already exists (pipeline.rs, retired campaigns)
+- [x] **T15. Tests and CI gate** (tier 5, needs 7, 8; lite 60 % coverage)
+  — **landed 2026-10-19, rules `2026-10-19.21`**
+  - `run_tests_gate_blocking` (pipeline.rs): the candidate's `./test.sh`
+    runs twice in a sandbox container (`--network none`, 120 s cap each),
+    then the coverage signal (Go measured via `go test -coverprofile`;
+    other stacks self-report `coverage: NN.N%`), gate 80 % (lite 60 %),
+    then sensitivity: for each of tickets 7 and 8 the newest matching
+    `stage N` commit in the workspace history has its changed files
+    restored to the parent commit in a git-free scratch copy, and
+    `./test.sh` must go red.
+  - scenario-only: `scenario_only(15)`; the stage-15 extra runs on later
+    acceptances too (the persistent gate). Campaign stage: `$0.20/36`,
+    tier 5, needs `[7, 8]`, lite `coverage-60` at `$0.12/22` (weight 0.4);
+    full and lite prompts; the ladder is 16 tickets (max_points 44).
+  - gates: the Docker fixture test (a green suite passes; a toothless suite
+    fails "stayed green"; 65 % fails the 80 % gate but passes the lite one)
+    and the **stage-15 live eval-only proof** (16/16, `Stage 15: Tests and
+    CI gate -> PASS`, coverage 85 %, both sensitivity reverts logged).
+    The full suite is green serialized (`cargo test --lib --bins --
+    --test-threads=1`: 926 passed / 6 ignored, bins 60); under default
+    parallelism the long Docker live proofs (stage 13/14) can exceed a
+    start timeout and surface as `infra_error`, and each passes alone.
+    fmt/clippy clean.
 - [ ] **T16. Larger than memory** (tier 6, needs 2, 4)
   - 64 MiB cgroup, ~400 MiB rows, external sort and indexed join; reuses the
     redis verifier's cgroup plumbing

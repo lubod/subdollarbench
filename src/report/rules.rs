@@ -8,6 +8,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.21`: ticket 15 (tests and CI gate) — a scenario-only stage
+///   with a lite variant (coverage 60% vs 80%): the candidate ships an
+///   offline `./test.sh` that must pass twice in under 120 s per run, a
+///   coverage signal (Go measured, otherwise a `coverage: NN.N%` line in
+///   coverage.txt), and tests that go red when the ticket-7 (aggregates) or
+///   ticket-8 (joins) commit is reverted in a scratch copy (sensitivity).
+///   The ladder is 16 tickets (max_points 39 -> 44).
 /// - `2026-10-19.20`: ticket 14 (observability) — a scenario-only stage
 ///   (no new grammar): `EXPLAIN <select>` answers a plan that names
 ///   `INDEX <table>.<index>` for an indexed equality and `SCAN <table>`
@@ -519,7 +526,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.20";
+pub const RULES_VERSION: &str = "2026-10-19.21";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

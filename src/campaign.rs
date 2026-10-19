@@ -2979,14 +2979,16 @@ mod tests {
         );
     }
 
-    /// Ticket 12 landed (2026-10-19): the sdb-sql ladder is 13 stages and
-    /// the new one is scenario-only (concurrency) with its lite variant.
+    /// Tickets 12-15 landed (2026-10-19): concurrency (scenario-only, lite),
+    /// schema change (differential), observability (scenario-only) and the
+    /// tests/CI gate (scenario-only, lite). Pins each stage's spec and the
+    /// ladder's max points.
     #[test]
     fn test_real_sdb_sql_spec_has_ticket_12() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
         let lc = load_campaign_from(&root, "sdb-sql").unwrap();
         validate_spec(&lc.spec, &lc.root).unwrap();
-        assert_eq!(lc.spec.stages.len(), 15);
+        assert_eq!(lc.spec.stages.len(), 16);
         let s = lc.spec.stages.iter().find(|s| s.id == 12).unwrap();
         assert_eq!(s.title, "Concurrency and isolation");
         assert_eq!(s.kind, "engine");
@@ -3002,7 +3004,7 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(12));
         assert!(!crate::verifier::sql::driver::differential_supported(12));
         assert!(crate::verifier::sql::driver::stage_supported(12));
-        assert!(!crate::verifier::sql::driver::stage_supported(15));
+        assert!(!crate::verifier::sql::driver::stage_supported(16));
         // Every stage accepts itself and only declared ids.
         for st in &lc.spec.stages {
             assert!(
@@ -3037,9 +3039,27 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(14));
         assert!(!crate::verifier::sql::driver::differential_supported(14));
         assert!(crate::verifier::sql::driver::stage_supported(14));
-        assert!(!crate::verifier::sql::driver::stage_supported(15));
-        // Max points: ticket 12 (26 -> 30), 13 (30 -> 34), 14 (34 -> 39).
-        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 39.0);
+        // Ticket 15 (tests and CI gate): scenario-only, tier 5, needs 7/8,
+        // with a coverage-60 lite variant.
+        let s15 = lc.spec.stages.iter().find(|s| s.id == 15).unwrap();
+        assert_eq!(s15.title, "Tests and CI gate");
+        assert_eq!(s15.kind, "ops");
+        assert_eq!(s15.tier, 5);
+        assert_eq!(s15.needs, vec![7, 8]);
+        assert_eq!(s15.budget_usd, 0.20);
+        assert_eq!(s15.max_turns, 36);
+        assert_eq!(s15.acceptance.sql_stages, (0..=15u32).collect::<Vec<u32>>());
+        let lite15 = s15.lite.as_ref().expect("ticket 15 has a lite variant");
+        assert_eq!(lite15.profile, vec!["coverage-60".to_string()]);
+        assert_eq!(lite15.budget_usd, 0.12);
+        assert!(lite15.max_turns < s15.max_turns);
+        assert!(crate::verifier::sql::driver::scenario_only(15));
+        assert!(!crate::verifier::sql::driver::differential_supported(15));
+        assert!(crate::verifier::sql::driver::stage_supported(15));
+        assert!(!crate::verifier::sql::driver::stage_supported(16));
+        // Max points: ticket 12 (26 -> 30), 13 (30 -> 34), 14 (34 -> 39),
+        // 15 (39 -> 44).
+        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 44.0);
     }
 
     #[test]
