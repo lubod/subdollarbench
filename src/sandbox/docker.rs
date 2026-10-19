@@ -1695,10 +1695,15 @@ impl SandboxManager {
             "sdb.role=candidate".into(),
             "--name".into(),
             name.clone(),
-            format!("--memory={}", extras.memory.as_deref().unwrap_or("2g")),
-            "--cpus=2.0".into(),
-            "--pids-limit=256".into(),
         ];
+        // A memory limit without an explicit swap limit lets Docker add an
+        // equal amount of swap; a "hard" cap must disable it (round-15 M1).
+        let memory = extras.memory.as_deref().unwrap_or("2g");
+        args.push(format!("--memory={memory}"));
+        if extras.memory.is_some() {
+            args.push(format!("--memory-swap={memory}"));
+        }
+        args.extend(["--cpus=2.0".into(), "--pids-limit=256".into()]);
         args.extend(Self::candidate_extras_args(extras));
         args.extend([
             "-v".into(),

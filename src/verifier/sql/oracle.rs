@@ -132,8 +132,16 @@ pub fn classify(message: &str) -> Option<ErrClass> {
         // UNIQUE/NOT NULL/CHECK/FOREIGN KEY/PRIMARY KEY constraint failures.
         return Some(ErrClass::Constraint);
     }
-    if starts("cannot drop column") || contains("after drop column") {
-        // Indexed/PK column drops: the dialect refuses with `constraint`.
+    if starts("cannot drop column")
+        || contains("after drop column")
+        || contains("cannot drop PRIMARY KEY column")
+        || contains("cannot drop UNIQUE column")
+        || contains("cannot drop unique column")
+    {
+        // Indexed/PK/UNIQUE column drops: the dialect refuses with
+        // `constraint`. SQLite names the reason ("cannot drop PRIMARY KEY
+        // column", "cannot drop UNIQUE column"); both are the same contract
+        // class as an indexed drop.
         return Some(ErrClass::Constraint);
     }
     if starts("syntax error")
@@ -719,6 +727,10 @@ mod tests {
             ("SELEC * FROM t", ErrClass::Syntax),
             ("INSERT INTO t (n) VALUES ('x')", ErrClass::Type),
             ("INSERT INTO t (n) VALUES (1), (1)", ErrClass::Constraint),
+            // PK and UNIQUE columns: named refusals, same contract class as
+            // an indexed drop (round-15 H1).
+            ("ALTER TABLE t DROP COLUMN id", ErrClass::Constraint),
+            ("ALTER TABLE t DROP COLUMN n", ErrClass::Constraint),
             ("COMMIT", ErrClass::Txn),
         ];
         for (stmt, want) in cases {

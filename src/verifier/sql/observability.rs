@@ -124,10 +124,14 @@ pub fn explain_plans(
             "the plan for an indexed equality does not name {index:?}: {indexed:?}"
         ));
     }
-    if low
-        .iter()
-        .any(|l| l.contains("scan") && l.contains(&table.to_ascii_lowercase()))
-    {
+    let table_low = table.to_ascii_lowercase();
+    if low.iter().any(|l| {
+        l.contains("scan")
+            && l.contains(&table_low)
+            // "INDEX SCAN t.ix" names the index; it is an index plan, not
+            // an additional scan (round-15 L3).
+            && !l.contains("index")
+    }) {
         return Err(format!(
             "the plan for an indexed equality still scans {table}: {indexed:?}"
         ));
@@ -153,8 +157,22 @@ pub fn stats_deltas(addr: &str, timeout: Duration, table: &str) -> Result<(), St
         c.exec(&format!("CREATE TABLE {table} (id INTEGER, v TEXT)")),
         "CREATE TABLE",
     )?;
-    let base = stats(&mut c)?;
+    // A prior connection's close may land late; settle the gauge with two
+    // equal reads so a delayed EOF cannot move it across the baseline
+    // (round-15 L2).
+    let mut base = stats(&mut c)?;
     require_all(&base, "SHOW STATS (baseline)")?;
+    let settle_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let again = stats(&mut c)?;
+        require_all(&again, "SHOW STATS (baseline settle)")?;
+        let stable = again["connections_current"] == base["connections_current"];
+        base = again;
+        if stable || std::time::Instant::now() >= settle_deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 
     // The scripted traffic. `statements` counts every line, including the
     // final SHOW STATS; SELECTs are counted by their first keyword even when
@@ -292,6 +310,7 @@ mod tests {
     enum Mode {
         Good,
         IgnoresIndex,
+        IndexScan,
         BadStats,
     }
 
@@ -394,7 +413,11 @@ mod tests {
                     .find(|(_, t, c)| t == &table && low.contains(&format!("where {c} ")))
                     .map(|(n, _, _)| n.clone())
                     .unwrap_or_default();
-                format!("INDEX {table}.{name}")
+                if self.mode == Mode::IndexScan {
+                    format!("INDEX SCAN {table}.{name}")
+                } else {
+                    format!("INDEX {table}.{name}")
+                }
             } else {
                 format!("SCAN {table}")
             };
@@ -545,6 +568,14 @@ mod tests {
             err.contains("delta") || err.contains("moved"),
             "a silent counter must fail: {err}"
         );
+    }
+
+    /// Round-15 L3: "INDEX SCAN t.ix" is an index plan, not a second scan.
+    #[test]
+    fn an_index_scan_plan_line_is_accepted() {
+        let addr = serve(Mode::IndexScan);
+        let t = Duration::from_secs(10);
+        explain_plans(&addr, t, "ix_t", "ix_k").expect("INDEX SCAN names the index");
     }
 
     #[test]

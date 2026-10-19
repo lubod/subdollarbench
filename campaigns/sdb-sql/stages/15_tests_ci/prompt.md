@@ -10,19 +10,24 @@ signal, and tests that catch regressions.
    server (or whatever pieces it needs), exercises it, and exits 0 on
    success, non-zero on failure. Two consecutive runs must both pass, each
    in under **120 s**.
-2. **Coverage**: Go projects are measured by the harness
-   (`go test -coverprofile`); every other stack writes a line
-   `coverage: NN.N%` into `coverage.txt`. The gate is **80%**.
+2. **Coverage (measured for Go, self-reported otherwise)**: Go projects
+   are measured by the harness (`go test -coverprofile`); every other stack
+   writes a line `coverage: NN.N%` into `coverage.txt`. **That number is
+   taken on trust and is not independently verified.** The gate is **80%**.
 3. **Sensitivity** (the point of the ticket): in a scratch copy the harness
-   reverts the **ticket-7 (aggregates)** and **ticket-8 (joins)** changes.
-   With either feature gone, `./test.sh` must **fail** — a suite that stays
-   green without the feature is decoration, not a gate.
+   reverses the **ticket-7 (aggregates)** and **ticket-8 (joins)** diffs.
+   If a later ticket touched the same lines so the diff no longer applies
+   cleanly, it falls back to the pre-ticket versions of the files those
+   commits touched (the log says which). With either feature gone,
+   `./test.sh` must **fail** — a suite that stays green without the feature
+   is decoration, not a gate.
 4. The suite must be deterministic: no network, no wall-clock races, no
    "sleep until it eventually works". The harness runs it twice and both
    runs must be green.
-5. The sensitivity runs use a scratch copy of the workspace **without
-   `.git`**: `./test.sh` must be self-contained (do not shell out to
-   `git`, and do not rely on files that only exist outside the repo).
+5. The sensitivity scratch copies may or may not include `.git` (the
+   narrow diff check keeps it; the whole-file fallback does not), so
+   `./test.sh` must be self-contained: do not shell out to `git`, and do not
+   rely on files that only exist outside the repo.
 
 ## What the suite does
 

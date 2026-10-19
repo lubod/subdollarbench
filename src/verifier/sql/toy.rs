@@ -2966,6 +2966,11 @@ mod tests {
         let p = Profile::through(crate::verifier::sql::driver::MAX_DIFFERENTIAL_STAGE);
         for seed in 1000..4000u64 {
             let script = build_script(seed, &p, 300);
+            assert!(
+                script.unknown.is_empty(),
+                "seed {seed}: unmapped oracle messages: {:?}",
+                script.unknown
+            );
             let mut toy = Toy::new(None);
             if let Verdict::Fail(f) = run_script(&mut toy, &script) {
                 panic!(

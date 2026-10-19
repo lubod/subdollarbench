@@ -12,8 +12,9 @@ with ~900-byte text cells) and checks exact answers:
 1. **Full-table aggregate**: `SELECT COUNT(*), SUM(v), MIN(k), MAX(k)
    FROM big` over all 400,000 rows.
 2. **External sort**: `SELECT id FROM big ORDER BY t DESC, id DESC LIMIT
-   10`, where `t` is a 900-byte text column with no index. The sort must
-   spill to disk: buffering the table or the sort dies under the cap.
+   10`, where `t` is a 900-byte text column with no index. The sort must stay
+   within the cap: a 10-row heap for the LIMIT is fine, while buffering the
+   whole table or the whole sort dies under the cap.
 3. **Indexed join**: after `CREATE INDEX ... ON big (k)`, a join with the
    1,000-row `dim` table, aggregated to one row. A nested loop over
    400,000 × 1,000 rows will not finish inside the read timeout.

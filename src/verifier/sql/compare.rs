@@ -82,6 +82,17 @@ pub fn render_expected(expected: &OracleOutcome) -> String {
     }
 }
 
+/// Truncate a candidate-supplied error to `max` characters (char-safe) and
+/// mark the cut, so a traceback cannot dominate the feedback.
+fn cap_error_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 /// What the candidate actually sent, in the same shape as
 /// [`render_expected`].
 pub fn render_response(got: &Result<Response, String>) -> String {
@@ -92,7 +103,9 @@ pub fn render_response(got: &Result<Response, String>) -> String {
         // ("internal error: 'list' object has no attribute 'lower'"); the
         // class alone made every repair round repeat the same crash.
         Ok(Response::Err { class, text }) => {
-            let text = text.trim();
+            // N5 has no length cap (round-15 L5): a one-line traceback can be
+            // thousands of characters and would swamp the feedback/repro.
+            let text = cap_error_text(text.trim(), 300);
             if text.is_empty() {
                 format!("ERR {class}")
             } else {
@@ -412,5 +425,26 @@ mod tests {
             kind_of(compare(&u, &Response::Ok(0), false)),
             MismatchKind::Internal
         );
+    }
+
+    #[test]
+    fn candidate_error_text_is_capped_char_safely() {
+        let long = "é".repeat(1000);
+        let rendered = render_response(&Ok(Response::Err {
+            class: "syntax".into(),
+            text: long.clone(),
+        }));
+        // "ERR syntax " + 300 characters + the ellipsis.
+        assert!(
+            rendered.chars().count() <= 312,
+            "{}",
+            rendered.chars().count()
+        );
+        assert!(rendered.ends_with('…'));
+        let short = render_response(&Ok(Response::Err {
+            class: "syntax".into(),
+            text: " near \"x\"".into(),
+        }));
+        assert_eq!(short, "ERR syntax near \"x\"");
     }
 }

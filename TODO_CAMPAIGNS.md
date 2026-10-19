@@ -80,6 +80,12 @@ class-only stored expectations drift.
     whose create had failed, so the drop succeeded and the generator's
     schema model silently diverged (the probe now uses only non-unique
     indexes, guaranteed live).
+  - round-15 fixes: SQLite's `cannot drop PRIMARY KEY column` and
+    `cannot drop UNIQUE column` map to `constraint` (H1; the oracle and the
+    Python twin), the soak now asserts `script.unknown.is_empty()` (0/3000
+    passes again), and fresh rename/probe table names carry the seed
+    namespace `s{seed:x}_t{n}` (H2), with the reference 20× test extended
+    to stages 0..=13 on one store.
 - [x] **T14. Observability** (tier 5, needs 11) — **landed 2026-10-19,
   rules `2026-10-19.20`**
   - `observability.rs`: `EXPLAIN <select>` must name `INDEX
@@ -105,11 +111,14 @@ class-only stored expectations drift.
   - `run_tests_gate_blocking` (pipeline.rs): the candidate's `./test.sh`
     runs twice in a sandbox container (`--network none`, 120 s cap each),
     then the coverage signal (Go measured via `go test -coverprofile`;
-    other stacks self-report `coverage: NN.N%`), gate 80 % (lite 60 %),
-    then sensitivity: for each of tickets 7 and 8 the newest matching
-    `stage N` commit in the workspace history has its changed files
-    restored to the parent commit in a git-free scratch copy, and
-    `./test.sh` must go red.
+    other stacks self-report `coverage: NN.N%`, and the prompt says the
+    number is not independently verified; round-15 M2), gate 80 % (lite
+    60 %), then sensitivity: for each of tickets 7 and 8 the newest matching
+    `stage N` commit has its own diff reversed with `git apply -R --3way`
+    in a scratch copy that includes `.git`; if later work overlapped the
+    same lines, the changed files are restored to their parent versions and
+    the fallback is logged (round-15 M3). Either way `./test.sh` must go
+    red.
   - scenario-only: `scenario_only(15)`; the stage-15 extra runs on later
     acceptances too (the persistent gate). Campaign stage: `$0.20/36`,
     tier 5, needs `[7, 8]`, lite `coverage-60` at `$0.12/22` (weight 0.4);
@@ -126,7 +135,9 @@ class-only stored expectations drift.
 - [x] **T16. Larger than memory** (tier 6, needs 2, 4)
   — **landed 2026-10-19, rules `2026-10-19.22`**
   - `memory.rs`: scenario-only 16. The pipeline restarts the candidate on a
-    fresh scratch `<data>-mem` with `--memory=64m` (the real store is
+    fresh scratch `<data>-mem` with `--memory=64m --memory-swap=64m` (a
+    hard cap: Docker's implicit equal swap is disabled; round-15 M1). The
+    real store is
     restored afterwards, the scratch dropped), then the scenario creates
     `big` (400k rows, ~900-byte `t`, ~400 MiB on disk) and `dim` (1k rows),
     loads in 1k-row transactions, builds `big_k`, and checks COUNT/SUM/MIN/
@@ -146,12 +157,14 @@ class-only stored expectations drift.
   — **landed 2026-10-19, rules `2026-10-19.23`**
   - `disk.rs`: scenario-only 17. The pipeline restarts the candidate on a
     fresh 16 MiB tmpfs at `/sdb-data` (no host bind), seeds 40 × 64 KiB
-    rows, fills the volume via `docker exec dd` (a foreign `fill` file),
-    and requires a 2 MiB write to answer `ERR full` without being acked or
-    applied, a small write while full to also answer `ERR full`, and every
-    seed to read back byte-for-byte. The harness then removes the filler and
-    the same write must succeed **without a restart** and read back exactly.
-    The real store is restored afterwards.
+    rows, fills the volume via `docker exec dd` (a foreign `fill` file, to
+    the byte), and requires a 64 KiB write to answer `ERR full` without
+    being acked or applied, and every seed to read back byte-for-byte. The
+    harness then removes the filler and the same write must succeed
+    **without a restart** and read back exactly. A second write while full
+    is not required (an engine with a preallocated journal may persist a
+    small row legitimately; round-15 M4/LOW). The real store is restored
+    afterwards.
   - campaign stage ($0.15/30, tier 6, needs 5, no lite) + prompt; ladder 18
     tickets (max_points 56).
   - gates: four mock-server tests (faithful, acked write, applied refused
@@ -170,6 +183,42 @@ class-only stored expectations drift.
 - [ ] **T20. PostgreSQL wire protocol** (tier 7, needs 1; lite simple query)
   - protocol 3.0 on `--pg-port`: SSL refusal, ParameterStatus,
     simple + extended query, SQLSTATE mapping, psql cross-check
+
+### Round-15 review fixes (2026-10-19, rules `2026-10-19.24`)
+
+Applied in the reviewer's order; no ladder change (18 tickets, max 56).
+
+- **H1/H2 (ticket 13)**: PK/UNIQUE drop refusals now map to `constraint`
+  in both the Rust oracle and the Python reference; the soak asserts no
+  unmapped oracle messages (0/3000 green); rename targets and the
+  missing-table probe use the seed namespace; the reference 20× suite now
+  runs stages 0..=13 on one store (48 s).
+- **M1 (ticket 16)**: `--memory-swap=<same>` accompanies every
+  `extras.memory` cap; the stage-16 live proof passes with no swap.
+- **M2/M3 (ticket 15)**: the prompt now says non-Go coverage is an
+  unverified self-report; sensitivity reverse-applies only the ticket's
+  own diff with `git apply -R --3way` (index stat cache refreshed), logs
+  the whole-file fallback when later changes overlap, and the live proof
+  exercises the narrow mode for both tickets 7 and 8.
+- **M4 (ticket 17)**: both incident writes are 64 KiB (no statement-size
+  contract is needed); a second write while full is no longer required,
+  per the reviewer's LOW. The stage-17 live proof passes.
+- **L1**: a scenario-only stage whose late check never ran now reports
+  `not run: an earlier stage failed` (not `PASS`), and those results are
+  not counted as regressions.
+- **L2/L3/L5**: the observability baseline settles the connection gauge
+  with two equal reads; `INDEX SCAN t.ix` is accepted as an index plan
+  (mock test added); candidate error text in feedback is capped at 300
+  chars (test added). **L4**: the ticket-12 (10 s) and ticket-16 (bounded
+  heap) prompt wording now matches the harness. **L6**: no action.
+- Not code: **M5** is the operator decision (a capped `.23` cell before a
+  full-ladder class or accepting the cap stop); no cell was launched.
+- Gates after the fixes: the soak 0/3000 with `script.unknown` asserted
+  empty; the reference 20× through stage 13 on one store; the stage-15
+  (narrow sensitivity), stage-16 (no-swap 64 MiB cap) and stage-17 (64 KiB
+  writes) live proofs; full suite serialized (`--test-threads=1`): **941
+  passed / 6 ignored, bins 60**; fmt/clippy clean. The reviewer's obsolete
+  `rules-18` branch/worktree was removed.
 
 ## Baseline evidence — canary wave under 2026-10-14.1
 

@@ -176,7 +176,11 @@ def classify(msg):
         return "type"
     if "constraint failed" in msg:
         return "constraint"
-    if msg.startswith("cannot drop column") or "after drop column" in msg:
+    if ("cannot drop column" in msg
+            or "after drop column" in msg
+            or "cannot drop PRIMARY KEY column" in msg
+            or "cannot drop UNIQUE column" in msg
+            or "cannot drop unique column" in msg):
         return "constraint"
     if (msg.startswith("syntax error")
             or msg.startswith("near ")
@@ -744,7 +748,7 @@ mod tests {
         let port = free_port();
         let mut proc = start_reference(port);
         let addr = format!("127.0.0.1:{port}");
-        for stage in 0..=11u32 {
+        for stage in 0..=13u32 {
             let passed: Vec<u32> = (0..=stage).collect();
             for run in 0..20u32 {
                 let seed = stage_seed(&format!("reference-bar-{run}"), stage);

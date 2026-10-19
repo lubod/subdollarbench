@@ -205,6 +205,10 @@ pub struct Generator {
     rng: Rng,
     schema: Schema,
     profile: Profile,
+    /// The seed namespace every schema identifier carries; fresh names
+    /// (rename targets, missing-table probes) use it too, so a persistent
+    /// store cannot collide with a later verification (round-15 H2).
+    namespace: String,
     /// Monotone counter for values that must be unique (keys, UNIQUE).
     uniq: u64,
     /// Recently inserted literals per column name (SQL text), so predicates
@@ -265,6 +269,7 @@ impl Generator {
             rng: Rng::new(seed ^ 0xD1CE_5EED_0000_0001),
             schema,
             profile,
+            namespace: format!("s{seed:x}_"),
             uniq: 0,
             seen: HashMap::new(),
             rows: HashMap::new(),
@@ -1077,7 +1082,7 @@ impl Generator {
     fn fresh_table_name(&mut self, skip: &str) -> String {
         loop {
             self.uniq += 1;
-            let cand = format!("t{}", self.uniq);
+            let cand = format!("{}t{}", self.namespace, self.uniq);
             if cand != skip
                 && self.schema.tables.iter().all(|t| t.name != cand)
                 && !self.indexes.iter().any(|(n, _, _, _)| n == &cand)
@@ -3907,5 +3912,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Round-15 H2: rename targets and missing-table probes carry the seed
+    /// namespace, so a persistent store cannot collide with them.
+    #[test]
+    fn fresh_table_names_carry_the_seed_namespace() {
+        let seed = 0x5EED_u64;
+        let schema = crate::verifier::sql::schema::generate(seed, 2, 3);
+        let mut g = Generator::new(seed, schema, Profile::through(13));
+        let name = g.fresh_table_name("none");
+        assert!(name.starts_with(&format!("s{seed:x}_")), "{name}");
     }
 }

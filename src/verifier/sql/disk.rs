@@ -13,6 +13,9 @@
 //!    it must succeed **without a restart**, and the new row must read back
 //!    exactly.
 //!
+//! A *second* write while the volume is full is not required: an engine
+//! that preallocates its journal can persist a small row legitimately.
+//!
 //! The harness owns the tmpfs, so "free space" is deterministic rather than
 //! dependent on the engine shrinking its files.
 
@@ -45,8 +48,8 @@ impl DiskConfig {
         Self {
             seed_rows: 40,
             seed_len: 64 * 1024,
-            fail_len: 2 * 1024 * 1024,
-            retry_len: 1024 * 1024,
+            fail_len: 64 * 1024,
+            retry_len: 64 * 1024,
             timeout: Duration::from_secs(60),
         }
     }
@@ -133,21 +136,16 @@ pub fn incident(
         }
     }
 
-    // The failed write must not be visible, and the connection must still
-    // work: a small write while full is also refused (no silent ack).
+    // The failed write must not be visible, and the connection must stay
+    // usable for reads. (A second write while full is deliberately not
+    // required: an engine with a preallocated journal can persist a small
+    // row legitimately — round-15 M4/LOW — so the contract only says the
+    // write that cannot fit is refused.)
     let after = one_int(c.exec("SELECT COUNT(*) FROM t")?, "COUNT after ENOSPC")?;
     if after != cfg.seed_rows as i64 {
         return Err(format!(
             "the rejected write changed the row count: {seeded} -> {after}"
         ));
-    }
-    match c.exec("INSERT INTO t VALUES (1001, 'g')")? {
-        Response::Err { class, .. } if class == "full" => {}
-        other => {
-            return Err(format!(
-                "a write while full answered {other:?}; expected ERR full (the connection must stay usable)"
-            ))
-        }
     }
     // Every acked seed row still reads back byte-for-byte.
     let rows = expect_rows(c.exec("SELECT id, v FROM t ORDER BY id")?, "seed readback")?;

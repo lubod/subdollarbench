@@ -12,8 +12,8 @@ are not its own), seeds rows, then fills the volume. With the volume full:
 1. **Reads keep serving**: every acked seed row still reads back exactly.
 2. **Writes fail cleanly**: a write larger than the free space answers
    `ERR full`, is never acked, and is not partially applied (the row count
-   is unchanged). The connection stays usable; a further write also answers
-   `ERR full` — no hang, no crash, no silent success.
+   is unchanged). The connection stays usable — no hang, no crash, no
+   silent success.
 3. **No corruption**: the seed rows are byte-for-byte intact.
 4. **Recovery**: the harness removes the filler file. The same write then
    succeeds **without a restart**, and the new row reads back exactly.

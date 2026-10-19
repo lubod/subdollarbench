@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.24`: round-15 review — ticket 13 maps SQLite's PRIMARY
+///   KEY/UNIQUE drop refusals to `constraint` and namespaces rename targets
+///   and missing-table probes (H1/H2); ticket 16's memory cap also disables
+///   swap (M1); ticket 15 discloses that non-Go coverage is self-reported
+///   and reverses only the ticket's own diff when it still applies, logging
+///   the whole-file fallback (M2/M3); ticket 17 uses 64 KiB writes and no
+///   longer requires a second write while full (M4); a scenario-only stage
+///   that never ran says "not run" instead of PASS (L1); "INDEX SCAN" is an
+///   index plan (L3); candidate error text is capped at 300 chars (L5).
+///   No ladder change (18 tickets, max_points 56).
 /// - `2026-10-19.23`: ticket 17 (incident: disk full) — a scenario-only stage:
 ///   the candidate runs on a fresh 16 MiB tmpfs, the harness fills it with a
 ///   foreign filler, a too-large write must answer `ERR full` without being
@@ -538,7 +548,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.23";
+pub const RULES_VERSION: &str = "2026-10-19.24";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

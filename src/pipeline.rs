@@ -807,19 +807,22 @@ fn run_tests_gate_blocking(
             Err(e) => return fail(format!("./test.sh could not run (run {attempt}/2): {e}")),
         }
     }
-    let coverage = if workdir.join("go.mod").is_file() {
+    let (coverage, measured) = if workdir.join("go.mod").is_file() {
         match sandbox.run_workspace_command(
             &workdir,
             "go test ./... -coverprofile=/tmp/sdb-cov.out >/dev/null 2>&1; go tool cover -func=/tmp/sdb-cov.out | tail -n 1",
             120,
         ) {
-            Ok((_, out)) => parse_go_coverage_total(&out),
+            Ok((_, out)) => (parse_go_coverage_total(&out), true),
             Err(e) => return fail(format!("coverage measurement failed: {e}")),
         }
     } else {
-        std::fs::read_to_string(workdir.join("coverage.txt"))
-            .ok()
-            .and_then(|t| parse_self_coverage(&t))
+        (
+            std::fs::read_to_string(workdir.join("coverage.txt"))
+                .ok()
+                .and_then(|t| parse_self_coverage(&t)),
+            false,
+        )
     };
     let Some(cov) = coverage else {
         return fail(
@@ -828,14 +831,26 @@ fn run_tests_gate_blocking(
         );
     };
     let gate = if lite { 60.0 } else { 80.0 };
-    logger.log(&format!("  [TESTS] coverage {cov:.1}% (gate {gate}%)"));
+    // Round-15 M2: only Go is measured here. Say so, and say it in the
+    // prompt too, so the number is not mistaken for an independent check.
+    logger.log(&format!(
+        "  [TESTS] coverage {cov:.1}% ({}; gate {gate}%)",
+        if measured {
+            "measured"
+        } else {
+            "self-report, not verified"
+        }
+    ));
     if cov < gate {
         return fail(format!("coverage {cov:.1}% is below the {gate}% gate"));
     }
 
     // Sensitivity: the stage-7 and stage-8 features must be covered by the
-    // candidate's own tests. Restore the parent's version of every file the
-    // commit changed, in a git-free scratch copy, and require the suite red.
+    // candidate's own tests. Prefer reversing only that commit's own diff
+    // (`git apply -R --3way` in a copy that includes .git); when later
+    // tickets touched the same lines, fall back to restoring every file
+    // the commit changed to its parent version. Either way the suite must
+    // go red (round-15 M3).
     let Some(parent) = workdir.parent() else {
         return fail("workspace has no parent directory".to_string());
     };
@@ -853,47 +868,100 @@ fn run_tests_gate_blocking(
             Ok(p) => p.trim().to_string(),
             Err(e) => return fail(format!("stage {stage}: parent commit: {e}")),
         };
+        let patch = match git_in(&workdir, &["diff", "--no-color", &parent_commit, &commit]) {
+            Ok(p) => p,
+            Err(e) => return fail(format!("stage {stage}: diff: {e}")),
+        };
+        if patch.trim().is_empty() {
+            return fail(format!(
+                "the stage-{stage} commit changed no files; the sensitivity check cannot revert it"
+            ));
+        }
         let changed = match git_in(&workdir, &["diff", "--name-only", &parent_commit, &commit]) {
             Ok(c) => c,
             Err(e) => return fail(format!("stage {stage}: changed files: {e}")),
         };
         let scenario = parent.join(format!("s15-stage{stage}-{}", std::process::id()));
+        let patch_path = parent.join(format!("s15-stage{stage}-{}.patch", std::process::id()));
         let _ = std::fs::remove_dir_all(&scenario);
-        if let Err(e) = crate::campaign::copy_dir_excluding_git(&workdir, &scenario) {
+        let _ = std::fs::remove_file(&patch_path);
+        if let Err(e) = std::fs::write(&patch_path, &patch) {
+            return fail(format!("stage {stage}: write patch: {e}"));
+        }
+        if let Err(e) = crate::campaign::copy_dir_with_git(&workdir, &scenario) {
             let _ = std::fs::remove_dir_all(&scenario);
+            let _ = std::fs::remove_file(&patch_path);
             return fail(format!("stage {stage}: scratch copy failed: {e}"));
         }
-        let revert = (|| -> Result<(), String> {
-            for f in changed.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                let target = scenario.join(f);
-                match git_in(&workdir, &["show", &format!("{parent_commit}:{f}")]) {
-                    Ok(content) => {
-                        if let Some(p) = target.parent() {
-                            let _ = std::fs::create_dir_all(p);
+        // The copy's files have fresh mtimes; refresh the index's stat
+        // cache first or `--3way` mistakes a clean file for a dirty one.
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&scenario)
+            .args(["update-index", "--refresh"])
+            .output();
+        let applied = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&scenario)
+            .args(["apply", "-R", "--3way"])
+            .arg(&patch_path)
+            .output();
+        let narrow = matches!(applied, Ok(ref out) if out.status.success());
+        if !narrow {
+            // A partial/conflicted reverse is discarded; the fallback copy
+            // restores whole files instead (and is logged as a fallback).
+            let _ = std::fs::remove_dir_all(&scenario);
+            if let Err(e) = crate::campaign::copy_dir_excluding_git(&workdir, &scenario) {
+                let _ = std::fs::remove_dir_all(&scenario);
+                let _ = std::fs::remove_file(&patch_path);
+                return fail(format!("stage {stage}: fallback scratch copy failed: {e}"));
+            }
+            let revert = (|| -> Result<(), String> {
+                for f in changed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    let target = scenario.join(f);
+                    match git_in(&workdir, &["show", &format!("{parent_commit}:{f}")]) {
+                        Ok(content) => {
+                            if let Some(p) = target.parent() {
+                                let _ = std::fs::create_dir_all(p);
+                            }
+                            std::fs::write(&target, content)
+                                .map_err(|e| format!("write {}: {e}", target.display()))?;
                         }
-                        std::fs::write(&target, content)
-                            .map_err(|e| format!("write {}: {e}", target.display()))?;
-                    }
-                    Err(_) => {
-                        let _ = std::fs::remove_file(&target);
+                        Err(_) => {
+                            let _ = std::fs::remove_file(&target);
+                        }
                     }
                 }
+                Ok(())
+            })();
+            if let Err(e) = revert {
+                let _ = std::fs::remove_dir_all(&scenario);
+                let _ = std::fs::remove_file(&patch_path);
+                return fail(format!("stage {stage}: sensitivity setup failed: {e}"));
             }
-            Ok(())
-        })();
-        if let Err(e) = revert {
-            let _ = std::fs::remove_dir_all(&scenario);
-            return fail(format!("stage {stage}: sensitivity setup failed: {e}"));
         }
         let red = run_suite(&scenario);
         let _ = std::fs::remove_dir_all(&scenario);
+        let _ = std::fs::remove_file(&patch_path);
         match red {
-            Ok((false, _)) => logger.log(&format!(
-                "  [TESTS] sensitivity ok: the suite goes red with the stage-{stage} feature reverted"
-            )),
+            Ok((false, _)) => {
+                let how = if narrow {
+                    format!("stage-{stage} diff reversed")
+                } else {
+                    format!("stage-{stage} whole-file fallback; the diff did not reverse cleanly")
+                };
+                logger.log(&format!(
+                    "  [TESTS] sensitivity ok ({how}): the suite goes red"
+                ));
+            }
             Ok((true, _)) => {
                 return fail(format!(
-                    "./test.sh stayed green with the stage-{stage} feature reverted — the tests do not catch regressions"
+                    "./test.sh stayed green with the stage-{stage} {} reverted — the tests do not catch regressions",
+                    if narrow {
+                        "diff"
+                    } else {
+                        "feature (whole-file fallback)"
+                    }
                 ))
             }
             Err(e) => {
@@ -3143,7 +3211,21 @@ impl BenchmarkPipeline {
                                 // earlier stages are green, like the crash
                                 // ladder, transactions and the perf gate. A
                                 // placeholder pass lets the late-failure path
-                                // flip it when its scenario fails.
+                                // flip it when its scenario fails; when an
+                                // earlier stage failed the scenario never
+                                // runs, so it must not display as PASS
+                                // (round-15 L1).
+                                if prior_failed {
+                                    let st = crate::verifier::StageResult {
+                                        stage,
+                                        name,
+                                        passed: false,
+                                        error: Some("not run: an earlier stage failed".to_string()),
+                                    };
+                                    log_stage(logger, &st);
+                                    stages.push(st);
+                                    continue;
+                                }
                                 logger.log(&format!(
                                     "  [SCENARIO] stage {stage}: scripted checks run after the suite"
                                 ));
@@ -3356,6 +3438,9 @@ impl BenchmarkPipeline {
                             stages.push(st);
                         }
                         let mut late_failure: Option<(u32, String)> = upgrade_failed.take();
+                        // Scenario-only stages whose late check actually ran;
+                        // the rest must not keep their placeholder PASS (L1).
+                        let mut scenario_ran: Vec<u32> = Vec::new();
                         if late_failure.is_none() && stages.iter().all(|s| s.passed) {
                             // Stage 5's suite adds the crash ladder, which
                             // needs kill/restart/truncate: the pipeline owns
@@ -3442,6 +3527,7 @@ impl BenchmarkPipeline {
                             // global lock: it passes the lost-update and
                             // transfer checks but fails the reader check.
                             if late_failure.is_none() && wanted.contains(&12) {
+                                scenario_ran.push(12);
                                 let ns =
                                     crate::verifier::sql::driver::stage_seed(verifier_seed, 12)
                                         ^ 0x5E27_1E10_0000_000C;
@@ -3474,6 +3560,7 @@ impl BenchmarkPipeline {
                             // SHOW STATS counters (docs/PROPOSAL-sdb-sql.md,
                             // "14. Observability").
                             if late_failure.is_none() && wanted.contains(&14) {
+                                scenario_ran.push(14);
                                 let ns =
                                     crate::verifier::sql::driver::stage_seed(verifier_seed, 14)
                                         ^ 0x5E27_1E10_0000_000E;
@@ -3497,6 +3584,7 @@ impl BenchmarkPipeline {
                             // (docs/PROPOSAL-sdb-sql.md, "15. Tests and CI
                             // gate"). `./test.sh` runs in the sandbox.
                             if late_failure.is_none() && wanted.contains(&15) {
+                                scenario_ran.push(15);
                                 let lite = if wanted.iter().copied().max() == Some(15) {
                                     lite_profile.iter().any(|p| p == "coverage-60")
                                 } else {
@@ -3640,6 +3728,7 @@ impl BenchmarkPipeline {
                             // memory"). The heavy store is thrown away; the
                             // real store never sees it.
                             if late_failure.is_none() && wanted.contains(&16) {
+                                scenario_ran.push(16);
                                 let scratch = sql_data.as_ref().map(|data| {
                                     data.with_file_name(format!(
                                         "{}-mem",
@@ -3712,6 +3801,7 @@ impl BenchmarkPipeline {
                             // must succeed after the filler is removed
                             // (docs/PROPOSAL-sdb-sql.md, "17. Disk full").
                             if late_failure.is_none() && wanted.contains(&17) {
+                                scenario_ran.push(17);
                                 let mut disk_extras = extras.clone();
                                 disk_extras.binds.clear();
                                 disk_extras.tmpfs = vec!["/sdb-data:size=16m".to_string()];
@@ -3723,7 +3813,12 @@ impl BenchmarkPipeline {
                                     let (what, cmd) = match op {
                                         crate::verifier::sql::disk::DiskOp::Fill => (
                                             "fill",
-                                            "dd if=/dev/zero of=/sdb-data/fill bs=1M count=64 status=none 2>/dev/null || true",
+                                            // Append (a second Fill after a failed
+                                            // statement must not truncate the
+                                            // filler) and eat the sub-block tail
+                                            // `bs=1M` leaves, so the volume is full
+                                            // to the byte.
+                                            "dd if=/dev/zero of=/sdb-data/fill bs=1M count=64 status=none oflag=append conv=notrunc 2>/dev/null || true;                                              dd if=/dev/zero of=/sdb-data/fill bs=4096 count=256 status=none oflag=append conv=notrunc 2>/dev/null || true;                                              dd if=/dev/zero of=/sdb-data/fill bs=1 count=8192 status=none oflag=append conv=notrunc 2>/dev/null || true",
                                         ),
                                         crate::verifier::sql::disk::DiskOp::Free => {
                                             ("free", "rm -f /sdb-data/fill")
@@ -3771,6 +3866,18 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                        }
+                        // L1: a scenario-only ticket whose check never ran
+                        // (an earlier differential stage or late check
+                        // failed) must not keep its placeholder PASS.
+                        for st in stages.iter_mut().filter(|s| {
+                            crate::verifier::sql::driver::scenario_only(s.stage)
+                                && s.passed
+                                && !scenario_ran.contains(&s.stage)
+                        }) {
+                            st.passed = false;
+                            st.error = Some("not run: an earlier stage failed".to_string());
+                            log_stage(logger, st);
                         }
                         if let Some((lost, why)) = late_failure {
                             // A late check failed: the stage that owns the
@@ -8971,9 +9078,9 @@ main()
             "Stage 14: Observability -> PASS",
             "[TESTS] ./test.sh green (run 1/2, offline, <= 120s)",
             "[TESTS] ./test.sh green (run 2/2, offline, <= 120s)",
-            "[TESTS] coverage 85.0% (gate 80%)",
-            "[TESTS] sensitivity ok: the suite goes red with the stage-7 feature reverted",
-            "[TESTS] sensitivity ok: the suite goes red with the stage-8 feature reverted",
+            "[TESTS] coverage 85.0% (self-report, not verified; gate 80%)",
+            "[TESTS] sensitivity ok (stage-7 diff reversed)",
+            "[TESTS] sensitivity ok (stage-8 diff reversed)",
         ] {
             assert!(
                 logger.contains(needle),

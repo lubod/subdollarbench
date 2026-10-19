@@ -12,7 +12,7 @@ would produce run one at a time (serializable).
    `ERR busy` (and rolled back); retrying it must then succeed. Serialize
    writers or detect conflicts — whichever is simpler.
 2. **No operation may hang.** Every statement answers, or answers
-   `ERR busy`, promptly; a statement that blocks for more than 5 s fails
+   `ERR busy`, promptly; a statement that blocks for more than 10 s fails
    the suite.
 3. **No lost updates.** 16 clients each run **50** transactions of
    `BEGIN; SELECT v FROM t WHERE id = 1; UPDATE t SET v = <the value read + 1>

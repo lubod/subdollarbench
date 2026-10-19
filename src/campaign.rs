@@ -651,7 +651,17 @@ pub fn detect_regressions(
 ) -> (Vec<u32>, u32) {
     let mut ids: Vec<u32> = results
         .iter()
-        .filter(|r| !r.passed && best.get(&r.stage).copied().unwrap_or(false))
+        // A scenario that never ran because an earlier stage failed is not a
+        // regression of that scenario: the failing earlier stage is already
+        // in the report (round-15 L1).
+        .filter(|r| {
+            !r.passed
+                && !r
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("not run:"))
+                && best.get(&r.stage).copied().unwrap_or(false)
+        })
         .map(|r| r.stage)
         .collect();
     ids.sort_unstable();
@@ -2218,17 +2228,29 @@ pub fn git_commit_stage(
 /// original workspace; scratch copies (tests sensitivity scenarios) start
 /// clean. Used by the tests/CI stage.
 pub fn copy_dir_excluding_git(src: &Path, dst: &Path) -> Result<()> {
+    copy_dir_inner(src, dst, false)
+}
+
+/// Copy a workspace **including** `.git`, so a scratch copy can run
+/// `git apply --3way` against the original object database (the ticket-15
+/// sensitivity check reverses only the ticket's own diff when it still
+/// applies; round-15 M3).
+pub fn copy_dir_with_git(src: &Path, dst: &Path) -> Result<()> {
+    copy_dir_inner(src, dst, true)
+}
+
+fn copy_dir_inner(src: &Path, dst: &Path, include_git: bool) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == ".git" {
+        if !include_git && name == ".git" {
             continue;
         }
         let from = entry.path();
         let to = dst.join(&name);
         if entry.file_type()?.is_dir() {
-            copy_dir_excluding_git(&from, &to)?;
+            copy_dir_inner(&from, &to, include_git)?;
         } else {
             std::fs::copy(&from, &to)
                 .map_err(|e| anyhow::anyhow!("copy {} -> {}: {e}", from.display(), to.display()))?;
@@ -3650,6 +3672,19 @@ mod tests {
         // Still-green and newly-green are not regressions.
         let (ids, _) = detect_regressions(&best, &[stage_result(1, true), stage_result(3, true)]);
         assert!(ids.is_empty());
+        // A scenario-only stage that never ran because an earlier stage
+        // failed is not a regression of that scenario (round-15 L1).
+        let skipped = crate::verifier::StageResult {
+            stage: 12,
+            name: "Concurrency and isolation".into(),
+            passed: false,
+            error: Some("not run: an earlier stage failed".into()),
+        };
+        let mut best12 = HashMap::new();
+        best12.insert(12, true);
+        let (ids, sev) = detect_regressions(&best12, &[skipped]);
+        assert!(ids.is_empty(), "{ids:?}");
+        assert_eq!(sev, 0);
     }
 
     #[tokio::test]
