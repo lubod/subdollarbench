@@ -3399,26 +3399,36 @@ impl BenchmarkPipeline {
                                 )
                             ));
                         } else if stages.iter().all(|s| s.passed) {
-                            // A passing stage >= 4 leaves a sentinel for
-                            // later tickets (its own seed keeps namespaces
-                            // apart from the differential script).
+                            // A passing suite that includes ticket 4 leaves
+                            // a sentinel for later tickets (its own seed
+                            // keeps namespaces apart from the differential
+                            // script), over the grammar it was graded on:
+                            // never a ticket that failed or was skipped
+                            // (review round 14, G1).
                             let top = wanted.iter().copied().max().unwrap_or(0);
-                            if top >= 4 {
+                            let mut variants: Vec<(u32, Vec<String>)> = passed_lite.to_vec();
+                            if !lite_profile.is_empty() {
+                                variants.push((top, lite_profile.to_vec()));
+                            }
+                            if let Some(profile) =
+                                crate::verifier::sql::driver::sentinel_profile(&wanted, &variants)
+                            {
                                 if let Some(dir) = &sentinel_dir {
                                     let seed = crate::verifier::sql::driver::stage_seed(
                                         verifier_seed,
                                         top,
                                     ) ^ 0x5E27_1E10_0000_0004;
                                     let addr = format!("127.0.0.1:{port}");
-                                    let built = crate::verifier::sql::sentinel::build(seed, top)
-                                        .and_then(|s| {
-                                            crate::verifier::sql::sentinel::write(
-                                                &addr,
-                                                std::time::Duration::from_secs(10),
-                                                &s,
-                                            )
-                                            .map(|()| s)
-                                        });
+                                    let built =
+                                        crate::verifier::sql::sentinel::build(seed, top, &profile)
+                                            .and_then(|s| {
+                                                crate::verifier::sql::sentinel::write(
+                                                    &addr,
+                                                    std::time::Duration::from_secs(10),
+                                                    &s,
+                                                )
+                                                .map(|()| s)
+                                            });
                                     match built {
                                         Ok(s) => {
                                             let path = dir.join(format!("sentinel-{top}.json"));
@@ -8688,7 +8698,12 @@ main()
         let prompt_path = dir.join("ticket_prompt.md");
         fs::write(&prompt_path, "sdb-sql sentinel-drift fixture").unwrap();
         // A sentinel the store never saw: its reads cannot answer.
-        let sent = crate::verifier::sql::sentinel::build(0x5EED_0001, 4).unwrap();
+        let sent = crate::verifier::sql::sentinel::build(
+            0x5EED_0001,
+            4,
+            &crate::verifier::sql::generator::Profile::through(4),
+        )
+        .unwrap();
         crate::verifier::sql::sentinel::save(&dir.join("sentinel-4.json"), &sent).unwrap();
 
         let mut config = covtest_config(workdir.clone(), worker, "sqldrift");

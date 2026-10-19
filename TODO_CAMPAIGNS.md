@@ -1061,6 +1061,26 @@ retried; a repair-round agent that never starts is retried once, then ends
 the repair loop. N4 — opencode no longer counts the turn killed at the cap
 (the repair round got one turn less).
 
+**Round-14 addendum, G1 (2026-10-19, rules still `2026-10-18.17`)**: since
+`.17` a suite grades only the tickets the ladder passed, but ticket 4's
+persistence scenario still built its dataset from `Profile::through(4)` and
+ran whenever the suite's highest stage was >= 4; the upgrade sentinel was
+gated on `top >= 4` and built from `Profile::through(top)`. Live damage: the
+ling `.17` cell (`_154400`, tickets 1-3 not passed) failed ticket 4 on a
+column-list `INSERT` and `ORDER BY ... LIMIT`, and is poisoned; the
+already-poisoned DeepSeek `_103729` failed tickets 4 and 9 the same way; the
+DeepSeek `_142825` cell lost its stage-8 sentinel (aggregates, ticket 7
+failed). Now `driver::persistence_profile` (tickets 0-4 ∩ passed, lite
+narrowed) feeds the scenario, which runs only when ticket 4 is in the suite;
+`driver::sentinel_profile` gates and shapes the sentinel; without `ORDER BY`
+sentinel reads are kept unordered (`SentQuery.ordered`, serde default
+`true`) and compare as a multiset of rows. With tickets 0-4 passed the
+dataset is byte-identical to before, so no recorded grade of an unpoisoned
+`.17` cell changes (`_142825` would also have had its stage-8 sentinel
+re-read at tickets 9 and 11, both failed on their own stage): the rules stay
+`.17`, and the next bump goes with the N5 raw-answer feedback and the
+ticket-11 work.
+
 **Round-11 review fixes landed (2026-10-18, rules still `2026-10-18.17` — no
 cell has run on it)**. **Host ops (O1), read this before starting anything**:
 the engine and GUI are systemd units (`subdollarbench-engine` on :3000,

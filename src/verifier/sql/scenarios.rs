@@ -69,16 +69,19 @@ pub enum ScenarioResult {
 /// a callback. Data that does not survive is a candidate failure; a
 /// restart the harness cannot even attempt is reported with it.
 ///
-/// Stages >= 4's suite includes this: the store is written once and later
-/// tickets must keep answering for it.
+/// Every suite that includes ticket 4 runs this. `profile` is the grammar
+/// of the tickets 0-4 the ladder passed
+/// ([`super::driver::persistence_profile`]): a failed ticket is not
+/// required, so the dataset never uses it.
 pub fn persistence(
     addr: &str,
     timeout: Duration,
     seed: u64,
+    profile: &super::generator::Profile,
     restart: &mut dyn FnMut() -> Result<(), String>,
 ) -> ScenarioResult {
     let pseed = seed ^ 0x5E27_A510_0000_0004;
-    let sent = match super::sentinel::build(pseed, 4) {
+    let sent = match super::sentinel::build(pseed, 4, profile) {
         Ok(s) => s,
         Err(e) => return ScenarioResult::Fault(format!("persistence dataset: {e}")),
     };

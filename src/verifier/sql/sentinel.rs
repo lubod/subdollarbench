@@ -9,8 +9,11 @@
 //! — and any drift is an `upgrade` regression of the stage that wrote the
 //! data.
 //!
-//! Only reads that order by every output column are kept, so the recorded
-//! wire frame compares byte for byte.
+//! When the graded grammar has `ORDER BY` (ticket 2 passed), only reads
+//! that order by every output column are kept, so the recorded wire frame
+//! compares byte for byte. Without it, plain reads are kept and compare as
+//! a multiset of rows: a ladder that failed ticket 2 is never asked to
+//! sort (rules `.17`: a failed ticket is not required).
 
 use super::client::TcpCandidate;
 use super::compare::{render_expected, render_response};
@@ -23,8 +26,17 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SentQuery {
     pub sql: String,
-    /// The exact wire frame a correct server answers (ordered reads only).
+    /// The exact wire frame a correct server answers.
     pub expected: String,
+    /// The read orders by every output column, so `expected` compares byte
+    /// for byte; otherwise its rows compare in any order. Sentinels written
+    /// before this field existed were all ordered.
+    #[serde(default = "ordered_by_default")]
+    pub ordered: bool,
+}
+
+fn ordered_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -42,12 +54,13 @@ pub struct Sentinel {
 /// Step statements per sentinel script (setup on top).
 pub const SENTINEL_STEPS: usize = 40;
 
-/// Build the sentinel for a passing `stage` from a seeded script: creates
-/// and inserts are the dataset, ordered selects are the reads. Statements
-/// that are not kept are not executed either, so the oracle state matches
-/// exactly what the candidate will hold.
-pub fn build(seed: u64, stage: u32) -> Result<Sentinel, String> {
-    let script = build_script(seed, &Profile::through(stage), SENTINEL_STEPS);
+/// Build the sentinel for a passing `stage` from a seeded script over
+/// `profile` (the grammar the ladder actually passed, never the declared
+/// one): creates and inserts are the dataset, selects are the reads.
+/// Statements that are not kept are not executed either, so the oracle
+/// state matches exactly what the candidate will hold.
+pub fn build(seed: u64, stage: u32, profile: &Profile) -> Result<Sentinel, String> {
+    let script = build_script(seed, profile, SENTINEL_STEPS);
     if !script.unknown.is_empty() {
         return Err(format!(
             "sentinel script: unmapped oracle messages {:?}",
@@ -62,7 +75,11 @@ pub fn build(seed: u64, stage: u32) -> Result<Sentinel, String> {
         write_expected: Vec::new(),
         queries: Vec::new(),
     };
-    let mut pending_reads: Vec<String> = Vec::new();
+    // With `ORDER BY` in the grammar, keep only totally ordered reads (the
+    // set this always kept); without it no read is ordered, so keep them all
+    // and compare their rows as a multiset.
+    let unordered_reads = !profile.order_limit;
+    let mut pending_reads: Vec<(String, bool)> = Vec::new();
     for c in script.setup.iter().chain(&script.steps) {
         match c.stmt.kind {
             Kind::Create | Kind::Insert => {
@@ -73,14 +90,16 @@ pub fn build(seed: u64, stage: u32) -> Result<Sentinel, String> {
                 sent.writes.push(c.stmt.sql.clone());
                 sent.write_expected.push(render_expected(&out));
             }
-            Kind::Select if c.stmt.ordered => pending_reads.push(c.stmt.sql.clone()),
+            Kind::Select if c.stmt.ordered || unordered_reads => {
+                pending_reads.push((c.stmt.sql.clone(), c.stmt.ordered))
+            }
             _ => {}
         }
     }
     // Reads are recorded against the *final* dataset state: the sentinel
     // writer runs the whole dataset first and the reads after it, so the
     // script's original interleaving is not replayed.
-    for sql in pending_reads {
+    for (sql, ordered) in pending_reads {
         let out = oracle.exec(&sql);
         if out.is_discard() || matches!(out, OracleOutcome::Unknown(_)) {
             continue;
@@ -88,6 +107,7 @@ pub fn build(seed: u64, stage: u32) -> Result<Sentinel, String> {
         sent.queries.push(SentQuery {
             sql,
             expected: render_expected(&out),
+            ordered,
         });
     }
     if sent.writes.is_empty() || sent.queries.is_empty() {
@@ -148,14 +168,46 @@ fn check_with(c: &mut TcpCandidate, sent: &Sentinel) -> Result<(), String> {
             }
         })?;
         let frame = frame(&Ok(got))?;
-        if frame != q.expected {
+        if !same_answer(&frame, &q.expected, q.ordered) {
             return Err(format!(
-                "drift: read {:?} answered {frame:?}, expected {:?}",
-                q.sql, q.expected
+                "drift: read {:?} answered {frame:?}, expected {:?}{}",
+                q.sql,
+                q.expected,
+                if q.ordered {
+                    ""
+                } else {
+                    " (rows in any order)"
+                }
             ));
         }
     }
     Ok(())
+}
+
+/// Whether `got` answers like `want`: byte for byte for an ordered read;
+/// for an unordered one, the same `ROWS` header, column names and `END`
+/// line with the same rows in any order. Anything but a `ROWS` frame (an
+/// `OK`, an `ERR`, no usable response) must match exactly.
+fn same_answer(got: &str, want: &str, ordered: bool) -> bool {
+    got == want
+        || (!ordered
+            && matches!((row_multiset(got), row_multiset(want)), (Some(a), Some(b)) if a == b))
+}
+
+/// A `ROWS` frame as (its fixed lines, its rows sorted). Rows are one line
+/// each on the wire, so sorting lines sorts rows.
+fn row_multiset(frame: &str) -> Option<(Vec<&str>, Vec<&str>)> {
+    if !frame.starts_with("ROWS ") {
+        return None;
+    }
+    let lines: Vec<&str> = frame.split('\n').collect();
+    if lines.len() < 3 {
+        return None;
+    }
+    let (rows, end) = lines[2..].split_at(lines.len() - 3);
+    let mut rows = rows.to_vec();
+    rows.sort_unstable();
+    Some(([&lines[..2], end].concat(), rows))
 }
 
 pub fn save(path: &Path, sent: &Sentinel) -> Result<(), String> {
@@ -235,7 +287,7 @@ mod tests {
 
     #[test]
     fn sentinel_round_trips_against_a_fresh_store() {
-        let sent = build(11, 4).expect("sentinel builds");
+        let sent = build(11, 4, &Profile::through(4)).expect("sentinel builds");
         assert!(!sent.writes.is_empty() && !sent.queries.is_empty());
         let (addr, _db) = oracle_server();
         let addr = addr.to_string();
@@ -245,7 +297,7 @@ mod tests {
 
     #[test]
     fn sentinel_check_catches_a_lost_store() {
-        let sent = build(12, 4).expect("sentinel builds");
+        let sent = build(12, 4, &Profile::through(4)).expect("sentinel builds");
         // A fresh server never saw the writes: the reads must fail.
         let (addr, _db) = oracle_server();
         let err = check(&addr.to_string(), Duration::from_secs(5), &sent).unwrap_err();
@@ -257,7 +309,7 @@ mod tests {
     /// regression behind the new tables' suite.
     #[test]
     fn check_after_an_answer_is_drift_not_unreachable() {
-        let sent = build(16, 4).unwrap();
+        let sent = build(16, 4, &Profile::through(4)).unwrap();
         assert!(
             sent.queries.len() >= 2,
             "the fixture needs two reads to answer one and break on the next"
@@ -289,9 +341,9 @@ mod tests {
 
     #[test]
     fn sentinel_is_deterministic_and_seed_namespaced() {
-        let a = build(13, 4).unwrap();
-        let b = build(13, 4).unwrap();
-        let c = build(14, 4).unwrap();
+        let a = build(13, 4, &Profile::through(4)).unwrap();
+        let b = build(13, 4, &Profile::through(4)).unwrap();
+        let c = build(14, 4, &Profile::through(4)).unwrap();
         assert_eq!(a, b);
         assert_ne!(a.writes, c.writes);
         // Reads are ordered: the recorded frame compares byte for byte.
@@ -301,12 +353,93 @@ mod tests {
             .all(|q| q.sql.to_lowercase().contains("order by")));
     }
 
+    /// Review round 14, G1: a ladder that failed tickets 1-3 is graded on
+    /// tickets 0 and 4 only, so ticket 4's dataset must not need a column
+    /// list, `WHERE`, `ORDER BY` or `LIMIT` — and its reads still prove the
+    /// data is there, as a multiset of rows.
+    #[test]
+    fn sentinel_without_tickets_1_to_3_uses_only_their_grammar() {
+        let p = Profile::for_passed(&[0, 4]);
+        for seed in 0..20u64 {
+            let sent = build(seed, 4, &p).expect("sentinel builds without ORDER BY");
+            assert!(!sent.writes.is_empty() && !sent.queries.is_empty());
+            for w in &sent.writes {
+                let w = w.to_lowercase();
+                if let (Some(into), Some(values)) = (w.find("into"), w.find("values")) {
+                    assert!(!w[into..values].contains('('), "column list: {w}");
+                }
+            }
+            for q in &sent.queries {
+                assert!(!q.ordered, "{}", q.sql);
+                let sql = q.sql.to_lowercase();
+                for kw in ["order", "limit", "where", "distinct"] {
+                    assert!(!sql.contains(kw), "{kw} in {sql}");
+                }
+            }
+        }
+        // And it round-trips against a correct server.
+        let sent = build(3, 4, &p).unwrap();
+        let (addr, _db) = oracle_server();
+        let addr = addr.to_string();
+        write(&addr, Duration::from_secs(5), &sent).expect("write");
+        check(&addr, Duration::from_secs(5), &sent).expect("check after write");
+        // A fresh store still drifts.
+        let (fresh, _db) = oracle_server();
+        let err = check(&fresh.to_string(), Duration::from_secs(5), &sent).unwrap_err();
+        assert!(
+            err.starts_with("drift:") && err.contains("rows in any order"),
+            "{err}"
+        );
+    }
+
+    /// With ticket 2 passed the sentinel is exactly what it always was: only
+    /// totally ordered reads, compared byte for byte.
+    #[test]
+    fn sentinel_with_order_by_keeps_only_ordered_reads() {
+        let sent = build(13, 4, &Profile::through(4)).unwrap();
+        assert!(sent.queries.iter().all(|q| q.ordered));
+        // A sentinel saved before `ordered` existed loads as ordered.
+        let mut json = serde_json::to_value(&sent).unwrap();
+        for q in json["queries"].as_array_mut().unwrap() {
+            q.as_object_mut().unwrap().remove("ordered");
+        }
+        let old: Sentinel = serde_json::from_value(json).unwrap();
+        assert_eq!(old, sent);
+    }
+
+    #[test]
+    fn unordered_reads_compare_rows_as_a_multiset() {
+        let want = "ROWS 2\na\tb\n1\tx\n2\t\\N\n1\tx\nEND 3";
+        let shuffled = "ROWS 2\na\tb\n2\t\\N\n1\tx\n1\tx\nEND 3";
+        assert!(same_answer(shuffled, want, false));
+        assert!(
+            !same_answer(shuffled, want, true),
+            "ordered reads stay byte for byte"
+        );
+        // A lost duplicate, a changed value, header or count is drift.
+        for bad in [
+            "ROWS 2\na\tb\n2\t\\N\n1\tx\nEND 2",
+            "ROWS 2\na\tb\n2\t\\N\n1\tx\n1\ty\nEND 3",
+            "ROWS 2\na\tc\n2\t\\N\n1\tx\n1\tx\nEND 3",
+            "ROWS 2\na\tb\n2\t\\N\n1\tx\n1\tx\nEND 4",
+            "ERR syntax",
+        ] {
+            assert!(!same_answer(bad, want, false), "{bad:?}");
+        }
+        assert!(same_answer("ROWS 1\na\nEND 0", "ROWS 1\na\nEND 0", false));
+        assert!(same_answer("ERR syntax", "ERR syntax", false));
+    }
+
     #[test]
     fn load_all_skips_junk_and_sorts() {
         let dir = std::env::temp_dir().join(format!("sdb-sentinel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        save(&dir.join("sentinel-4.json"), &build(15, 4).unwrap()).unwrap();
+        save(
+            &dir.join("sentinel-4.json"),
+            &build(15, 4, &Profile::through(4)).unwrap(),
+        )
+        .unwrap();
         std::fs::write(dir.join("sentinel-x.json"), "{not json").unwrap();
         std::fs::write(dir.join("other.json"), "{}").unwrap();
         let all = load_all(&dir);

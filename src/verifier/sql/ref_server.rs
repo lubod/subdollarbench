@@ -772,6 +772,7 @@ mod tests {
                 &addr,
                 Duration::from_secs(10),
                 stage_seed("reference-persistence", 4),
+                &Profile::through(4),
                 &mut keep,
             ),
             super::super::scenarios::ScenarioResult::Pass
@@ -787,12 +788,52 @@ mod tests {
             &addr,
             Duration::from_secs(10),
             stage_seed("reference-persistence", 4) ^ 1,
+            &Profile::through(4),
             &mut fresh,
         ) {
             super::super::scenarios::ScenarioResult::Fail(d) => {
                 assert!(d.contains("after a clean restart"), "{d}")
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// Review round 14, G1, as it happened live. A ladder that failed
+    /// tickets 2 and 4 is graded on `[0, 1, 3, 9]`: no restart, no
+    /// persistence dataset (gating on the highest stage used to run it). One
+    /// that failed tickets 1-3 is graded on `[0, 4]`: the restart runs, on
+    /// a dataset of ticket-0 grammar compared as a multiset.
+    #[test]
+    fn reference_suites_run_persistence_only_with_ticket_4() {
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let restarts = std::cell::Cell::new(0u32);
+        for (passed, restarted) in [
+            (vec![0u32, 1, 3, 9], false),
+            (vec![0, 4], true),
+            (vec![0, 1, 2, 3, 4], true),
+        ] {
+            for run in 0..3u32 {
+                restarts.set(0);
+                let seed = stage_seed(&format!("g1-{passed:?}-{run}"), passed[passed.len() - 1]);
+                let mut restart = || {
+                    restarts.set(restarts.get() + 1);
+                    proc.restart()
+                };
+                let out = run_stage(
+                    &addr,
+                    Duration::from_secs(10),
+                    seed,
+                    &passed,
+                    120,
+                    None,
+                    Some(&mut restart),
+                )
+                .unwrap_or_else(|e| panic!("{passed:?} run {run}: verifier fault: {e}"));
+                assert!(out.passed, "{passed:?} run {run}: {}", out.detail);
+                assert_eq!(restarts.get() > 0, restarted, "{passed:?} run {run}");
+            }
         }
     }
 

@@ -157,9 +157,10 @@ pub const SHRINK_CHECKS: usize = 60;
 /// repro is the original run's prefix: bigger, but always what actually
 /// happened.
 ///
-/// `restart` stops and starts the candidate *keeping its store*: stage 4+
-/// suites include the persistence scenario, which needs it. `None` skips
-/// that scenario (eval/replay and tests without container control).
+/// `restart` stops and starts the candidate *keeping its store*: a suite
+/// that includes ticket 4 runs the persistence scenario, which needs it.
+/// `None` skips that scenario (eval/replay and tests without container
+/// control).
 pub fn run_stage(
     addr: &str,
     timeout: Duration,
@@ -175,10 +176,46 @@ pub fn run_stage(
         seed,
         passed.iter().copied().max().unwrap_or(0),
         &Profile::for_passed(passed),
+        persistence_profile(passed, &[]).as_ref(),
         steps,
         reset,
         restart,
     )
+}
+
+/// The grammar a suite of `passed` stages grades: their cumulative profile,
+/// narrowed by the lite variant each of them passed at.
+pub fn effective_profile(passed: &[u32], variants: &[(u32, Vec<String>)]) -> Profile {
+    let mut profile = Profile::for_passed(passed);
+    for (stage, flags) in variants {
+        if passed.contains(stage) {
+            profile.narrow(flags);
+        }
+    }
+    profile
+}
+
+/// The grammar of ticket 4's persistence dataset: tickets 0-4, minus the
+/// ones this ladder did not pass (review round 14, G1: rules `.17` tells
+/// the model a failed ticket is not required, so the dataset must not use
+/// it). `None` when ticket 4 itself is not in `passed`: its scenario is
+/// then not part of the suite. With 0-4 all passed this is exactly
+/// `Profile::through(4)`, the profile the dataset always used.
+pub fn persistence_profile(passed: &[u32], variants: &[(u32, Vec<String>)]) -> Option<Profile> {
+    if !passed.contains(&4) {
+        return None;
+    }
+    let early: Vec<u32> = passed.iter().copied().filter(|&s| s <= 4).collect();
+    Some(effective_profile(&early, variants))
+}
+
+/// The grammar of the upgrade sentinel a passing suite leaves behind: the
+/// suite itself. `None` unless ticket 4 is in it: the sentinel is re-read
+/// after restarts, so it rests on ticket 4's contract.
+pub fn sentinel_profile(passed: &[u32], variants: &[(u32, Vec<String>)]) -> Option<Profile> {
+    passed
+        .contains(&4)
+        .then(|| effective_profile(passed, variants))
 }
 
 /// The cumulative suite at the variant each stage passed at: a lite pass
@@ -196,18 +233,13 @@ pub fn run_stage_with_variants(
     reset: Option<&mut dyn FnMut() -> Result<(), String>>,
     restart: Option<&mut dyn FnMut() -> Result<(), String>>,
 ) -> Result<StageOutcome, String> {
-    let mut profile = Profile::for_passed(passed);
-    for (stage, flags) in variants {
-        if passed.contains(stage) {
-            profile.narrow(flags);
-        }
-    }
     run_stage_profiled(
         addr,
         timeout,
         seed,
         passed.iter().copied().max().unwrap_or(0),
-        &profile,
+        &effective_profile(passed, variants),
+        persistence_profile(passed, variants).as_ref(),
         steps,
         reset,
         restart,
@@ -221,6 +253,7 @@ fn run_stage_profiled(
     seed: u64,
     stage: u32,
     profile: &Profile,
+    persistence: Option<&Profile>,
     steps: usize,
     reset: Option<&mut dyn FnMut() -> Result<(), String>>,
     restart: Option<&mut dyn FnMut() -> Result<(), String>>,
@@ -275,17 +308,17 @@ fn run_stage_profiled(
             {
                 return Ok(failed(checks, MismatchKind::Protocol, d));
             }
-            // Stage 4's suite adds the restart scenario: the candidate must
-            // come back on the same store it wrote.
-            if stage >= 4 {
-                if let Some(restart) = restart {
-                    match super::scenarios::persistence(addr, timeout, seed, restart) {
-                        ScenarioResult::Pass => {}
-                        ScenarioResult::Fail(d) => {
-                            return Ok(failed(checks, MismatchKind::Protocol, d))
-                        }
-                        ScenarioResult::Fault(e) => return Err(e),
+            // A suite that includes ticket 4 adds the restart scenario: the
+            // candidate must come back on the same store it wrote. A suite
+            // without it (ticket 4 failed or skipped) does not: gating on
+            // the highest stage used to grade ticket 9 on persistence.
+            if let (Some(pprofile), Some(restart)) = (persistence, restart) {
+                match super::scenarios::persistence(addr, timeout, seed, pprofile, restart) {
+                    ScenarioResult::Pass => {}
+                    ScenarioResult::Fail(d) => {
+                        return Ok(failed(checks, MismatchKind::Protocol, d))
                     }
+                    ScenarioResult::Fault(e) => return Err(e),
                 }
             }
             Ok(StageOutcome {
@@ -371,6 +404,38 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    /// Review round 14, G1: the persistence dataset and the upgrade
+    /// sentinel use only the grammar the ladder passed, and neither exists
+    /// without ticket 4. A full ladder keeps exactly the old profile, so
+    /// every cell that passed tickets 0-4 grades as before.
+    #[test]
+    fn persistence_and_sentinel_profiles_follow_the_passed_tickets() {
+        let full: Vec<u32> = (0..=4).collect();
+        assert_eq!(persistence_profile(&full, &[]), Some(Profile::through(4)));
+        let later: Vec<u32> = vec![0, 1, 2, 3, 4, 5, 6, 8];
+        assert_eq!(persistence_profile(&later, &[]), Some(Profile::through(4)));
+        assert_eq!(persistence_profile(&[0, 1, 3, 9], &[]), None);
+        assert_eq!(sentinel_profile(&[0, 1, 3, 9], &[]), None);
+
+        // Live ling `.17` cell: tickets 1-3 failed or skipped.
+        let p = persistence_profile(&[0, 4], &[]).unwrap();
+        assert_eq!(p, Profile::for_passed(&[0]));
+        assert!(!p.column_list_insert && !p.where_clause && !p.order_limit);
+        // Live DeepSeek `_103729`: ticket 2 failed, so no ORDER BY.
+        let p = persistence_profile(&[0, 1, 3, 4], &[]).unwrap();
+        assert!(p.column_list_insert && p.update && !p.order_limit && !p.distinct);
+
+        // Live DeepSeek `_142825`: ticket 7 failed, ticket 8 passed. Its
+        // sentinel must not need aggregates (it was never written).
+        let s = sentinel_profile(&later, &[]).unwrap();
+        assert!(s.joins && s.txn && !s.aggregates);
+        assert_eq!(sentinel_profile(&full, &[]), Some(Profile::through(4)));
+        // A lite pass narrows the sentinel too.
+        let lite = vec![(8u32, vec!["join-inner-only".to_string()])];
+        let s = sentinel_profile(&later, &lite).unwrap();
+        assert!(s.joins && !s.left_join);
+    }
 
     /// A server that answers every connection from a fresh oracle; this is
     /// what a correct candidate looks like on the wire.

@@ -211,7 +211,10 @@ are compared.
 
 **4. Persistence.** Write a seeded dataset, `SIGTERM`, restart on the same
 `--data`, re-run the read queries: identical. **Upgrade check starts here**
-(see below).
+(see below). The scenario runs in every suite that includes ticket 4, and
+its dataset uses only the grammar of the tickets 0-3 the ladder passed (a
+failed ticket is not required). Without ticket 2 there is no total order,
+so the reads compare their rows as a multiset.
 
 Clean stops deliver **SIGTERM to every process in the container** (`docker
 stop` signals PID 1 only, and a `start.sh` without `exec` would hide the
@@ -353,8 +356,9 @@ and skipped stages contribute nothing.
 
 **Upgrade check (data migration).** The harness owns a data directory
 outside the workspace that lives for the whole campaign. After a passing
-stage k >= 4, the harness writes a seeded **sentinel dataset k** and
-records the oracle's answers to its queries. At stage k+1, before the
+stage k whose suite includes ticket 4, the harness writes a seeded
+**sentinel dataset k** over the grammar that suite graded, and records the
+oracle's answers to its queries. At stage k+1, before the
 regular suite, the new build boots on that directory and must answer every
 prior sentinel's queries correctly. A failure is a regression of class
 `upgrade`. The ticket text says plainly: "the data written by your
