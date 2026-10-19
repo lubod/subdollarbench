@@ -3704,6 +3704,73 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Ticket 17's incident: the candidate runs on a
+                            // fresh 16 MiB tmpfs; the harness fills it with a
+                            // foreign filler, a too-large write must answer
+                            // `ERR full` without being acked or applied, the
+                            // seeds must stay readable, and the same write
+                            // must succeed after the filler is removed
+                            // (docs/PROPOSAL-sdb-sql.md, "17. Disk full").
+                            if late_failure.is_none() && wanted.contains(&17) {
+                                let mut disk_extras = extras.clone();
+                                disk_extras.binds.clear();
+                                disk_extras.tmpfs = vec!["/sdb-data:size=16m".to_string()];
+                                let run = |e: &crate::sandbox::docker::CandidateRunExtras| {
+                                    restart_candidate(&sandbox.instance_id, workdir, port, e, true)
+                                };
+                                let container = sandbox.candidate_container_name();
+                                let mut control = |op: crate::verifier::sql::disk::DiskOp| {
+                                    let (what, cmd) = match op {
+                                        crate::verifier::sql::disk::DiskOp::Fill => (
+                                            "fill",
+                                            "dd if=/dev/zero of=/sdb-data/fill bs=1M count=64 status=none 2>/dev/null || true",
+                                        ),
+                                        crate::verifier::sql::disk::DiskOp::Free => {
+                                            ("free", "rm -f /sdb-data/fill")
+                                        }
+                                    };
+                                    let out = std::process::Command::new("docker")
+                                        .args(["exec", &container, "sh", "-c", cmd])
+                                        .output()
+                                        .map_err(|e| format!("{what}: docker exec: {e}"))?;
+                                    if !out.status.success() {
+                                        return Err(format!(
+                                            "{what}: {}",
+                                            String::from_utf8_lossy(&out.stderr).trim()
+                                        ));
+                                    }
+                                    Ok(())
+                                };
+                                let body: Result<String, String> = (|| {
+                                    run(&disk_extras)?;
+                                    logger.log(
+                                        "  [DISK] incident runs on a fresh 16 MiB tmpfs at /sdb-data",
+                                    );
+                                    let addr = format!("127.0.0.1:{port}");
+                                    crate::verifier::sql::disk::incident(
+                                        &addr,
+                                        &crate::verifier::sql::disk::DiskConfig::full(),
+                                        &mut control,
+                                    )
+                                })(
+                                );
+                                let restored = run(&extras);
+                                match body {
+                                    Ok(report) => logger.log(&format!("  [DISK] {report}")),
+                                    Err(e) => {
+                                        logger.log(&format!("  [DISK] FAILED: {e}"));
+                                        late_failure = Some((17, format!("[disk] {e}")));
+                                    }
+                                }
+                                if let Err(e) = restored {
+                                    logger.log(&format!(
+                                        "  [DISK] FAILED: back on the real store: {e}"
+                                    ));
+                                    if late_failure.is_none() {
+                                        late_failure = Some((17, format!("[disk] restart: {e}")));
+                                    }
+                                }
+                            }
                         }
                         if let Some((lost, why)) = late_failure {
                             // A late check failed: the stage that owns the
@@ -8993,6 +9060,80 @@ main()
             (17, 17)
         );
         cleanup_covtest_network("sqlmemory");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 17 live proof (eval-only, no model): the reference runs the
+    /// cumulative suite through stage 17; the incident extra restarts it on
+    /// a 16 MiB tmpfs, fills the volume through the harness, checks that a
+    /// too-large write is refused without being acked or applied, re-reads
+    /// the seeds, frees the filler and retries the write successfully.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage17_disk_full_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 77u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqldisk");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqldisk");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-17 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqldisk");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 17,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=17).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..17).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-17 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 17: Incident: disk full -> PASS",
+            "Stage 16: Larger than memory -> PASS",
+            "[DISK] incident runs on a fresh 16 MiB tmpfs at /sdb-data",
+            "[DISK] seed 40 rows; ENOSPC refused the write and never applied it",
+            "the retry succeeded after the filler was removed",
+            "[UPGRADE] sentinel for stage 17 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (18, 18)
+        );
+        cleanup_covtest_network("sqldisk");
         let _ = fs::remove_dir_all(&dir);
     }
 

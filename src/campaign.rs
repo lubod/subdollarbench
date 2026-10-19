@@ -2988,7 +2988,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
         let lc = load_campaign_from(&root, "sdb-sql").unwrap();
         validate_spec(&lc.spec, &lc.root).unwrap();
-        assert_eq!(lc.spec.stages.len(), 17);
+        assert_eq!(lc.spec.stages.len(), 18);
         let s = lc.spec.stages.iter().find(|s| s.id == 12).unwrap();
         assert_eq!(s.title, "Concurrency and isolation");
         assert_eq!(s.kind, "engine");
@@ -3004,7 +3004,7 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(12));
         assert!(!crate::verifier::sql::driver::differential_supported(12));
         assert!(crate::verifier::sql::driver::stage_supported(12));
-        assert!(!crate::verifier::sql::driver::stage_supported(17));
+        assert!(!crate::verifier::sql::driver::stage_supported(18));
         // Every stage accepts itself and only declared ids.
         for st in &lc.spec.stages {
             assert!(
@@ -3056,7 +3056,7 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(15));
         assert!(!crate::verifier::sql::driver::differential_supported(15));
         assert!(crate::verifier::sql::driver::stage_supported(15));
-        assert!(!crate::verifier::sql::driver::stage_supported(17));
+        assert!(!crate::verifier::sql::driver::stage_supported(18));
         // Ticket 16 (larger than memory): scenario-only, tier 6, needs 2/4,
         // no lite variant.
         let s16 = lc.spec.stages.iter().find(|s| s.id == 16).unwrap();
@@ -3071,9 +3071,24 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(16));
         assert!(!crate::verifier::sql::driver::differential_supported(16));
         assert!(crate::verifier::sql::driver::stage_supported(16));
+        // Ticket 17 (incident: disk full): scenario-only, tier 6, needs 5,
+        // no lite variant.
+        let s17 = lc.spec.stages.iter().find(|s| s.id == 17).unwrap();
+        assert_eq!(s17.title, "Incident: disk full");
+        assert_eq!(s17.kind, "resilience");
+        assert_eq!(s17.tier, 6);
+        assert_eq!(s17.needs, vec![5]);
+        assert_eq!(s17.budget_usd, 0.15);
+        assert_eq!(s17.max_turns, 30);
+        assert!(s17.lite.is_none(), "ticket 17 has no lite variant");
+        assert_eq!(s17.acceptance.sql_stages, (0..=17u32).collect::<Vec<u32>>());
+        assert!(crate::verifier::sql::driver::scenario_only(17));
+        assert!(!crate::verifier::sql::driver::differential_supported(17));
+        assert!(crate::verifier::sql::driver::stage_supported(17));
+        assert!(!crate::verifier::sql::driver::stage_supported(18));
         // Max points: ticket 12 (26 -> 30), 13 (30 -> 34), 14 (34 -> 39),
-        // 15 (39 -> 44), 16 (44 -> 50).
-        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 50.0);
+        // 15 (39 -> 44), 16 (44 -> 50), 17 (50 -> 56).
+        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 56.0);
     }
 
     #[test]

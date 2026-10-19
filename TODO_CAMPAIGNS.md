@@ -142,9 +142,24 @@ class-only stored expectations drift.
     (~343 MiB of text) ... exact`; the reference stayed alive under 64 MiB,
     RSS ~17 MB). The full suite is green serialized (`--test-threads=1`:
     933 passed / 6 ignored, bins 60); fmt/clippy clean.
-- [ ] **T17. Incident: disk full** (tier 6, needs 5)
-  - tmpfs ENOSPC mid-traffic: reads serve, writes `ERR full`, no corruption,
-    resume after space is freed; reuses the ENOSPC injector
+- [x] **T17. Incident: disk full** (tier 6, needs 5)
+  — **landed 2026-10-19, rules `2026-10-19.23`**
+  - `disk.rs`: scenario-only 17. The pipeline restarts the candidate on a
+    fresh 16 MiB tmpfs at `/sdb-data` (no host bind), seeds 40 × 64 KiB
+    rows, fills the volume via `docker exec dd` (a foreign `fill` file),
+    and requires a 2 MiB write to answer `ERR full` without being acked or
+    applied, a small write while full to also answer `ERR full`, and every
+    seed to read back byte-for-byte. The harness then removes the filler and
+    the same write must succeed **without a restart** and read back exactly.
+    The real store is restored afterwards.
+  - campaign stage ($0.15/30, tier 6, needs 5, no lite) + prompt; ladder 18
+    tickets (max_points 56).
+  - gates: four mock-server tests (faithful, acked write, applied refused
+    write, corrupted seed) and the **stage-17 live eval-only proof** (18/18,
+    `Stage 17: Incident: disk full -> PASS`, `[DISK] seed 40 rows; ENOSPC
+    refused the write and never applied it`, retry after freeing succeeds).
+    Full suite green serialized (`--test-threads=1`: 938 passed /
+    6 ignored, bins 60); fmt/clippy clean.
 - [ ] **T18. Hostile input and limits** (tier 6, needs 0)
   - `AUTH`/`SDB_SQL_PASSWORD`, fuzz/mutation, 10k-deep nesting, 16 MiB
     statements, 5 s cancel, slow-loris, 256-connection cap

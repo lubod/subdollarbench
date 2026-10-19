@@ -8,6 +8,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.23`: ticket 17 (incident: disk full) — a scenario-only stage:
+///   the candidate runs on a fresh 16 MiB tmpfs, the harness fills it with a
+///   foreign filler, a too-large write must answer `ERR full` without being
+///   acked or applied, the acked seeds must read back exactly, and the same
+///   write must succeed after the filler is removed (no restart). The ladder
+///   is 18 tickets (max_points 50 -> 56).
 /// - `2026-10-19.22`: ticket 16 (larger than memory) — a scenario-only stage:
 ///   the candidate is restarted on a fresh scratch store under a 64 MiB
 ///   cgroup cap; the harness loads 400,000 rows with ~900-byte text cells
@@ -532,7 +538,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.22";
+pub const RULES_VERSION: &str = "2026-10-19.23";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

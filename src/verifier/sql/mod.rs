@@ -16,6 +16,7 @@ pub mod client;
 pub mod compare;
 pub mod concurrency;
 pub mod crash;
+pub mod disk;
 pub mod driver;
 pub mod generator;
 pub mod memory;
