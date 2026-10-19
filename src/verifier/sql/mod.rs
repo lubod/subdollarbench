@@ -18,6 +18,7 @@ pub mod concurrency;
 pub mod crash;
 pub mod driver;
 pub mod generator;
+pub mod memory;
 pub mod observability;
 pub mod oracle;
 pub mod perf;

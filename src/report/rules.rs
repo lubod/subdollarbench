@@ -8,6 +8,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.22`: ticket 16 (larger than memory) — a scenario-only stage:
+///   the candidate is restarted on a fresh scratch store under a 64 MiB
+///   cgroup cap; the harness loads 400,000 rows with ~900-byte text cells
+///   (~400 MiB on disk), then checks a full-table aggregate, an external
+///   `ORDER BY ... LIMIT 10` and an indexed join exactly, with the server
+///   alive throughout. The ladder is 17 tickets (max_points 44 -> 50).
 /// - `2026-10-19.21`: ticket 15 (tests and CI gate) — a scenario-only stage
 ///   with a lite variant (coverage 60% vs 80%): the candidate ships an
 ///   offline `./test.sh` that must pass twice in under 120 s per run, a
@@ -526,7 +532,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.21";
+pub const RULES_VERSION: &str = "2026-10-19.22";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -3632,6 +3632,78 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Ticket 16's store: a fresh scratch dir, the
+                            // same binary restarted under a 64 MiB cap, then
+                            // ~400 MiB of rows, a full aggregate, an
+                            // external sort and an indexed join
+                            // (docs/PROPOSAL-sdb-sql.md, "16. Larger than
+                            // memory"). The heavy store is thrown away; the
+                            // real store never sees it.
+                            if late_failure.is_none() && wanted.contains(&16) {
+                                let scratch = sql_data.as_ref().map(|data| {
+                                    data.with_file_name(format!(
+                                        "{}-mem",
+                                        data.file_name()
+                                            .map(|n| n.to_string_lossy())
+                                            .unwrap_or_default()
+                                    ))
+                                });
+                                let mut scratch_extras = extras.clone();
+                                if let Some(scratch) = &scratch {
+                                    let real_src = sql_data
+                                        .as_ref()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    for b in scratch_extras.binds.iter_mut() {
+                                        if b.0 == real_src {
+                                            b.0 = scratch.display().to_string();
+                                        }
+                                    }
+                                }
+                                scratch_extras.memory = Some("64m".to_string());
+                                let run = |e: &crate::sandbox::docker::CandidateRunExtras| {
+                                    restart_candidate(&sandbox.instance_id, workdir, port, e, true)
+                                };
+                                let body: Result<String, String> = (|| {
+                                    if let Some(scratch) = &scratch {
+                                        let _ = std::fs::remove_dir_all(scratch);
+                                        std::fs::create_dir_all(scratch)
+                                            .map_err(|e| format!("scratch store: {e}"))?;
+                                        logger.log(
+                                            "  [MEMORY] gate runs on a fresh scratch store under a 64 MiB cap",
+                                        );
+                                    }
+                                    run(&scratch_extras)?;
+                                    let addr = format!("127.0.0.1:{port}");
+                                    crate::verifier::sql::memory::scenario(
+                                        &addr,
+                                        &crate::verifier::sql::memory::MemoryConfig::full(),
+                                    )
+                                })(
+                                );
+                                // Always back onto the real store (and its
+                                // normal memory limit), then drop the heavy
+                                // scratch copy.
+                                let restored = run(&extras);
+                                if let Some(scratch) = &scratch {
+                                    let _ = std::fs::remove_dir_all(scratch);
+                                }
+                                match body {
+                                    Ok(report) => logger.log(&format!("  [MEMORY] {report}")),
+                                    Err(e) => {
+                                        logger.log(&format!("  [MEMORY] FAILED: {e}"));
+                                        late_failure = Some((16, format!("[memory] {e}")));
+                                    }
+                                }
+                                if let Err(e) = restored {
+                                    logger.log(&format!(
+                                        "  [MEMORY] FAILED: back on the real store: {e}"
+                                    ));
+                                    if late_failure.is_none() {
+                                        late_failure = Some((16, format!("[memory] restart: {e}")));
+                                    }
+                                }
+                            }
                         }
                         if let Some((lost, why)) = late_failure {
                             // A late check failed: the stage that owns the
@@ -8706,40 +8778,15 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Ticket 15 live proof (eval-only, no model): the reference workspace
-    /// ships an offline `test.sh`, a coverage line and stage-7/8 commits; the
-    /// real pipeline runs the cumulative suite through stage 15 and the gate
-    /// (two green runs, coverage, both sensitivity reverts) passes.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
-    async fn test_pipeline_eval_only_sql_stage15_tests_ci_live() {
-        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 86u8;
-        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
-        cleanup_covtest_network("sqltests");
-        if let Ok(out) = std::process::Command::new("docker")
-            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
-            .output()
-        {
-            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .map(str::to_string)
-                .collect();
-            if !ids.is_empty() {
-                let mut args = vec!["rm".to_string(), "-f".to_string()];
-                args.extend(ids);
-                let _ = std::process::Command::new("docker").args(&args).output();
-            }
-        }
-        let dir = covtest_dir("sqltests");
-        let workdir = dir.join("workspace");
-        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
-        // A stage-7/8 history the sensitivity check can revert: each commit
-        // adds a marker the suite greps for.
+    /// Ticket 15's gate needs `./test.sh`, a coverage line and stage-7/8
+    /// commits; stage 16's acceptance includes ticket 15, so both live
+    /// proofs install the same fixture. `sql_server.py` stays byte-identical
+    /// to the harness reference (the anti-cheat check recognizes it).
+    fn install_tests_ci_fixture(workdir: &std::path::Path, port: u16) {
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(args)
-                .current_dir(&workdir)
+                .current_dir(workdir)
                 .output()
                 .expect("git");
             assert!(
@@ -8754,8 +8801,8 @@ main()
         git(&["config", "user.name", "reference"]);
         git(&["add", "-A"]);
         git(&["commit", "-qm", "stage 6: Transactions [pass]"]);
-        // Keep `sql_server.py` byte-identical to the harness reference: the
-        // anti-cheat check recognizes that exact file and skips it.
+        // The feature commits carry files the suite greps for; the reference
+        // adapter itself stays untouched.
         std::fs::write(workdir.join("feature_aggregates.py"), "AGG = True\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "stage 7: Aggregates [pass]"]);
@@ -8799,6 +8846,37 @@ main()
             )
             .unwrap();
         }
+    }
+
+    /// Ticket 15 live proof (eval-only, no model): the reference workspace
+    /// ships an offline `test.sh`, a coverage line and stage-7/8 commits; the
+    /// real pipeline runs the cumulative suite through stage 15 and the gate
+    /// (two green runs, coverage, both sensitivity reverts) passes.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage15_tests_ci_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 86u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqltests");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqltests");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
         let prompt_path = dir.join("ticket_prompt.md");
         fs::write(&prompt_path, "sdb-sql stage-15 fixture").unwrap();
 
@@ -8841,6 +8919,80 @@ main()
             (16, 16)
         );
         cleanup_covtest_network("sqltests");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 16 live proof (eval-only, no model): the reference runs the
+    /// cumulative suite through stage 16; the memory extra restarts it on a
+    /// fresh scratch store under a 64 MiB cap, loads 400k x 900 B rows and
+    /// checks the full aggregate, the external sort and the indexed join
+    /// without being OOM-killed.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage16_memory_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 78u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqlmemory");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqlmemory");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-16 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlmemory");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 16,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=16).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..16).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-16 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 16: Larger than memory -> PASS",
+            "Stage 15: Tests and CI gate -> PASS",
+            "[MEMORY] gate runs on a fresh scratch store under a 64 MiB cap",
+            "[MEMORY] 400000 rows (~343 MiB of text)",
+            "aggregate, ORDER BY and indexed join exact",
+            "[UPGRADE] sentinel for stage 16 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (17, 17)
+        );
+        cleanup_covtest_network("sqlmemory");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -123,9 +123,25 @@ class-only stored expectations drift.
     parallelism the long Docker live proofs (stage 13/14) can exceed a
     start timeout and surface as `infra_error`, and each passes alone.
     fmt/clippy clean.
-- [ ] **T16. Larger than memory** (tier 6, needs 2, 4)
-  - 64 MiB cgroup, ~400 MiB rows, external sort and indexed join; reuses the
-    redis verifier's cgroup plumbing
+- [x] **T16. Larger than memory** (tier 6, needs 2, 4)
+  — **landed 2026-10-19, rules `2026-10-19.22`**
+  - `memory.rs`: scenario-only 16. The pipeline restarts the candidate on a
+    fresh scratch `<data>-mem` with `--memory=64m` (the real store is
+    restored afterwards, the scratch dropped), then the scenario creates
+    `big` (400k rows, ~900-byte `t`, ~400 MiB on disk) and `dim` (1k rows),
+    loads in 1k-row transactions, builds `big_k`, and checks COUNT/SUM/MIN/
+    MAX, `ORDER BY t DESC, id DESC LIMIT 10` over the whole table, and the
+    indexed join exactly. Expected values are computed while generating the
+    rows (no second 400 MiB engine); the full config is pinned to the
+    reference's prototype answers.
+  - campaign stage ($0.20/40, tier 6, needs 2/4, no lite) + prompt; the
+    ladder is 17 tickets (max_points 50).
+  - gates: five mock-server tests (faithful, bad aggregate, bad order, bad
+    join, brute-force top-10) and the **stage-16 live eval-only proof**
+    (17/17, `Stage 16: Larger than memory -> PASS`, `[MEMORY] 400000 rows
+    (~343 MiB of text) ... exact`; the reference stayed alive under 64 MiB,
+    RSS ~17 MB). The full suite is green serialized (`--test-threads=1`:
+    933 passed / 6 ignored, bins 60); fmt/clippy clean.
 - [ ] **T17. Incident: disk full** (tier 6, needs 5)
   - tmpfs ENOSPC mid-traffic: reads serve, writes `ERR full`, no corruption,
     resume after space is freed; reuses the ENOSPC injector
