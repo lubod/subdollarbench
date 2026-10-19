@@ -5,6 +5,79 @@ tickets, cumulative acceptance, cost-first scoring, runtime faults.
 See `docs/PROPOSAL-iterative-campaigns.md` (ladder + contracts) and
 `docs/PROPOSAL-scoring-v2.md` (protocol/curve/Pareto).
 
+## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
+
+Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and
+§"Stage acceptance details". Only stages 0-11 exist in
+`campaigns/sdb-sql/campaign.json`; the validator already accepts ids 0..=20,
+`stage_title()` names all 21, and the per-ticket gates are the same ones
+0-11 went through (verifier + prompts + spec/acceptance, RULES bump and
+history, the 0/3000 soak through the differential part, the 20/20 flake bar,
+Docker live proofs, TODO record, board/portal check).
+
+**Operator decision needed before ticket 16+ work:** the full 21-ticket
+ladder is $3.20 / 680 turns (proposal line 181), while the cell policy is
+$0.75 / 120 min. A $0.75 cell stops by "budget cap" around ticket 8-11 and
+20 tickets at ~30-40 min each is 10-13 h of wall, so tickets 12-20 are
+unreachable inside today's caps. Either add a "full-ladder" cell class
+(e.g. $4-5 / 8-12 h) or accept the cap stop as the result; a cap stop is
+never a model ceiling.
+
+- [x] **T12. Concurrency and isolation** (tier 4, needs 6, full + lite) —
+  **landed 2026-10-19, rules `2026-10-19.18`**
+  - `src/verifier/sql/concurrency.rs`: (a) lost update, 16 clients × 50
+    read-modify-write transactions, final value exactly 800 (bounded retry
+    on `ERR busy`); (b) transfers with three snapshot readers (the sum
+    never changes, at least ten snapshots); (c) full only: with a write
+    transaction open, a reader answers the pre-transaction value within
+    1 s — blocking and `ERR busy` both fail. The lite profile
+    `concurrency-global-lock` skips (c).
+  - scenario-only stages: `driver::scenario_only`/`stage_supported`; the
+    pipeline runs the scenario after the suite and records a late failure
+    against stage 12; the campaign spec has the stage (acceptance `0..=12`,
+    $0.20/40, lite $0.12/24 weight 0.4) and both prompts.
+  - tests: eight mock-server tests (snapshot-reader mode passes all;
+    global-lock passes a+b and fails (c); naive autocommit loses updates;
+    busy retries succeed; five repeats), and the spec test (13 stages,
+    tier 4, needs 6, lite profile, max_points 30).
+  - gates: fmt and clippy clean; lib **916 passed**, bins 60; the
+    differential soak is unchanged (ticket 12 adds no grammar). Not yet: a
+    live cell reaching ticket 12 (the cap decision above), and the 20/20
+    manual repeat.
+**Round-14 remainder (2026-10-19)**: P1 (portal and console medians use the
+mean of the two middles for even counts: 7 + 13 -> 10.0, tested); N5
+(feedback renders the candidate's raw error text, not just the class); the
+sentinel compares `ERR` answers by class, because the N5 text made the
+class-only stored expectations drift.
+
+- [ ] **T13. Schema change** (tier 4, needs 4; differential)
+  - generator/oracle: `ALTER TABLE ADD/DROP/RENAME COLUMN`, `RENAME TO`,
+    `IF [NOT] EXISTS`; `DROP COLUMN` on an indexed column is
+    `ERR constraint`; every change survives restart and keeps indexes valid
+  - raise `MAX_DIFFERENTIAL_STAGE` to 13; sweep + agreement + soak through 13
+- [ ] **T14. Observability** (tier 5, needs 11)
+  - `EXPLAIN <select>` names `SCAN`/`INDEX` as appropriate; `SHOW STATS`
+    exact counter deltas after scripted traffic
+- [ ] **T15. Tests and CI gate** (tier 5, needs 7, 8; lite 60 % coverage)
+  - `./test.sh` twice, coverage, sensitivity reverts of tickets 7/8; the CI
+    stage machinery already exists (pipeline.rs, retired campaigns)
+- [ ] **T16. Larger than memory** (tier 6, needs 2, 4)
+  - 64 MiB cgroup, ~400 MiB rows, external sort and indexed join; reuses the
+    redis verifier's cgroup plumbing
+- [ ] **T17. Incident: disk full** (tier 6, needs 5)
+  - tmpfs ENOSPC mid-traffic: reads serve, writes `ERR full`, no corruption,
+    resume after space is freed; reuses the ENOSPC injector
+- [ ] **T18. Hostile input and limits** (tier 6, needs 0)
+  - `AUTH`/`SDB_SQL_PASSWORD`, fuzz/mutation, 10k-deep nesting, 16 MiB
+    statements, 5 s cancel, slow-loris, 256-connection cap
+- [ ] **T19. Replication and failover** (tier 7, needs 6; lite 2 nodes)
+  - 3 nodes 7101-7103, `--replicaof`, `SHOW ROLE`/LSN, sync ack, failover
+    and rejoin; the campaign harness runs one candidate container today, so
+    multi-node orchestration comes first
+- [ ] **T20. PostgreSQL wire protocol** (tier 7, needs 1; lite simple query)
+  - protocol 3.0 on `--pg-port`: SSL refusal, ParameterStatus,
+    simple + extended query, SQLSTATE mapping, psql cross-check
+
 ## Baseline evidence — canary wave under 2026-10-14.1
 
 First coherent dataset after the review fixes (6 cells, redis, high,

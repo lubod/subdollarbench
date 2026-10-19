@@ -132,7 +132,7 @@ pub fn write(addr: &str, timeout: Duration, sent: &Sentinel) -> Result<(), Strin
     for (sql, want) in sent.writes.iter().zip(&sent.write_expected) {
         let got = c.exec(sql).map_err(|e| format!("{sql:?}: {e}"))?;
         let frame = frame(&Ok(got))?;
-        if &frame != want {
+        if !same_answer(&frame, want, true) {
             return Err(format!(
                 "write {sql:?} answered {frame:?}, expected {want:?}"
             ));
@@ -189,9 +189,21 @@ fn check_with(c: &mut TcpCandidate, sent: &Sentinel) -> Result<(), String> {
 /// line with the same rows in any order. Anything but a `ROWS` frame (an
 /// `OK`, an `ERR`, no usable response) must match exactly.
 fn same_answer(got: &str, want: &str, ordered: bool) -> bool {
-    got == want
-        || (!ordered
-            && matches!((row_multiset(got), row_multiset(want)), (Some(a), Some(b)) if a == b))
+    if got == want {
+        return true;
+    }
+    // Error answers are graded by class: the text is free-form and the
+    // reference's wording differs. The stored expectations carry the class
+    // only, while feedback renders the candidate's raw text (round-14 N5).
+    if let (Some(g), Some(w)) = (err_class(got), err_class(want)) {
+        return g == w;
+    }
+    !ordered && matches!((row_multiset(got), row_multiset(want)), (Some(a), Some(b)) if a == b)
+}
+
+/// The class token of an `ERR <class> <text>` frame.
+fn err_class(frame: &str) -> Option<&str> {
+    frame.strip_prefix("ERR ")?.split_whitespace().next()
 }
 
 /// A `ROWS` frame as (its fixed lines, its rows sorted). Rows are one line

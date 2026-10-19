@@ -2979,6 +2979,43 @@ mod tests {
         );
     }
 
+    /// Ticket 12 landed (2026-10-19): the sdb-sql ladder is 13 stages and
+    /// the new one is scenario-only (concurrency) with its lite variant.
+    #[test]
+    fn test_real_sdb_sql_spec_has_ticket_12() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+        let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+        validate_spec(&lc.spec, &lc.root).unwrap();
+        assert_eq!(lc.spec.stages.len(), 13);
+        let s = lc.spec.stages.iter().find(|s| s.id == 12).unwrap();
+        assert_eq!(s.title, "Concurrency and isolation");
+        assert_eq!(s.kind, "engine");
+        assert_eq!(s.tier, 4);
+        assert_eq!(s.needs, vec![6]);
+        assert_eq!(s.budget_usd, 0.20);
+        assert_eq!(s.max_turns, 40);
+        assert_eq!(s.acceptance.sql_stages, (0..=12u32).collect::<Vec<u32>>());
+        let lite = s.lite.as_ref().expect("ticket 12 has a lite variant");
+        assert_eq!(lite.profile, vec!["concurrency-global-lock".to_string()]);
+        assert!(lite.budget_usd < s.budget_usd);
+        // Scenario-only: graded, though above the differential ceiling.
+        assert!(crate::verifier::sql::driver::scenario_only(12));
+        assert!(!crate::verifier::sql::driver::differential_supported(12));
+        assert!(crate::verifier::sql::driver::stage_supported(12));
+        assert!(!crate::verifier::sql::driver::stage_supported(13));
+        // Every stage accepts itself and only declared ids.
+        for st in &lc.spec.stages {
+            assert!(
+                st.acceptance.sql_stages.contains(&st.id),
+                "stage {} acceptance misses itself: {:?}",
+                st.id,
+                st.acceptance.sql_stages
+            );
+        }
+        // Max points grew by ticket 12's tier (26 -> 30).
+        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 30.0);
+    }
+
     #[test]
     fn test_real_sdb_http_spec_validates() {
         let lc = load_campaign("sdb-http").expect("bundled campaign must load");

@@ -2477,7 +2477,10 @@
         rows += boardRowHtml(top, rank, { extra });
         if (expanded && n > 1) {
           const sorted = cells.map(cellPoints).sort((a, b) => a - b);
-          const med = sorted[Math.floor(sorted.length / 2)];
+          // P1 (round 14): an even count's median is the mean of the middles.
+          const med = sorted.length % 2 === 0
+            ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+            : sorted[Math.floor(sorted.length / 2)];
           rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
           cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
         }

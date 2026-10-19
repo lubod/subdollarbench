@@ -8,6 +8,17 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.18`: ticket 12 (concurrency and isolation) — a
+///   scenario-only stage (no new grammar): the lost-update check
+///   (16 clients x 50 read-modify-write transactions must end at exactly
+///   800), the transfer invariant with snapshot readers (the sum never
+///   changes), and the full-only reader check (a reader answers the
+///   pre-transaction value within 1 s while a writer is open; neither
+///   blocking nor `ERR busy` passes; the lite variant
+///   `concurrency-global-lock` skips it). The ladder now has 13 tickets
+///   (max_points 26 -> 30). Feedback also carries the candidate's raw error
+///   text ("ERR syntax internal error: …"), not just the class, so a repair
+///   round sees the bug (round-14 N5).
 /// - `2026-10-18.17`: round-10 harness fixes — the per-round
 ///   `FEEDBACK_REPORT.md` is deleted before and after every attempt and
 ///   never committed (a stale report used to greet later tickets and be
@@ -487,7 +498,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-18.17";
+pub const RULES_VERSION: &str = "2026-10-19.18";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

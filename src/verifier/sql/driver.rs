@@ -62,6 +62,20 @@ pub fn differential_supported(stage: u32) -> bool {
     stage <= MAX_DIFFERENTIAL_STAGE
 }
 
+/// Stages whose contract is a scripted scenario rather than new differential
+/// grammar. Ticket 12 (concurrency) is the first; later tickets extend this
+/// as their scenarios land.
+pub fn scenario_only(stage: u32) -> bool {
+    stage == 12
+}
+
+/// Whether the verifier can grade this stage at all: the differential
+/// ladder through [`MAX_DIFFERENTIAL_STAGE`], plus the scenario-only
+/// tickets built so far.
+pub fn stage_supported(stage: u32) -> bool {
+    differential_supported(stage) || scenario_only(stage)
+}
+
 /// A deterministic seed for (verification, stage): every verification of a
 /// ticket uses a fresh seed, so a repair cannot overfit to the reported
 /// example (docs/PROPOSAL-sdb-sql.md, "Fresh seeds").

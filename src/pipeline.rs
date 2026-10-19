@@ -2990,6 +2990,26 @@ impl BenchmarkPipeline {
                                 "Stage {stage}: {}",
                                 crate::verifier::sql::driver::stage_title(stage)
                             );
+                            if crate::verifier::sql::driver::scenario_only(stage) {
+                                // A scenario-only ticket (ticket 12 first):
+                                // its checks run after the suite, once the
+                                // earlier stages are green, like the crash
+                                // ladder, transactions and the perf gate. A
+                                // placeholder pass lets the late-failure path
+                                // flip it when its scenario fails.
+                                logger.log(&format!(
+                                    "  [SCENARIO] stage {stage}: scripted checks run after the suite"
+                                ));
+                                let st = crate::verifier::StageResult {
+                                    stage,
+                                    name,
+                                    passed: true,
+                                    error: None,
+                                };
+                                log_stage(logger, &st);
+                                stages.push(st);
+                                continue;
+                            }
                             if !crate::verifier::sql::driver::differential_supported(stage) {
                                 let st = crate::verifier::StageResult {
                                     stage,
@@ -3266,6 +3286,40 @@ impl BenchmarkPipeline {
                                     Err(e) => {
                                         logger.log(&format!("  [TXN] FAILED: {e}"));
                                         late_failure = Some((6, format!("[txn] {e}")));
+                                    }
+                                }
+                            }
+                            // Stage 12's suite: serializable concurrency
+                            // (docs/PROPOSAL-sdb-sql.md, "12. Concurrency
+                            // and isolation"). The lite variant is one
+                            // global lock: it passes the lost-update and
+                            // transfer checks but fails the reader check.
+                            if late_failure.is_none() && wanted.contains(&12) {
+                                let ns =
+                                    crate::verifier::sql::driver::stage_seed(verifier_seed, 12)
+                                        ^ 0x5E27_1E10_0000_000C;
+                                let lite = if wanted.iter().copied().max() == Some(12) {
+                                    lite_profile.iter().any(|p| p == "concurrency-global-lock")
+                                } else {
+                                    passed_lite.iter().any(|(s, p)| {
+                                        *s == 12 && p.iter().any(|f| f == "concurrency-global-lock")
+                                    })
+                                };
+                                let addr = format!("127.0.0.1:{port}");
+                                match crate::verifier::sql::concurrency::scenario(
+                                    &addr,
+                                    std::time::Duration::from_secs(10),
+                                    ns,
+                                    lite,
+                                ) {
+                                    Ok(()) => logger.log(if lite {
+                                        "  [CONCURRENCY] lite: lost update and transfers are serializable (global lock)"
+                                    } else {
+                                        "  [CONCURRENCY] serializable: lost update, transfers, and readers never blocked"
+                                    }),
+                                    Err(e) => {
+                                        logger.log(&format!("  [CONCURRENCY] FAILED: {e}"));
+                                        late_failure = Some((12, format!("[concurrency] {e}")));
                                     }
                                 }
                             }

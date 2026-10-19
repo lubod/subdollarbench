@@ -1645,7 +1645,14 @@ impl PortalExporter {
                     .map(|x| x.points)
                     .collect();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = sorted[sorted.len() / 2];
+                // P1 (round 14): an even count's median is the mean of the
+                // two middle values (7 and 13 -> 10.0, not 13.0).
+                let n = sorted.len();
+                let median = if n.is_multiple_of(2) {
+                    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+                } else {
+                    sorted[n / 2]
+                };
                 let mut inner = format!(
                     "<div class=\"line\">median {median:.1} pts across {} runs</div>",
                     extra.len() + 1
@@ -3273,6 +3280,10 @@ mod tests {
         assert!(
             pos("m2") < pos("m2b") && pos("m2b") < pos("m1"),
             "the duplicate run folds under its best: {html}"
+        );
+        assert!(
+            html.contains("median 10.0 pts across 2 runs"),
+            "an even count uses the mean of the two middles: {html}"
         );
         assert!(
             pos("older rule sets") < pos("m3"),

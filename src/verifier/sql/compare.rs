@@ -88,7 +88,17 @@ pub fn render_response(got: &Result<Response, String>) -> String {
     match got {
         Err(e) => format!("(no usable response: {e})"),
         Ok(Response::Ok(n)) => format!("OK {n}"),
-        Ok(Response::Err { class, .. }) => format!("ERR {class}"),
+        // N5 (round 14): the candidate's own words name the bug
+        // ("internal error: 'list' object has no attribute 'lower'"); the
+        // class alone made every repair round repeat the same crash.
+        Ok(Response::Err { class, text }) => {
+            let text = text.trim();
+            if text.is_empty() {
+                format!("ERR {class}")
+            } else {
+                format!("ERR {class} {text}")
+            }
+        }
         Ok(Response::Rows {
             ncols,
             headers,
