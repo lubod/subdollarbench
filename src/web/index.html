@@ -2309,12 +2309,15 @@
     function groupCells(cells) {
       // The API already returns cells in the one Rust board order
       // (campaign::board_order); the grouping preserves it: the first cell
-      // of a group is its best, and groups keep first-seen order.
+      // of a group is its best, and groups keep first-seen order. A group
+      // is one model, harness, effort *and rule set*: points from different
+      // rule sets (or ladders) are not comparable, so they never share a
+      // row or a median.
       const groups = {};
       cells.forEach(c => {
         const r = cellRollup(c);
         if (!r.model) return;
-        const key = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}`;
+        const key = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}\u0001${r.rules_version || ''}`;
         (groups[key] = groups[key] || []).push(c);
       });
       return Object.entries(groups).map(([key, list]) => ({ key, cells: list }));

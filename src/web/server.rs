@@ -1569,13 +1569,14 @@ fn campaign_board_view(
     Vec<crate::campaign::LadderEntry>,
     String,
     crate::campaign::BoardSortKey,
+    Option<crate::campaign::CampaignRollup>,
 )> {
     let parsed: Option<crate::campaign::CampaignRollup> = v
         .get("rollup")
         .filter(|r| !r.is_null())
         .and_then(|r| serde_json::from_value(r.clone()).ok());
     let live = parsed.is_none();
-    let rollup = parsed.unwrap_or_else(|| crate::campaign::live_rollup_stub(campaign_id, v));
+    let mut rollup = parsed.unwrap_or_else(|| crate::campaign::live_rollup_stub(campaign_id, v));
     let spec = specs
         .entry(rollup.name.clone())
         .or_insert_with(|| {
@@ -1584,6 +1585,10 @@ fn campaign_board_view(
                 .map(|lc| lc.spec)
         })
         .clone()?;
+    if live {
+        // The stub reads 0 of the ladder's points, not 0 of 0.
+        rollup.max_points = crate::campaign::max_points(&spec.stages);
+    }
     // Only a *running* cell marks its current ticket running: a stalled
     // cell must not read `running` anywhere.
     let running = v["state"].as_str() == Some("running");
@@ -1607,7 +1612,13 @@ fn campaign_board_view(
     } else {
         crate::campaign::stop_reason(&rollup).to_string()
     };
-    Some((ladder, stop, key))
+    // A running cell has no rollup until its first ticket is recorded. The
+    // board groups and renders cells from their rollup, so it gets the stub
+    // the ladder and the key were built from; without it the cell vanished
+    // from the Board for the whole first ticket. A stalled or dead cell
+    // without a rollup keeps none: the stub's current rules would misfile it.
+    let stub = (live && running).then_some(rollup);
+    Some((ladder, stop, key, stub))
 }
 
 pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
@@ -1665,10 +1676,13 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 .unwrap_or(serde_json::Value::Null);
             // The full ladder (attempted and not) + the stop reason: one
             // derivation for the console and the board (gui-spec.md §5.3).
-            if let Some((ladder, stop, key)) = campaign_board_view(&v, &mut specs, &name) {
+            if let Some((ladder, stop, key, stub)) = campaign_board_view(&v, &mut specs, &name) {
                 v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
                 v["stop_reason"] = serde_json::json!(stop);
                 v["board_key"] = serde_json::to_value(key).unwrap_or_default();
+                if let Some(stub) = stub {
+                    v["rollup"] = serde_json::to_value(stub).unwrap_or(serde_json::Value::Null);
+                }
             }
             out.push(v);
         }
@@ -5468,6 +5482,39 @@ global.fetch = async (url) => {
   if (!live.includes('17 Oct')) fail.push('live-dated-stall');
   if (/wall 0s|wall 19h|wall 2[0-9]h/.test(live)) fail.push('live-wall-now');
   if (!board.includes('17 Oct')) fail.push('board-dated-stall');
+  // Round-18 Board: a running cell that only has the server's stub rollup
+  // is listed, above the older-rules divider; one model under two rule
+  // sets is two rows, never one group with a mixed median.
+  window.__SDB_RULES__ = '2026-10-19.31';
+  const boardFixture = [
+    { id: 'campaign_live_cell', state: 'running', current_stage: 0, stop_reason: '',
+      live: { ticket: 0, turn: 3, max_turns: 28 },
+      rollup: { model: 'openrouter/ut/live', harness: 'omp', effort: 'max', rules_version: '2026-10-19.31',
+                points: 0, max_points: 76, total_cost_usd: 0, stages: [] },
+      ladder: [{ id: 0, title: 'Genesis', status: 'running', points: 0 }] },
+    { id: 'campaign_new_cell', state: 'done', stop_reason: 'budget cap', live: {},
+      rollup: { model: 'openrouter/ut/m', harness: 'omp', effort: 'high', rules_version: '2026-10-19.29',
+                points: 34.6, max_points: 76, total_cost_usd: 0.75, stages: [] },
+      ladder: [{ id: 0, title: 'Genesis', status: 'pass', points: 1 }] },
+    { id: 'campaign_old_cell', state: 'done', stop_reason: 'ladder end', live: {},
+      rollup: { model: 'openrouter/ut/m', harness: 'omp', effort: 'high', rules_version: '2026-10-18.17',
+                points: 13, max_points: 26, total_cost_usd: 0.36, stages: [] },
+      ladder: [{ id: 0, title: 'Genesis', status: 'pass', points: 1 }] },
+  ];
+  global.fetch = async (url) => {
+    const u = String(url || '');
+    const body = (u.includes('/api/campaigns') && !u.includes('/log')) ? boardFixture : {};
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => body, text: async () => '' };
+  };
+  try { await refreshBoard(); renderBoard(); } catch (e) { console.log('BOARD THREW:', e.message); process.exit(1); }
+  const b2 = el('boardBody').innerHTML;
+  const iLive = b2.indexOf('campaign_live_cell');
+  const iDiv = b2.indexOf('older rule sets');
+  if (iLive < 0) fail.push('board-live-cell-missing');
+  if (iLive >= 0 && iDiv >= 0 && iDiv < iLive) fail.push('board-live-cell-under-divider');
+  if (!b2.includes('campaign_old_cell')) fail.push('board-rules-folded-into-one-group');
+  if (b2.includes('\u00d72 runs') || b2.includes('×2 runs')) fail.push('board-grouped-across-rules');
+  if (!b2.includes('0.0/76 pts')) fail.push('board-live-cell-max-points');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
   console.log('smoke OK');
 })();
@@ -6236,6 +6283,16 @@ global.fetch = async (url) => {
             list.first().map(|c| c["id"].clone()),
             Some(serde_json::json!(id.clone()))
         );
+        // ...and carries the stub rollup the Board groups and renders from
+        // (round-18 GUI: without it the running cell vanished from the
+        // Board until its first ticket was recorded).
+        let first = list.first().expect("the live cell");
+        assert_eq!(first["rollup"]["model"], "ut/live-model");
+        assert_eq!(
+            first["rollup"]["rules_version"],
+            crate::report::rules::RULES_VERSION
+        );
+        assert_eq!(first["rollup"]["max_points"], 76.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
