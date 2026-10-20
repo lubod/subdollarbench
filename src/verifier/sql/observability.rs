@@ -164,6 +164,7 @@ pub fn stats_deltas(addr: &str, timeout: Duration, table: &str) -> Result<(), St
     require_all(&base, "SHOW STATS (baseline)")?;
     let settle_deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
+        std::thread::sleep(Duration::from_millis(25));
         let again = stats(&mut c)?;
         require_all(&again, "SHOW STATS (baseline settle)")?;
         let stable = again["connections_current"] == base["connections_current"];

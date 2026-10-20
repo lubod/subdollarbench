@@ -26,6 +26,9 @@ pub struct PgConfig {
     pub password: Option<String>,
     pub timeout: Duration,
     pub extended: bool,
+    /// Whether the scenario may use ticket 9's PRIMARY KEY and grade the
+    /// duplicate-key SQLSTATE; false when the ladder did not pass ticket 9.
+    pub unique_keys: bool,
 }
 
 impl PgConfig {
@@ -35,6 +38,7 @@ impl PgConfig {
             password,
             timeout: Duration::from_secs(10),
             extended: true,
+            unique_keys: true,
         }
     }
 
@@ -283,6 +287,85 @@ impl PgConn {
     }
 }
 
+/// Connect with a deliberately wrong password and return the SQLSTATE of
+/// the ErrorResponse (the prompt requires 28P01).
+fn wrong_password_probe(addr: &str, cfg: &PgConfig) -> Result<String, String> {
+    let mut stream = TcpStream::connect(addr).map_err(|e| format!("probe connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(cfg.timeout))
+        .map_err(|e| format!("probe timeout: {e}"))?;
+    stream
+        .set_write_timeout(Some(cfg.timeout))
+        .map_err(|e| format!("probe write timeout: {e}"))?;
+    stream
+        .write_all(&[0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f])
+        .map_err(|e| format!("probe SSLRequest: {e}"))?;
+    let mut ssl = [0u8; 1];
+    stream
+        .read_exact(&mut ssl)
+        .map_err(|e| format!("probe SSLRequest answer: {e}"))?;
+    if ssl != [b'N'] {
+        return Err("the probe's SSLRequest was not refused".to_string());
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&be_i32(196608));
+    body.extend_from_slice(&cstr("user"));
+    body.extend_from_slice(&cstr(&cfg.user));
+    body.extend_from_slice(&cstr("database"));
+    body.extend_from_slice(&cstr(&cfg.user));
+    body.push(0);
+    let mut startup = be_i32((body.len() + 4) as i32).to_vec();
+    startup.extend_from_slice(&body);
+    stream
+        .write_all(&startup)
+        .map_err(|e| format!("probe startup: {e}"))?;
+    let mut sent = false;
+    loop {
+        let mut t = [0u8; 1];
+        match stream.read_exact(&mut t) {
+            Ok(()) => {}
+            Err(_) => return Err("the server closed before an auth error".to_string()),
+        }
+        let mut l = [0u8; 4];
+        stream
+            .read_exact(&mut l)
+            .map_err(|e| format!("probe length: {e}"))?;
+        let n = i32::from_be_bytes(l);
+        let mut b = vec![0u8; (n - 4).max(0) as usize];
+        stream
+            .read_exact(&mut b)
+            .map_err(|e| format!("probe body: {e}"))?;
+        match t[0] {
+            b'R' if b.len() >= 4 && i32::from_be_bytes([b[0], b[1], b[2], b[3]]) == 3 => {
+                let mut msg = b"sdb-wrong-password".to_vec();
+                msg.push(0);
+                let mut out = vec![b'p'];
+                out.extend_from_slice(&be_i32((msg.len() + 4) as i32));
+                out.extend_from_slice(&msg);
+                stream
+                    .write_all(&out)
+                    .map_err(|e| format!("probe password: {e}"))?;
+                sent = true;
+            }
+            b'R' if b.len() >= 4 && i32::from_be_bytes([b[0], b[1], b[2], b[3]]) == 0 => {
+                return Err("the server accepted the connection before a password".to_string())
+            }
+            b'E' => {
+                let (code, _) = parse_error(&b);
+                return Ok(code);
+            }
+            b'Z' => {
+                return Err(if sent {
+                    "the server accepted the wrong password".to_string()
+                } else {
+                    "the server did not request a password".to_string()
+                })
+            }
+            _ => {}
+        }
+    }
+}
+
 fn parse_error(b: &[u8]) -> (String, String) {
     let mut code = String::new();
     let mut msg = String::new();
@@ -385,6 +468,14 @@ fn cell(o: &Outcome, what: &str) -> Result<String, String> {
 /// The stage-20 contract. The caller owns the PG port, auth/password and
 /// the scratch store.
 pub fn scenario(addr: &str, cfg: &PgConfig) -> Result<String, String> {
+    if cfg.password.is_some() {
+        let code = wrong_password_probe(addr, cfg)?;
+        if code != "28P01" {
+            return Err(format!(
+                "a wrong password answered SQLSTATE {code}, expected 28P01"
+            ));
+        }
+    }
     let c = PgConn::connect(addr, cfg)?;
     let table = format!("pg_{:x}", 0x20u64);
     let mut c2 = c;
@@ -398,12 +489,12 @@ pub fn scenario(addr: &str, cfg: &PgConfig) -> Result<String, String> {
         ));
     }
 
-    expect_no_error(
-        &c2.simple(&format!(
-            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, v TEXT NOT NULL)"
-        ))?,
-        "CREATE TABLE",
-    )?;
+    let ddl = if cfg.unique_keys {
+        format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY, v TEXT)")
+    } else {
+        format!("CREATE TABLE {table} (id INTEGER, v TEXT)")
+    };
+    expect_no_error(&c2.simple(&ddl)?, "CREATE TABLE")?;
     expect_no_error(
         &c2.simple(&format!("INSERT INTO {table} VALUES (1, 'hello')"))?,
         "INSERT",
@@ -442,8 +533,10 @@ pub fn scenario(addr: &str, cfg: &PgConfig) -> Result<String, String> {
     }
     let o = c2.simple("SELEC 1")?;
     expect_error(&o, "42601", "syntax error")?;
-    let o = c2.simple(&format!("INSERT INTO {table} VALUES (1, 'dup')"))?;
-    expect_error(&o, "23505", "duplicate key")?;
+    if cfg.unique_keys {
+        let o = c2.simple(&format!("INSERT INTO {table} VALUES (1, 'dup')"))?;
+        expect_error(&o, "23505", "duplicate key")?;
+    }
     // The connection stays usable after errors.
     let o = c2.simple("SELECT 1")?;
     expect_no_error(&o, "SELECT 1 after errors")?;
@@ -768,6 +861,7 @@ mod tests {
             password: Some("pw-test".to_string()),
             timeout: Duration::from_secs(2),
             extended,
+            unique_keys: true,
         }
     }
 

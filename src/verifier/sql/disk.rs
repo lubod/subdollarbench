@@ -77,14 +77,12 @@ fn expect_rows(resp: Response, what: &str) -> Result<Vec<Vec<String>>, String> {
     }
 }
 
-fn one_int(resp: Response, what: &str) -> Result<i64, String> {
-    let rows = expect_rows(resp, what)?;
-    let cell = rows
-        .first()
-        .and_then(|r| r.first())
-        .ok_or_else(|| format!("{what}: no scalar row"))?;
-    cell.parse::<i64>()
-        .map_err(|e| format!("{what}: {cell:?} is not an integer: {e}"))
+fn read_all(c: &mut TcpCandidate, what: &str) -> Result<Vec<Vec<String>>, String> {
+    expect_rows(c.exec("SELECT id, v FROM t")?, what)
+}
+
+fn row_count(rows: &[Vec<String>]) -> usize {
+    rows.len()
 }
 
 /// Run the incident. `control` must fill/free the candidate's data volume;
@@ -96,7 +94,7 @@ pub fn incident(
 ) -> Result<String, String> {
     let mut c = TcpCandidate::connect(addr, cfg.timeout)?;
     expect_ok(
-        c.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)")?,
+        c.exec("CREATE TABLE t (id INTEGER, v TEXT)")?,
         "CREATE TABLE",
     )?;
     for i in 0..cfg.seed_rows {
@@ -108,10 +106,10 @@ pub fn incident(
             &format!("seed INSERT {i}"),
         )?;
     }
-    let seeded = one_int(c.exec("SELECT COUNT(*) FROM t")?, "seed COUNT")?;
-    if seeded != cfg.seed_rows as i64 {
+    let seeded = row_count(&read_all(&mut c, "seed readback")?);
+    if seeded != cfg.seed_rows as usize {
         return Err(format!(
-            "seed COUNT is {seeded}, expected {}",
+            "seed row count is {seeded}, expected {}",
             cfg.seed_rows
         ));
     }
@@ -141,14 +139,15 @@ pub fn incident(
     // required: an engine with a preallocated journal can persist a small
     // row legitimately — round-15 M4/LOW — so the contract only says the
     // write that cannot fit is refused.)
-    let after = one_int(c.exec("SELECT COUNT(*) FROM t")?, "COUNT after ENOSPC")?;
-    if after != cfg.seed_rows as i64 {
+    let after = row_count(&read_all(&mut c, "rows after ENOSPC")?);
+    if after != seeded {
         return Err(format!(
             "the rejected write changed the row count: {seeded} -> {after}"
         ));
     }
     // Every acked seed row still reads back byte-for-byte.
-    let rows = expect_rows(c.exec("SELECT id, v FROM t ORDER BY id")?, "seed readback")?;
+    let mut rows = expect_rows(c.exec("SELECT id, v FROM t")?, "seed readback")?;
+    rows.sort_by_key(|r| r.first().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0));
     if rows.len() != cfg.seed_rows as usize {
         return Err(format!(
             "seed readback returned {} rows, expected {}",
@@ -173,23 +172,24 @@ pub fn incident(
         "r".repeat(cfg.retry_len)
     );
     expect_ok(c.exec(&retry)?, "retry after freeing space")?;
-    let after = one_int(c.exec("SELECT COUNT(*) FROM t")?, "COUNT after retry")?;
-    if after != cfg.seed_rows as i64 + 1 {
+    let rows = read_all(&mut c, "rows after retry")?;
+    if rows.len() != cfg.seed_rows as usize + 1 {
         return Err(format!(
-            "the retry after freeing space did not persist (COUNT {after}, expected {})",
+            "the retry after freeing space did not persist ({} rows, expected {})",
+            rows.len(),
             cfg.seed_rows + 1
         ));
     }
-    let got = expect_rows(c.exec("SELECT v FROM t WHERE id = 1000")?, "retry readback")?;
     let want = "r".repeat(cfg.retry_len);
-    if got.len() != 1 || got[0].first() != Some(&want) {
+    let got = rows
+        .iter()
+        .find(|r| r.first().map(String::as_str) == Some("1000"))
+        .and_then(|r| r.get(1));
+    if got != Some(&want) {
         return Err(format!(
-            "the retried row is not readable exactly ({} rows, {})",
-            got.len(),
-            got.first()
-                .and_then(|r| r.first())
-                .map(|v| format!("{} bytes", v.len()))
-                .unwrap_or_else(|| "no value".to_string())
+            "the retried row is not readable exactly ({})",
+            got.map(|v| format!("{} bytes", v.len()))
+                .unwrap_or_else(|| "missing".to_string())
         ));
     }
 
@@ -291,7 +291,7 @@ mod tests {
                 .unwrap_or_default();
             return rows_response(rows);
         }
-        if low.starts_with("select id, v from t order by id") {
+        if low.starts_with("select id, v from t") {
             let mut rows: Vec<Vec<String>> = state
                 .rows
                 .iter()

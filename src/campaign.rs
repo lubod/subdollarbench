@@ -656,10 +656,10 @@ pub fn detect_regressions(
         // in the report (round-15 L1).
         .filter(|r| {
             !r.passed
-                && !r
-                    .error
-                    .as_deref()
-                    .is_some_and(|e| e.starts_with("not run:"))
+                && !r.error.as_deref().is_some_and(|e| {
+                    e.starts_with("not run:")
+                        || e.starts_with("skipped due to failure in earlier stages")
+                })
                 && best.get(&r.stage).copied().unwrap_or(false)
         })
         .map(|r| r.stage)
@@ -3015,7 +3015,7 @@ mod tests {
         assert_eq!(s.title, "Concurrency and isolation");
         assert_eq!(s.kind, "engine");
         assert_eq!(s.tier, 4);
-        assert_eq!(s.needs, vec![6]);
+        assert_eq!(s.needs, vec![1, 2, 3, 6]);
         assert_eq!(s.budget_usd, 0.20);
         assert_eq!(s.max_turns, 40);
         assert_eq!(s.acceptance.sql_stages, (0..=12u32).collect::<Vec<u32>>());
@@ -3053,7 +3053,7 @@ mod tests {
         assert_eq!(s14.title, "Observability");
         assert_eq!(s14.kind, "ops");
         assert_eq!(s14.tier, 5);
-        assert_eq!(s14.needs, vec![11]);
+        assert_eq!(s14.needs, vec![6, 11]);
         assert_eq!(s14.budget_usd, 0.12);
         assert_eq!(s14.max_turns, 24);
         assert!(s14.lite.is_none(), "ticket 14 has no lite variant");
@@ -3085,7 +3085,7 @@ mod tests {
         assert_eq!(s16.title, "Larger than memory");
         assert_eq!(s16.kind, "resilience");
         assert_eq!(s16.tier, 6);
-        assert_eq!(s16.needs, vec![2, 4]);
+        assert_eq!(s16.needs, vec![2, 4, 6, 7, 8, 11]);
         assert_eq!(s16.budget_usd, 0.20);
         assert_eq!(s16.max_turns, 40);
         assert!(s16.lite.is_none(), "ticket 16 has no lite variant");
@@ -3113,7 +3113,7 @@ mod tests {
         assert_eq!(s18.title, "Hostile input and limits");
         assert_eq!(s18.kind, "resilience");
         assert_eq!(s18.tier, 6);
-        assert_eq!(s18.needs, vec![0]);
+        assert_eq!(s18.needs, vec![1, 6, 7, 8]);
         assert_eq!(s18.budget_usd, 0.15);
         assert_eq!(s18.max_turns, 30);
         assert!(s18.lite.is_none(), "ticket 18 has no lite variant");
@@ -3144,7 +3144,7 @@ mod tests {
         assert_eq!(s20.title, "PostgreSQL wire protocol");
         assert_eq!(s20.kind, "distributed");
         assert_eq!(s20.tier, 7);
-        assert_eq!(s20.needs, vec![1]);
+        assert_eq!(s20.needs, vec![1, 6, 7]);
         assert_eq!(s20.budget_usd, 0.20);
         assert_eq!(s20.max_turns, 40);
         assert_eq!(s20.acceptance.sql_stages, (0..=20u32).collect::<Vec<u32>>());
@@ -3732,6 +3732,19 @@ mod tests {
         let mut best12 = HashMap::new();
         best12.insert(12, true);
         let (ids, sev) = detect_regressions(&best12, &[skipped]);
+        assert!(ids.is_empty(), "{ids:?}");
+        assert_eq!(sev, 0);
+        // A differential stage skipped after an earlier failure is the same
+        // (round-16 L-d).
+        let skipped_differential = crate::verifier::StageResult {
+            stage: 13,
+            name: "Schema change".into(),
+            passed: false,
+            error: Some("skipped due to failure in earlier stages".into()),
+        };
+        let mut best13 = HashMap::new();
+        best13.insert(13, true);
+        let (ids, sev) = detect_regressions(&best13, &[skipped_differential]);
         assert!(ids.is_empty(), "{ids:?}");
         assert_eq!(sev, 0);
     }

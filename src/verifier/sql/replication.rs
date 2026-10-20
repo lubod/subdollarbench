@@ -8,11 +8,11 @@
 //!
 //! 1. node 1 is the primary, nodes 2/3 replicas; `SHOW ROLE` reports
 //!    `role` and `lsn` on every node;
-//! 2. a committed transaction is visible on both replicas; replicas refuse
-//!    writes with `ERR readonly`;
-//! 3. the primary is killed; within the election budget exactly one
-//!    survivor is primary — the highest LSN, tie to the lowest port — and
-//!    holds every acked row;
+//! 2. replicas refuse writes with `ERR readonly`;
+//! 3. the primary is killed immediately after the COMMIT ack; within the
+//!    election budget exactly one survivor is primary — the highest LSN
+//!    read after the kill, tie to the lowest port — and holds every acked
+//!    row (the ack was synchronous);
 //! 4. a new committed write reaches the other survivor;
 //! 5. the old primary is respawned as a replica, converges, and refuses
 //!    writes.
@@ -142,9 +142,7 @@ fn wait_lsn(addr: &str, want: i64, deadline: Instant, what: &str) -> Result<(), 
 fn seed_rows(ports: &[u16], cfg: &ReplicationConfig, table: &str) -> Result<i64, String> {
     let mut c = TcpCandidate::connect(addr(ports, 0), cfg.timeout)?;
     expect_ok(
-        c.exec(&format!(
-            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, v TEXT NOT NULL)"
-        ))?,
+        c.exec(&format!("CREATE TABLE {table} (id INTEGER, v TEXT)"))?,
         "CREATE TABLE",
     )?;
     for i in 0..10 {
@@ -166,20 +164,24 @@ fn seed_rows(ports: &[u16], cfg: &ReplicationConfig, table: &str) -> Result<i64,
     Ok(last)
 }
 
-fn read_acked(addr: &str, cfg: &ReplicationConfig, table: &str) -> Result<(), String> {
+fn read_rows(addr: &str, cfg: &ReplicationConfig, table: &str) -> Result<Vec<Vec<String>>, String> {
     let mut c = TcpCandidate::connect(addr, cfg.timeout)?;
-    let rows = expect_rows(
-        c.exec(&format!("SELECT COUNT(*) FROM {table}"))?,
-        "replica COUNT",
-    )?;
-    if rows != vec![vec!["15".to_string()]] {
-        return Err(format!("replica COUNT is {rows:?}, expected 15"));
+    expect_rows(
+        c.exec(&format!("SELECT id, v FROM {table}"))?,
+        "replica rows",
+    )
+}
+
+fn read_acked(addr: &str, cfg: &ReplicationConfig, table: &str) -> Result<(), String> {
+    let rows = read_rows(addr, cfg, table)?;
+    if rows.len() != 15 {
+        return Err(format!("replica has {} rows, expected 15", rows.len()));
     }
-    let v = expect_rows(
-        c.exec(&format!("SELECT v FROM {table} WHERE id = 14"))?,
-        "replica value",
-    )?;
-    if v != vec![vec!["v14".to_string()]] {
+    let v = rows
+        .iter()
+        .find(|r| r.first().map(String::as_str) == Some("14"))
+        .and_then(|r| r.get(1));
+    if v != Some(&"v14".to_string()) {
         return Err(format!("replica id=14 is {v:?}, expected v14"));
     }
     Ok(())
@@ -219,12 +221,12 @@ fn wait_new_row(
         Instant::now() + cfg.election,
         "replica did not reach the failover commit",
     )?;
-    let mut c = TcpCandidate::connect(addr, cfg.timeout)?;
-    let v = expect_rows(
-        c.exec(&format!("SELECT v FROM {table} WHERE id = 100"))?,
-        "failover value",
-    )?;
-    if v != vec![vec!["new".to_string()]] {
+    let rows = read_rows(addr, cfg, table)?;
+    let v = rows
+        .iter()
+        .find(|r| r.first().map(String::as_str) == Some("100"))
+        .and_then(|r| r.get(1));
+    if v != Some(&"new".to_string()) {
         return Err(format!("the new row is {v:?}, expected new"));
     }
     Ok(())
@@ -254,21 +256,39 @@ pub fn scenario(
         )?;
     }
 
-    let commit_lsn = seed_rows(ports, cfg, &table)?;
+    // The replicas are read-only (this also proves the replica role).
     for i in [1usize, 2usize] {
-        wait_lsn(
-            &addr(ports, i),
-            commit_lsn,
-            Instant::now() + cfg.election,
-            "replica missed the acked commit",
-        )?;
-        read_acked(&addr(ports, i), cfg, &table)?;
         replica_refuses(&addr(ports, i), cfg, &table)?;
     }
-
-    // The replicas' LSNs decide the election; tie goes to the lower port.
-    let (_, l1) = role(&addr(ports, 1), cfg.timeout)?;
-    let (_, l2) = role(&addr(ports, 2), cfg.timeout)?;
+    let commit_lsn = seed_rows(ports, cfg, &table)?;
+    // Kill immediately after the COMMIT ack: the ack must already mean a
+    // replica holds the commit. Waiting for the replicas here would let an
+    // asynchronous engine pass (round-16 I5).
+    control(HaAction::Kill(0))?;
+    let deadline = Instant::now() + cfg.election;
+    let (winner, l1, l2) = loop {
+        let mut primaries = Vec::new();
+        let mut lsns = [0i64; 2];
+        for (j, i) in [1usize, 2usize].iter().copied().enumerate() {
+            if let Ok((r, l)) = role(&addr(ports, i), Duration::from_secs(2)) {
+                lsns[j] = l;
+                if r == "primary" {
+                    primaries.push(i);
+                }
+            }
+        }
+        if primaries.len() == 1 {
+            break (primaries[0], lsns[0], lsns[1]);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "failover did not leave exactly one primary (found {primaries:?})"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // The survivors' LSNs decide the election; tie goes to the lower port.
+    // They are read after the kill: the dead primary cannot advance them.
     let expected = if l1 != l2 {
         if l1 > l2 {
             1
@@ -280,32 +300,16 @@ pub fn scenario(
     } else {
         2
     };
-
-    control(HaAction::Kill(0))?;
-    let deadline = Instant::now() + cfg.election;
-    let winner = loop {
-        let mut primaries = Vec::new();
-        for i in [1usize, 2usize] {
-            if let Ok((r, _)) = role(&addr(ports, i), Duration::from_secs(2)) {
-                if r == "primary" {
-                    primaries.push(i);
-                }
-            }
-        }
-        if primaries.len() == 1 {
-            break primaries[0];
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "failover did not leave exactly one primary (found {primaries:?})"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
     if winner != expected {
         return Err(format!(
             "elected node {} (index {winner}), expected the highest-LSN/lowest-port survivor index {expected}",
             ports[winner]
+        ));
+    }
+    let winner_lsn = if winner == 1 { l1 } else { l2 };
+    if winner_lsn < commit_lsn {
+        return Err(format!(
+            "the elected survivor is at lsn {winner_lsn}, behind the acked COMMIT lsn {commit_lsn}: the ack was not synchronous"
         ));
     }
     read_acked(&addr(ports, winner), cfg, &table)?;
@@ -329,9 +333,10 @@ pub fn scenario(
     Ok((
         winner,
         format!(
-            "3 nodes; the acked commit reached both replicas; node 1 killed; \
-             node {} elected at lsn {new_lsn}; the survivor and the rejoined \
-             old primary converged and refuse writes",
+            "3 nodes; node 1 killed immediately after the acked COMMIT; \
+             node {} elected at lsn {new_lsn} with every acked row; the \
+             survivor and the rejoined old primary converged and refuse \
+             writes",
             ports[winner]
         ),
     ))
@@ -359,16 +364,10 @@ pub fn lite_scenario(
         "the replica never reached the initial LSN",
     )?;
 
-    let commit_lsn = seed_rows(ports, cfg, &table)?;
-    wait_lsn(
-        &addr(ports, 1),
-        commit_lsn,
-        Instant::now() + cfg.election,
-        "the replica missed the acked commit",
-    )?;
-    read_acked(&addr(ports, 1), cfg, &table)?;
     replica_refuses(&addr(ports, 1), cfg, &table)?;
-
+    let commit_lsn = seed_rows(ports, cfg, &table)?;
+    // Kill immediately after the COMMIT ack; the promoted replica must
+    // already hold the commit (round-16 I5).
     control(HaAction::Kill(0))?;
     let mut c = TcpCandidate::connect(addr(ports, 1), cfg.timeout)?;
     expect_ok(c.exec("PROMOTE")?, "PROMOTE")?;
@@ -378,8 +377,13 @@ pub fn lite_scenario(
         Instant::now() + cfg.election,
         "the promoted replica is not primary",
     )?;
-    read_acked(&addr(ports, 1), cfg, &table)?;
     let (_, lsn) = role(&addr(ports, 1), cfg.timeout)?;
+    if lsn < commit_lsn {
+        return Err(format!(
+            "the promoted replica is at lsn {lsn}, behind the acked COMMIT lsn {commit_lsn}: the ack was not synchronous"
+        ));
+    }
+    read_acked(&addr(ports, 1), cfg, &table)?;
     Ok((
         1,
         format!(
@@ -495,6 +499,23 @@ mod tests {
                     || low.starts_with("commit")
                 {
                     "OK 0\n".to_string()
+                } else if low.starts_with("select id, v") {
+                    let mut rows: Vec<Vec<String>> = if mode == Mode::StaleReplica && node != 0 {
+                        vec![]
+                    } else {
+                        st.rows
+                            .iter()
+                            .map(|(id, v)| vec![id.to_string(), v.clone()])
+                            .collect()
+                    };
+                    rows.sort_by_key(|r| r[0].parse::<i64>().unwrap_or(0));
+                    let mut out = "ROWS 2\nid\tv\n".to_string();
+                    for r in &rows {
+                        out.push_str(&r.join("\t"));
+                        out.push('\n');
+                    }
+                    out.push_str(&format!("END {}\n", rows.len()));
+                    out
                 } else if low.starts_with("select count(*)") {
                     let n = if mode == Mode::StaleReplica && node != 0 {
                         0
@@ -597,7 +618,7 @@ mod tests {
         let (ports, state) = spawn_cluster(3, Mode::StaleReplica);
         let mut ctl = control(state, Mode::StaleReplica, 3, ports.clone());
         let err = scenario(&ports, &cfg(), &mut ctl).unwrap_err();
-        assert!(err.contains("COUNT"), "{err}");
+        assert!(err.contains("rows"), "{err}");
     }
 
     #[test]
@@ -605,7 +626,7 @@ mod tests {
         let (ports, state) = spawn_cluster(3, Mode::LosesAcked);
         let mut ctl = control(state, Mode::LosesAcked, 3, ports.clone());
         let err = scenario(&ports, &cfg(), &mut ctl).unwrap_err();
-        assert!(err.contains("COUNT"), "{err}");
+        assert!(err.contains("rows"), "{err}");
     }
 
     #[test]

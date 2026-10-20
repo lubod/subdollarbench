@@ -426,6 +426,26 @@ mod tests {
     /// sentinel use only the grammar the ladder passed, and neither exists
     /// without ticket 4. A full ladder keeps exactly the old profile, so
     /// every cell that passed tickets 0-4 grades as before.
+    /// Round-16 I1: the post-failover suite is built from the cumulative
+    /// profile narrowed by the lite variant each ticket passed at. A lite
+    /// ticket 8 (`join-inner-only`) must not generate LEFT JOIN.
+    #[test]
+    fn lite_variants_narrow_the_post_failover_suite() {
+        let passed: Vec<u32> = (0..=13).collect();
+        let variants = vec![(8u32, vec!["join-inner-only".to_string()])];
+        let profile = effective_profile(&passed, &variants);
+        for seed in 0..200u64 {
+            let script = build_script(seed, &profile, 120);
+            for st in script.setup.iter().chain(&script.steps) {
+                assert!(
+                    !st.stmt.sql.to_ascii_uppercase().contains("LEFT JOIN"),
+                    "seed {seed}: LEFT JOIN in a post-failover lite-8 suite: {}",
+                    st.stmt.sql
+                );
+            }
+        }
+    }
+
     #[test]
     fn persistence_and_sentinel_profiles_follow_the_passed_tickets() {
         let full: Vec<u32> = (0..=4).collect();

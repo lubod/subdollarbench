@@ -319,6 +319,9 @@
       "type": "engine",
       "tier": 4,
       "needs": [
+        1,
+        2,
+        3,
         6
       ],
       "title": "Concurrency and isolation",
@@ -389,6 +392,7 @@
       "type": "ops",
       "tier": 5,
       "needs": [
+        6,
         11
       ],
       "title": "Observability",
@@ -465,7 +469,11 @@
       "tier": 6,
       "needs": [
         2,
-        4
+        4,
+        6,
+        7,
+        8,
+        11
       ],
       "title": "Larger than memory",
       "id": 16,
@@ -534,7 +542,10 @@
       "type": "resilience",
       "tier": 6,
       "needs": [
-        0
+        1,
+        6,
+        7,
+        8
       ],
       "title": "Hostile input and limits",
       "id": 18,
@@ -616,7 +627,9 @@
       "type": "distributed",
       "tier": 7,
       "needs": [
-        1
+        1,
+        6,
+        7
       ],
       "title": "PostgreSQL wire protocol",
       "id": 20,

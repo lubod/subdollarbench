@@ -23,8 +23,9 @@ is on every node).
 4. **Failover**: kill the primary. Within **10 s** exactly one survivor is
    primary — the one with the highest LSN, ties broken by the lowest port —
    it holds every acked commit, and its writes reach the other survivor.
-5. **Rejoin**: the old primary is restarted as a replica
-   (`--replicaof <new primary>`); it converges and refuses writes.
+5. **Rejoin**: the old primary's container is recreated as a replica
+   (`--replicaof <new primary>`, a fresh data directory); it rebuilds from
+   the new primary's log, converges and refuses writes.
 6. **After failover** the cumulative differential suite runs against the
    current primary.
 

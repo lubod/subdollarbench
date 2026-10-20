@@ -177,11 +177,11 @@ pub fn scenario(addr: &str, cfg: &MemoryConfig) -> Result<String, String> {
     let mut c = TcpCandidate::connect(addr, cfg.timeout)?;
 
     expect_ok(
-        c.exec("CREATE TABLE big (id INTEGER PRIMARY KEY, k INTEGER NOT NULL, v INTEGER NOT NULL, t TEXT NOT NULL)")?,
+        c.exec("CREATE TABLE big (id INTEGER, k INTEGER, v INTEGER, t TEXT)")?,
         "CREATE TABLE big",
     )?;
     expect_ok(
-        c.exec("CREATE TABLE dim (k INTEGER PRIMARY KEY, w INTEGER NOT NULL)")?,
+        c.exec("CREATE TABLE dim (k INTEGER, w INTEGER)")?,
         "CREATE TABLE dim",
     )?;
 

@@ -8,6 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.28`: round-16 review — ticket 19's post-failover suite keeps
+///   every lite variant (I1); the scenario tickets' `needs` now cover the
+///   grammar they send (12: 1/2/3/6; 14: 6/11; 16: 2/4/6/7/8/11; 18:
+///   1/6/7/8; 20: 1/6/7), 16/17/19/20 use plain DDL and full-table reads,
+///   17 sends only ticket-0 grammar, and 20 grades 23505 only when ticket 9
+///   passed (I2); the 5 s statement budget is opt-in via
+///   `SDB_SQL_STATEMENT_TIMEOUT_MS` (I3); the HA nodes use the worker's own
+///   `port+60..62` block and a cluster start failure is an infra fault (I4);
+///   ticket 19 kills the primary immediately after the COMMIT ack and
+///   derives the election from post-kill LSNs (I5); the PG wrong-password
+///   probe and psql image requirement, T18 scope wording, skipped-stage
+///   regression accounting and the T14 settle pause (L-b..L-e). The ladder
+///   is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.27`: ticket 20 (PostgreSQL wire protocol) — a scenario-only
 ///   stage with a simple-query lite variant: protocol 3.0 on `--pg-port`
 ///   (SSL refusal, startup/cleartext auth, ParameterStatus, simple and
@@ -568,7 +581,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.27";
+pub const RULES_VERSION: &str = "2026-10-19.28";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

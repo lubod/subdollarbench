@@ -940,6 +940,54 @@ fn run_tests_gate_blocking(
                 return fail(format!("stage {stage}: sensitivity setup failed: {e}"));
             }
         }
+        // L-a: a red suite is only meaningful if the reverted copy still
+        // boots and answers a basic query. Otherwise a whole-file fallback
+        // that broke the server would "prove" sensitivity trivially. The
+        // full stage-0/7 harness comparison remains a known residual.
+        if scenario.join("start.sh").is_file() {
+            let probe = sandbox.run_workspace_command(
+                &scenario,
+                concat!(
+                    "set -e\n",
+                    "mkdir -p /tmp/sens-data\n",
+                    "bash ./start.sh --port 7123 --data /tmp/sens-data >/tmp/sens.log 2>&1 &\n",
+                    "pid=$!\n",
+                    "trap 'kill $pid 2>/dev/null || true' EXIT\n",
+                    "python3 - <<'PY'\n",
+                    "import socket, sys, time\n",
+                    "for _ in range(100):\n",
+                    "    try:\n",
+                    "        s = socket.create_connection((\"127.0.0.1\", 7123), 0.2)\n",
+                    "        break\n",
+                    "    except OSError:\n",
+                    "        time.sleep(0.05)\n",
+                    "else:\n",
+                    "    sys.exit(\"server did not start\")\n",
+                    "s.sendall(b\"SELECT 1\\n\")\n",
+                    "line = s.makefile(\"rb\").readline()\n",
+                    "if not line.startswith(b\"ROWS\"):\n",
+                    "    sys.exit(\"unexpected answer: %r\" % line)\n",
+                    "PY\n",
+                ),
+                30,
+            );
+            match probe {
+                Ok((true, _)) => {}
+                Ok((false, out)) => {
+                    let _ = std::fs::remove_dir_all(&scenario);
+                    let _ = std::fs::remove_file(&patch_path);
+                    return fail(format!(
+                        "sensitivity is inconclusive: the reverted copy does not answer SELECT 1, so ./test.sh failing proves nothing: {}",
+                        output_tail(&out, 400)
+                    ));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&scenario);
+                    let _ = std::fs::remove_file(&patch_path);
+                    return fail(format!("sensitivity probe could not run: {e}"));
+                }
+            }
+        }
         let red = run_suite(&scenario);
         let _ = std::fs::remove_dir_all(&scenario);
         let _ = std::fs::remove_file(&patch_path);
@@ -3440,13 +3488,14 @@ impl BenchmarkPipeline {
                         let mut late_failure: Option<(u32, String)> = upgrade_failed.take();
                         // Scenario-only stages whose late check actually ran;
                         // the rest must not keep their placeholder PASS (L1).
-                        let mut scenario_ran: Vec<u32> = Vec::new();
+                        let mut late_ran: Vec<u32> = Vec::new();
                         if late_failure.is_none() && stages.iter().all(|s| s.passed) {
                             // Stage 5's suite adds the crash ladder, which
                             // needs kill/restart/truncate: the pipeline owns
                             // the container, so it runs here.
                             if wanted.contains(&5) {
                                 if let Some(data) = &sql_data {
+                                    late_ran.push(5);
                                     // Stage 5's variant comes from this
                                     // attempt when stage 5 *is* the current
                                     // ticket, else from the pass that earned
@@ -3479,6 +3528,7 @@ impl BenchmarkPipeline {
                             // a kill with a transaction open (needs the
                             // sandbox's kill/restart, so it runs here too).
                             if late_failure.is_none() && wanted.contains(&6) {
+                                late_ran.push(6);
                                 let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 6)
                                     ^ 0x5E27_1E10_0000_0006;
                                 let addr = format!("127.0.0.1:{port}");
@@ -3527,7 +3577,7 @@ impl BenchmarkPipeline {
                             // global lock: it passes the lost-update and
                             // transfer checks but fails the reader check.
                             if late_failure.is_none() && wanted.contains(&12) {
-                                scenario_ran.push(12);
+                                late_ran.push(12);
                                 let ns =
                                     crate::verifier::sql::driver::stage_seed(verifier_seed, 12)
                                         ^ 0x5E27_1E10_0000_000C;
@@ -3560,7 +3610,7 @@ impl BenchmarkPipeline {
                             // SHOW STATS counters (docs/PROPOSAL-sdb-sql.md,
                             // "14. Observability").
                             if late_failure.is_none() && wanted.contains(&14) {
-                                scenario_ran.push(14);
+                                late_ran.push(14);
                                 let ns =
                                     crate::verifier::sql::driver::stage_seed(verifier_seed, 14)
                                         ^ 0x5E27_1E10_0000_000E;
@@ -3584,7 +3634,7 @@ impl BenchmarkPipeline {
                             // (docs/PROPOSAL-sdb-sql.md, "15. Tests and CI
                             // gate"). `./test.sh` runs in the sandbox.
                             if late_failure.is_none() && wanted.contains(&15) {
-                                scenario_ran.push(15);
+                                late_ran.push(15);
                                 let lite = if wanted.iter().copied().max() == Some(15) {
                                     lite_profile.iter().any(|p| p == "coverage-60")
                                 } else {
@@ -3635,6 +3685,7 @@ impl BenchmarkPipeline {
                             // ticket-4 graceful one (SIGKILL is ticket 5's
                             // contract, and ticket 11 needs only [3, 4]).
                             if late_failure.is_none() && wanted.contains(&11) {
+                                late_ran.push(11);
                                 let lite = if wanted.iter().copied().max() == Some(11) {
                                     lite_profile.iter().any(|p| p == "index-equality-only")
                                 } else {
@@ -3728,7 +3779,7 @@ impl BenchmarkPipeline {
                             // memory"). The heavy store is thrown away; the
                             // real store never sees it.
                             if late_failure.is_none() && wanted.contains(&16) {
-                                scenario_ran.push(16);
+                                late_ran.push(16);
                                 let scratch = sql_data.as_ref().map(|data| {
                                     data.with_file_name(format!(
                                         "{}-mem",
@@ -3801,7 +3852,7 @@ impl BenchmarkPipeline {
                             // must succeed after the filler is removed
                             // (docs/PROPOSAL-sdb-sql.md, "17. Disk full").
                             if late_failure.is_none() && wanted.contains(&17) {
-                                scenario_ran.push(17);
+                                late_ran.push(17);
                                 let mut disk_extras = extras.clone();
                                 disk_extras.binds.clear();
                                 disk_extras.tmpfs = vec!["/sdb-data:size=16m".to_string()];
@@ -3875,7 +3926,7 @@ impl BenchmarkPipeline {
                             // "18. Hostile input and limits"). The password
                             // must not reach an error or the container logs.
                             if late_failure.is_none() && wanted.contains(&18) {
-                                scenario_ran.push(18);
+                                late_ran.push(18);
                                 let password = format!(
                                     "sdb-sec-{:x}",
                                     crate::verifier::sql::driver::stage_seed(verifier_seed, 18)
@@ -3903,6 +3954,13 @@ impl BenchmarkPipeline {
                                 sec_extras
                                     .env
                                     .push(("SDB_SQL_PASSWORD".to_string(), password.clone()));
+                                // Ticket 18's 5 s statement budget is scoped
+                                // to this restart; tickets 11/16 run long
+                                // statements without it (round-16 I3).
+                                sec_extras.env.push((
+                                    "SDB_SQL_STATEMENT_TIMEOUT_MS".to_string(),
+                                    "5000".to_string(),
+                                ));
                                 sec_extras.pids_limit = Some("1024".to_string());
                                 let run = |e: &crate::sandbox::docker::CandidateRunExtras| {
                                     restart_candidate(&sandbox.instance_id, workdir, port, e, true)
@@ -3971,7 +4029,7 @@ impl BenchmarkPipeline {
                             // primary (docs/PROPOSAL-sdb-sql.md,
                             // "19. Replication and failover").
                             if late_failure.is_none() && wanted.contains(&19) {
-                                scenario_ran.push(19);
+                                late_ran.push(19);
                                 let lite = if wanted.iter().copied().max() == Some(19) {
                                     lite_profile.iter().any(|p| p == "two-nodes-promote")
                                 } else {
@@ -3980,7 +4038,7 @@ impl BenchmarkPipeline {
                                     })
                                 };
                                 let node_count = if lite { 2 } else { 3 };
-                                let base = port + 200;
+                                let base = port + 60;
                                 let ports: Vec<u16> =
                                     (0..node_count).map(|i| base + i as u16).collect();
                                 let nodes_env = ports
@@ -3992,8 +4050,10 @@ impl BenchmarkPipeline {
                                 let started =
                                     sandbox.start_sql_ha_nodes(workdir, &ports, &nodes_env);
                                 if let Err(e) = started {
-                                    logger
-                                        .log(&format!("  [REPL] FAILED to start the cluster: {e}"));
+                                    logger.log(&format!(
+                                        "  [INFRA] REPL cluster could not start: {e}"
+                                    ));
+                                    infra_error = true;
                                     sandbox.stop_ha_nodes(node_count as u8);
                                     late_failure = Some((19, format!("[repl] start: {e}")));
                                 } else {
@@ -4063,11 +4123,23 @@ impl BenchmarkPipeline {
                                             verifier_seed,
                                             13,
                                         );
-                                        let out = crate::verifier::sql::driver::run_stage(
+                                        // The post-failover suite must grade at
+                                        // the variant each ticket passed at,
+                                        // exactly like the main suite (round-16
+                                        // I1): a ticket-8 lite pass must not be
+                                        // asked for LEFT JOIN after failover.
+                                        let mut variants = passed_lite.to_vec();
+                                        if !lite_profile.is_empty() {
+                                            if let Some(&cur) = wanted.iter().max() {
+                                                variants.push((cur, lite_profile.to_vec()));
+                                            }
+                                        }
+                                        let out = crate::verifier::sql::driver::run_stage_with_variants(
                                             &addr,
                                             std::time::Duration::from_secs(10),
                                             seed,
                                             &passed,
+                                            &variants,
                                             crate::verifier::sql::driver::DEFAULT_STEPS,
                                             None,
                                             None,
@@ -4121,7 +4193,7 @@ impl BenchmarkPipeline {
                             // extended query, SQLSTATE), then a stock psql
                             // from the local postgres image cross-checks it.
                             if late_failure.is_none() && wanted.contains(&20) {
-                                scenario_ran.push(20);
+                                late_ran.push(20);
                                 let lite = if wanted.iter().copied().max() == Some(20) {
                                     lite_profile.iter().any(|p| p == "pg-simple")
                                 } else {
@@ -4174,7 +4246,7 @@ impl BenchmarkPipeline {
                                     logger.log(&format!(
                                         "  [PG] PostgreSQL wire scenario on port {pg_port} (password set)"
                                     ));
-                                    let cfg = if lite {
+                                    let mut cfg = if lite {
                                         crate::verifier::sql::pgwire::PgConfig::lite(Some(
                                             password.clone(),
                                         ))
@@ -4183,6 +4255,10 @@ impl BenchmarkPipeline {
                                             password.clone(),
                                         ))
                                     };
+                                    // The 23505 probe needs ticket 9's PRIMARY
+                                    // KEY; a cell that never passed 9 must not be
+                                    // graded on it (round-16 I2).
+                                    cfg.unique_keys = wanted.contains(&9);
                                     let report = crate::verifier::sql::pgwire::scenario(
                                         &format!("127.0.0.1:{pg_port}"),
                                         &cfg,
@@ -4240,8 +4316,10 @@ impl BenchmarkPipeline {
                                         }
                                         logger.log("  [PG] stock psql SELECT 1 -> 1");
                                     } else {
-                                        logger.log(
-                                            "  [PG] postgres:16-alpine not local; psql cross-check skipped",
+                                        infra_error = true;
+                                        return Err(
+                                            "postgres:16-alpine is required for the stock psql cross-check"
+                                                .to_string(),
                                         );
                                     }
                                     let out = std::process::Command::new("docker")
@@ -4280,13 +4358,16 @@ impl BenchmarkPipeline {
                                 }
                             }
                         }
-                        // L1: a scenario-only ticket whose check never ran
-                        // (an earlier differential stage or late check
-                        // failed) must not keep its placeholder PASS.
+                        // L1/L-d: a ticket whose late check never ran (an
+                        // earlier differential stage or late check failed)
+                        // must not keep its placeholder PASS. Scenario-only
+                        // stages and the late-checked differential stages 5,
+                        // 6 and 11 are all in scope.
                         for st in stages.iter_mut().filter(|s| {
-                            crate::verifier::sql::driver::scenario_only(s.stage)
+                            (crate::verifier::sql::driver::scenario_only(s.stage)
+                                || matches!(s.stage, 5 | 6 | 11))
                                 && s.passed
-                                && !scenario_ran.contains(&s.stage)
+                                && !late_ran.contains(&s.stage)
                         }) {
                             st.passed = false;
                             st.error = Some("not run: an earlier stage failed".to_string());
@@ -9740,7 +9821,7 @@ main()
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let worker = 75u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
-        let ha_ports = [port + 200, port + 201, port + 202];
+        let ha_ports = [port + 60, port + 61, port + 62];
         cleanup_covtest_network("sqlrepl");
         for p in [port, ha_ports[0], ha_ports[1], ha_ports[2]] {
             if let Ok(out) = std::process::Command::new("docker")
@@ -9788,7 +9869,7 @@ main()
             "Stage 19: Replication and failover -> PASS",
             "Stage 18: Hostile input and limits -> PASS",
             "[REPL] cluster of 3 nodes on ports",
-            "[REPL] 3 nodes; the acked commit reached both replicas",
+            "[REPL] 3 nodes; node 1 killed immediately after the acked COMMIT",
             "[REPL] the cumulative differential suite passes against the current primary",
             "[UPGRADE] sentinel for stage 19 written",
         ] {
@@ -9814,7 +9895,7 @@ main()
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let worker = 74u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
-        let ha_ports = [port + 200, port + 201];
+        let ha_ports = [port + 60, port + 61];
         cleanup_covtest_network("sqlrepllite");
         for p in [port, ha_ports[0], ha_ports[1]] {
             if let Ok(out) = std::process::Command::new("docker")

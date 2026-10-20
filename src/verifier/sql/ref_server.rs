@@ -143,7 +143,10 @@ PASSWORD = os.environ.get("SDB_SQL_PASSWORD", "")
 MAX_STMT = 16 * 1024 * 1024
 MAX_DEPTH = 10000
 MAX_CONNS = 256
-STMT_TIMEOUT = 5.0
+# Ticket 18's statement budget is opt-in: the security restart sets
+# SDB_SQL_STATEMENT_TIMEOUT_MS; the cumulative suites (including ticket
+# 16's 400 MiB sort and ticket 11's index build) run without it.
+STMT_TIMEOUT = 0.0
 CONN_LOCK = threading.Lock()
 CONNS_CURRENT = 0
 
@@ -433,6 +436,8 @@ def read_line_capped(f):
 
 
 def timed_answer(conn, sql):
+    if STMT_TIMEOUT <= 0:
+        return answer(conn, sql)
     start = time.monotonic()
 
     def progress():
@@ -1074,7 +1079,7 @@ def serve(sock, db_path):
 
 
 def main():
-    global ROLE, LAST_LSN, PORT, DATA, NODES, PRIMARY, PG_PORT
+    global ROLE, LAST_LSN, PORT, DATA, NODES, PRIMARY, PG_PORT, STMT_TIMEOUT
     port = 5480
     data = None
     replicaof = None
@@ -1101,6 +1106,10 @@ def main():
     PORT = port
     DATA = data
     PG_PORT = pg_port
+    try:
+        STMT_TIMEOUT = max(0, int(os.environ.get("SDB_SQL_STATEMENT_TIMEOUT_MS", "0"))) / 1000.0
+    except ValueError:
+        STMT_TIMEOUT = 0.0
     nodes_text = nodes_arg or os.environ.get("SDB_SQL_NODES", "")
     NODES = [n.strip() for n in nodes_text.split(",") if n.strip()]
     ROLE = "replica" if replicaof else "primary"

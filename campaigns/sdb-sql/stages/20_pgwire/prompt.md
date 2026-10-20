@@ -20,7 +20,8 @@ in addition to the text port.
    `Describe` may answer NoData (the RowDescription may come with Execute).
 5. **SQLSTATE**: missing table `42P01`, syntax `42601`, duplicate key
    `23505` (errors still carry ReadyForQuery and leave the connection
-   usable).
+   usable). The duplicate-key probe applies only when ticket 9's PRIMARY
+   KEY is part of the contract.
 6. **A stock `psql`** (`psql -h 127.0.0.1 -p <pg-port> -U sdb -d sdb -c
    'SELECT 1'`) must work.
 

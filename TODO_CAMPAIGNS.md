@@ -23,7 +23,7 @@ unreachable inside today's caps. Either add a "full-ladder" cell class
 (e.g. $4-5 / 8-12 h) or accept the cap stop as the result; a cap stop is
 never a model ceiling.
 
-- [x] **T12. Concurrency and isolation** (tier 4, needs 6, full + lite) —
+- [x] **T12. Concurrency and isolation** (tier 4, needs 1, 2, 3, 6, full + lite) —
   **landed 2026-10-19, rules `2026-10-19.18`**
   - `src/verifier/sql/concurrency.rs`: (a) lost update, 16 clients × 50
     read-modify-write transactions, final value exactly 800 (bounded retry
@@ -39,7 +39,7 @@ never a model ceiling.
   - tests: eight mock-server tests (snapshot-reader mode passes all;
     global-lock passes a+b and fails (c); naive autocommit loses updates;
     busy retries succeed; five repeats), and the spec test (13 stages,
-    tier 4, needs 6, lite profile, max_points 30).
+    tier 4, needs 1, 2, 3, 6, lite profile, max_points 30).
   - gates: fmt and clippy clean; lib **916 passed**, bins 60; the
     differential soak is unchanged (ticket 12 adds no grammar). Not yet: a
     live cell reaching ticket 12 (the cap decision above), and the 20/20
@@ -86,7 +86,7 @@ class-only stored expectations drift.
     passes again), and fresh rename/probe table names carry the seed
     namespace `s{seed:x}_t{n}` (H2), with the reference 20× test extended
     to stages 0..=13 on one store.
-- [x] **T14. Observability** (tier 5, needs 11) — **landed 2026-10-19,
+- [x] **T14. Observability** (tier 5, needs 6, 11) — **landed 2026-10-19,
   rules `2026-10-19.20`**
   - `observability.rs`: `EXPLAIN <select>` must name `INDEX
     <table>.<index>` for an indexed equality and `SCAN <table>` without
@@ -97,7 +97,7 @@ class-only stored expectations drift.
     `errors` counts ERR answers, and the connection gauge follows opens and
     closes (a short retry absorbs TCP EOF latency).
   - scenario-only: `scenario_only(14)`, a pipeline late-failure check, the
-    campaign stage ($0.12/24, tier 5, needs 11, no lite, acceptance
+    campaign stage ($0.12/24, tier 5, needs 6, 11, no lite, acceptance
     `0..=14`) and the prompt; the ladder is 15 tickets (max_points 39).
   - the Python reference answers both statements (SQLite's planner is
     translated into `INDEX t.ix`/`SCAN t`; the counters live in one
@@ -117,8 +117,10 @@ class-only stored expectations drift.
     `stage N` commit has its own diff reversed with `git apply -R --3way`
     in a scratch copy that includes `.git`; if later work overlapped the
     same lines, the changed files are restored to their parent versions and
-    the fallback is logged (round-15 M3). Either way `./test.sh` must go
-    red.
+    the fallback is logged (round-15 M3). Before grading a red suite, a
+    boot probe starts the reverted copy and requires a `SELECT 1` answer
+    (round-16 L-a); a broken fallback is inconclusive. Either way
+    `./test.sh` must go red.
   - scenario-only: `scenario_only(15)`; the stage-15 extra runs on later
     acceptances too (the persistent gate). Campaign stage: `$0.20/36`,
     tier 5, needs `[7, 8]`, lite `coverage-60` at `$0.12/22` (weight 0.4);
@@ -132,7 +134,7 @@ class-only stored expectations drift.
     parallelism the long Docker live proofs (stage 13/14) can exceed a
     start timeout and surface as `infra_error`, and each passes alone.
     fmt/clippy clean.
-- [x] **T16. Larger than memory** (tier 6, needs 2, 4)
+- [x] **T16. Larger than memory** (tier 6, needs 2, 4, 6, 7, 8, 11)
   — **landed 2026-10-19, rules `2026-10-19.22`**
   - `memory.rs`: scenario-only 16. The pipeline restarts the candidate on a
     fresh scratch `<data>-mem` with `--memory=64m --memory-swap=64m` (a
@@ -173,7 +175,7 @@ class-only stored expectations drift.
     refused the write and never applied it`, retry after freeing succeeds).
     Full suite green serialized (`--test-threads=1`: 938 passed /
     6 ignored, bins 60); fmt/clippy clean.
-- [x] **T18. Hostile input and limits** (tier 6, needs 0)
+- [x] **T18. Hostile input and limits** (tier 6, needs 1, 6, 7, 8)
   — **landed 2026-10-19, rules `2026-10-19.25`**
   - `security.rs`: scenario-only 18. The pipeline restarts the candidate on
     a fresh scratch store with `SDB_SQL_PASSWORD` and `--pids-limit=1024`;
@@ -187,9 +189,10 @@ class-only stored expectations drift.
     one answers, and the cap releases after closes. The pipeline also greps
     the candidate's container logs for the password.
   - the Python reference implements AUTH, the 16 MiB/nesting checks, a
-    SQLite progress-handler 5 s cancellation, slow-loris-safe threads and
+    SQLite progress-handler 5 s cancellation enabled only by
+    `SDB_SQL_STATEMENT_TIMEOUT_MS` (ticket 18's restart), slow-loris-safe threads and
     the 256-connection cap; the candidate launch gained `--pids-limit`.
-  - campaign stage ($0.15/30, tier 6, needs 0, no lite) + prompt; ladder 19
+  - campaign stage ($0.15/30, tier 6, needs 1, 6, 7, 8, no lite) + prompt; ladder 19
     tickets (max_points 62).
   - gates: five mock tests (faithful, no auth, password leak, no limits,
     uncapped) and the **stage-18 live eval-only proof** (19/19,
@@ -204,9 +207,11 @@ class-only stored expectations drift.
     per node) and exports `SDB_SQL_NODES=ha1:P1,ha2:P2,ha3:P3`. The
     scenario checks `SHOW ROLE` (`role`/`lsn`) on every node, replica reads
     and `ERR readonly` writes, a seed transaction on the primary, its
-    visibility on both replicas, the kill of the primary, exactly one
-    survivor as primary within 10 s (highest LSN, lower-port tie), every
-    acked row on the winner, a new commit replicated to the other survivor,
+    read-only replicas, the kill of the primary immediately after the
+    COMMIT ack (no replica wait: the ack is synchronous), exactly one
+    survivor as primary within 10 s (highest post-kill LSN, lower-port
+    tie), every acked row on the winner, a new commit replicated to the
+    other survivor,
     the old primary respawned as a replica (fresh tmpfs) converging and
     refusing writes, and the cumulative differential suite on the current
     primary.
@@ -217,7 +222,9 @@ class-only stored expectations drift.
     sync-acked COMMITs (2 s), replica application through the same
     `answer` path (ALTER IF-exists emulation included), election, manual
     PROMOTE, and restart/fresh-rejoin. The candidate container launch gained
-    `--pids-limit` (T18) and the HD node env/tmpfs variants.
+    `--pids-limit` (T18) and the HD node env/tmpfs variants. HA nodes use
+    the worker's own `port+60..62` block; a cluster that cannot start is an
+    infra fault, not a model failure.
   - campaign stage ($0.20/40, tier 7, needs 6, lite $0.12/24 weight 0.4) +
     full and lite prompts; ladder 20 tickets (max_points 69).
   - gates: six mock-cluster tests (faithful, stale replica, lost acked
@@ -225,14 +232,15 @@ class-only stored expectations drift.
     lite live eval-only proofs** (20/20 each, election/rejoin and
     PROMOTE/cumulative suite). Their full-suite gate is the shared serial
     run recorded with T20.
-- [x] **T20. PostgreSQL wire protocol** (tier 7, needs 1; lite simple query)
+- [x] **T20. PostgreSQL wire protocol** (tier 7, needs 1, 6, 7; lite simple query)
   — **landed 2026-10-20, rules `2026-10-19.27`**
   - `pgwire.rs`: scenario-only 20. SSLRequest -> `N`; Startup (cleartext
     password when `SDB_SQL_PASSWORD` is set, AuthenticationOk,
     ParameterStatus `server_version`/`client_encoding=UTF8`,
     BackendKeyData, ReadyForQuery `I`); simple Query with
     RowDescription/DataRow/CommandComplete and `I`/`T`/`E`; SQLSTATE
-    `42P01` (missing table), `42601` (syntax), `23505` (duplicate key);
+    `42P01` (missing table), `42601` (syntax), `23505` (duplicate key,
+    only when ticket 9 passed); a wrong-password Startup answers `28P01`;
     extended Parse/Bind/Describe/Execute/Sync with `SELECT $1` (text) in
     the full variant. The lite (`pg-simple`) grades the simple-query
     protocol only.
@@ -240,8 +248,9 @@ class-only stored expectations drift.
     ParameterStatus, simple/extended, SQLSTATE, transaction status); the
     pipeline restarts on a scratch store with `--pg-port` and a password,
     checks the container logs for the password, and runs a stock
-    `psql` from `postgres:16-alpine` (`--network host`) as a cross-check.
-  - campaign stage ($0.20/40, tier 7, needs 1, lite $0.12/24 weight 0.4) +
+    `psql` from `postgres:16-alpine` (`--network host`) as a cross-check;
+    a missing image is an infra fault.
+  - campaign stage ($0.20/40, tier 7, needs 1, 6, 7, lite $0.12/24 weight 0.4) +
     full and lite prompts; ladder 21 tickets (max_points 76).
   - gates: seven PG mock tests (faithful full/lite, SSL accepted, missing
     ParameterStatus, wrong SQLSTATE, broken extended, missing
@@ -288,6 +297,58 @@ Applied in the reviewer's order; no ladder change (18 tickets, max 56).
   writes) live proofs; full suite serialized (`--test-threads=1`): **941
   passed / 6 ignored, bins 60**; fmt/clippy clean. The reviewer's obsolete
   `rules-18` branch/worktree was removed.
+
+### Round-16 review fixes (2026-10-20, rules `2026-10-19.28`)
+
+Applied in the reviewer's order; the ladder is unchanged (21 tickets, max 76).
+
+- **I1 (HIGH, ticket 19)**: the post-failover cumulative suite now calls
+  `run_stage_with_variants` with the same `passed_lite` variants as the
+  main suite, so a lite ticket 8 keeps `join-inner-only` after failover.
+  A driver test runs 200 seeds with `(8, ["join-inner-only"])` and asserts
+  no LEFT JOIN is generated.
+- **I2 (MEDIUM, tickets 12/14/16/17/18/19/20)**: scenario grammar is now
+  covered by each ticket's `needs`: 12 -> 1/2/3/6 (WHERE, ORDER BY, UPDATE,
+  BEGIN/COMMIT); 14 -> 6/11; 16 -> 2/4/6/7/8/11; 18 -> 1/6/7/8 (SELECT 1 +
+  transaction + aggregate/join for the four-way timeout workload); 20 ->
+  1/6/7. 16/17/19/20 use plain DDL (no PK/NOT NULL) and whole-table reads;
+  17 now sends only ticket-0 grammar (CREATE/INSERT/SELECT); 20 grades the
+  23505 duplicate only when ticket 9's PRIMARY KEY passed. The proposal
+  lists each scenario's statement kinds next to the needs table.
+- **I3 (MEDIUM, tickets 11/16/18)**: the 5 s statement cancel is opt-in:
+  only ticket 18's restart sets `SDB_SQL_STATEMENT_TIMEOUT_MS=5000`; the
+  reference defaults to 0, so the long ticket-11/16 statements run without
+  it. The T18 prompt states both the AUTH and timeout scopes.
+- **I4 (MEDIUM, ticket 19)**: HA nodes use the worker's own block
+  (`port+60..62`, no collision with the next worker); a cluster that
+  cannot start sets `infra_error` instead of grading the model.
+- **I5 (MEDIUM, ticket 19)**: the primary is killed immediately after the
+  COMMIT ack, before any replica wait; the survivors' LSNs read after the
+  kill decide the expected winner, and the elected node must be at/past
+  the acked commit LSN and hold all 15 rows. The lite variant does the same
+  before PROMOTE. The prompt says the old node rejoins on a fresh data dir.
+- **L-a (ticket 15)**: before grading a red `./test.sh` after the
+  sensitivity revert, a boot probe starts the reverted copy and requires a
+  `SELECT 1` answer; a whole-file fallback that broke the server is now
+  "inconclusive" instead of proof. The full stage-0/7 harness comparison is
+  a known residual.
+- **L-b (ticket 20)**: a wrong-password startup must answer `28P01`; a
+  missing `postgres:16-alpine` is an infra fault, not a skip.
+- **L-c**: T18 prompt AUTH/timeout scopes (above).
+- **L-d**: `detect_regressions` skips `skipped due to failure in earlier
+  stages` like `not run:`; the late checks of differential stages 5, 6 and
+  11 now join the L1 sweep, so an unrun crash/txn/perf check cannot leave a
+  placeholder PASS.
+- **L-e**: the T14 gauge settle loop pauses 25 ms between reads.
+- **Ops**: the manual experiment containers (rha1-rha3, refpg,
+  refsec-bench) and the refha network were removed; no cell was launched.
+- **M5** remains the operator decision (a capped `.28` cell vs a
+  full-ladder class); no cell was launched.
+
+Gates after the fixes: the affected mock/verifier suites and clippy are
+green; the 0/3000 differential soak is green; the stage-15 (boot probe),
+stage-19 full/lite (immediate-kill sync) and stage-20 full/lite live proofs
+pass; full serial suite: **965 passed / 6 ignored, bins 60**.
 
 ## Baseline evidence — canary wave under 2026-10-14.1
 

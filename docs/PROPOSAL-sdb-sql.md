@@ -168,15 +168,28 @@ scenario.
 | 9 | 3 Relational | Constraints | D: `PRIMARY KEY` (+ auto-assign), `UNIQUE`, `NOT NULL`, `DEFAULT`, `REFERENCES` | 3 | -- | $0.12 | 30 |
 | 10 | 3 Relational | Subqueries | D: scalar, `IN (subquery)`, `IN (list)`, `EXISTS`, correlated, `INSERT ... SELECT` | 7 | -- | $0.15 | 30 |
 | 11 | 4 Engine | Indexes + perf gate | D: `CREATE [UNIQUE] INDEX`, `DROP INDEX`; S: lookup speed ratio | 3, 4 | equality lookups only | $0.15 | 36 |
-| 12 | 4 Engine | Concurrency and isolation | S: lost-update, transfer invariant, readers vs open writer | 6 | one global lock | $0.20 | 40 |
+| 12 | 4 Engine | Concurrency and isolation | S: lost-update, transfer invariant, readers vs open writer | 1, 2, 3, 6 | one global lock | $0.20 | 40 |
 | 13 | 4 Engine | Schema change | D: `ALTER TABLE ADD/DROP/RENAME COLUMN`, `RENAME TO`, `IF [NOT] EXISTS` | 4 | -- | $0.12 | 30 |
-| 14 | 5 Ops | Observability | S: `EXPLAIN` plan shape, `SHOW STATS` exact counter deltas | 11 | -- | $0.12 | 24 |
+| 14 | 5 Ops | Observability | S: `EXPLAIN` plan shape, `SHOW STATS` exact counter deltas | 6, 11 | -- | $0.12 | 24 |
 | 15 | 5 Ops | Tests and CI gate | S: `./test.sh` green twice, coverage >= 80%, sensitivity reverts | 7, 8 | 60% coverage, sensitivity kept | $0.20 | 36 |
-| 16 | 6 Resilience | Larger than memory | S: 64 MiB memory cap, data many times larger; scans, external sort, joins | 2, 4 | -- | $0.20 | 40 |
+| 16 | 6 Resilience | Larger than memory | S: 64 MiB memory cap, data many times larger; scans, external sort, joins | 2, 4, 6, 7, 8, 11 | -- | $0.20 | 40 |
 | 17 | 6 Resilience | Incident: disk full | S: tmpfs ENOSPC; reads serve, writes `ERR full`, no corruption, recovery | 5 | -- | $0.15 | 30 |
-| 18 | 6 Resilience | Hostile input and limits | S: `AUTH`, fuzzing, nesting depth, statement size, timeouts, slow-loris, connection cap | 0 | -- | $0.15 | 30 |
+| 18 | 6 Resilience | Hostile input and limits | S: `AUTH`, fuzzing, nesting depth, statement size, timeouts, slow-loris, connection cap | 1, 6, 7, 8 | -- | $0.15 | 30 |
 | 19 | 7 Distributed | Replication and failover | S: 3 nodes, sync commit, automatic failover, rejoin | 6 | 2 nodes, manual `PROMOTE` | $0.20 | 40 |
-| 20 | 7 Distributed | PostgreSQL wire protocol | S: `psql` + harness client, extended query protocol | 1 | simple query protocol only | $0.20 | 40 |
+| 20 | 7 Distributed | PostgreSQL wire protocol | S: `psql` + harness client, extended query protocol | 1, 6, 7 | simple query protocol only | $0.20 | 40 |
+
+Scenario statement kinds (each must be covered by the ticket's `needs`
+chain; a new scenario is checked against this list):
+
+| Ticket | Statements the scenario sends |
+|---|---|
+| 12 | `WHERE` (1), `ORDER BY` (2), `UPDATE` (3), `BEGIN`/`COMMIT` (6) |
+| 14 | `EXPLAIN`/`SHOW STATS`; `BEGIN`/`COMMIT`/`ROLLBACK` and predicates via the 6/11 chains |
+| 16 | `CREATE`/`INSERT`/`SELECT`, `ORDER BY` (2), `BEGIN`/`COMMIT` (6), aggregates (7), `JOIN` (8), `CREATE INDEX` (11) |
+| 17 | `CREATE`/`INSERT`/`SELECT` only (ticket 5's chain) |
+| 18 | `SELECT 1`/parentheses (1), `BEGIN`/`COMMIT` (6), `COUNT` (7), four-way `JOIN` (8) |
+| 19 | `CREATE`/`INSERT`/`SELECT` (0), `BEGIN`/`COMMIT` (6); `SHOW ROLE`/`PROMOTE` are the ticket's own |
+| 20 | `CREATE`/`INSERT`/`SELECT` (0), `BEGIN`/`COMMIT` (6), `COUNT` (7); `23505` only if ticket 9 passed |
 
 Full ladder: $3.20 and 680 turns before lite attempts; the campaign-wide
 cap stays a real stop. Lite attempts use 60% of the stage's budget and
@@ -320,7 +333,10 @@ connection must send `AUTH <password>` first (`ERR auth` otherwise; the
 password never appears in logs or errors). Grammar-mutation and byte
 fuzzing never crash the server; expressions nested 10,000 deep give
 `ERR limit`, not a stack overflow; statements over 16 MiB give `ERR
-limit`; a statement running over 5 s is cancelled with `ERR limit`;
+limit`; when the ticket-18 restart sets
+`SDB_SQL_STATEMENT_TIMEOUT_MS=5000`, a statement running over 5 s is
+cancelled with `ERR limit` (the long ticket-11/16 statements run without
+that budget);
 slow-loris clients do not starve others; beyond 256 connections new ones
 are refused cleanly.
 
@@ -328,11 +344,14 @@ are refused cleanly.
 separate data dirs, `--replicaof`. `SHOW ROLE` returns `role` and `lsn`.
 Replicas serve reads and refuse writes (`ERR readonly`). A `COMMIT` is
 acknowledged only after at least one replica has it durably. Kill the
-primary: within 10 s exactly one survivor is primary (highest `lsn`, tie
-to the lowest port), holds every acked commit, and accepts writes that
-reach the other survivor. Restart the old primary: it rejoins as a replica
-and converges. Lite: two nodes, `PROMOTE` on the replica, no acked commit
-lost. The cumulative suite then runs against the current primary.
+primary immediately after the ack: within 10 s exactly one survivor is
+primary (highest `lsn` read after the kill, tie to the lowest port),
+holds every acked commit, and accepts writes that reach the other
+survivor. Restart the old primary: the harness recreates its container
+with a fresh data directory as a replica of the new primary; it rebuilds
+from the leader's retained log and converges. Lite: two nodes, `PROMOTE`
+on the replica, no acked commit lost. The cumulative suite then runs
+against the current primary.
 
 **20. PostgreSQL wire protocol.** Protocol 3.0 on `--pg-port`: SSL
 request refused with `N`, startup, cleartext password when
