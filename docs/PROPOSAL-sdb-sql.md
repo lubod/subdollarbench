@@ -292,8 +292,9 @@ BenchLock.
 A conflicting transaction may get `ERR busy`; the harness retries it. No
 operation may hang more than 5 s.
 (a) Lost update: 16 clients x 50 `BEGIN; SELECT; UPDATE v=v+1; COMMIT`:
-final value exactly 800. (b) Transfers: concurrent balance moves; the sum
-is constant in every snapshot a reader takes. (c) Full only: with a write
+final value exactly 800. (b) Transfers: concurrent balance moves, each
+writer pausing 1 ms between transfers; the sum is constant in every
+snapshot a reader takes, and the readers take at least 10. (c) Full only: with a write
 transaction open on connection A, a `SELECT` on connection B returns the
 pre-transaction value within 1 s (readers do not block on writers). Lite
 (a global lock) passes (a) and (b), not (c).
@@ -340,20 +341,24 @@ that budget);
 slow-loris clients do not starve others; beyond 256 connections new ones
 are refused cleanly.
 
-**19. Replication and failover.** Three nodes on ports 7101-7103 (+ offset),
-separate data dirs, `--replicaof`. `SHOW ROLE` returns `role` and `lsn`.
-Replicas serve reads and refuse writes (`ERR readonly`). A `COMMIT` is
-acknowledged only after at least one replica has it durably. The harness
-freezes both replicas for about 1 s before a commit: the ack must wait for
-a resume, and the freeze must not trigger an election. Once both replicas
-have applied the commit (equal LSNs), the harness kills the primary:
+**19. Replication and failover.** Three nodes on the worker's ports
+`+60..62` (5540-5542 on worker 0), separate data dirs, `--replicaof`.
+`SHOW ROLE` returns `role` and `lsn`; the `lsn` grows only when a write
+commits. Replicas serve reads and refuse writes (`ERR readonly`). A
+`COMMIT` is acknowledged only after at least one replica has it durably.
+The harness freezes both replicas for about 1 s (up to about 1.5 s)
+before a commit: the ack must wait for a resume, and the freeze must not
+trigger an election (both must still be replicas afterwards). Once both
+replicas have applied the commit (equal LSNs), the harness kills the
+primary:
 within 10 s exactly one survivor is primary (highest `lsn`, tie to the
 lowest port), holds every acked commit, and accepts writes that reach the
 other survivor. Restart the old primary: the harness recreates its
 container with a fresh data directory as a replica of the new primary; it
 rebuilds from the leader's retained log and converges. Lite: two nodes;
-freeze the replica across the commit, then kill the primary and `PROMOTE`
-the replica, with no acked commit lost. The cumulative suite then runs
+freeze the replica across the commit, wait until it has applied the
+commit, then kill the primary and `PROMOTE` the replica, with no acked
+commit lost. The cumulative suite then runs
 against the current primary.
 
 **20. PostgreSQL wire protocol.** Protocol 3.0 on `--pg-port`: SSL

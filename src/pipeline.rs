@@ -781,6 +781,22 @@ fn suite_variants(
     variants
 }
 
+/// Ticket 19: whether a failed control action is a harness fault. A rejoin
+/// is the harness recreating a container, so its failure always is. A
+/// kill, pause or resume that fails on a node whose container already
+/// exited is the candidate's crash and stays a model failure; on a node
+/// that is still up, or one Docker cannot inspect, Docker itself failed
+/// (round-18 N2).
+fn repl_control_failure_is_infra(
+    action: crate::verifier::sql::replication::HaAction,
+    node_state: Option<&str>,
+) -> bool {
+    matches!(
+        action,
+        crate::verifier::sql::replication::HaAction::Rejoin { .. }
+    ) || !matches!(node_state, Some("exited") | Some("dead"))
+}
+
 /// Ticket 15 (tests & CI gate, sdb-sql): the ticket ships `./test.sh`
 /// (offline, under 120 s), a coverage signal (Go measured here; other
 /// stacks self-report `coverage: NN.N%` in coverage.txt) and tests that
@@ -4084,9 +4100,13 @@ impl BenchmarkPipeline {
                                             seed,
                                         )
                                     };
+                                    // A control action that fails on a node
+                                    // that is still up is a harness fault,
+                                    // not the model's (round-18 N2).
+                                    let control_fault = std::cell::Cell::new(false);
                                     let mut control =
                                         |action: crate::verifier::sql::replication::HaAction| {
-                                            match action {
+                                            let done = match action {
                                             crate::verifier::sql::replication::HaAction::Kill(
                                                 node,
                                             ) => sandbox
@@ -4119,7 +4139,18 @@ impl BenchmarkPipeline {
                                                         format!("rejoin node {}: {e}", node + 1)
                                                     })
                                             }
-                                        }
+                                        };
+                                            if done.is_err()
+                                                && repl_control_failure_is_infra(
+                                                    action,
+                                                    sandbox
+                                                        .ha_node_state((action.node() + 1) as u8)
+                                                        .as_deref(),
+                                                )
+                                            {
+                                                control_fault.set(true);
+                                            }
+                                            done
                                         };
                                     let outcome = if lite {
                                         crate::verifier::sql::replication::lite_scenario(
@@ -4198,6 +4229,13 @@ impl BenchmarkPipeline {
                                     sandbox.stop_ha_nodes(node_count as u8);
                                     match body {
                                         Ok(()) => {}
+                                        Err(e) if control_fault.get() => {
+                                            logger.log(&format!(
+                                                "  [INFRA] REPL cluster control failed: {e}"
+                                            ));
+                                            infra_error = true;
+                                            late_failure = Some((19, format!("[repl] {e}")));
+                                        }
                                         Err(e) => {
                                             logger.log(&format!("  [REPL] FAILED: {e}"));
                                             late_failure = Some((19, format!("[repl] {e}")));
@@ -4382,7 +4420,13 @@ impl BenchmarkPipeline {
                         // not keep its placeholder PASS. Scenario-only
                         // stages and the late-checked differential stages 5,
                         // 6 and 11 are all in scope.
-                        let failed_stage = stages.iter().find(|s| !s.passed).map(|s| s.stage);
+                        // A failed late check counts too: it is applied to
+                        // `stages` only below (round-18 N5).
+                        let failed_stage = stages
+                            .iter()
+                            .find(|s| !s.passed)
+                            .map(|s| s.stage)
+                            .or(late_failure.as_ref().map(|(n, _)| *n));
                         for st in stages.iter_mut().filter(|s| {
                             (crate::verifier::sql::driver::scenario_only(s.stage)
                                 || matches!(s.stage, 5 | 6 | 11))
@@ -4435,10 +4479,7 @@ impl BenchmarkPipeline {
                             // never a ticket that failed or was skipped
                             // (review round 14, G1).
                             let top = wanted.iter().copied().max().unwrap_or(0);
-                            let mut variants: Vec<(u32, Vec<String>)> = passed_lite.to_vec();
-                            if !lite_profile.is_empty() {
-                                variants.push((top, lite_profile.to_vec()));
-                            }
+                            let variants = suite_variants(passed_lite, lite_profile, &wanted);
                             if let Some(profile) =
                                 crate::verifier::sql::driver::sentinel_profile(&wanted, &variants)
                             {
@@ -9631,6 +9672,38 @@ main()
             suite_variants(&passed_lite, &[], &wanted),
             vec![(8u32, vec!["join-inner-only".to_string()])]
         );
+    }
+
+    #[test]
+    fn repl_control_failures_split_harness_faults_from_crashes() {
+        use crate::verifier::sql::replication::HaAction;
+        // Docker failed on a node that is still up, or could not say.
+        assert!(repl_control_failure_is_infra(
+            HaAction::Pause(1),
+            Some("running")
+        ));
+        assert!(repl_control_failure_is_infra(
+            HaAction::Resume(1),
+            Some("paused")
+        ));
+        assert!(repl_control_failure_is_infra(HaAction::Kill(0), None));
+        // The candidate's node already exited: a model failure.
+        assert!(!repl_control_failure_is_infra(
+            HaAction::Kill(0),
+            Some("exited")
+        ));
+        assert!(!repl_control_failure_is_infra(
+            HaAction::Pause(2),
+            Some("dead")
+        ));
+        // A rejoin recreates the container: always the harness.
+        assert!(repl_control_failure_is_infra(
+            HaAction::Rejoin {
+                node: 0,
+                primary: 1
+            },
+            Some("exited")
+        ));
     }
 
     /// Ticket 16 live proof (eval-only, no model): the reference runs the

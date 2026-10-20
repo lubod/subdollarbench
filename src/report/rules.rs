@@ -8,6 +8,21 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.30`: round-18 review — ticket 19 lite waits for the
+///   replica's LSN to reach the acked commit instead of sampling it once,
+///   so an engine that applies a commit just after acking it passes (N1);
+///   a failed pause/resume/kill on a node that is still up, or a failed
+///   rejoin, is an infra fault (N2); the full scenario requires both
+///   replicas to still be replicas after the freeze, and both prompts state
+///   the freeze length, that `COMMIT` blocks, the 3 s detection floor and
+///   that `lsn` grows only on commits (N3); ticket 12's transfer writers
+///   pause 1 ms between transfers so the readers' 10 snapshots overlap them
+///   on any engine (N4); late-check skips name a failed late check, the
+///   sentinel uses `suite_variants`, and the proposal's ticket-19 ports are
+///   current (N5). The failure classifier no longer blames late checks the
+///   pipeline did not run ("not run: ..."): a ticket whose own stage failed
+///   reads `own_stage`, not "broke tickets 5,6" (N6, seen in the `.29`
+///   calibration cell). The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.29`: round-17 review — ticket 19 tests sync commit by
 ///   freezing the replicas across a `COMMIT` (an answer within 1 s fails;
 ///   the pending COMMIT must answer after a resume), then requires the
@@ -595,7 +610,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.29";
+pub const RULES_VERSION: &str = "2026-10-19.30";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -35,6 +35,10 @@ const MIN_SNAPSHOTS: usize = 10;
 /// A busy transaction is retried; a wedged server is not.
 const RETRIES: usize = 400;
 const RETRY_PAUSE: Duration = Duration::from_millis(2);
+/// A writer pauses after each transfer so the readers' snapshots overlap
+/// the transfers however fast the engine is (round-18 N4): without it a
+/// fast engine finished all 160 before the readers took 10 snapshots.
+const WRITER_PAUSE: Duration = Duration::from_millis(1);
 /// (c): the reader's window while a writer holds its transaction open.
 const READER_WINDOW: Duration = Duration::from_secs(1);
 
@@ -290,7 +294,10 @@ pub fn transfers(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
                 loop {
                     tries += 1;
                     match transfer_once(&mut c, &table, from as i64, to as i64) {
-                        Ok(()) => break,
+                        Ok(()) => {
+                            std::thread::sleep(WRITER_PAUSE);
+                            break;
+                        }
                         Err(TxErr::Busy) if tries < RETRIES => {
                             std::thread::sleep(RETRY_PAUSE);
                         }

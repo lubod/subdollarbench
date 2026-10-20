@@ -7,12 +7,14 @@ harness starts node 1 as primary and node 2 as a replica
 ## This ticket's contract
 
 1. **`SHOW ROLE`** answers `ROWS` with `name`/`value` rows: `role`
-   (`primary` or `replica`) and `lsn`.
+   (`primary` or `replica`) and `lsn`, an integer that grows only when a
+   write commits.
 2. The replica serves reads and answers writes with `ERR readonly`.
 3. **Sync commit**: a `COMMIT` is acknowledged only after the replica has
    it durably; the acked rows are on the replica before the failover. The
-   harness freezes the replica for about 1 s before a commit; `COMMIT` must
-   not be acknowledged until it is resumed.
+   harness freezes the replica (its process stops; connections stay open)
+   for about 1 s before a commit. `COMMIT` blocks, answering neither `OK`
+   nor `ERR`, until it is resumed, then answers `OK`.
 4. **Manual failover**: the harness kills the primary and sends `PROMOTE`
    to the replica. It becomes primary with every acked commit and serves
    the cumulative SQL suite. (The survivor is alone; it may ack new writes

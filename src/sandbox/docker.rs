@@ -529,6 +529,21 @@ impl SandboxManager {
         }
     }
 
+    /// The node container's Docker state (`running`, `paused`, `exited`,
+    /// ...), or `None` when it cannot be inspected. A failed control action
+    /// on a node that already exited is the candidate's crash, not a
+    /// harness fault (round-18 N2).
+    pub fn ha_node_state(&self, idx: u8) -> Option<String> {
+        let name = self.ha_node_container_name(idx);
+        let out = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Status}}", &name])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     /// HA nodes in the owned-container belt (label reaping covers them too).
     fn ha_node_names(&self) -> Vec<String> {
         (1..=3).map(|i| self.ha_node_container_name(i)).collect()

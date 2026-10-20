@@ -15,14 +15,18 @@ is on every node).
 ## This ticket's contract
 
 1. **`SHOW ROLE`** answers `ROWS` with `name`/`value` rows: `role`
-   (`primary` or `replica`) and `lsn` (an integer that only grows).
+   (`primary` or `replica`) and `lsn`, an integer that grows only when a
+   write commits (an idle cluster's `lsn` stays put).
 2. **Replicas** serve reads and answer writes and DDL with `ERR readonly`.
 3. **Sync commit**: a `COMMIT` is acknowledged only after at least one
    replica has it durably. A client that saw `OK` for a commit must find
    every row on the survivor after the primary dies. The harness freezes
-   both replicas for about 1 s before a commit; `COMMIT` must not be
-   acknowledged until one of them is resumed, and a 1 s freeze must not
-   trigger an election.
+   both replicas (their processes stop; connections stay open) for up to
+   about 1.5 s before a commit. `COMMIT` blocks, answering neither `OK`
+   nor `ERR`, until one of them is resumed, then answers `OK`. The freeze
+   must not trigger an election, and the harness checks that both are
+   still replicas afterwards: declare a primary dead only after at least
+   3 s of silence.
 4. **Failover**: kill the primary. Within **10 s** exactly one survivor is
    primary — the one with the highest LSN, ties broken by the lowest port —
    it holds every acked commit, and its writes reach the other survivor.
@@ -33,9 +37,10 @@ is on every node).
    current primary.
 
 The harness seeds a table, catches both replicas up, freezes them across
-a commit, resumes one and waits for the commit, kills node 1, checks the
-election and rows, writes to the new primary, brings node 1 back, and
-finally runs the SQL suite against the winner.
+a commit, resumes one and waits for the commit, checks that both are
+still replicas at the same LSN, kills node 1, checks the election and
+rows, writes to the new primary, brings node 1 back, and finally runs the
+SQL suite against the winner.
 
 ## Constraints
 

@@ -208,14 +208,16 @@ class-only stored expectations drift.
     scenario checks `SHOW ROLE` (`role`/`lsn`) on every node, catches the
     replicas up, checks `ERR readonly` writes against the existing table,
     freezes both replicas across the commit (a 1 s freeze; the ack must
-    wait for a resume), waits for both to reach the committed LSN, kills
-    node 1, and requires exactly one survivor as primary within 10 s
+    wait for a resume), waits for both to reach the committed LSN and
+    still be replicas (round-18 N3), kills node 1, and requires exactly
+    one survivor as primary within 10 s
     (equal LSNs, lower-port tie), every acked row on the winner, a new
     commit replicated to the other survivor,
     the old primary respawned as a replica (fresh tmpfs) converging and
     refusing writes, and the cumulative differential suite on the current
     primary.
-  - lite (`two-nodes-promote`): two nodes, kill the primary, manual
+  - lite (`two-nodes-promote`): two nodes, the replica frozen across the
+    commit and caught up (round-18 N1), kill the primary, manual
     `PROMOTE`, no acked commit lost, the promoted node acks new commits
     locally (it is alone), cumulative suite on it.
   - the Python reference implements the retained log (`repl.log`), LSNs,
@@ -400,6 +402,54 @@ run hit one unrelated timing flake in
 `verifier::sql::concurrency::tests::the_scenario_repeats_cleanly` (7
 snapshots vs the expected 10 under load); that test then passed 20/20 in
 isolation and the full rerun was green.
+
+### Round-18 review fixes (2026-10-20, rules `2026-10-19.30`)
+
+Prepared by the reviewer in a separate worktree while the `.29`
+calibration cell ran; the ladder is unchanged (21 tickets, max 76).
+
+- **N1 (ticket 19 lite)**: after the frozen `COMMIT` is acked, the
+  harness waits (up to the election budget) for the replica's `lsn` to
+  reach the commit instead of sampling it once. An engine that acks on
+  durable receipt and applies a moment later is correct; the mock's
+  `ApplyLag` mode passes full and lite.
+- **N2 (ticket 19)**: a failed pause, resume or kill on a node whose
+  container is still up (or cannot be inspected), and any failed rejoin,
+  is an infra fault (`[INFRA] REPL cluster control failed`). A node that
+  already exited stays a model failure (`repl_control_failure_is_infra`,
+  unit-tested).
+- **N3 (ticket 19)**: after the freeze both replicas must still report
+  `replica` ("the freeze triggered an election"; the mock's
+  `ElectsOnFreeze` mode, which used to pass when the lower port elected
+  itself). Both prompts state the freeze (processes stop, connections stay
+  open, up to about 1.5 s), that `COMMIT` blocks with neither `OK` nor
+  `ERR`, a 3 s failure-detection floor (full), and that `lsn` grows only
+  when a write commits.
+- **N4 (ticket 12)**: transfer writers pause 1 ms after each transfer, so
+  the readers' 10 snapshots overlap the transfers on any engine; this is
+  the race behind the round-17 gate flake in
+  `the_scenario_repeats_cleanly`.
+- **N5**: late-check skips name a failed late check as well as a failed
+  differential stage; the sentinel builds its variants with
+  `suite_variants`; the proposal's ticket-19 ports are `+60..62`. An
+  extra lite async-ack mock test was added.
+- **N6 (failure classifier, found in the `.29` calibration cell)**:
+  `classify_failure` treats a late check the pipeline did not run ("not
+  run: ...") like a verifier skip. Since `.28` the late-checked stages 5
+  and 6 read "not run" whenever a later stage fails, and the classifier
+  blamed them: the cell's failed rounds of tickets 6, 8, 9, 11, 12 and 13
+  read "broke tickets 5,6: not run: ..." with kind `regression`, and the
+  board showed that as the cause of tickets 8, 9 and 11. Grading was not
+  affected (`detect_regressions` already skipped them).
+
+Gates after the fixes (run after the calibration cell ended): fmt/clippy
+clean; full suite **975 passed / 6 ignored, bins 60**, including the
+stage-13..20 live proofs (19 full/lite on the freeze plus the role check)
+and both sensitivity end-to-end tests; `the_scenario_repeats_cleanly`
+20/20; the reviewer's live freeze probe on `.30`: sync 3/3 full and 3/3
+lite, an asynchronous ack caught 4/4. The transfer check's snapshot count
+on the in-process mocks rose from min 7 / median 23 to min 121 / median
+125 (30 runs each).
 
 ## Baseline evidence — canary wave under 2026-10-14.1
 

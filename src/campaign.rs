@@ -909,7 +909,21 @@ pub fn classify_failure(
 ) -> Option<FailureSummary> {
     let failed: Vec<&crate::verifier::StageResult> =
         stage_results.iter().filter(|s| !s.passed).collect();
-    let first = failed.first().copied();
+    // Results the verifier skipped ("skipped due to failure in earlier
+    // stages") and late checks the pipeline did not run ("not run: ...")
+    // only follow the real break; they are counted, not blamed (round-7
+    // finding 3; round-18 N6: since `.28` the late-checked stages 5 and 6
+    // read "not run" whenever a later stage fails, and were blamed).
+    let is_skipped = |s: &crate::verifier::StageResult| {
+        s.error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("skipped due to failure") || e.starts_with("not run:"))
+    };
+    let first = failed
+        .iter()
+        .copied()
+        .find(|s| !is_skipped(s))
+        .or_else(|| failed.first().copied());
     if failed.is_empty() && !agent_failed && !infra_error {
         return None;
     }
@@ -944,16 +958,9 @@ pub fn classify_failure(
             return Some(mk("no_start", Some(0), line));
         }
     }
-    // 3. regression: an earlier green ticket fails now. Results the
-    // verifier skipped ("skipped due to failure in earlier stages") only
-    // follow the real break; they are counted, not blamed (round-7
-    // finding 3: ticket 6 broke stage 0, not stages 0,1,3,4,5).
-    let is_skipped = |s: &crate::verifier::StageResult| {
-        s.error
-            .as_deref()
-            .map(|e| e.starts_with("skipped due to failure"))
-            .unwrap_or(false)
-    };
+    // 3. regression: an earlier green ticket fails now; skipped results
+    // are not blamed (round-7 finding 3: ticket 6 broke stage 0, not
+    // stages 0,1,3,4,5).
     let real: Vec<&crate::verifier::StageResult> =
         failed.iter().copied().filter(|s| !is_skipped(s)).collect();
     let regressed: Vec<u32> = real
@@ -1016,7 +1023,7 @@ pub fn classify_failure(
         return Some(mk("late_check", stage, tagged.to_string()));
     }
     // 5. own_stage: only this ticket's stage failed.
-    if !failed.is_empty() && failed.iter().all(|s| s.stage == stage_id) {
+    if !real.is_empty() && real.iter().all(|s| s.stage == stage_id) {
         let what = first
             .and_then(|s| s.error.as_deref())
             .map(|e| e.lines().next().unwrap_or("").trim().to_string())
@@ -2465,6 +2472,66 @@ mod tests {
         .expect("classified");
         assert_eq!(own.kind, "own_stage");
         assert!(own.line.starts_with("own stage:"), "{}", own.line);
+        // Round-18 N6: late checks the pipeline did not run follow the real
+        // break too. Ticket 8's own failure is not a regression of 5 and 6.
+        let not_run = "not run: late checks skipped after stage 8 failed";
+        let own_not_run = classify_failure(
+            8,
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            &[
+                result(0, true, None),
+                result(5, false, Some(not_run)),
+                result(6, false, Some(not_run)),
+                result(7, true, None),
+                result(
+                    8,
+                    false,
+                    Some("Kind: expected ROWS (10 rows), got ERR syntax"),
+                ),
+            ],
+            false,
+            false,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(own_not_run.kind, "own_stage");
+        assert_eq!(own_not_run.stage, Some(8));
+        assert_eq!(
+            own_not_run.line,
+            "own stage: Kind: expected ROWS (10 rows), got ERR syntax"
+        );
+        assert!(
+            own_not_run.detail.starts_with("Kind:"),
+            "{}",
+            own_not_run.detail
+        );
+        // A real regression is still named, with the late checks listed as
+        // not run.
+        let reg_not_run = classify_failure(
+            11,
+            &[0, 5, 6, 7, 10],
+            &[
+                result(
+                    5,
+                    false,
+                    Some("not run: late checks skipped after stage 6 failed"),
+                ),
+                result(6, false, Some("Kind: expected OK 2, got ERR syntax")),
+                result(7, false, Some("skipped due to failure in earlier stages")),
+                result(10, false, Some("skipped due to failure in earlier stages")),
+                result(11, false, Some("skipped due to failure in earlier stages")),
+            ],
+            false,
+            false,
+            None,
+        )
+        .expect("classified");
+        assert_eq!(reg_not_run.kind, "regression");
+        assert_eq!(reg_not_run.stage, Some(6));
+        assert_eq!(
+            reg_not_run.line,
+            "broke ticket 6 (5,7,10 not run): Kind: expected OK 2, got ERR syntax"
+        );
         // agent: the agent died or never signalled READY.
         let agent = classify_failure(8, &[], &[], true, false, None).expect("classified");
         assert_eq!(agent.kind, "agent");

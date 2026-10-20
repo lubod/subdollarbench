@@ -11,7 +11,8 @@
 //! 2. the replicas are caught up, then refuse writes with `ERR readonly`;
 //! 3. both replicas are frozen for about a second: `COMMIT` must not answer
 //!    until one is resumed (an asynchronous ack answers within the freeze);
-//!    both then apply the commit, so their LSNs are equal;
+//!    both then apply the commit, so their LSNs are equal, and both must
+//!    still be replicas (the freeze must not trigger an election);
 //! 4. the primary is killed; with equal LSNs the lower port must win within
 //!    the election budget and hold every acked row;
 //! 5. a new committed write reaches the other survivor;
@@ -19,8 +20,8 @@
 //!    writes.
 //!
 //! The lite variant has two nodes and a manual `PROMOTE`: the replica is
-//! frozen across the COMMIT, resumed, then the primary is killed and the
-//! replica promoted.
+//! frozen across the COMMIT, resumed and caught up, then the primary is
+//! killed and the replica promoted.
 
 use super::client::TcpCandidate;
 use super::run::Candidate;
@@ -63,6 +64,16 @@ pub enum HaAction {
     Pause(usize),
     /// Thaw the node again.
     Resume(usize),
+}
+
+impl HaAction {
+    /// The node the action targets.
+    pub fn node(&self) -> usize {
+        match *self {
+            HaAction::Kill(n) | HaAction::Pause(n) | HaAction::Resume(n) => n,
+            HaAction::Rejoin { node, .. } => node,
+        }
+    }
 }
 
 fn addr(ports: &[u16], i: usize) -> String {
@@ -338,8 +349,16 @@ pub fn scenario(
             "replica did not receive the frozen commit",
         )?;
     }
-    let (_, l1) = role(&addr(ports, 1), cfg.timeout)?;
-    let (_, l2) = role(&addr(ports, 2), cfg.timeout)?;
+    let (r1, l1) = role(&addr(ports, 1), cfg.timeout)?;
+    let (r2, l2) = role(&addr(ports, 2), cfg.timeout)?;
+    // The freeze must not trigger an election (round-18 N3). Without this
+    // check a lower-port replica that elected itself would pass: after the
+    // kill it is the only primary.
+    if r1 != "replica" || r2 != "replica" {
+        return Err(format!(
+            "the freeze triggered an election: after the resume the replicas report roles {r1:?} and {r2:?}"
+        ));
+    }
     if l1 != l2 {
         return Err(format!(
             "the replicas did not converge after the frozen commit: lsn {l1} vs {l2}"
@@ -440,17 +459,19 @@ pub fn lite_scenario(
     replica_refuses(&addr(ports, 1), cfg, &table)?;
     control(HaAction::Pause(1))?;
     let commit_lsn = seed_commit(&addr(ports, 0), cfg, &table, 1, control)?;
-    // `seed_commit` resumes the replica; the ack means it holds the commit.
-    let (_, lsn) = role(&addr(ports, 1), cfg.timeout)?;
-    if lsn < commit_lsn {
-        return Err(format!(
-            "the promoted replica is at lsn {lsn}, behind the acked COMMIT lsn {commit_lsn}: the ack was not synchronous"
-        ));
-    }
+    // `seed_commit` resumed the replica, and the ack means it holds the
+    // commit durably. It may apply the commit a moment after acking, so
+    // wait for its LSN instead of sampling it once (round-18 N1).
+    wait_lsn(
+        &addr(ports, 1),
+        commit_lsn,
+        Instant::now() + cfg.election,
+        "the replica did not apply the acked COMMIT",
+    )?;
     control(HaAction::Kill(0))?;
     let mut c = TcpCandidate::connect(addr(ports, 1), cfg.timeout)?;
     expect_ok(c.exec("PROMOTE")?, "PROMOTE")?;
-    wait_role(
+    let (_, lsn) = wait_role(
         &addr(ports, 1),
         true,
         Instant::now() + cfg.election,
@@ -472,7 +493,10 @@ pub fn lite_scenario(
 mod tests {
     //! A tiny three/two-node cluster. The replicas share the mock's store
     //! (instant replication); modes remove one property at a time: stale
-    //! replicas, a lost acked commit, no election, and writable replicas.
+    //! replicas, a lost acked commit, no election, writable replicas, an
+    //! asynchronous ack and an election during the freeze. Two more modes
+    //! are correct engines the scenario must pass: a replica that resolves
+    //! the table first, and one that applies a commit just after acking it.
 
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -491,6 +515,12 @@ mod tests {
         AsyncAck,
         /// Resolve the table before the replica role (round-17 J2).
         TableFirst,
+        /// Ack on durable receipt and apply 30 ms later: a replica's `SHOW
+        /// ROLE` lags the ack (round-18 N1).
+        ApplyLag,
+        /// The lower-port replica elects itself when it is resumed, while
+        /// the primary is still alive (round-18 N3).
+        ElectsOnFreeze,
     }
 
     #[derive(Default)]
@@ -500,6 +530,7 @@ mod tests {
         rows: BTreeMap<i64, String>,
         paused: Vec<bool>,
         tables: BTreeSet<String>,
+        lag_until: Option<Instant>,
     }
 
     fn spawn_cluster(n: usize, mode: Mode) -> (Vec<u16>, Arc<Mutex<State>>) {
@@ -563,6 +594,10 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                 };
+                if mode == Mode::ApplyLag {
+                    state.lock().unwrap().lag_until =
+                        Some(Instant::now() + Duration::from_millis(30));
+                }
                 if writer.write_all(reply.as_bytes()).is_err() {
                     break;
                 }
@@ -572,10 +607,11 @@ mod tests {
                 let mut st = state.lock().unwrap();
                 let role = st.roles[node].clone();
                 if low == "show role" {
-                    format!(
-                        "ROWS 2\nname\tvalue\nrole\t{role}\nlsn\t{}\nEND 2\n",
-                        st.lsn
-                    )
+                    let lagging = mode == Mode::ApplyLag
+                        && role == "replica"
+                        && st.lag_until.is_some_and(|t| Instant::now() < t);
+                    let lsn = if lagging { st.lsn - 1 } else { st.lsn };
+                    format!("ROWS 2\nname\tvalue\nrole\t{role}\nlsn\t{lsn}\nEND 2\n")
                 } else if low == "promote" {
                     st.roles[node] = "primary".to_string();
                     "OK 0\n".to_string()
@@ -725,6 +761,10 @@ mod tests {
                     if node < st.paused.len() {
                         st.paused[node] = false;
                     }
+                    if mode == Mode::ElectsOnFreeze && n >= 3 {
+                        let lower = if ports[1] < ports[2] { 1 } else { 2 };
+                        st.roles[lower] = "primary".to_string();
+                    }
                 }
             }
             Ok(())
@@ -755,6 +795,33 @@ mod tests {
         let mut ctl = control(state, Mode::AsyncAck, 3, ports.clone());
         let err = scenario(&ports, &cfg(), &mut ctl).unwrap_err();
         assert!(err.contains("COMMIT answered within one second"), "{err}");
+    }
+
+    #[test]
+    fn an_async_lite_commit_ack_is_caught() {
+        let (ports, state) = spawn_cluster(2, Mode::AsyncAck);
+        let mut ctl = control(state, Mode::AsyncAck, 2, ports.clone());
+        let err = lite_scenario(&ports, &cfg(), &mut ctl).unwrap_err();
+        assert!(err.contains("COMMIT answered within one second"), "{err}");
+    }
+
+    #[test]
+    fn a_replica_that_applies_after_the_ack_still_passes() {
+        let (ports, state) = spawn_cluster(2, Mode::ApplyLag);
+        let mut ctl = control(state, Mode::ApplyLag, 2, ports.clone());
+        let (winner, _) = lite_scenario(&ports, &cfg(), &mut ctl).expect("apply lag, lite");
+        assert_eq!(winner, 1);
+        let (ports, state) = spawn_cluster(3, Mode::ApplyLag);
+        let mut ctl = control(state, Mode::ApplyLag, 3, ports.clone());
+        scenario(&ports, &cfg(), &mut ctl).expect("apply lag, full");
+    }
+
+    #[test]
+    fn an_election_during_the_freeze_is_caught() {
+        let (ports, state) = spawn_cluster(3, Mode::ElectsOnFreeze);
+        let mut ctl = control(state, Mode::ElectsOnFreeze, 3, ports.clone());
+        let err = scenario(&ports, &cfg(), &mut ctl).unwrap_err();
+        assert!(err.contains("the freeze triggered an election"), "{err}");
     }
 
     #[test]
