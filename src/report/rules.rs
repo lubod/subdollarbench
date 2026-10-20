@@ -8,6 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.29`: round-17 review — ticket 19 tests sync commit by
+///   freezing the replicas across a `COMMIT` (an answer within 1 s fails;
+///   the pending COMMIT must answer after a resume), then requires the
+///   lower port to win once both replicas hold the committed LSN; replicas
+///   are caught up before the read-only check, so a table-first replica
+///   still answers `readonly` (J1/J2). The ticket-15 boot probe allows 25 s
+///   to start and 10 s to answer (J3). The PG wrong-password probe bounds
+///   message lengths and reports a post-password `AuthenticationOk`
+///   correctly; negative tests cover any-password PG auth, the no-ticket-9
+///   duplicate path, asynchronous replication and a table-first replica
+///   (K1/K2). Late-check skips name the failed stage, the round-16 test
+///   comment is restored, and the psql image is a host prerequisite (K3).
+///   The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.28`: round-16 review — ticket 19's post-failover suite keeps
 ///   every lite variant (I1); the scenario tickets' `needs` now cover the
 ///   grammar they send (12: 1/2/3/6; 14: 6/11; 16: 2/4/6/7/8/11; 18:
@@ -16,9 +29,10 @@ use std::hash::{Hash, Hasher};
 ///   passed (I2); the 5 s statement budget is opt-in via
 ///   `SDB_SQL_STATEMENT_TIMEOUT_MS` (I3); the HA nodes use the worker's own
 ///   `port+60..62` block and a cluster start failure is an infra fault (I4);
-///   ticket 19 kills the primary immediately after the COMMIT ack and
-///   derives the election from post-kill LSNs (I5); the PG wrong-password
-///   probe and psql image requirement, T18 scope wording, skipped-stage
+///   ticket 19's first sync-commit attempt killed the primary immediately
+///   after the COMMIT ack and derived the election from post-kill LSNs; that
+///   could not distinguish an asynchronous ack and is superseded by `.29`
+///   (I5); the PG wrong-password probe and psql image requirement, T18 scope wording, skipped-stage
 ///   regression accounting and the T14 settle pause (L-b..L-e). The ladder
 ///   is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.27`: ticket 20 (PostgreSQL wire protocol) — a scenario-only
@@ -581,7 +595,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.28";
+pub const RULES_VERSION: &str = "2026-10-19.29";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

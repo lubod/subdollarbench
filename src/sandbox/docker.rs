@@ -500,6 +500,35 @@ impl SandboxManager {
         }
     }
 
+    /// Freeze one HA node so it cannot pull the leader's log or ack a
+    /// commit (round-17 J1's sync-commit probe).
+    pub fn pause_ha_node(&self, idx: u8) -> Result<()> {
+        let name = self.ha_node_container_name(idx);
+        let out = Command::new("docker").args(["pause", &name]).output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "HA node {idx} pause failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    /// Thaw a node previously frozen with [`Self::pause_ha_node`].
+    pub fn resume_ha_node(&self, idx: u8) -> Result<()> {
+        let name = self.ha_node_container_name(idx);
+        let out = Command::new("docker").args(["unpause", &name]).output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "HA node {idx} resume failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
     /// HA nodes in the owned-container belt (label reaping covers them too).
     fn ha_node_names(&self) -> Vec<String> {
         (1..=3).map(|i| self.ha_node_container_name(i)).collect()

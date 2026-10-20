@@ -104,12 +104,15 @@ Throughput Score. The other five tasks rank by Pass@1 / cost (efficiency only).
 - **Docker**: Docker CE 24+ installed and running with socket access.
 - **Rust Toolchain**: Rust 1.80+ (`cargo`, `rustc`).
 - **OpenRouter API Key**: Export `OPENROUTER_API_KEY` in your environment.
+- **PostgreSQL image (ticket 20 cross-check)**: `docker pull postgres:16-alpine`.
+  Without it, every ticket-20 attempt is an infra fault.
 
 ### 2. Build the Multi-Language Sandbox Image
 ```bash
 git clone https://github.com/username/subdollarbench.git
 cd subdollarbench
 docker build -t subdollar-sandbox -f Dockerfile.sandbox .
+docker pull postgres:16-alpine   # stock psql cross-check for ticket 20
 ```
 
 ### 3. Launch the Interactive Web UI (Recommended)

@@ -331,7 +331,10 @@ fn wrong_password_probe(addr: &str, cfg: &PgConfig) -> Result<String, String> {
             .read_exact(&mut l)
             .map_err(|e| format!("probe length: {e}"))?;
         let n = i32::from_be_bytes(l);
-        let mut b = vec![0u8; (n - 4).max(0) as usize];
+        if !(4..=64 * 1024 * 1024).contains(&n) {
+            return Err(format!("probe message length {n} is outside 4..=64 MiB"));
+        }
+        let mut b = vec![0u8; (n - 4) as usize];
         stream
             .read_exact(&mut b)
             .map_err(|e| format!("probe body: {e}"))?;
@@ -348,7 +351,11 @@ fn wrong_password_probe(addr: &str, cfg: &PgConfig) -> Result<String, String> {
                 sent = true;
             }
             b'R' if b.len() >= 4 && i32::from_be_bytes([b[0], b[1], b[2], b[3]]) == 0 => {
-                return Err("the server accepted the connection before a password".to_string())
+                return Err(if sent {
+                    "the server accepted the wrong password".to_string()
+                } else {
+                    "the server accepted the connection before a password".to_string()
+                })
             }
             b'E' => {
                 let (code, _) = parse_error(&b);
@@ -589,12 +596,14 @@ mod tests {
         WrongSqlstate,
         BrokenExtended,
         NoReady,
+        AcceptsAnyPassword,
     }
 
     #[derive(Default)]
     struct Store {
         rows: Vec<(i64, String)>,
         txn: u8,
+        duplicate_seen: bool,
     }
 
     fn msg(t: u8, body: &[u8]) -> Vec<u8> {
@@ -695,7 +704,9 @@ mod tests {
         let Some((t, p)) = read_msg(&mut r) else {
             return;
         };
-        if t != b'p' || p.split(|&x| x == 0).next() != Some(b"pw-test") {
+        if t != b'p'
+            || (mode != Mode::AcceptsAnyPassword && p.split(|&x| x == 0).next() != Some(b"pw-test"))
+        {
             send(&mut w, &error("28P01", "bad password"));
             return;
         }
@@ -793,6 +804,7 @@ mod tests {
         } else if low.starts_with("insert") {
             let dup = low.contains("(1,") && st.rows.iter().any(|(i, _)| *i == 1);
             if dup {
+                st.duplicate_seen = true;
                 out.extend_from_slice(&error("23505", "duplicate key"));
             } else {
                 let id = if low.contains("(2,") { 2 } else { 1 };
@@ -839,12 +851,18 @@ mod tests {
     }
 
     fn spawn(mode: Mode) -> String {
+        spawn_with_store(mode).0
+    }
+
+    fn spawn_with_store(mode: Mode) -> (String, Arc<Mutex<Store>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let store = Arc::new(Mutex::new(Store {
             rows: Vec::new(),
             txn: b'I',
+            duplicate_seen: false,
         }));
+        let kept = store.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
@@ -852,7 +870,7 @@ mod tests {
                 std::thread::spawn(move || handle(stream, mode, store));
             }
         });
-        addr
+        (addr, kept)
     }
 
     fn cfg(extended: bool) -> PgConfig {
@@ -905,6 +923,25 @@ mod tests {
         let addr = spawn(Mode::BrokenExtended);
         let err = scenario(&addr, &cfg(true)).unwrap_err();
         assert!(err.contains("extended") || err.contains("42601"), "{err}");
+    }
+
+    #[test]
+    fn ticket_9_absent_skips_the_duplicate_probe() {
+        let (addr, store) = spawn_with_store(Mode::Good);
+        let mut c = cfg(true);
+        c.unique_keys = false;
+        scenario(&addr, &c).expect("the no-ticket-9 path");
+        assert!(
+            !store.lock().unwrap().duplicate_seen,
+            "the scenario sent the 23505 probe without ticket 9"
+        );
+    }
+
+    #[test]
+    fn accepting_the_wrong_password_is_caught() {
+        let addr = spawn(Mode::AcceptsAnyPassword);
+        let err = scenario(&addr, &cfg(true)).unwrap_err();
+        assert!(err.contains("accepted the wrong password"), "{err}");
     }
 
     #[test]

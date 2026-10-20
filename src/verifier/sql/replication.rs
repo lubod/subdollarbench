@@ -8,17 +8,19 @@
 //!
 //! 1. node 1 is the primary, nodes 2/3 replicas; `SHOW ROLE` reports
 //!    `role` and `lsn` on every node;
-//! 2. replicas refuse writes with `ERR readonly`;
-//! 3. the primary is killed immediately after the COMMIT ack; within the
-//!    election budget exactly one survivor is primary — the highest LSN
-//!    read after the kill, tie to the lowest port — and holds every acked
-//!    row (the ack was synchronous);
-//! 4. a new committed write reaches the other survivor;
-//! 5. the old primary is respawned as a replica, converges, and refuses
+//! 2. the replicas are caught up, then refuse writes with `ERR readonly`;
+//! 3. both replicas are frozen for about a second: `COMMIT` must not answer
+//!    until one is resumed (an asynchronous ack answers within the freeze);
+//!    both then apply the commit, so their LSNs are equal;
+//! 4. the primary is killed; with equal LSNs the lower port must win within
+//!    the election budget and hold every acked row;
+//! 5. a new committed write reaches the other survivor;
+//! 6. the old primary is respawned as a replica, converges, and refuses
 //!    writes.
 //!
-//! The lite variant has two nodes and a manual `PROMOTE`; there is no third
-//! survivor to ack new commits, so the promoted node acks locally.
+//! The lite variant has two nodes and a manual `PROMOTE`: the replica is
+//! frozen across the COMMIT, resumed, then the primary is killed and the
+//! replica promoted.
 
 use super::client::TcpCandidate;
 use super::run::Candidate;
@@ -57,6 +59,10 @@ pub enum HaAction {
     Kill(usize),
     /// Recreate the node as a fresh replica of `primary`.
     Rejoin { node: usize, primary: usize },
+    /// Freeze the node (`docker pause`) for the sync-commit probe.
+    Pause(usize),
+    /// Thaw the node again.
+    Resume(usize),
 }
 
 fn addr(ports: &[u16], i: usize) -> String {
@@ -139,7 +145,11 @@ fn wait_lsn(addr: &str, want: i64, deadline: Instant, what: &str) -> Result<(), 
     }
 }
 
-fn seed_rows(ports: &[u16], cfg: &ReplicationConfig, table: &str) -> Result<i64, String> {
+/// Create the table and the ten acked seed rows, outside a transaction.
+/// The replicas are caught up before the read-only check, so a replica that
+/// resolves the table before checking its role still answers `readonly`
+/// (round-17 J2). Returns the base LSN.
+fn seed_base(ports: &[u16], cfg: &ReplicationConfig, table: &str) -> Result<i64, String> {
     let mut c = TcpCandidate::connect(addr(ports, 0), cfg.timeout)?;
     expect_ok(
         c.exec(&format!("CREATE TABLE {table} (id INTEGER, v TEXT)"))?,
@@ -151,16 +161,52 @@ fn seed_rows(ports: &[u16], cfg: &ReplicationConfig, table: &str) -> Result<i64,
             &format!("seed insert {i}"),
         )?;
     }
-    expect_ok(c.exec("BEGIN")?, "BEGIN")?;
+    let (_, last) = role(&addr(ports, 0), cfg.timeout)?;
+    Ok(last)
+}
+
+/// The frozen sync-commit probe (round-17 J1). Every replica is paused
+/// before the transaction is sent, so an asynchronous ack answers within a
+/// second while a synchronous one waits. The pending `COMMIT` must answer
+/// `OK` within five seconds of resuming `resume`.
+fn seed_commit(
+    primary: &str,
+    cfg: &ReplicationConfig,
+    table: &str,
+    resume: usize,
+    control: &mut dyn FnMut(HaAction) -> Result<(), String>,
+) -> Result<i64, String> {
+    let mut c = TcpCandidate::connect(primary, cfg.timeout)?;
+    expect_ok(c.exec("BEGIN")?, "frozen BEGIN")?;
     for i in 10..15 {
         expect_ok(
             c.exec(&format!("INSERT INTO {table} VALUES ({i}, 'v{i}')"))?,
             &format!("transaction insert {i}"),
         )?;
     }
-    expect_ok(c.exec("COMMIT")?, "COMMIT")?;
-    // The commit's LSN is the last log entry; the replicas must reach it.
-    let (_, last) = role(&addr(ports, 0), cfg.timeout)?;
+    c.send("COMMIT")?;
+    c.set_read_timeout(Duration::from_secs(1))?;
+    let started = Instant::now();
+    match c.recv() {
+        Ok(resp) => {
+            return Err(format!(
+                "COMMIT answered within one second while every replica was frozen: {resp:?}"
+            ))
+        }
+        Err(e) if started.elapsed() < Duration::from_millis(900) => {
+            return Err(format!(
+                "COMMIT failed before the one-second freeze deadline: {e}"
+            ))
+        }
+        Err(_) => {}
+    }
+    control(HaAction::Resume(resume))?;
+    c.set_read_timeout(Duration::from_secs(5))?;
+    let resp = c
+        .recv()
+        .map_err(|e| format!("COMMIT after resuming replica {}: {e}", resume + 1))?;
+    expect_ok(resp, "COMMIT after resume")?;
+    let (_, last) = role(primary, cfg.timeout)?;
     Ok(last)
 }
 
@@ -256,29 +302,64 @@ pub fn scenario(
         )?;
     }
 
-    // The replicas are read-only (this also proves the replica role).
+    // Create the table and seed rows, catch every replica up, and only then
+    // check the read-only refusal: an engine that resolves the table before
+    // its role must still see the table (round-17 J2).
+    let base = seed_base(ports, cfg, &table)?;
+    let seed_deadline = Instant::now() + cfg.timeout;
+    for i in [1usize, 2usize] {
+        wait_lsn(
+            &addr(ports, i),
+            base,
+            seed_deadline,
+            "replica missed the seed rows",
+        )?;
+    }
     for i in [1usize, 2usize] {
         replica_refuses(&addr(ports, i), cfg, &table)?;
     }
-    let commit_lsn = seed_rows(ports, cfg, &table)?;
-    // Kill immediately after the COMMIT ack: the ack must already mean a
-    // replica holds the commit. Waiting for the replicas here would let an
-    // asynchronous engine pass (round-16 I5).
+
+    // Freeze both replicas, then commit. A synchronous engine cannot answer
+    // within one second; an asynchronous one does, which fails here.
+    for i in [1usize, 2usize] {
+        control(HaAction::Pause(i))?;
+    }
+    let commit_lsn = seed_commit(&addr(ports, 0), cfg, &table, 1, control)?;
+    control(HaAction::Resume(2))?;
+
+    // Both replicas now apply the commit; with equal LSNs the lower port
+    // must win, deterministically (round-17 J1).
+    let commit_deadline = Instant::now() + cfg.election;
+    for i in [1usize, 2usize] {
+        wait_lsn(
+            &addr(ports, i),
+            commit_lsn,
+            commit_deadline,
+            "replica did not receive the frozen commit",
+        )?;
+    }
+    let (_, l1) = role(&addr(ports, 1), cfg.timeout)?;
+    let (_, l2) = role(&addr(ports, 2), cfg.timeout)?;
+    if l1 != l2 {
+        return Err(format!(
+            "the replicas did not converge after the frozen commit: lsn {l1} vs {l2}"
+        ));
+    }
+    let expected = if ports[1] < ports[2] { 1 } else { 2 };
+
     control(HaAction::Kill(0))?;
     let deadline = Instant::now() + cfg.election;
-    let (winner, l1, l2) = loop {
+    let winner = loop {
         let mut primaries = Vec::new();
-        let mut lsns = [0i64; 2];
-        for (j, i) in [1usize, 2usize].iter().copied().enumerate() {
-            if let Ok((r, l)) = role(&addr(ports, i), Duration::from_secs(2)) {
-                lsns[j] = l;
+        for i in [1usize, 2usize] {
+            if let Ok((r, _)) = role(&addr(ports, i), Duration::from_secs(2)) {
                 if r == "primary" {
                     primaries.push(i);
                 }
             }
         }
         if primaries.len() == 1 {
-            break (primaries[0], lsns[0], lsns[1]);
+            break primaries[0];
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -287,31 +368,13 @@ pub fn scenario(
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    // The survivors' LSNs decide the election; tie goes to the lower port.
-    // They are read after the kill: the dead primary cannot advance them.
-    let expected = if l1 != l2 {
-        if l1 > l2 {
-            1
-        } else {
-            2
-        }
-    } else if ports[1] < ports[2] {
-        1
-    } else {
-        2
-    };
     if winner != expected {
         return Err(format!(
-            "elected node {} (index {winner}), expected the highest-LSN/lowest-port survivor index {expected}",
+            "elected node {} (index {winner}), expected the lower-port survivor index {expected} after both replicas applied the frozen commit",
             ports[winner]
         ));
     }
-    let winner_lsn = if winner == 1 { l1 } else { l2 };
-    if winner_lsn < commit_lsn {
-        return Err(format!(
-            "the elected survivor is at lsn {winner_lsn}, behind the acked COMMIT lsn {commit_lsn}: the ack was not synchronous"
-        ));
-    }
+    let (_, elected_lsn) = role(&addr(ports, winner), cfg.timeout)?;
     read_acked(&addr(ports, winner), cfg, &table)?;
     let new_lsn = commit_new_row(&addr(ports, winner), cfg, &table)?;
     let other = if winner == 1 { 2 } else { 1 };
@@ -333,10 +396,11 @@ pub fn scenario(
     Ok((
         winner,
         format!(
-            "3 nodes; node 1 killed immediately after the acked COMMIT; \
-             node {} elected at lsn {new_lsn} with every acked row; the \
-             survivor and the rejoined old primary converged and refuse \
-             writes",
+            "3 nodes; the replicas were frozen across the COMMIT (the ack \
+             waited for a resume); node 1 killed; node {} elected at lsn \
+             {elected_lsn} with every acked row; the new write committed at \
+             lsn {new_lsn}; the survivor and the rejoined old primary \
+             converged and refuse writes",
             ports[winner]
         ),
     ))
@@ -364,10 +428,25 @@ pub fn lite_scenario(
         "the replica never reached the initial LSN",
     )?;
 
+    // Create the table, catch the replica up, then check the refusal
+    // (round-17 J2), freeze it, and commit.
+    let base = seed_base(ports, cfg, &table)?;
+    wait_lsn(
+        &addr(ports, 1),
+        base,
+        Instant::now() + cfg.timeout,
+        "the replica missed the seed rows",
+    )?;
     replica_refuses(&addr(ports, 1), cfg, &table)?;
-    let commit_lsn = seed_rows(ports, cfg, &table)?;
-    // Kill immediately after the COMMIT ack; the promoted replica must
-    // already hold the commit (round-16 I5).
+    control(HaAction::Pause(1))?;
+    let commit_lsn = seed_commit(&addr(ports, 0), cfg, &table, 1, control)?;
+    // `seed_commit` resumes the replica; the ack means it holds the commit.
+    let (_, lsn) = role(&addr(ports, 1), cfg.timeout)?;
+    if lsn < commit_lsn {
+        return Err(format!(
+            "the promoted replica is at lsn {lsn}, behind the acked COMMIT lsn {commit_lsn}: the ack was not synchronous"
+        ));
+    }
     control(HaAction::Kill(0))?;
     let mut c = TcpCandidate::connect(addr(ports, 1), cfg.timeout)?;
     expect_ok(c.exec("PROMOTE")?, "PROMOTE")?;
@@ -377,18 +456,13 @@ pub fn lite_scenario(
         Instant::now() + cfg.election,
         "the promoted replica is not primary",
     )?;
-    let (_, lsn) = role(&addr(ports, 1), cfg.timeout)?;
-    if lsn < commit_lsn {
-        return Err(format!(
-            "the promoted replica is at lsn {lsn}, behind the acked COMMIT lsn {commit_lsn}: the ack was not synchronous"
-        ));
-    }
     read_acked(&addr(ports, 1), cfg, &table)?;
     Ok((
         1,
         format!(
-            "2 nodes; the acked commit was on the replica; node 1 killed; \
-             node {} promoted at lsn {lsn} with all 15 rows",
+            "2 nodes; the replica was frozen across the COMMIT and acked \
+             it after the resume; node 1 killed; node {} promoted at lsn \
+             {lsn} with all 15 rows",
             ports[1]
         ),
     ))
@@ -401,7 +475,7 @@ mod tests {
     //! replicas, a lost acked commit, no election, and writable replicas.
 
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
@@ -413,6 +487,10 @@ mod tests {
         LosesAcked,
         NoElection,
         ReplicaWrites,
+        /// ACK the commit without waiting for a replica (round-17 J1).
+        AsyncAck,
+        /// Resolve the table before the replica role (round-17 J2).
+        TableFirst,
     }
 
     #[derive(Default)]
@@ -420,6 +498,8 @@ mod tests {
         roles: Vec<String>,
         lsn: i64,
         rows: BTreeMap<i64, String>,
+        paused: Vec<bool>,
+        tables: BTreeSet<String>,
     }
 
     fn spawn_cluster(n: usize, mode: Mode) -> (Vec<u16>, Arc<Mutex<State>>) {
@@ -427,6 +507,7 @@ mod tests {
             roles: (0..n)
                 .map(|i| if i == 0 { "primary" } else { "replica" }.to_string())
                 .collect(),
+            paused: vec![false; n],
             ..Default::default()
         }));
         let mut ports = Vec::new();
@@ -441,14 +522,14 @@ mod tests {
                         continue;
                     }
                     let state = state.clone();
-                    std::thread::spawn(move || handle(stream, i, state, mode));
+                    std::thread::spawn(move || handle(stream, i, state, mode, n));
                 }
             });
         }
         (ports, state)
     }
 
-    fn handle(stream: TcpStream, node: usize, state: Arc<Mutex<State>>, mode: Mode) {
+    fn handle(stream: TcpStream, node: usize, state: Arc<Mutex<State>>, mode: Mode, n: usize) {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut writer = stream;
         let mut line = Vec::new();
@@ -460,6 +541,33 @@ mod tests {
             let sql = String::from_utf8_lossy(&line);
             let sql = sql.trim_end_matches('\n').to_string();
             let low = sql.to_ascii_lowercase();
+            if low == "commit" {
+                // The sync-commit gate: an asynchronous engine answers even
+                // while every replica is frozen; a synchronous one waits for
+                // a replica to be resumed (round-17 J1).
+                let reply = if mode == Mode::AsyncAck {
+                    "OK 0\n".to_string()
+                } else {
+                    let deadline = Instant::now() + Duration::from_secs(4);
+                    loop {
+                        let ready = {
+                            let st = state.lock().unwrap();
+                            (1..n).any(|i| !st.paused[i])
+                        };
+                        if ready {
+                            break "OK 0\n".to_string();
+                        }
+                        if Instant::now() >= deadline {
+                            break "ERR busy replica ack timeout\n".to_string();
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                };
+                if writer.write_all(reply.as_bytes()).is_err() {
+                    break;
+                }
+                continue;
+            }
             let reply = {
                 let mut st = state.lock().unwrap();
                 let role = st.roles[node].clone();
@@ -472,8 +580,18 @@ mod tests {
                     st.roles[node] = "primary".to_string();
                     "OK 0\n".to_string()
                 } else if low.starts_with("insert") {
+                    let table = sql
+                        .split_whitespace()
+                        .nth(2)
+                        .unwrap_or("")
+                        .trim_matches('(')
+                        .to_string();
                     if role != "primary" && mode != Mode::ReplicaWrites {
-                        "ERR readonly replica\n".to_string()
+                        if mode == Mode::TableFirst && !st.tables.contains(&table) {
+                            "ERR no_table replica\n".to_string()
+                        } else {
+                            "ERR readonly replica\n".to_string()
+                        }
                     } else {
                         st.lsn += 1;
                         let tail = sql
@@ -494,10 +612,18 @@ mod tests {
                         st.rows.insert(id, v);
                         "OK 1\n".to_string()
                     }
-                } else if low.starts_with("create")
-                    || low.starts_with("begin")
-                    || low.starts_with("commit")
-                {
+                } else if low.starts_with("create") {
+                    let table = sql
+                        .split_whitespace()
+                        .nth(2)
+                        .unwrap_or("")
+                        .trim_matches('(')
+                        .to_string();
+                    if !table.is_empty() {
+                        st.tables.insert(table);
+                    }
+                    "OK 0\n".to_string()
+                } else if low.starts_with("begin") {
                     "OK 0\n".to_string()
                 } else if low.starts_with("select id, v") {
                     let mut rows: Vec<Vec<String>> = if mode == Mode::StaleReplica && node != 0 {
@@ -590,6 +716,16 @@ mod tests {
                 HaAction::Rejoin { node, .. } => {
                     st.roles[node] = "replica".to_string();
                 }
+                HaAction::Pause(node) => {
+                    if node < st.paused.len() {
+                        st.paused[node] = true;
+                    }
+                }
+                HaAction::Resume(node) => {
+                    if node < st.paused.len() {
+                        st.paused[node] = false;
+                    }
+                }
             }
             Ok(())
         }
@@ -611,6 +747,32 @@ mod tests {
         let expected = if ports[1] < ports[2] { 1 } else { 2 };
         assert_eq!(winner, expected, "the lower-port replica wins the tie");
         assert!(report.contains("elected at lsn"), "{report}");
+    }
+
+    #[test]
+    fn an_async_commit_ack_is_caught() {
+        let (ports, state) = spawn_cluster(3, Mode::AsyncAck);
+        let mut ctl = control(state, Mode::AsyncAck, 3, ports.clone());
+        let err = scenario(&ports, &cfg(), &mut ctl).unwrap_err();
+        assert!(err.contains("COMMIT answered within one second"), "{err}");
+    }
+
+    #[test]
+    fn a_table_first_replica_still_passes() {
+        let (ports, state) = spawn_cluster(3, Mode::TableFirst);
+        let mut ctl = control(state, Mode::TableFirst, 3, ports.clone());
+        let (winner, _) = scenario(&ports, &cfg(), &mut ctl).expect("table-first replica");
+        let expected = if ports[1] < ports[2] { 1 } else { 2 };
+        assert_eq!(winner, expected);
+    }
+
+    #[test]
+    fn a_table_first_lite_replica_still_passes() {
+        let (ports, state) = spawn_cluster(2, Mode::TableFirst);
+        let mut ctl = control(state, Mode::TableFirst, 2, ports.clone());
+        let (winner, _) =
+            lite_scenario(&ports, &cfg(), &mut ctl).expect("table-first lite replica");
+        assert_eq!(winner, 1);
     }
 
     #[test]

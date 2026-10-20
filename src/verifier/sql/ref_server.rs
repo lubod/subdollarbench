@@ -691,7 +691,10 @@ def replica_loop(data, start_primary):
                 except Exception:
                     pass
                 conn = None
-            if ROLE == "replica" and time.monotonic() - last_ok > 1.5:
+            # The harness freezes a replica for about 1 s during the
+            # sync-commit probe; 3 s leaves that comfortable margin while
+            # staying inside the 10 s failover budget (round-17 J1).
+            if ROLE == "replica" and time.monotonic() - last_ok > 3.0:
                 try_elect()
             time.sleep(0.2)
 

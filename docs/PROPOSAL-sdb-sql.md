@@ -343,14 +343,17 @@ are refused cleanly.
 **19. Replication and failover.** Three nodes on ports 7101-7103 (+ offset),
 separate data dirs, `--replicaof`. `SHOW ROLE` returns `role` and `lsn`.
 Replicas serve reads and refuse writes (`ERR readonly`). A `COMMIT` is
-acknowledged only after at least one replica has it durably. Kill the
-primary immediately after the ack: within 10 s exactly one survivor is
-primary (highest `lsn` read after the kill, tie to the lowest port),
-holds every acked commit, and accepts writes that reach the other
-survivor. Restart the old primary: the harness recreates its container
-with a fresh data directory as a replica of the new primary; it rebuilds
-from the leader's retained log and converges. Lite: two nodes, `PROMOTE`
-on the replica, no acked commit lost. The cumulative suite then runs
+acknowledged only after at least one replica has it durably. The harness
+freezes both replicas for about 1 s before a commit: the ack must wait for
+a resume, and the freeze must not trigger an election. Once both replicas
+have applied the commit (equal LSNs), the harness kills the primary:
+within 10 s exactly one survivor is primary (highest `lsn`, tie to the
+lowest port), holds every acked commit, and accepts writes that reach the
+other survivor. Restart the old primary: the harness recreates its
+container with a fresh data directory as a replica of the new primary; it
+rebuilds from the leader's retained log and converges. Lite: two nodes;
+freeze the replica across the commit, then kill the primary and `PROMOTE`
+the replica, with no acked commit lost. The cumulative suite then runs
 against the current primary.
 
 **20. PostgreSQL wire protocol.** Protocol 3.0 on `--pg-port`: SSL

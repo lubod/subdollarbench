@@ -205,13 +205,13 @@ class-only stored expectations drift.
   - `replication.rs`: scenario-only 19. The pipeline reuses the HA container
     plumbing (`start.sh --port/--data/--replicaof`, three nodes, one tmpfs
     per node) and exports `SDB_SQL_NODES=ha1:P1,ha2:P2,ha3:P3`. The
-    scenario checks `SHOW ROLE` (`role`/`lsn`) on every node, replica reads
-    and `ERR readonly` writes, a seed transaction on the primary, its
-    read-only replicas, the kill of the primary immediately after the
-    COMMIT ack (no replica wait: the ack is synchronous), exactly one
-    survivor as primary within 10 s (highest post-kill LSN, lower-port
-    tie), every acked row on the winner, a new commit replicated to the
-    other survivor,
+    scenario checks `SHOW ROLE` (`role`/`lsn`) on every node, catches the
+    replicas up, checks `ERR readonly` writes against the existing table,
+    freezes both replicas across the commit (a 1 s freeze; the ack must
+    wait for a resume), waits for both to reach the committed LSN, kills
+    node 1, and requires exactly one survivor as primary within 10 s
+    (equal LSNs, lower-port tie), every acked row on the winner, a new
+    commit replicated to the other survivor,
     the old primary respawned as a replica (fresh tmpfs) converging and
     refusing writes, and the cumulative differential suite on the current
     primary.
@@ -322,11 +322,13 @@ Applied in the reviewer's order; the ladder is unchanged (21 tickets, max 76).
 - **I4 (MEDIUM, ticket 19)**: HA nodes use the worker's own block
   (`port+60..62`, no collision with the next worker); a cluster that
   cannot start sets `infra_error` instead of grading the model.
-- **I5 (MEDIUM, ticket 19)**: the primary is killed immediately after the
-  COMMIT ack, before any replica wait; the survivors' LSNs read after the
-  kill decide the expected winner, and the elected node must be at/past
-  the acked commit LSN and hold all 15 rows. The lite variant does the same
-  before PROMOTE. The prompt says the old node rejoins on a fresh data dir.
+- **I5 (MEDIUM, ticket 19; superseded in `.29`)**: the `.28` commit killed
+  the primary immediately after the COMMIT ack and derived the election
+  from post-kill LSNs. Round 17 showed this cannot catch an asynchronous
+  ack (the 88 ms kill lets it replicate) and can reject a correct
+  higher-port winner after it ships its tail; `.29` replaces it with the
+  replica freeze (round-17 J1). The prompt still says the old node rejoins
+  on a fresh data dir.
 - **L-a (ticket 15)**: before grading a red `./test.sh` after the
   sensitivity revert, a boot probe starts the reverted copy and requires a
   `SELECT 1` answer; a whole-file fallback that broke the server is now
@@ -347,8 +349,57 @@ Applied in the reviewer's order; the ladder is unchanged (21 tickets, max 76).
 
 Gates after the fixes: the affected mock/verifier suites and clippy are
 green; the 0/3000 differential soak is green; the stage-15 (boot probe),
-stage-19 full/lite (immediate-kill sync) and stage-20 full/lite live proofs
-pass; full serial suite: **965 passed / 6 ignored, bins 60**.
+stage-19 full/lite (immediate-kill sync, superseded in `.29`) and
+stage-20 full/lite live proofs pass; full serial suite: **965 passed /
+6 ignored, bins 60**.
+
+### Round-17 review fixes (2026-10-20, rules `2026-10-19.29`)
+
+Applied in the reviewer's order; the ladder is unchanged (21 tickets, max 76).
+
+- **J1 (HIGH, ticket 19)**: sync commit is tested with a frozen replica,
+  not an immediate kill. The harness creates the table and seed rows,
+  catches both replicas up, freezes them (`docker pause`), sends the
+  transaction and `COMMIT` with a 1 s read deadline (an answer fails:
+  "COMMIT answered within one second while every replica was frozen"),
+  resumes one replica and requires the pending `COMMIT` to answer within
+  5 s, then resumes the other. Both replicas reach the committed LSN
+  (equal), so the lower port must win the election deterministically. The
+  lite freezes its one replica, resumes it, then kills and `PROMOTE`s.
+  `HaAction::Pause`/`Resume` map to `docker pause`/`unpause`; the mock
+  models per-node pause flags, an asynchronous-ack mode that must fail and
+  the same commit gate; the reference's election threshold is raised from
+  1.5 s to 3 s (a 1 s freeze must not elect). Both prompts document the
+  freeze, and the module doc/proposal/rules history are corrected.
+- **J2 (MEDIUM, ticket 19)**: the read-only refusal now runs only after
+  the table exists and both replicas have caught up, so a table-first
+  engine answers `readonly` (the mock's `TableFirst` mode passes the full
+  and lite scenarios).
+- **J3 (MEDIUM, ticket 15)**: the boot probe polls for 25 s (500 x 50 ms),
+  sets a 10 s socket timeout after connecting, and the
+  `run_workspace_command` cap is 45 s.
+- **K1 (ticket 20)**: the wrong-password probe bounds the message length
+  to 4..=64 MiB and reports a post-password `AuthenticationOk` as
+  "accepted the wrong password".
+- **K2**: negative tests added: a PG mock that accepts any password (fails
+  with the new message); `unique_keys = false` does not send the 23505
+  probe (asserted with the mock's `duplicate_seen`); asynchronous
+  replication is caught; a table-first replica passes full and lite.
+- **K3/T6**: the round-16 I1 test is back above its own doc comment and the
+  old persistence test regained its comment; the suite variants are
+  extracted into `suite_variants` and unit-tested; late-check skips read
+  `not run: late checks skipped after stage N failed`; the README lists
+  `postgres:16-alpine` as a prerequisite and the build step pulls it.
+- **Ops**: no cell was launched; cells stay on hold until `.29` is
+  reviewed.
+
+Gates after the fixes: affected verifier/mock suites and clippy green; the
+stage-19 full/lite and stage-20 full/lite live proofs on the freeze test;
+full serial suite **971 passed / 6 ignored, bins 60**. The first serial
+run hit one unrelated timing flake in
+`verifier::sql::concurrency::tests::the_scenario_repeats_cleanly` (7
+snapshots vs the expected 10 under load); that test then passed 20/20 in
+isolation and the full rerun was green.
 
 ## Baseline evidence — canary wave under 2026-10-14.1
 

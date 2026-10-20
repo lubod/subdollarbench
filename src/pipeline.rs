@@ -764,6 +764,23 @@ fn run_tests_ci_blocking(
     }
 }
 
+/// The lite variants a suite grades at: every earlier lite pass from the
+/// ladder, plus this attempt's lite profile at the ticket being graded
+/// (round-16 I1, shared by the main and post-failover suites).
+fn suite_variants(
+    passed_lite: &[(u32, Vec<String>)],
+    lite_profile: &[String],
+    wanted: &[u32],
+) -> Vec<(u32, Vec<String>)> {
+    let mut variants = passed_lite.to_vec();
+    if !lite_profile.is_empty() {
+        if let Some(&cur) = wanted.iter().max() {
+            variants.push((cur, lite_profile.to_vec()));
+        }
+    }
+    variants
+}
+
 /// Ticket 15 (tests & CI gate, sdb-sql): the ticket ships `./test.sh`
 /// (offline, under 120 s), a coverage signal (Go measured here; other
 /// stacks self-report `coverage: NN.N%` in coverage.txt) and tests that
@@ -955,21 +972,22 @@ fn run_tests_gate_blocking(
                     "trap 'kill $pid 2>/dev/null || true' EXIT\n",
                     "python3 - <<'PY'\n",
                     "import socket, sys, time\n",
-                    "for _ in range(100):\n",
+                    "for _ in range(500):\n",
                     "    try:\n",
                     "        s = socket.create_connection((\"127.0.0.1\", 7123), 0.2)\n",
                     "        break\n",
                     "    except OSError:\n",
                     "        time.sleep(0.05)\n",
                     "else:\n",
-                    "    sys.exit(\"server did not start\")\n",
+                    "    sys.exit(\"server did not start within 25 s\")\n",
+                    "s.settimeout(10)\n",
                     "s.sendall(b\"SELECT 1\\n\")\n",
                     "line = s.makefile(\"rb\").readline()\n",
                     "if not line.startswith(b\"ROWS\"):\n",
                     "    sys.exit(\"unexpected answer: %r\" % line)\n",
                     "PY\n",
                 ),
-                30,
+                45,
             );
             match probe {
                 Ok((true, _)) => {}
@@ -3383,12 +3401,7 @@ impl BenchmarkPipeline {
                             // current attempt's lite profile applies to the
                             // ticket being graded, earlier lite passes come
                             // from the ladder (`passed_lite`).
-                            let mut variants: Vec<(u32, Vec<String>)> = passed_lite.to_vec();
-                            if let Some(&cur) = wanted.iter().max() {
-                                if !lite_profile.is_empty() {
-                                    variants.push((cur, lite_profile.to_vec()));
-                                }
-                            }
+                            let variants = suite_variants(passed_lite, lite_profile, &wanted);
                             let run = tokio::task::spawn_blocking(move || {
                                 crate::verifier::sql::driver::run_stage_with_variants(
                                     &addr,
@@ -4079,6 +4092,16 @@ impl BenchmarkPipeline {
                                             ) => sandbox
                                                 .kill_ha_node((node + 1) as u8)
                                                 .map_err(|e| format!("kill node {}: {e}", node + 1)),
+                                            crate::verifier::sql::replication::HaAction::Pause(
+                                                node,
+                                            ) => sandbox
+                                                .pause_ha_node((node + 1) as u8)
+                                                .map_err(|e| format!("pause node {}: {e}", node + 1)),
+                                            crate::verifier::sql::replication::HaAction::Resume(
+                                                node,
+                                            ) => sandbox
+                                                .resume_ha_node((node + 1) as u8)
+                                                .map_err(|e| format!("resume node {}: {e}", node + 1)),
                                             crate::verifier::sql::replication::HaAction::Rejoin {
                                                 node,
                                                 primary,
@@ -4128,12 +4151,8 @@ impl BenchmarkPipeline {
                                         // exactly like the main suite (round-16
                                         // I1): a ticket-8 lite pass must not be
                                         // asked for LEFT JOIN after failover.
-                                        let mut variants = passed_lite.to_vec();
-                                        if !lite_profile.is_empty() {
-                                            if let Some(&cur) = wanted.iter().max() {
-                                                variants.push((cur, lite_profile.to_vec()));
-                                            }
-                                        }
+                                        let variants =
+                                            suite_variants(passed_lite, lite_profile, &wanted);
                                         let out = crate::verifier::sql::driver::run_stage_with_variants(
                                             &addr,
                                             std::time::Duration::from_secs(10),
@@ -4358,11 +4377,12 @@ impl BenchmarkPipeline {
                                 }
                             }
                         }
-                        // L1/L-d: a ticket whose late check never ran (an
-                        // earlier differential stage or late check failed)
-                        // must not keep its placeholder PASS. Scenario-only
+                        // L1/L-d: a ticket whose late check never ran (a
+                        // differential stage or a late check failed) must
+                        // not keep its placeholder PASS. Scenario-only
                         // stages and the late-checked differential stages 5,
                         // 6 and 11 are all in scope.
+                        let failed_stage = stages.iter().find(|s| !s.passed).map(|s| s.stage);
                         for st in stages.iter_mut().filter(|s| {
                             (crate::verifier::sql::driver::scenario_only(s.stage)
                                 || matches!(s.stage, 5 | 6 | 11))
@@ -4370,7 +4390,12 @@ impl BenchmarkPipeline {
                                 && !late_ran.contains(&s.stage)
                         }) {
                             st.passed = false;
-                            st.error = Some("not run: an earlier stage failed".to_string());
+                            st.error = Some(match failed_stage {
+                                Some(n) => {
+                                    format!("not run: late checks skipped after stage {n} failed")
+                                }
+                                None => "not run: late checks skipped".to_string(),
+                            });
                             log_stage(logger, st);
                         }
                         if let Some((lost, why)) = late_failure {
@@ -9590,6 +9615,24 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn suite_variants_carry_the_lite_grammar_into_later_suites() {
+        let passed_lite = vec![(8u32, vec!["join-inner-only".to_string()])];
+        let wanted: Vec<u32> = (0..=19).collect();
+        let variants = suite_variants(&passed_lite, &["two-nodes-promote".to_string()], &wanted);
+        assert_eq!(
+            variants,
+            vec![
+                (8u32, vec!["join-inner-only".to_string()]),
+                (19u32, vec!["two-nodes-promote".to_string()]),
+            ]
+        );
+        assert_eq!(
+            suite_variants(&passed_lite, &[], &wanted),
+            vec![(8u32, vec!["join-inner-only".to_string()])]
+        );
+    }
+
     /// Ticket 16 live proof (eval-only, no model): the reference runs the
     /// cumulative suite through stage 16; the memory extra restarts it on a
     /// fresh scratch store under a 64 MiB cap, loads 400k x 900 B rows and
@@ -9869,7 +9912,7 @@ main()
             "Stage 19: Replication and failover -> PASS",
             "Stage 18: Hostile input and limits -> PASS",
             "[REPL] cluster of 3 nodes on ports",
-            "[REPL] 3 nodes; node 1 killed immediately after the acked COMMIT",
+            "[REPL] 3 nodes; the replicas were frozen across the COMMIT",
             "[REPL] the cumulative differential suite passes against the current primary",
             "[UPGRADE] sentinel for stage 19 written",
         ] {
@@ -9942,7 +9985,7 @@ main()
         for needle in [
             "Stage 19: Replication and failover -> PASS",
             "[REPL] cluster of 2 nodes on ports",
-            "[REPL] 2 nodes; the acked commit was on the replica",
+            "[REPL] 2 nodes; the replica was frozen across the COMMIT",
             "[REPL] the cumulative differential suite passes against the current primary",
             "[UPGRADE] sentinel for stage 19 written",
         ] {
