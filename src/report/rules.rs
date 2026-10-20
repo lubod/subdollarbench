@@ -8,6 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.31`: M5 — the sdb-sql cell cap is $0.99 / 150 min (from
+///   $0.75 / 120): the console launcher, the engine's start default and
+///   `scripts/sql-cell.sh` all default to `campaign::CELL_BUDGET_USD` /
+///   `CELL_WALL_MIN`. It is the highest budget that keeps a cell under $1.
+///   The `.29` calibration cell hit the $0.75 cap at ticket 19 with 49 min
+///   left, and a full ladder costs about $1.03 at its rate. The grading
+///   code is unchanged, but points compare only within one cap, so the cap
+///   gets its own version. The ladder is unchanged (21 tickets, max_points
+///   76).
 /// - `2026-10-19.30`: round-18 review — ticket 19 lite waits for the
 ///   replica's LSN to reach the acked commit instead of sampling it once,
 ///   so an engine that applies a commit just after acking it passes (N1);
@@ -610,7 +619,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.30";
+pub const RULES_VERSION: &str = "2026-10-19.31";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

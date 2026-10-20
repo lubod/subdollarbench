@@ -451,6 +451,26 @@ lite, an asynchronous ack caught 4/4. The transfer check's snapshot count
 on the in-process mocks rose from min 7 / median 23 to min 121 / median
 125 (30 runs each).
 
+### M5 decided (2026-10-20, rules `2026-10-19.31`): the cell cap is $0.99 / 150 min
+
+- **Decision (operator):** raise the cap from $0.75 / 120 min to
+  **$0.99 / 150 min**, the highest budget that keeps every cell under $1
+  (the README's "Under-$1" claim). The console launcher, the engine's
+  `POST /api/campaigns` default and `scripts/sql-cell.sh` all default to
+  `campaign::CELL_BUDGET_USD` / `CELL_WALL_MIN`.
+- **Evidence:** the `.29` calibration cell (DeepSeek v4.1 flash, omp/high,
+  `runs/campaign-launch-20261020_154206.log`) reached ticket 19 with 34.6
+  of 76 points and spent $0.748, hitting the cap after 71 of 120 min.
+  Tickets 14, 15, 16 and 18 were skipped by needs (8 and 11 failed) and
+  20 was not attempted. Spend ran at 32% of the attempted tickets'
+  budgets, so a full ladder costs about $1.03 at that rate: a model of
+  this class gets close to the top under $0.99, and reaching it stays
+  part of the score.
+- **Comparability:** the grading code is unchanged, but the board ranks
+  by points within the current rules, so the cap change gets its own
+  rules version; cells under the old cap stay readable under their own
+  stamp.
+
 ## Baseline evidence — canary wave under 2026-10-14.1
 
 First coherent dataset after the review fixes (6 cells, redis, high,

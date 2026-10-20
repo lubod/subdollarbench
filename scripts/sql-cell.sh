@@ -8,15 +8,17 @@
 #
 # Usage: scripts/sql-cell.sh <model> [budget_usd] [wall_min] [extra args...]
 #   e.g. scripts/sql-cell.sh openrouter/thinkingmachines/inkling-small:free
+# The defaults are the official cell cap (M5, 2026-10-20): $0.99 / 150 min,
+# the same as the console launcher. Pass smaller values for a smoke cell.
 # Environment: CARGO_TARGET_DIR, CELL_DRY_RUN=1 to print the command only.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${1:?usage: sql-cell.sh <model> [budget_usd] [wall_min] [extra...]}"
 shift || true
-BUDGET="${1:-0.25}"
+BUDGET="${1:-0.99}"
 shift || true
-WALL="${1:-40}"
+WALL="${1:-150}"
 shift || true
 # Harness/effort are cell configuration like the caps: env, not extra argv,
 # so the flags can never clash with the ones this script sets.

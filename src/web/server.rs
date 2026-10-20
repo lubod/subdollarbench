@@ -1774,7 +1774,7 @@ pub(crate) async fn start_campaign(
     let budget = if req.budget_usd > 0.0 {
         req.budget_usd
     } else {
-        0.75
+        crate::campaign::CELL_BUDGET_USD
     };
     if budget > 5.0 && !req.confirm {
         return (
@@ -1785,7 +1785,11 @@ pub(crate) async fn start_campaign(
         )
             .into_response();
     }
-    let wall = if req.wall_min > 0 { req.wall_min } else { 120 };
+    let wall = if req.wall_min > 0 {
+        req.wall_min
+    } else {
+        crate::campaign::CELL_WALL_MIN
+    };
     let Some(exe) = crate::campaign::launcher_binary() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

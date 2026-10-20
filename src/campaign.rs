@@ -1427,6 +1427,15 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
     }
 }
 
+/// The official sdb-sql cell cap (M5, decided 2026-10-20): the highest
+/// budget that keeps every cell under $1. The `.29` calibration cell hit
+/// the old $0.75 cap at ticket 19 after 71 of 120 min; a full ladder costs
+/// about $1.03 at its rate, so reaching the top stays part of the score.
+pub const CELL_BUDGET_USD: f64 = 0.99;
+/// The wall that goes with [`CELL_BUDGET_USD`], with room for the late
+/// checks that rerun in every later verification.
+pub const CELL_WALL_MIN: u64 = 150;
+
 /// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
 /// test pins that the real clap definition accepts it (round-8 finding 2).
 pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) -> Vec<String> {
