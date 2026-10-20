@@ -17,10 +17,12 @@
 pub const SQL_REF_SERVER_PY: &str = r#"# sdb-sql reference server: the text protocol over its own sqlite3.
 # Reference only (docs/PROPOSAL-sdb-sql.md): it proves the harness end to
 # end, it is not a candidate. STRICT tables, INTEGER and TEXT only.
+import base64
 import os
 import re
 import socket
 import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -144,6 +146,32 @@ MAX_CONNS = 256
 STMT_TIMEOUT = 5.0
 CONN_LOCK = threading.Lock()
 CONNS_CURRENT = 0
+
+# Ticket 19: replication. NODES is the per-cluster node list (Docker
+# aliases) from SDB_SQL_NODES / --nodes; the data dir holds the primary's
+# retained log, which a promoted replica keeps serving.
+NODES = []
+ROLE = "primary"
+LAST_LSN = 0
+ACK_MAX = 0
+ACK_LOCK = threading.Lock()
+LOG_LOCK = threading.Lock()
+SKIP_SYNC = False
+PORT = 0
+DATA = "/tmp"
+PRIMARY = None
+WRITE_KEYWORDS = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER")
+LOG_KEYWORDS = WRITE_KEYWORDS + ("BEGIN", "COMMIT", "ROLLBACK")
+
+# Ticket 20: PostgreSQL wire protocol v3 on --pg-port.
+PG_PORT = 0
+SQLSTATE = {
+    "syntax": "42601", "no_table": "42P01", "no_column": "42703",
+    "ambiguous": "42702", "exists": "42P07", "arity": "42601",
+    "type": "42804", "constraint": "23505", "txn": "25P02",
+    "busy": "40001", "limit": "54000", "full": "53100",
+    "readonly": "25006", "auth": "28P01",
+}
 
 
 def stats_bump(sql):
@@ -417,8 +445,509 @@ def timed_answer(conn, sql):
         conn.set_progress_handler(None, 0)
 
 
+def first_keyword(sql):
+    parts = sql.strip().split(None, 1)
+    # The dialect permits an optional trailing semicolon; classification
+    # (logging, read-only writes, command tags) must see the bare keyword.
+    return parts[0].upper().rstrip(";") if parts else ""
+
+
+def role_reply():
+    return ("ROWS 2\nname\tvalue\nrole\t%s\nlsn\t%d\nEND 2\n" % (ROLE, LAST_LSN)).encode()
+
+
+def load_log(data):
+    global LAST_LSN
+    path = os.path.join(data, "repl.log")
+    last = 0
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            for line in f:
+                try:
+                    last = max(last, int(line.split(b"\t", 1)[0]))
+                except Exception:
+                    pass
+    LAST_LSN = last
+
+
+def append_log(data, sql):
+    global LAST_LSN
+    with LOG_LOCK:
+        LAST_LSN += 1
+        append_log_at_locked(data, LAST_LSN, sql)
+        return LAST_LSN
+
+
+def append_log_at(data, lsn, sql):
+    global LAST_LSN
+    with LOG_LOCK:
+        append_log_at_locked(data, lsn, sql)
+        if lsn > LAST_LSN:
+            LAST_LSN = lsn
+
+
+def append_log_at_locked(data, lsn, sql):
+    entry = "%d\t%s\n" % (lsn, base64.b64encode(sql.encode()).decode())
+    with open(os.path.join(data, "repl.log"), "ab") as f:
+        f.write(entry.encode())
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def log_since(data, want):
+    path = os.path.join(data, "repl.log")
+    out = []
+    last = 0
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            for line in f:
+                try:
+                    lsn_s, b64 = line.rstrip(b"\n").split(b"\t", 1)
+                    lsn = int(lsn_s)
+                except Exception:
+                    continue
+                last = max(last, lsn)
+                if lsn > want:
+                    out.append((lsn, base64.b64decode(b64).decode()))
+    return out, last
+
+
+def wait_ack(lsn):
+    # The replica may be applying a batch from the cumulative suite; give
+    # the sync ack room without making a dead replica stall a commit for
+    # long (the harness's statement timeout is 10 s).
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        with ACK_LOCK:
+            if ACK_MAX >= lsn:
+                return True
+        time.sleep(0.005)
+    return False
+
+
+def peer_status(addr):
+    try:
+        host, port_s = addr.rsplit(":", 1)
+        s = socket.create_connection((host, int(port_s)), 0.6)
+        s.settimeout(0.6)
+        s.sendall(b"SHOW ROLE\n")
+        data = b""
+        while b"END " not in data:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        lines = data.decode("utf-8", "replace").splitlines()
+        role = None
+        lsn = 0
+        for line in lines[2:]:
+            if line.startswith("role\t"):
+                role = line.split("\t", 1)[1]
+            elif line.startswith("lsn\t"):
+                lsn = int(line.split("\t", 1)[1])
+        return (role, lsn)
+    except Exception:
+        return None
+
+
+def try_elect():
+    global ROLE, PRIMARY
+    if ROLE != "replica":
+        return
+    peers = []
+    for node in NODES:
+        try:
+            port = int(node.rsplit(":", 1)[1])
+        except Exception:
+            continue
+        if port == PORT:
+            continue
+        st = peer_status(node)
+        if st is None:
+            continue
+        if st[0] == "primary":
+            PRIMARY = node
+            return
+        peers.append((st[1], port))
+    peers.append((LAST_LSN, PORT))
+    best = max(peers, key=lambda x: (x[0], -x[1]))
+    if best[1] != PORT:
+        return
+    # A peer may have won while we waited; follow it instead of splitting.
+    time.sleep(0.3)
+    for node in NODES:
+        try:
+            port = int(node.rsplit(":", 1)[1])
+        except Exception:
+            continue
+        if port == PORT:
+            continue
+        st = peer_status(node)
+        if st is not None and st[0] == "primary":
+            PRIMARY = node
+            return
+    ROLE = "primary"
+    print("sdb-sql reference: node %d promoted" % PORT, file=sys.stderr, flush=True)
+
+
+def replica_loop(data, start_primary):
+    global ROLE, LAST_LSN, PRIMARY
+    PRIMARY = start_primary
+    db_path = os.path.join(data, "sdb-sql-ref-%d.sqlite" % PORT)
+    conn = None
+    last_ok = time.monotonic()
+    while ROLE == "replica":
+        try:
+            host, port_s = PRIMARY.rsplit(":", 1)
+            s = socket.create_connection((host, int(port_s)), 1.0)
+            s.settimeout(5.0)
+            f = s.makefile("rwb")
+            last_ok = time.monotonic()
+            while ROLE == "replica":
+                f.write(("SDB_REPL %d\n" % LAST_LSN).encode())
+                f.flush()
+                entries = []
+                primary_last = LAST_LSN
+                while True:
+                    line = f.readline()
+                    if not line:
+                        raise EOFError("primary closed")
+                    line = line.decode("utf-8", "replace").rstrip("\n")
+                    if line.startswith("RLOG "):
+                        _, lsn_s, b64 = line.split(" ", 2)
+                        entries.append((int(lsn_s), base64.b64decode(b64).decode()))
+                    elif line.startswith("REND "):
+                        primary_last = int(line.split(" ", 1)[1])
+                        break
+                if primary_last < LAST_LSN and not entries:
+                    # Diverged: rebuild from the leader's retained history.
+                    if conn:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        conn = None
+                    for suffix in ("", "-wal", "-shm"):
+                        try:
+                            os.remove(db_path + suffix)
+                        except OSError:
+                            pass
+                    try:
+                        os.remove(os.path.join(data, "repl.log"))
+                    except OSError:
+                        pass
+                    LAST_LSN = 0
+                    continue
+                if entries:
+                    if conn is None:
+                        conn = sqlite3.connect(db_path, isolation_level=None)
+                        conn.execute("PRAGMA journal_mode=WAL")
+                        conn.execute("PRAGMA synchronous=FULL")
+                    for idx, (lsn, entry_sql) in enumerate(entries):
+                        # Replay through the same `answer` path as a client:
+                        # ALTER ... IF [NOT] EXISTS and statement atomicity
+                        # are handled there, not by translate_ddl alone.
+                        try:
+                            answer(conn, entry_sql)
+                        except Exception as e:
+                            print("sdb-sql reference: replica apply failed at lsn %d: %r entry=%r"
+                                  % (lsn, e, entry_sql[:200]), file=sys.stderr, flush=True)
+                            for plsn, psql in entries[max(0, idx - 6):idx + 1]:
+                                print("  log %d %r" % (plsn, psql[:160]),
+                                      file=sys.stderr, flush=True)
+                            try:
+                                with open(os.path.join(data, "repl.log"), "rb") as lf:
+                                    tail = lf.readlines()[-12:]
+                                for line in tail:
+                                    ls, b64 = line.rstrip(b"\n").split(b"\t", 1)
+                                    print("  local %s %r" % (
+                                        ls.decode(),
+                                        base64.b64decode(b64)[:100],
+                                    ), file=sys.stderr, flush=True)
+                            except Exception:
+                                pass
+                            raise
+                        append_log_at(data, lsn, entry_sql)
+                f.write(("SDB_ACK %d\n" % LAST_LSN).encode())
+                f.flush()
+                f.readline()
+                last_ok = time.monotonic()
+                time.sleep(0.05)
+            try:
+                f.close()
+                s.close()
+            except Exception:
+                pass
+        except Exception:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+            if ROLE == "replica" and time.monotonic() - last_ok > 1.5:
+                try_elect()
+            time.sleep(0.2)
+
+
+def pg_send(f, typ, body):
+    f.write(typ + struct.pack("!i", len(body) + 4) + body)
+    f.flush()
+
+
+def pg_error(f, code, msg):
+    clean = msg.replace("\n", " ").encode("utf-8", "replace")
+    body = b"SERROR\0VERROR\0C" + code.encode() + b"\0M" + clean + b"\0\0"
+    pg_send(f, b"E", body)
+
+
+def pg_rowdesc(f, headers):
+    body = struct.pack("!h", len(headers))
+    for h in headers:
+        body += h.encode("utf-8", "replace") + b"\0"
+        body += struct.pack("!i", 0)          # table OID
+        body += struct.pack("!h", 0)          # column number
+        body += struct.pack("!i", 25)         # text
+        body += struct.pack("!h", -1)         # type size
+        body += struct.pack("!i", -1)         # type modifier
+        body += struct.pack("!h", 0)          # text format
+    pg_send(f, b"T", body)
+
+
+def pg_datarow(f, values):
+    body = struct.pack("!h", len(values))
+    for v in values:
+        if v is None:
+            body += struct.pack("!i", -1)
+        else:
+            b = str(v).encode("utf-8", "replace")
+            body += struct.pack("!i", len(b)) + b
+    pg_send(f, b"D", body)
+
+
+def pg_complete(f, tag):
+    pg_send(f, b"C", tag.encode() + b"\0")
+
+
+def pg_ready(f, status):
+    pg_send(f, b"Z", status)
+
+
+def sqlstate(msg):
+    cls = classify(msg) or "syntax"
+    return SQLSTATE.get(cls, "XX000")
+
+
+def pg_statement(conn, sql):
+    before = conn.total_changes
+    guard = None
+    if re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.I):
+        guard = "sdb_pg"
+        conn.execute("SAVEPOINT sdb_pg")
+    try:
+        cur = conn.execute(translate_ddl(sql))
+    except Exception:
+        if guard:
+            try:
+                conn.execute("ROLLBACK TO sdb_pg")
+                conn.execute("RELEASE sdb_pg")
+            except Exception:
+                pass
+        raise
+    if guard:
+        conn.execute("RELEASE sdb_pg")
+    if cur.description is not None and not re.match(r"\s*ALTER\b", sql, re.I):
+        headers = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        return ("rows", headers, rows)
+    changed = conn.total_changes - before
+    n = cur.rowcount if changed else 0
+    if n < 0:
+        n = 0
+    first = first_keyword(sql)
+    tag = {
+        "INSERT": "INSERT 0 %d" % n,
+        "UPDATE": "UPDATE %d" % n,
+        "DELETE": "DELETE %d" % n,
+        "CREATE": "CREATE TABLE",
+        "DROP": "DROP TABLE",
+        "ALTER": "ALTER TABLE",
+        "BEGIN": "BEGIN",
+        "COMMIT": "COMMIT",
+        "ROLLBACK": "ROLLBACK",
+    }.get(first, "OK")
+    return ("cmd", tag)
+
+
+def pg_read_msg(f):
+    typ = f.read(1)
+    if not typ:
+        return None
+    ln = f.read(4)
+    if len(ln) < 4:
+        return None
+    n = struct.unpack("!i", ln)[0]
+    body = f.read(max(0, n - 4))
+    return typ, body
+
+
+def pg_send_result(f, kind):
+    if kind[0] == "rows":
+        pg_rowdesc(f, kind[1])
+        for row in kind[2]:
+            pg_datarow(f, row)
+        pg_complete(f, "SELECT %d" % len(kind[2]))
+    else:
+        pg_complete(f, kind[1])
+
+
+def pg_serve(sock, db_path):
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=FULL")
+    f = sock.makefile("rwb")
+    try:
+        hdr = f.read(8)
+        if len(hdr) < 8:
+            return
+        length, code = struct.unpack("!ii", hdr)
+        if length == 8 and code == 80877103:
+            f.write(b"N")
+            f.flush()
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                return
+            length, code = struct.unpack("!ii", hdr)
+        body = f.read(max(0, length - 8))
+        if code != 196608:
+            pg_error(f, "08P01", "unsupported frontend protocol")
+            return
+        if PASSWORD:
+            pg_send(f, b"R", struct.pack("!i", 3))
+            m = pg_read_msg(f)
+            if m is None or m[0] != b"p":
+                return
+            pw = m[1].split(b"\0")[0].decode("utf-8", "replace")
+            if pw != PASSWORD:
+                pg_error(f, "28P01", "password authentication failed for user")
+                return
+        pg_send(f, b"R", struct.pack("!i", 0))
+        pg_send(f, b"S", b"server_version\0" + b"16.0\0")
+        pg_send(f, b"S", b"client_encoding\0" + b"UTF8\0")
+        pg_send(f, b"K", struct.pack("!ii", 1234, 5678))
+        pg_ready(f, b"I")
+        txn = b"I"
+        stmts = {}
+        portals = {}
+        while True:
+            m = pg_read_msg(f)
+            if m is None:
+                break
+            typ, body = m
+            if typ == b"Q":
+                sql = body.split(b"\0")[0].decode("utf-8", "replace")
+                if not sql.strip():
+                    pg_send(f, b"I", b"")
+                    pg_ready(f, txn)
+                    continue
+                try:
+                    kind = pg_statement(conn, sql)
+                except Exception as e:
+                    pg_error(f, sqlstate(str(e)), str(e))
+                    if txn == b"T":
+                        txn = b"E"
+                    pg_ready(f, txn)
+                    continue
+                pg_send_result(f, kind)
+                first = first_keyword(sql)
+                if first == "BEGIN":
+                    txn = b"T"
+                elif first in ("COMMIT", "ROLLBACK"):
+                    txn = b"I"
+                pg_ready(f, txn)
+            elif typ == b"P":
+                parts = body.split(b"\0", 2)
+                stmts[parts[0].decode("utf-8", "replace")] = parts[1].decode("utf-8", "replace")
+                pg_send(f, b"1", b"")
+            elif typ == b"B":
+                pos = 0
+
+                def cstr_at():
+                    nonlocal pos
+                    end = body.index(b"\0", pos)
+                    out = body[pos:end]
+                    pos = end + 1
+                    return out
+
+                portal = cstr_at().decode("utf-8", "replace")
+                stmt = cstr_at().decode("utf-8", "replace")
+                nfmt = struct.unpack("!h", body[pos:pos + 2])[0]
+                pos += 2 + 2 * nfmt
+                nparams = struct.unpack("!h", body[pos:pos + 2])[0]
+                pos += 2
+                vals = []
+                for _ in range(nparams):
+                    ln = struct.unpack("!i", body[pos:pos + 4])[0]
+                    pos += 4
+                    if ln < 0:
+                        vals.append(None)
+                    else:
+                        vals.append(body[pos:pos + ln].decode("utf-8", "replace"))
+                        pos += ln
+                portals[portal] = (stmts.get(stmt, ""), vals)
+                pg_send(f, b"2", b"")
+            elif typ == b"D":
+                if body[:1] == b"S":
+                    pg_send(f, b"t", struct.pack("!h", 0))
+                pg_send(f, b"n", b"")
+            elif typ == b"E":
+                portal = body.split(b"\0")[0].decode("utf-8", "replace")
+                query, vals = portals.get(portal, ("", []))
+                for i, val in enumerate(vals, 1):
+                    lit = "NULL" if val is None else "'" + val.replace("'", "''") + "'"
+                    query = query.replace("$%d" % i, lit)
+                try:
+                    kind = pg_statement(conn, query)
+                except Exception as e:
+                    pg_error(f, sqlstate(str(e)), str(e))
+                    if txn == b"T":
+                        txn = b"E"
+                    continue
+                pg_send_result(f, kind)
+                first = first_keyword(query)
+                if first == "BEGIN":
+                    txn = b"T"
+                elif first in ("COMMIT", "ROLLBACK"):
+                    txn = b"I"
+            elif typ == b"S":
+                pg_ready(f, txn)
+            elif typ == b"C":
+                pg_send(f, b"3", b"")
+            elif typ == b"H":
+                pass
+            elif typ == b"X":
+                break
+            else:
+                pg_error(f, "08P01", "unsupported message")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        sock.close()
+
+
+def pg_accept_loop(srv, db_path):
+    while True:
+        conn, _ = srv.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        threading.Thread(target=pg_serve, args=(conn, db_path), daemon=True).start()
+
+
 def serve(sock, db_path):
-    global CONNS_CURRENT
+    global CONNS_CURRENT, ROLE, ACK_MAX, SKIP_SYNC
     conn = sqlite3.connect(db_path, isolation_level=None)
     with STATS_LOCK:
         STATS["connections_current"] += 1
@@ -454,6 +983,51 @@ def serve(sock, db_path):
             if not sql.strip():
                 continue
             stats_bump(sql)
+            up = sql.strip().upper()
+            if up == "SHOW ROLE":
+                f.write(role_reply())
+                f.flush()
+                continue
+            if up == "PROMOTE":
+                # Manual promotion (the two-node lite): the survivor is the
+                # only node left, so its commits need no replica ack.
+                SKIP_SYNC = True
+                if ROLE == "replica":
+                    ROLE = "primary"
+                    print("sdb-sql reference: node %d promoted (manual)" % PORT,
+                          file=sys.stderr, flush=True)
+                f.write(b"OK 0\n")
+                f.flush()
+                continue
+            if sql.startswith("SDB_REPL "):
+                try:
+                    want = int(sql.split(None, 1)[1])
+                except Exception:
+                    want = 0
+                entries, last = log_since(DATA, want)
+                out = []
+                for lsn, entry_sql in entries:
+                    out.append("RLOG %d %s\n" % (
+                        lsn, base64.b64encode(entry_sql.encode()).decode()))
+                out.append("REND %d\n" % last)
+                f.write("".join(out).encode())
+                f.flush()
+                continue
+            if sql.startswith("SDB_ACK "):
+                try:
+                    ack = int(sql.split(None, 1)[1])
+                    if ack > ACK_MAX:
+                        ACK_MAX = ack
+                except Exception:
+                    pass
+                f.write(b"OK 0\n")
+                f.flush()
+                continue
+            if ROLE == "replica" and first_keyword(sql) in WRITE_KEYWORDS:
+                stats_error()
+                f.write(b"ERR readonly replica\n")
+                f.flush()
+                continue
             if nesting_too_deep(sql):
                 stats_error()
                 f.write(b"ERR limit nesting too deep\n")
@@ -470,6 +1044,21 @@ def serve(sock, db_path):
                           file=sys.stderr, flush=True)
                     cls = "syntax"
                 reply = ("ERR %s %s\n" % (cls, msg)).encode()
+            else:
+                if ROLE == "primary" and NODES and first_keyword(sql) in LOG_KEYWORDS:
+                    lsn = append_log(DATA, sql)
+                    if (first_keyword(sql) == "COMMIT"
+                            and not SKIP_SYNC and not wait_ack(lsn)):
+                        print("sdb-sql reference: ack timeout at lsn %d; leader tail:" % lsn,
+                              file=sys.stderr, flush=True)
+                        try:
+                            tail, _ = log_since(DATA, max(0, lsn - 8))
+                            for plsn, psql in tail:
+                                print("  leader log %d %r" % (plsn, psql[:160]),
+                                      file=sys.stderr, flush=True)
+                        except Exception:
+                            pass
+                        reply = b"ERR busy replica ack timeout\n"
             f.write(reply)
             f.flush()
     finally:
@@ -485,18 +1074,38 @@ def serve(sock, db_path):
 
 
 def main():
+    global ROLE, LAST_LSN, PORT, DATA, NODES, PRIMARY, PG_PORT
     port = 5480
     data = None
+    replicaof = None
+    nodes_arg = None
+    pg_port = 0
     args = sys.argv[1:]
     for i, a in enumerate(args):
         if a == "--port" and i + 1 < len(args):
             port = int(args[i + 1])
         elif a == "--data" and i + 1 < len(args):
             data = args[i + 1]
-        elif a.isdigit():
+        elif a == "--replicaof" and i + 1 < len(args):
+            replicaof = args[i + 1]
+        elif a == "--nodes" and i + 1 < len(args):
+            nodes_arg = args[i + 1]
+        elif a == "--pg-port" and i + 1 < len(args):
+            pg_port = int(args[i + 1])
+        elif a.isdigit() and (i == 0 or args[i - 1] not in (
+                "--port", "--data", "--replicaof", "--nodes", "--pg-port")):
             port = int(a)
     if data is None:
         data = "/tmp"
+    os.makedirs(data, exist_ok=True)
+    PORT = port
+    DATA = data
+    PG_PORT = pg_port
+    nodes_text = nodes_arg or os.environ.get("SDB_SQL_NODES", "")
+    NODES = [n.strip() for n in nodes_text.split(",") if n.strip()]
+    ROLE = "replica" if replicaof else "primary"
+    PRIMARY = replicaof
+    load_log(data)
     db_path = os.path.join(data, "sdb-sql-ref-%d.sqlite" % port)
     # The store is the harness's to own: it hands a fresh --data per run and
     # expects the same directory to survive a restart (persistence).
@@ -512,6 +1121,15 @@ def main():
     keeper.execute("PRAGMA journal_mode=WAL")
     keeper.execute("PRAGMA synchronous=FULL")
     print("sdb-sql reference listening on %d (db %s)" % (port, db_path), flush=True)
+    if ROLE == "replica" and PRIMARY:
+        threading.Thread(target=replica_loop, args=(data, PRIMARY), daemon=True).start()
+    if PG_PORT:
+        pgsrv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        pgsrv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        pgsrv.bind(("0.0.0.0", PG_PORT))
+        pgsrv.listen(128)
+        print("sdb-sql reference PostgreSQL wire on %d" % PG_PORT, flush=True)
+        threading.Thread(target=pg_accept_loop, args=(pgsrv, db_path), daemon=True).start()
     global CONNS_CURRENT
     while True:
         conn, _ = srv.accept()

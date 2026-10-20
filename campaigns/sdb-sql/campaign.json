@@ -3,7 +3,7 @@
   "version": 1,
   "task": "sql",
   "title": "sdb-sql: a SQL database, verified differentially",
-  "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition ships tickets 0-18 (query core, storage and transactions, relational features, concurrency, schema change, observability, tests, memory, disk-full, hostile input); later tickets land as their verifiers do.",
+  "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition is the full tickets 0-20 ladder: query core, storage and transactions, relational features, concurrency, schema change, observability, tests, memory, disk-full, hostile input, replication, and the PostgreSQL wire protocol.",
   "ladder": "continue",
   "stages": [
     {
@@ -540,6 +540,97 @@
       "id": 18,
       "budget_usd": 0.15,
       "max_turns": 30
+    },
+    {
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ]
+      },
+      "prompt": "stages/19_replication/prompt.md",
+      "type": "distributed",
+      "tier": 7,
+      "needs": [
+        6
+      ],
+      "title": "Replication and failover",
+      "id": 19,
+      "budget_usd": 0.2,
+      "max_turns": 40,
+      "lite": {
+        "prompt": "stages/19_replication_lite/prompt.md",
+        "profile": [
+          "two-nodes-promote"
+        ],
+        "budget_usd": 0.12,
+        "max_turns": 24,
+        "weight": 0.4
+      }
+    },
+    {
+      "acceptance": {
+        "sql_stages": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20
+        ]
+      },
+      "prompt": "stages/20_pgwire/prompt.md",
+      "type": "distributed",
+      "tier": 7,
+      "needs": [
+        1
+      ],
+      "title": "PostgreSQL wire protocol",
+      "id": 20,
+      "budget_usd": 0.2,
+      "max_turns": 40,
+      "lite": {
+        "prompt": "stages/20_pgwire_lite/prompt.md",
+        "profile": [
+          "pg-simple"
+        ],
+        "budget_usd": 0.12,
+        "max_turns": 24,
+        "weight": 0.4
+      }
     }
   ]
 }

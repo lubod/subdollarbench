@@ -8,6 +8,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.27`: ticket 20 (PostgreSQL wire protocol) — a scenario-only
+///   stage with a simple-query lite variant: protocol 3.0 on `--pg-port`
+///   (SSL refusal, startup/cleartext auth, ParameterStatus, simple and
+///   extended query, `I`/`T`/`E`, SQLSTATE 42P01/42601/23505) plus a stock
+///   psql cross-check. The ladder is 21 tickets (max_points 69 -> 76).
+/// - `2026-10-19.26`: ticket 19 (replication and failover) — a scenario-only
+///   stage with a two-node lite variant: three nodes (or two) launched with
+///   `--replicaof` and `SDB_SQL_NODES`, `SHOW ROLE`/LSN, read-only replicas,
+///   sync-acked commits, automatic election (highest LSN, lowest-port tie)
+///   or manual `PROMOTE`, rejoin, and the cumulative differential suite
+///   against the current primary. The ladder is 20 tickets (max_points
+///   62 -> 69).
 /// - `2026-10-19.25`: ticket 18 (hostile input and limits) — a scenario-only
 ///   stage: the candidate is restarted with `SDB_SQL_PASSWORD` on a fresh
 ///   scratch store; the harness checks AUTH (and that the password never
@@ -556,7 +568,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.25";
+pub const RULES_VERSION: &str = "2026-10-19.27";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

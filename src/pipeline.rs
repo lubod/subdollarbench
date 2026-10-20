@@ -3963,6 +3963,322 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             }
+                            // Ticket 19's cluster: three nodes on the HA
+                            // containers (or two for the lite manual
+                            // PROMOTE), seeded through the wire, failed
+                            // over, rejoined, then the cumulative
+                            // differential suite runs against the current
+                            // primary (docs/PROPOSAL-sdb-sql.md,
+                            // "19. Replication and failover").
+                            if late_failure.is_none() && wanted.contains(&19) {
+                                scenario_ran.push(19);
+                                let lite = if wanted.iter().copied().max() == Some(19) {
+                                    lite_profile.iter().any(|p| p == "two-nodes-promote")
+                                } else {
+                                    passed_lite.iter().any(|(s, p)| {
+                                        *s == 19 && p.iter().any(|f| f == "two-nodes-promote")
+                                    })
+                                };
+                                let node_count = if lite { 2 } else { 3 };
+                                let base = port + 200;
+                                let ports: Vec<u16> =
+                                    (0..node_count).map(|i| base + i as u16).collect();
+                                let nodes_env = ports
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, p)| format!("ha{}:{}", i + 1, p))
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                let started =
+                                    sandbox.start_sql_ha_nodes(workdir, &ports, &nodes_env);
+                                if let Err(e) = started {
+                                    logger
+                                        .log(&format!("  [REPL] FAILED to start the cluster: {e}"));
+                                    sandbox.stop_ha_nodes(node_count as u8);
+                                    late_failure = Some((19, format!("[repl] start: {e}")));
+                                } else {
+                                    logger.log(&format!(
+                                        "  [REPL] cluster of {node_count} nodes on ports {ports:?} ready"
+                                    ));
+                                    let seed =
+                                        crate::verifier::sql::driver::stage_seed(verifier_seed, 19);
+                                    let cfg = if lite {
+                                        crate::verifier::sql::replication::ReplicationConfig::lite(
+                                            seed,
+                                        )
+                                    } else {
+                                        crate::verifier::sql::replication::ReplicationConfig::full(
+                                            seed,
+                                        )
+                                    };
+                                    let mut control =
+                                        |action: crate::verifier::sql::replication::HaAction| {
+                                            match action {
+                                            crate::verifier::sql::replication::HaAction::Kill(
+                                                node,
+                                            ) => sandbox
+                                                .kill_ha_node((node + 1) as u8)
+                                                .map_err(|e| format!("kill node {}: {e}", node + 1)),
+                                            crate::verifier::sql::replication::HaAction::Rejoin {
+                                                node,
+                                                primary,
+                                            } => {
+                                                let alias = format!("ha{}", primary + 1);
+                                                sandbox
+                                                    .respawn_sql_ha_node(
+                                                        workdir,
+                                                        (node + 1) as u8,
+                                                        ports[node],
+                                                        Some((&alias, ports[primary])),
+                                                        &nodes_env,
+                                                    )
+                                                    .map_err(|e| {
+                                                        format!("rejoin node {}: {e}", node + 1)
+                                                    })
+                                            }
+                                        }
+                                        };
+                                    let outcome = if lite {
+                                        crate::verifier::sql::replication::lite_scenario(
+                                            &ports,
+                                            &cfg,
+                                            &mut control,
+                                        )
+                                    } else {
+                                        crate::verifier::sql::replication::scenario(
+                                            &ports,
+                                            &cfg,
+                                            &mut control,
+                                        )
+                                    };
+                                    let body = outcome.and_then(|(winner, report)| {
+                                        logger.log(&format!("  [REPL] {report}"));
+                                        let passed: Vec<u32> = wanted
+                                            .iter()
+                                            .copied()
+                                            .filter(|s| *s <= 13)
+                                            .collect();
+                                        let addr = format!("127.0.0.1:{}", ports[winner]);
+                                        let seed = crate::verifier::sql::driver::stage_seed(
+                                            verifier_seed,
+                                            13,
+                                        );
+                                        let out = crate::verifier::sql::driver::run_stage(
+                                            &addr,
+                                            std::time::Duration::from_secs(10),
+                                            seed,
+                                            &passed,
+                                            crate::verifier::sql::driver::DEFAULT_STEPS,
+                                            None,
+                                            None,
+                                        )?;
+                                        if !out.passed {
+                                            return Err(format!(
+                                                "the cumulative differential suite failed on the current primary: {}",
+                                                out.detail
+                                            ));
+                                        }
+                                        logger.log(
+                                            "  [REPL] the cumulative differential suite passes against the current primary",
+                                        );
+                                        Ok(())
+                                    });
+                                    if body.is_err() {
+                                        for i in 0..node_count {
+                                            let name =
+                                                sandbox.ha_node_container_name((i + 1) as u8);
+                                            if let Ok(out) = std::process::Command::new("docker")
+                                                .args(["logs", &name])
+                                                .output()
+                                            {
+                                                let mut text = String::from_utf8_lossy(&out.stdout)
+                                                    .to_string();
+                                                text.push_str(&String::from_utf8_lossy(
+                                                    &out.stderr,
+                                                ));
+                                                logger.log(&format!(
+                                                    "  [REPL] node {} logs: {}",
+                                                    i + 1,
+                                                    output_tail(&text, 1200)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    sandbox.stop_ha_nodes(node_count as u8);
+                                    match body {
+                                        Ok(()) => {}
+                                        Err(e) => {
+                                            logger.log(&format!("  [REPL] FAILED: {e}"));
+                                            late_failure = Some((19, format!("[repl] {e}")));
+                                        }
+                                    }
+                                }
+                            }
+                            // Ticket 20's PostgreSQL wire listener. The
+                            // candidate is restarted on a scratch store with
+                            // --pg-port and a password; the harness acts as a
+                            // frontend (SSL refusal, startup, simple and
+                            // extended query, SQLSTATE), then a stock psql
+                            // from the local postgres image cross-checks it.
+                            if late_failure.is_none() && wanted.contains(&20) {
+                                scenario_ran.push(20);
+                                let lite = if wanted.iter().copied().max() == Some(20) {
+                                    lite_profile.iter().any(|p| p == "pg-simple")
+                                } else {
+                                    passed_lite.iter().any(|(s, p)| {
+                                        *s == 20 && p.iter().any(|f| f == "pg-simple")
+                                    })
+                                };
+                                let pg_port = port + 50;
+                                let password = format!(
+                                    "sdb-pg-{:x}",
+                                    crate::verifier::sql::driver::stage_seed(verifier_seed, 20)
+                                );
+                                let scratch = sql_data.as_ref().map(|data| {
+                                    data.with_file_name(format!(
+                                        "{}-pg",
+                                        data.file_name()
+                                            .map(|n| n.to_string_lossy())
+                                            .unwrap_or_default()
+                                    ))
+                                });
+                                let mut pg_extras = extras.clone();
+                                if let Some(scratch) = &scratch {
+                                    let real_src = sql_data
+                                        .as_ref()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    for b in pg_extras.binds.iter_mut() {
+                                        if b.0 == real_src {
+                                            b.0 = scratch.display().to_string();
+                                        }
+                                    }
+                                }
+                                pg_extras.ports.push(pg_port);
+                                pg_extras.launch_args.push("--pg-port".to_string());
+                                pg_extras.launch_args.push(pg_port.to_string());
+                                pg_extras
+                                    .env
+                                    .push(("SDB_SQL_PASSWORD".to_string(), password.clone()));
+                                let run = |e: &crate::sandbox::docker::CandidateRunExtras| {
+                                    restart_candidate(&sandbox.instance_id, workdir, port, e, true)
+                                };
+                                let container = sandbox.candidate_container_name();
+                                let body: Result<String, String> = (|| {
+                                    if let Some(scratch) = &scratch {
+                                        let _ = std::fs::remove_dir_all(scratch);
+                                        std::fs::create_dir_all(scratch)
+                                            .map_err(|e| format!("scratch store: {e}"))?;
+                                    }
+                                    run(&pg_extras)?;
+                                    logger.log(&format!(
+                                        "  [PG] PostgreSQL wire scenario on port {pg_port} (password set)"
+                                    ));
+                                    let cfg = if lite {
+                                        crate::verifier::sql::pgwire::PgConfig::lite(Some(
+                                            password.clone(),
+                                        ))
+                                    } else {
+                                        crate::verifier::sql::pgwire::PgConfig::full(Some(
+                                            password.clone(),
+                                        ))
+                                    };
+                                    let report = crate::verifier::sql::pgwire::scenario(
+                                        &format!("127.0.0.1:{pg_port}"),
+                                        &cfg,
+                                    )?;
+                                    // Stock psql cross-check when the local
+                                    // postgres image is available.
+                                    let image = std::process::Command::new("docker")
+                                        .args(["image", "inspect", "postgres:16-alpine"])
+                                        .output()
+                                        .map(|o| o.status.success())
+                                        .unwrap_or(false);
+                                    if image {
+                                        let out = std::process::Command::new("docker")
+                                            .args([
+                                                "run",
+                                                "--rm",
+                                                "--network",
+                                                "host",
+                                                "-e",
+                                                &format!("PGPASSWORD={password}"),
+                                                "postgres:16-alpine",
+                                                "psql",
+                                                "-h",
+                                                "127.0.0.1",
+                                                "-p",
+                                                &pg_port.to_string(),
+                                                "-U",
+                                                "sdb",
+                                                "-d",
+                                                "sdb",
+                                                "-tAc",
+                                                "SELECT 1",
+                                            ])
+                                            .output()
+                                            .map_err(|e| format!("psql: {e}"))?;
+                                        if !out.status.success() {
+                                            return Err(format!(
+                                                "stock psql failed: {}",
+                                                output_tail(
+                                                    &format!(
+                                                        "{}{}",
+                                                        String::from_utf8_lossy(&out.stdout),
+                                                        String::from_utf8_lossy(&out.stderr)
+                                                    ),
+                                                    400
+                                                )
+                                            ));
+                                        }
+                                        let text =
+                                            String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                        if text != "1" {
+                                            return Err(format!(
+                                                "stock psql SELECT 1 printed {text:?}"
+                                            ));
+                                        }
+                                        logger.log("  [PG] stock psql SELECT 1 -> 1");
+                                    } else {
+                                        logger.log(
+                                            "  [PG] postgres:16-alpine not local; psql cross-check skipped",
+                                        );
+                                    }
+                                    let out = std::process::Command::new("docker")
+                                        .args(["logs", &container])
+                                        .output()
+                                        .map_err(|e| format!("docker logs: {e}"))?;
+                                    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+                                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                                    if text.contains(&password) {
+                                        return Err(
+                                            "the password appeared in the candidate's logs"
+                                                .to_string(),
+                                        );
+                                    }
+                                    Ok(report)
+                                })(
+                                );
+                                let restored = run(&extras);
+                                if let Some(scratch) = &scratch {
+                                    let _ = std::fs::remove_dir_all(scratch);
+                                }
+                                match body {
+                                    Ok(report) => logger.log(&format!("  [PG] {report}")),
+                                    Err(e) => {
+                                        logger.log(&format!("  [PG] FAILED: {e}"));
+                                        late_failure = Some((20, format!("[pg] {e}")));
+                                    }
+                                }
+                                if let Err(e) = restored {
+                                    logger.log(&format!(
+                                        "  [PG] FAILED: back on the real store: {e}"
+                                    ));
+                                    if late_failure.is_none() {
+                                        late_failure = Some((20, format!("[pg] restart: {e}")));
+                                    }
+                                }
+                            }
                         }
                         // L1: a scenario-only ticket whose check never ran
                         // (an earlier differential stage or late check
@@ -9412,6 +9728,303 @@ main()
             (19, 19)
         );
         cleanup_covtest_network("sqlsec");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 19 live proof (eval-only, no model): three reference nodes,
+    /// a sync-acked transaction, a primary kill with election, a new write,
+    /// the old primary rejoined, and the cumulative suite on the winner.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage19_replication_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 75u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let ha_ports = [port + 200, port + 201, port + 202];
+        cleanup_covtest_network("sqlrepl");
+        for p in [port, ha_ports[0], ha_ports[1], ha_ports[2]] {
+            if let Ok(out) = std::process::Command::new("docker")
+                .args(["ps", "-aq", "--filter", &format!("publish={p}")])
+                .output()
+            {
+                let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if !ids.is_empty() {
+                    let mut args = vec!["rm".to_string(), "-f".to_string()];
+                    args.extend(ids);
+                    let _ = std::process::Command::new("docker").args(&args).output();
+                }
+            }
+        }
+        let dir = covtest_dir("sqlrepl");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-19 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlrepl");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 19,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=19).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..19).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-19 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 19: Replication and failover -> PASS",
+            "Stage 18: Hostile input and limits -> PASS",
+            "[REPL] cluster of 3 nodes on ports",
+            "[REPL] 3 nodes; the acked commit reached both replicas",
+            "[REPL] the cumulative differential suite passes against the current primary",
+            "[UPGRADE] sentinel for stage 19 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (20, 20)
+        );
+        cleanup_covtest_network("sqlrepl");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 19 lite live proof: two nodes, kill the primary, manual
+    /// `PROMOTE`, then the cumulative suite on the promoted node.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage19_replication_lite_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 74u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let ha_ports = [port + 200, port + 201];
+        cleanup_covtest_network("sqlrepllite");
+        for p in [port, ha_ports[0], ha_ports[1]] {
+            if let Ok(out) = std::process::Command::new("docker")
+                .args(["ps", "-aq", "--filter", &format!("publish={p}")])
+                .output()
+            {
+                let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if !ids.is_empty() {
+                    let mut args = vec!["rm".to_string(), "-f".to_string()];
+                    args.extend(ids);
+                    let _ = std::process::Command::new("docker").args(&args).output();
+                }
+            }
+        }
+        let dir = covtest_dir("sqlrepllite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-19-lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlrepllite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 19,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=19).collect(),
+            lite_profile: vec!["two-nodes-promote".to_string()],
+            passed_lite: Vec::new(),
+            passed_stages: (0..19).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-19 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 19: Replication and failover -> PASS",
+            "[REPL] cluster of 2 nodes on ports",
+            "[REPL] 2 nodes; the acked commit was on the replica",
+            "[REPL] the cumulative differential suite passes against the current primary",
+            "[UPGRADE] sentinel for stage 19 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (20, 20)
+        );
+        cleanup_covtest_network("sqlrepllite");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 20 live proof (eval-only, no model): the reference serves
+    /// PostgreSQL protocol 3.0 on a second port; the harness frontend and a
+    /// stock psql check SSL, startup/auth, simple + extended query,
+    /// transactions and SQLSTATE.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage20_pgwire_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 73u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let pg_port = port + 50;
+        cleanup_covtest_network("sqlpg");
+        for p in [port, pg_port] {
+            if let Ok(out) = std::process::Command::new("docker")
+                .args(["ps", "-aq", "--filter", &format!("publish={p}")])
+                .output()
+            {
+                let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if !ids.is_empty() {
+                    let mut args = vec!["rm".to_string(), "-f".to_string()];
+                    args.extend(ids);
+                    let _ = std::process::Command::new("docker").args(&args).output();
+                }
+            }
+        }
+        let dir = covtest_dir("sqlpg");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-20 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlpg");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 20,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=20).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..20).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-20 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 20: PostgreSQL wire protocol -> PASS",
+            "Stage 19: Replication and failover -> PASS",
+            "[PG] PostgreSQL wire scenario on port",
+            "[PG] stock psql SELECT 1 -> 1",
+            "[PG] SSL refused; startup/auth/ParameterStatus ok; simple + extended query",
+            "[UPGRADE] sentinel for stage 20 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (21, 21)
+        );
+        cleanup_covtest_network("sqlpg");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 20 lite live proof: the simple-query protocol only (no
+    /// extended query), plus the psql cross-check.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage20_pgwire_lite_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 72u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        let pg_port = port + 50;
+        cleanup_covtest_network("sqlpglite");
+        for p in [port, pg_port] {
+            if let Ok(out) = std::process::Command::new("docker")
+                .args(["ps", "-aq", "--filter", &format!("publish={p}")])
+                .output()
+            {
+                let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if !ids.is_empty() {
+                    let mut args = vec!["rm".to_string(), "-f".to_string()];
+                    args.extend(ids);
+                    let _ = std::process::Command::new("docker").args(&args).output();
+                }
+            }
+        }
+        let dir = covtest_dir("sqlpglite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture(&workdir, port);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-20-lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlpglite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 20,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=20).collect(),
+            lite_profile: vec!["pg-simple".to_string()],
+            passed_lite: Vec::new(),
+            passed_stages: (0..20).collect(),
+            spec_md: None,
+            preamble: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-20 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 20: PostgreSQL wire protocol -> PASS",
+            "[PG] PostgreSQL wire scenario on port",
+            "[PG] stock psql SELECT 1 -> 1",
+            "[PG] SSL refused; startup/auth/ParameterStatus ok; simple query, transactions and SQLSTATE",
+            "[UPGRADE] sentinel for stage 20 written",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (21, 21)
+        );
+        cleanup_covtest_network("sqlpglite");
         let _ = fs::remove_dir_all(&dir);
     }
 

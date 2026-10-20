@@ -3010,7 +3010,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
         let lc = load_campaign_from(&root, "sdb-sql").unwrap();
         validate_spec(&lc.spec, &lc.root).unwrap();
-        assert_eq!(lc.spec.stages.len(), 19);
+        assert_eq!(lc.spec.stages.len(), 21);
         let s = lc.spec.stages.iter().find(|s| s.id == 12).unwrap();
         assert_eq!(s.title, "Concurrency and isolation");
         assert_eq!(s.kind, "engine");
@@ -3026,7 +3026,7 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(12));
         assert!(!crate::verifier::sql::driver::differential_supported(12));
         assert!(crate::verifier::sql::driver::stage_supported(12));
-        assert!(!crate::verifier::sql::driver::stage_supported(19));
+        assert!(!crate::verifier::sql::driver::stage_supported(21));
         // Every stage accepts itself and only declared ids.
         for st in &lc.spec.stages {
             assert!(
@@ -3078,7 +3078,7 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(15));
         assert!(!crate::verifier::sql::driver::differential_supported(15));
         assert!(crate::verifier::sql::driver::stage_supported(15));
-        assert!(!crate::verifier::sql::driver::stage_supported(19));
+        assert!(!crate::verifier::sql::driver::stage_supported(21));
         // Ticket 16 (larger than memory): scenario-only, tier 6, needs 2/4,
         // no lite variant.
         let s16 = lc.spec.stages.iter().find(|s| s.id == 16).unwrap();
@@ -3121,10 +3121,45 @@ mod tests {
         assert!(crate::verifier::sql::driver::scenario_only(18));
         assert!(!crate::verifier::sql::driver::differential_supported(18));
         assert!(crate::verifier::sql::driver::stage_supported(18));
-        assert!(!crate::verifier::sql::driver::stage_supported(19));
+        // Ticket 19 (replication and failover): scenario-only, tier 7,
+        // needs 6, with a two-node PROMOTE lite variant.
+        let s19 = lc.spec.stages.iter().find(|s| s.id == 19).unwrap();
+        assert_eq!(s19.title, "Replication and failover");
+        assert_eq!(s19.kind, "distributed");
+        assert_eq!(s19.tier, 7);
+        assert_eq!(s19.needs, vec![6]);
+        assert_eq!(s19.budget_usd, 0.20);
+        assert_eq!(s19.max_turns, 40);
+        assert_eq!(s19.acceptance.sql_stages, (0..=19u32).collect::<Vec<u32>>());
+        let lite19 = s19.lite.as_ref().expect("ticket 19 has a lite variant");
+        assert_eq!(lite19.profile, vec!["two-nodes-promote".to_string()]);
+        assert_eq!(lite19.budget_usd, 0.12);
+        assert!(lite19.max_turns < s19.max_turns);
+        assert!(crate::verifier::sql::driver::scenario_only(19));
+        assert!(!crate::verifier::sql::driver::differential_supported(19));
+        assert!(crate::verifier::sql::driver::stage_supported(19));
+        // Ticket 20 (PostgreSQL wire protocol): scenario-only, tier 7,
+        // needs 1, with a simple-query lite variant.
+        let s20 = lc.spec.stages.iter().find(|s| s.id == 20).unwrap();
+        assert_eq!(s20.title, "PostgreSQL wire protocol");
+        assert_eq!(s20.kind, "distributed");
+        assert_eq!(s20.tier, 7);
+        assert_eq!(s20.needs, vec![1]);
+        assert_eq!(s20.budget_usd, 0.20);
+        assert_eq!(s20.max_turns, 40);
+        assert_eq!(s20.acceptance.sql_stages, (0..=20u32).collect::<Vec<u32>>());
+        let lite20 = s20.lite.as_ref().expect("ticket 20 has a lite variant");
+        assert_eq!(lite20.profile, vec!["pg-simple".to_string()]);
+        assert_eq!(lite20.budget_usd, 0.12);
+        assert!(lite20.max_turns < s20.max_turns);
+        assert!(crate::verifier::sql::driver::scenario_only(20));
+        assert!(!crate::verifier::sql::driver::differential_supported(20));
+        assert!(crate::verifier::sql::driver::stage_supported(20));
+        assert!(!crate::verifier::sql::driver::stage_supported(21));
         // Max points: ticket 12 (26 -> 30), 13 (30 -> 34), 14 (34 -> 39),
-        // 15 (39 -> 44), 16 (44 -> 50), 17 (50 -> 56), 18 (56 -> 62).
-        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 62.0);
+        // 15 (39 -> 44), 16 (44 -> 50), 17 (50 -> 56), 18 (56 -> 62),
+        // 19 (62 -> 69), 20 (69 -> 76).
+        assert_eq!(crate::campaign::max_points(&lc.spec.stages), 76.0);
     }
 
     #[test]

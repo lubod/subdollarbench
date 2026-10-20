@@ -197,13 +197,61 @@ class-only stored expectations drift.
     enforced; ... 256-connection cap enforced`). Full suite serialized
     (`--test-threads=1`: 947 passed / 6 ignored, bins 60); fmt/clippy
     clean.
-- [ ] **T19. Replication and failover** (tier 7, needs 6; lite 2 nodes)
-  - 3 nodes 7101-7103, `--replicaof`, `SHOW ROLE`/LSN, sync ack, failover
-    and rejoin; the campaign harness runs one candidate container today, so
-    multi-node orchestration comes first
-- [ ] **T20. PostgreSQL wire protocol** (tier 7, needs 1; lite simple query)
-  - protocol 3.0 on `--pg-port`: SSL refusal, ParameterStatus,
-    simple + extended query, SQLSTATE mapping, psql cross-check
+- [x] **T19. Replication and failover** (tier 7, needs 6; lite 2 nodes)
+  — **landed 2026-10-20, rules `2026-10-19.26`**
+  - `replication.rs`: scenario-only 19. The pipeline reuses the HA container
+    plumbing (`start.sh --port/--data/--replicaof`, three nodes, one tmpfs
+    per node) and exports `SDB_SQL_NODES=ha1:P1,ha2:P2,ha3:P3`. The
+    scenario checks `SHOW ROLE` (`role`/`lsn`) on every node, replica reads
+    and `ERR readonly` writes, a seed transaction on the primary, its
+    visibility on both replicas, the kill of the primary, exactly one
+    survivor as primary within 10 s (highest LSN, lower-port tie), every
+    acked row on the winner, a new commit replicated to the other survivor,
+    the old primary respawned as a replica (fresh tmpfs) converging and
+    refusing writes, and the cumulative differential suite on the current
+    primary.
+  - lite (`two-nodes-promote`): two nodes, kill the primary, manual
+    `PROMOTE`, no acked commit lost, the promoted node acks new commits
+    locally (it is alone), cumulative suite on it.
+  - the Python reference implements the retained log (`repl.log`), LSNs,
+    sync-acked COMMITs (2 s), replica application through the same
+    `answer` path (ALTER IF-exists emulation included), election, manual
+    PROMOTE, and restart/fresh-rejoin. The candidate container launch gained
+    `--pids-limit` (T18) and the HD node env/tmpfs variants.
+  - campaign stage ($0.20/40, tier 7, needs 6, lite $0.12/24 weight 0.4) +
+    full and lite prompts; ladder 20 tickets (max_points 69).
+  - gates: six mock-cluster tests (faithful, stale replica, lost acked
+    commit, missing election, writable replica, lite) and the **full and
+    lite live eval-only proofs** (20/20 each, election/rejoin and
+    PROMOTE/cumulative suite). Their full-suite gate is the shared serial
+    run recorded with T20.
+- [x] **T20. PostgreSQL wire protocol** (tier 7, needs 1; lite simple query)
+  — **landed 2026-10-20, rules `2026-10-19.27`**
+  - `pgwire.rs`: scenario-only 20. SSLRequest -> `N`; Startup (cleartext
+    password when `SDB_SQL_PASSWORD` is set, AuthenticationOk,
+    ParameterStatus `server_version`/`client_encoding=UTF8`,
+    BackendKeyData, ReadyForQuery `I`); simple Query with
+    RowDescription/DataRow/CommandComplete and `I`/`T`/`E`; SQLSTATE
+    `42P01` (missing table), `42601` (syntax), `23505` (duplicate key);
+    extended Parse/Bind/Describe/Execute/Sync with `SELECT $1` (text) in
+    the full variant. The lite (`pg-simple`) grades the simple-query
+    protocol only.
+  - the Python reference gained a PG v3 listener on `--pg-port` (auth,
+    ParameterStatus, simple/extended, SQLSTATE, transaction status); the
+    pipeline restarts on a scratch store with `--pg-port` and a password,
+    checks the container logs for the password, and runs a stock
+    `psql` from `postgres:16-alpine` (`--network host`) as a cross-check.
+  - campaign stage ($0.20/40, tier 7, needs 1, lite $0.12/24 weight 0.4) +
+    full and lite prompts; ladder 21 tickets (max_points 76).
+  - gates: seven PG mock tests (faithful full/lite, SSL accepted, missing
+    ParameterStatus, wrong SQLSTATE, broken extended, missing
+    ReadyForQuery) and the **full and lite live proofs** (21/21 each,
+    `[PG] ...`, `[PG] stock psql SELECT 1 -> 1`). The final full suite is
+    the shared serial run below.
+- Gates for tickets 19-20 (final full ladder): `cargo test --lib --bins
+  -- --test-threads=1` green (**964 passed / 6 ignored, bins 60**);
+  fmt/clippy clean; the dry-run shows 21 stages and the full $3.20
+  budget.
 
 ### Round-15 review fixes (2026-10-19, rules `2026-10-19.24`)
 

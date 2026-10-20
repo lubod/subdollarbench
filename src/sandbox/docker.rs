@@ -259,6 +259,8 @@ impl SandboxManager {
         port: u16,
         replicaof: Option<(&str, u16)>,
         dash_port: Option<u16>,
+        extra_env: &[(String, String)],
+        tmpfs: Option<&str>,
     ) -> (Vec<String>, String) {
         let mut launch = format!(
             "cd /workspace && chmod +x start.sh 2>/dev/null; ./start.sh --port {port} --data /data{idx}"
@@ -275,6 +277,12 @@ impl SandboxManager {
             format!("sdb.role=ha{idx}"),
             "--name".into(),
             name.to_string(),
+        ];
+        for (k, v) in extra_env {
+            args.push("-e".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.extend([
             "--memory=2g".into(),
             "--cpus=2.0".into(),
             "--pids-limit=256".into(),
@@ -284,12 +292,16 @@ impl SandboxManager {
             format!("ha{idx}"),
             "-p".into(),
             format!("127.0.0.1:{port}:{port}"),
-        ];
+        ]);
         if idx == 1 {
             if let Some(dp) = dash_port {
                 args.push("-p".into());
                 args.push(format!("127.0.0.1:{dp}:{dp}"));
             }
+        }
+        if let Some(tmpfs) = tmpfs {
+            args.push("--tmpfs".into());
+            args.push(tmpfs.to_string());
         }
         args.push("-v".into());
         args.push(format!("{}:/workspace", canonical_workdir.display()));
@@ -356,6 +368,8 @@ impl SandboxManager {
                 *port,
                 replicaof,
                 dash_port,
+                &[],
+                None,
             );
             self.run_ha_container(&args, idx)?;
         }
@@ -385,6 +399,80 @@ impl SandboxManager {
             port,
             replicaof,
             None,
+            &[],
+            None,
+        );
+        self.run_ha_container(&args, idx)
+    }
+
+    /// SQL ticket 19: the same three-node topology with a writable tmpfs
+    /// per node and the cluster's node list in `SDB_SQL_NODES`. The tmpfs
+    /// makes the reference's data dir writable without a host bind; a
+    /// respawned node starts fresh and rebuilds from the leader's log.
+    pub fn start_sql_ha_nodes(&self, workdir: &Path, ports: &[u16], nodes_env: &str) -> Result<()> {
+        if !(2..=3).contains(&ports.len()) {
+            return Err(anyhow!("SQL HA cluster needs two or three node ports"));
+        }
+        self.ensure_network()?;
+        Self::relax_workspace_perms(workdir);
+        let canonical = Self::canonical_workdir_for(workdir);
+        let net = self.network_name();
+        let env = vec![("SDB_SQL_NODES".to_string(), nodes_env.to_string())];
+        for (i, port) in ports.iter().enumerate() {
+            let idx = (i + 1) as u8;
+            let name = self.ha_node_container_name(idx);
+            let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+            let replicaof = if idx == 1 {
+                None
+            } else {
+                Some(("ha1", ports[0]))
+            };
+            let tmpfs = format!("/data{idx}:size=256m");
+            let (args, _launch) = Self::ha_node_args(
+                &self.instance_id,
+                &name,
+                &net,
+                &canonical,
+                idx,
+                *port,
+                replicaof,
+                None,
+                &env,
+                Some(&tmpfs),
+            );
+            self.run_ha_container(&args, idx)?;
+        }
+        Ok(())
+    }
+
+    /// Recreate one SQL node with a fresh data tmpfs, pointed at a new
+    /// leader (the failover rejoin).
+    pub fn respawn_sql_ha_node(
+        &self,
+        workdir: &Path,
+        idx: u8,
+        port: u16,
+        replicaof: Option<(&str, u16)>,
+        nodes_env: &str,
+    ) -> Result<()> {
+        self.ensure_network()?;
+        let canonical = Self::canonical_workdir_for(workdir);
+        let net = self.network_name();
+        let name = self.ha_node_container_name(idx);
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+        let env = vec![("SDB_SQL_NODES".to_string(), nodes_env.to_string())];
+        let tmpfs = format!("/data{idx}:size=256m");
+        let (args, _launch) = Self::ha_node_args(
+            &self.instance_id,
+            &name,
+            &net,
+            &canonical,
+            idx,
+            port,
+            replicaof,
+            None,
+            &env,
+            Some(&tmpfs),
         );
         self.run_ha_container(&args, idx)
     }
@@ -2515,8 +2603,18 @@ mod tests {
     fn test_ha_node_args_launch_contract() {
         use super::SandboxManager;
         let dir = std::path::Path::new("/tmp/ws");
-        let (args1, launch1) =
-            SandboxManager::ha_node_args("id", "ha1-id", "net", dir, 1, 7001, None, Some(8090));
+        let (args1, launch1) = SandboxManager::ha_node_args(
+            "id",
+            "ha1-id",
+            "net",
+            dir,
+            1,
+            7001,
+            None,
+            Some(8090),
+            &[],
+            None,
+        );
         assert!(launch1.contains("--port 7001 --data /data1"), "{launch1}");
         assert!(!launch1.contains("--replicaof"), "{launch1}");
         assert!(args1.windows(2).any(|w| w == ["-p", "127.0.0.1:7001:7001"]));
@@ -2532,6 +2630,8 @@ mod tests {
             7002,
             Some(("ha1", 7001)),
             None,
+            &[],
+            None,
         );
         assert!(launch2.contains("--replicaof ha1:7001"), "{launch2}");
         assert!(args2.windows(2).any(|w| w == ["-p", "127.0.0.1:7002:7002"]));
@@ -2546,6 +2646,8 @@ mod tests {
             1,
             7001,
             Some(("ha3", 7003)),
+            None,
+            &[],
             None,
         );
         assert!(
