@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.33`: career phases P1 — the sdb-sql spec splits the ladder
+///   into four phases (0-6, 7-10, 11-15, 16-20), validated as a contiguous
+///   partition with no forward needs; `campaign run --phase N --chain <id>`
+///   continues a phase cell with the previous workspace (including `.git`),
+///   store, snapshots, sentinels, baseline and `ladder_state.json`; rollups
+///   carry `phase`, `chain_from`, `career` totals and the persisted state.
+///   The console launcher has a phase picker and a finished-predecessor
+///   chain list; `scripts/sql-cell.sh` accepts `SDB_CELL_PHASE` /
+///   `SDB_CELL_CHAIN`. Score impact: cells are phase-scoped, and a career's
+///   points are the sum of its phase points (max 76).
 /// - `2026-10-19.32`: career-phase P0 cap enforcement — one API budget per
 ///   attempt (a repair gets only the remainder and does not start below
 ///   $0.02); the cell cap keeps the largest single call seen so far in
@@ -629,7 +639,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.32";
+pub const RULES_VERSION: &str = "2026-10-19.33";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

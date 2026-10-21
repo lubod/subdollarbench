@@ -10,6 +10,9 @@
 #   e.g. scripts/sql-cell.sh openrouter/thinkingmachines/inkling-small:free
 # The defaults are the official cell cap (M5, 2026-10-20): $0.99 / 150 min,
 # the same as the console launcher. Pass smaller values for a smoke cell.
+# Career phases: SDB_CELL_PHASE=2 SDB_CELL_CHAIN=<phase-1 cell id> (P1);
+# phase 1 needs no chain, phases after 1 require one. Extra argv still
+# passes through, so --phase/--chain also work there.
 # Environment: CARGO_TARGET_DIR, CELL_DRY_RUN=1 to print the command only.
 set -euo pipefail
 
@@ -24,6 +27,8 @@ shift || true
 # so the flags can never clash with the ones this script sets.
 HARNESS="${SDB_CELL_HARNESS:-omp}"
 EFFORT="${SDB_CELL_EFFORT:-high}"
+PHASE="${SDB_CELL_PHASE:-}"
+CHAIN="${SDB_CELL_CHAIN:-}"
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="$TARGET_DIR/release/subdollarbench"
@@ -77,13 +82,16 @@ if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':5480 '; then
     exit 1
 fi
 
-echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT root=$ROOT"
+echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT phase=${PHASE:-full} chain=${CHAIN:-none} root=$ROOT"
+PHASE_ARGS=()
+if [[ -n "$PHASE" ]]; then PHASE_ARGS+=(--phase "$PHASE"); fi
+if [[ -n "$CHAIN" ]]; then PHASE_ARGS+=(--chain "$CHAIN"); fi
 if [[ "${CELL_DRY_RUN:-0}" == "1" ]]; then
     echo "[cell] dry run: would exec: campaign run --name sdb-sql --model $MODEL" \
-        "--effort $EFFORT --harness $HARNESS --budget-usd $BUDGET --wall-min $WALL --timeout-min 20 $*"
+        "--effort $EFFORT --harness $HARNESS --budget-usd $BUDGET --wall-min $WALL --timeout-min 20 ${PHASE_ARGS[*]} $*"
     exit 0
 fi
 
 exec env SDB_HOME="$ROOT" "$BIN" campaign run \
     --name sdb-sql --model "$MODEL" --effort "$EFFORT" --harness "$HARNESS" \
-    --budget-usd "$BUDGET" --wall-min "$WALL" --timeout-min 20 "$@"
+    --budget-usd "$BUDGET" --wall-min "$WALL" --timeout-min 20 "${PHASE_ARGS[@]}" "$@"

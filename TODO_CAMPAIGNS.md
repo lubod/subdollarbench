@@ -222,6 +222,38 @@ The cap-enforcement prerequisite is implemented and committed separately:
   cgroup, so this is a host/page-cache environment regression, not P0.
   The P0 code paths themselves are covered by the focused tests above.
 
+### P1 landed (2026-10-21, rules `2026-10-19.33`)
+
+Career phases and chaining are implemented:
+
+- `campaign.json` now carries four phases: Core + durability (0-6),
+  Relational (7-10), Engine (11-15) and Hard (16-20), with 10/12/22/32
+  points (76 total). `validate_spec` checks the partition, ordering,
+  uniqueness and that no stage needs a later phase.
+- `campaign run --phase N --chain <cell>`: phase 1 needs no chain, later
+  phases require one; the chain cell must be phase N-1, the same model,
+  harness, effort and rules version, and finished. The previous workspace
+  (including `.git`), `sql-data`, `sql-data.snap`, `sql-sentinels.snap`,
+  sentinels and `baseline.json` are copied into the new cell, and the
+  ladder state is loaded from `ladder_state.json`.
+- Rollups carry `phase`, `chain_from`, the phase `max_points`, a `career`
+  block (points, spend, cell ids) and the persisted ladder state. The
+  pipeline's per-stage on_stage callback writes `ladder_state.json` at every
+  boundary, including the last-green commit.
+- Console: phase picker, continue-from datalist populated from finished
+  previous-phase cells of the selected model, phase/chain in the resolved
+  command and request, and phase/chain/career metadata in the Run view.
+- `scripts/sql-cell.sh` accepts `SDB_CELL_PHASE` and `SDB_CELL_CHAIN`
+  (defaults $0.99 / 150 unchanged); extra argv still passes through.
+- Gates: spec partition/points test (10+12+22+32 = 76); phase filtering
+  with a chain (phase 3 runs only stage 12; 11/13/14/15 skipped and cost 0;
+  phase 2 untouched); carry-over (phase 2's first attempt sees phase 1's
+  passed set, lite profile and dirty rollback); chain refusal paths (wrong
+  phase, other model, unfinished, no state, harness-fault/non-result). The
+  lib suite with the eight known memory-cap live proofs skipped is **975
+  passed / 6 ignored / 8 filtered**; the skipped set is the P0/host
+  memory failure, not P1. Bins **60**; fmt/clippy clean.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and

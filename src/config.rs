@@ -71,6 +71,12 @@ pub enum CampaignAction {
         /// future brownfield campaigns will too.
         #[arg(long)]
         workspace: Option<String>,
+        /// Career phase to run (P1); phases after 1 require --chain.
+        #[arg(long)]
+        phase: Option<u32>,
+        /// Previous phase cell id to continue from (P1 career chaining).
+        #[arg(long)]
+        chain: Option<String>,
     },
 }
 

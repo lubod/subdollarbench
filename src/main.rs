@@ -2011,6 +2011,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 api_key,
                 eval_only,
                 workspace,
+                phase,
+                chain,
             } => {
                 main_campaign::run(
                     name,
@@ -2023,6 +2025,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     api_key,
                     eval_only,
                     workspace,
+                    phase,
+                    chain,
                 )
                 .await?
             }
@@ -2879,6 +2883,29 @@ mod tests {
                 assert_eq!(budget_usd, 0.75);
                 assert_eq!(wall_min, Some(120));
                 assert_eq!(timeout_min, 20);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // P1: the phase/chain form parses too.
+        let args = subdollarbench::campaign::launcher_args_with_phase(
+            "openrouter/meta/muse-spark-1.3-contributor",
+            "high",
+            0.99,
+            150,
+            Some(2),
+            Some("campaign_prev"),
+        );
+        let cli = Cli::try_parse_from(
+            std::iter::once("subdollarbench").chain(args.iter().map(String::as_str)),
+        )
+        .expect("the phase/chain launcher argv must parse");
+        match cli.command {
+            Commands::Campaign {
+                action: subdollarbench::config::CampaignAction::Run { phase, chain, .. },
+            } => {
+                assert_eq!(phase, Some(2));
+                assert_eq!(chain.as_deref(), Some("campaign_prev"));
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4834,6 +4861,8 @@ mod tests {
                     api_key: None,
                     eval_only: true,
                     workspace: None,
+                    phase: None,
+                    chain: None,
                 },
             },
         })

@@ -645,5 +645,52 @@
         "weight": 0.4
       }
     }
+  ],
+  "phases": [
+    {
+      "id": 1,
+      "title": "Core + durability",
+      "stages": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Relational",
+      "stages": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Engine",
+      "stages": [
+        11,
+        12,
+        13,
+        14,
+        15
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Hard",
+      "stages": [
+        16,
+        17,
+        18,
+        19,
+        20
+      ]
+    }
   ]
 }

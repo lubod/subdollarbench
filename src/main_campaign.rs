@@ -357,6 +357,22 @@ pub fn dry_run(name: &str, model: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Persist the career ladder state at every phase boundary (P1).
+fn write_ladder_state(cdir: &Path, state: &campaign::LadderState) {
+    atomic_write_json(
+        &cdir.join("ladder_state.json"),
+        &serde_json::to_value(state).unwrap_or_default(),
+    );
+}
+
+/// Copy a chained workspace including `.git` (the stage history must
+/// continue); `copy_tree` skips symlinks and creates the destination.
+fn copy_workspace_all(src: &Path, dst: &Path) -> Result<()> {
+    subdollarbench::verifier::sql::crash::copy_tree(src, dst).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     name: String,
     model: String,
@@ -368,6 +384,8 @@ pub async fn run(
     api_key: Option<String>,
     eval_only: bool,
     workspace: Option<String>,
+    phase: Option<u32>,
+    chain: Option<String>,
 ) -> Result<()> {
     let lc = campaign::load_campaign(&name).context("load campaign")?;
     // Foreground campaigns use the canonical worker-0 ports (6379/6380/…);
@@ -383,6 +401,62 @@ pub async fn run(
             );
         }
     }
+    let phase_spec = match phase {
+        Some(p) => Some(
+            lc.spec
+                .phases
+                .iter()
+                .find(|ph| ph.id == p)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("campaign '{}' has no phase {}", lc.spec.name, p))?,
+        ),
+        None => None,
+    };
+    match (phase, chain.as_deref()) {
+        (None, Some(_)) => anyhow::bail!("--chain requires --phase"),
+        (Some(1), Some(_)) => anyhow::bail!("phase 1 has no chain"),
+        (Some(p), None) if p > 1 => {
+            anyhow::bail!("phase {p} requires --chain <previous phase cell id>")
+        }
+        _ => {}
+    }
+    let runs_dir = RunArchiver::resolve_runs_dir();
+    let (chain_state, chain_career) = if let Some(chain_id) = chain.as_deref() {
+        if chain_id.contains('/') || chain_id.contains("..") {
+            anyhow::bail!("invalid --chain id {chain_id:?}");
+        }
+        let chain_dir = runs_dir.join(chain_id);
+        let status: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(chain_dir.join("status.json"))
+                .with_context(|| format!("read chain cell {}", chain_dir.display()))?,
+        )
+        .with_context(|| format!("parse chain cell {}", chain_dir.display()))?;
+        let rollup: campaign::CampaignRollup = serde_json::from_value(
+            status
+                .get("rollup")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("chain cell {chain_id} has no rollup"))?,
+        )
+        .with_context(|| format!("parse chain rollup {chain_id}"))?;
+        let state = std::fs::read_to_string(chain_dir.join("ladder_state.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<campaign::LadderState>(&t).ok());
+        let phase = phase.expect("a chain implies a phase");
+        let state = campaign::validate_chain(
+            &rollup,
+            state.as_ref(),
+            phase,
+            &model,
+            &harness.to_string(),
+            &effort,
+            subdollarbench::report::rules::RULES_VERSION,
+        )?;
+        let career = campaign::career_from(&rollup);
+        (Some(state), Some(career))
+    } else {
+        (None, None)
+    };
+
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let model_tag = model.replace(['/', ':'], "_");
     let campaign_id = format!("campaign_{}_{}_{}", lc.spec.name, model_tag, ts);
@@ -390,7 +464,6 @@ pub async fn run(
     // is released when this process ends (round-7 finding 1).
     let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id)
         .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
-    let runs_dir = RunArchiver::resolve_runs_dir();
     let cdir = runs_dir.join(&campaign_id);
     std::fs::create_dir_all(&cdir)?;
     // The campaign-level live fields (round-8 improvement A): every later
@@ -409,10 +482,42 @@ pub async fn run(
             "effort": effort,
             "campaign_budget": budget_usd,
             "campaign_spent": 0.0,
+            "phase": phase,
+            "chain_from": chain,
         });
     });
     let workdir = cdir.join("workspace");
 
+    if let Some(chain_id) = chain.as_deref() {
+        if workspace.is_some() {
+            anyhow::bail!("--workspace cannot be combined with --chain");
+        }
+        let chain_dir = runs_dir.join(chain_id);
+        let src_ws = chain_dir.join("workspace");
+        if !src_ws.is_dir() {
+            anyhow::bail!("chain cell {chain_id} has no workspace");
+        }
+        copy_workspace_all(&src_ws, &workdir)?;
+        for name in ["sql-data", "sql-data.snap", "sql-sentinels.snap"] {
+            let src = chain_dir.join(name);
+            if src.is_dir() {
+                copy_store(&src, &cdir.join(name))?;
+            }
+        }
+        if chain_dir.join("baseline.json").is_file() {
+            std::fs::copy(chain_dir.join("baseline.json"), cdir.join("baseline.json"))?;
+        }
+        for f in sentinel_files(&chain_dir) {
+            if let Some(name) = f.file_name() {
+                let _ = std::fs::copy(&f, cdir.join(name));
+            }
+        }
+        println!(
+            "[CONTINUE] phase {} from {} (workspace, store, sentinels, baseline)",
+            phase.unwrap_or(0),
+            chain_id
+        );
+    }
     if let Some(src) = &workspace {
         let src = Path::new(src);
         if !src.is_dir() {
@@ -425,8 +530,12 @@ pub async fn run(
     println!(
         "{}",
         format!(
-            "=== CAMPAIGN {} · {} · {} · cap ${:.2} ===",
-            lc.spec.name, model, harness, budget_usd
+            "=== CAMPAIGN {} · {} · {} · cap ${:.2}{} ===",
+            lc.spec.name,
+            model,
+            harness,
+            budget_usd,
+            phase.map(|p| format!(" · phase {p}")).unwrap_or_default()
         )
         .bold()
     );
@@ -450,7 +559,6 @@ pub async fn run(
 
     write_status(&cdir, "running", Some(0), None);
 
-    let on_stage = |r: &CampaignRollup| write_status(&cdir, "running", None, Some(r));
     // Termination safety: a foreground campaign killed with Ctrl-C/SIGTERM
     // must cancel the running stage so the pipeline's cleanup guards reap
     // its containers (a SIGTERM default-kill skips Drop entirely and leaked
@@ -479,9 +587,27 @@ pub async fn run(
         });
     }
     let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let rollup = campaign::run_campaign(
+    if let Some(state) = &chain_state {
+        *last_green.lock().unwrap() = state.last_green.clone();
+    }
+    let initial_state = chain_state.clone().unwrap_or_default();
+    write_ladder_state(&cdir, &initial_state);
+    let state_cdir = cdir.clone();
+    let state_green = last_green.clone();
+    let on_stage = move |r: &CampaignRollup| {
+        write_status(&state_cdir, "running", None, Some(r));
+        if let Some(mut st) = r.ladder_state.clone() {
+            st.last_green = state_green.lock().map(|g| g.clone()).unwrap_or(None);
+            write_ladder_state(&state_cdir, &st);
+        }
+    };
+    let rollup = campaign::run_campaign_phase(
         &lc,
         &opts,
+        phase_spec.as_ref(),
+        chain_state.as_ref(),
+        chain.as_deref(),
+        chain_career.as_ref(),
         |attempt| {
             let job = StageJob {
                 stage: attempt.stage.clone(),
@@ -529,7 +655,7 @@ pub async fn run(
         Some(&on_stage),
     )
     .await;
-    let rollup = match rollup {
+    let mut rollup = match rollup {
         Ok(r) => r,
         Err(e) => {
             // Round-11 O2: a cancel (SIGINT/SIGTERM sets the flag) leaves an
@@ -545,6 +671,10 @@ pub async fn run(
             return Err(e);
         }
     };
+    if let Some(st) = rollup.ladder_state.as_mut() {
+        st.last_green = last_green.lock().map(|g| g.clone()).unwrap_or(None);
+        write_ladder_state(&cdir, st);
+    }
 
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
@@ -1123,6 +1253,10 @@ mod tests {
             rules_version: subdollarbench::report::rules::RULES_VERSION.to_string(),
             points: 0.0,
             max_points: 0.0,
+            phase: None,
+            chain_from: None,
+            career: None,
+            ladder_state: None,
             campaign_id: "campaign_fixture".to_string(),
             name: "fixture".to_string(),
             model: "m".to_string(),
@@ -1366,6 +1500,7 @@ mod tests {
                 title: "Fixture".to_string(),
                 description: String::new(),
                 stages: Vec::new(),
+                phases: Vec::new(),
             },
             root: dir.clone(),
         };
@@ -1443,6 +1578,8 @@ mod tests {
             5,
             None,
             true,
+            None,
+            None,
             None,
         )
         .await

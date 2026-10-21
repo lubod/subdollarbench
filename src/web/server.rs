@@ -1724,6 +1724,12 @@ pub(crate) struct CampaignStartRequest {
     /// Budgets above $5 need an explicit confirmation (round-7 finding 1).
     #[serde(default)]
     pub confirm: bool,
+    /// Career phase (P1); phases after 1 require `chain`.
+    #[serde(default)]
+    pub phase: Option<u32>,
+    /// Previous phase cell id to continue from.
+    #[serde(default)]
+    pub chain: Option<String>,
 }
 
 /// Start a campaign run (gui-spec.md §4.4): what `scripts/sql-cell.sh`
@@ -1804,6 +1810,46 @@ pub(crate) async fn start_campaign(
     } else {
         crate::campaign::CELL_WALL_MIN
     };
+    match (req.phase, req.chain.as_deref()) {
+        (None, Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "--chain requires --phase"})),
+            )
+                .into_response()
+        }
+        (Some(0), _) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "phase must be >= 1"})),
+            )
+                .into_response()
+        }
+        (Some(1), Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "phase 1 has no chain"})),
+            )
+                .into_response()
+        }
+        (Some(p), None) if p > 1 => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("phase {p} requires a chain cell")})),
+            )
+                .into_response()
+        }
+        _ => {}
+    }
+    if let Some(c) = req.chain.as_deref() {
+        if c.contains('/') || c.contains("..") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid chain cell id"})),
+            )
+                .into_response();
+        }
+    }
     let Some(exe) = crate::campaign::launcher_binary() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1825,7 +1871,14 @@ pub(crate) async fn start_campaign(
         )
             .into_response(),
     };
-    let args = crate::campaign::launcher_args(&model, &effort, budget, wall);
+    let args = crate::campaign::launcher_args_with_phase(
+        &model,
+        &effort,
+        budget,
+        wall,
+        req.phase,
+        req.chain.as_deref(),
+    );
     let cmd = format!("subdollarbench {}", args.join(" "));
     let mut command = std::process::Command::new(exe);
     command

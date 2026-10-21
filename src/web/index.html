@@ -1181,6 +1181,17 @@
               <input type="number" id="campaignBudget" value="0.99" step="0.01" min="0.05" style="width:100px;" title="The official cell cap (M5): $0.99 / 150 min" /></div>
             <div><span class="hint">Wall min</span><br>
               <input type="number" id="campaignWall" value="150" min="5" style="width:100px;" /></div>
+            <div><span class="hint">Phase</span><br>
+              <select id="campaignPhase" onchange="refreshCampaignChains()" style="width:180px;">
+                <option value="">Full ladder</option>
+                <option value="1">1 · Core + durability</option>
+                <option value="2">2 · Relational</option>
+                <option value="3">3 · Engine</option>
+                <option value="4">4 · Hard</option>
+              </select></div>
+            <div><span class="hint">Continue from</span><br>
+              <input id="campaignChain" list="campaignChainList" placeholder="previous phase cell id" style="width:220px;" />
+              <datalist id="campaignChainList"></datalist></div>
             <button class="btn" id="campaignStartBtn" onclick="startCampaign()">Start campaign</button>
           </div>
           <div class="hint" id="campaignChoice" style="margin-top:6px;">model: <b>—</b> · effort: <b>—</b></div>
@@ -2346,6 +2357,7 @@
       updatePageTitle();
       updateHealth();
       updateCampaignLauncher();
+      refreshCampaignChains();
       // Keep the open Run view ticking (elapsed) and live.
       if (currentRunDetail && location.hash.startsWith('#run/')) {
         loadRunDetail(currentRunDetail.id, true);
@@ -2477,7 +2489,15 @@
         const extra = n > 1
           ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">\u00d7${n} runs ${expanded ? '\u25be' : '\u25b8'}</a>`
           : '';
-        rows += boardRowHtml(top, rank, { extra });
+        // P1: the career total across phase cells (the top row stays the
+        // model/effort group; the expanded rows are the phase cells).
+        const careerCell = cells
+          .filter(c => c.rollup && c.rollup.career)
+          .sort((a, b) => (b.rollup.phase || 0) - (a.rollup.phase || 0))[0];
+        const careerExtra = careerCell
+          ? ` <span class="hint" title="career total across chained phases">career ${fmt1(careerCell.rollup.career.points || 0)} pts \u00b7 $${fmtMoney(careerCell.rollup.career.total_cost_usd || 0)}</span>`
+          : '';
+        rows += boardRowHtml(top, rank, { extra: careerExtra + extra });
         if (expanded && n > 1) {
           const sorted = cells.map(cellPoints).sort((a, b) => a - b);
           // P1 (round 14): an even count's median is the mean of the middles.
@@ -2625,7 +2645,8 @@
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
           <div>
             <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(shortModel(r.model || d.id))}</h2>
-            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ` \u00b7 <span style="color:var(--warning);">over budget by $${fmtMoney(total - cap)}</span>` : ''}${r.cap_reached ? ' \u00b7 <span style="color:var(--warning);">budget cap reached</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${r.phase ? ` \u00b7 phase ${r.phase}` : ''}${r.chain_from ? ` \u00b7 <a href="#run/${encodeURIComponent(r.chain_from)}" style="color:var(--primary);">from ${escapeHtml(r.chain_from)}</a>` : ''}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ` \u00b7 <span style="color:var(--warning);">over budget by $${fmtMoney(total - cap)}</span>` : ''}${r.cap_reached ? ' \u00b7 <span style="color:var(--warning);">budget cap reached</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            ${r.career ? `<div class="hint">career: ${fmt1(r.career.points || 0)} pts \u00b7 $${fmtMoney(r.career.total_cost_usd || 0)} \u00b7 ${(r.career.cells || []).length} phase cell(s)</div>` : ''}
             ${d.live_run ? `<div class="hint" style="color:var(--primary);">${escapeHtml(liveSummary(false))}</div>` : ''}
           </div>
           <div class="hint" style="display:flex;gap:10px;align-items:center;">
@@ -2653,6 +2674,34 @@
       renderRun();
     }
 
+    /// P1: offer the finished cells of the previous phase for this model.
+    function refreshCampaignChains() {
+      const phaseEl = document.getElementById('campaignPhase');
+      const input = document.getElementById('campaignChain');
+      const list = document.getElementById('campaignChainList');
+      if (!phaseEl || !input || !list) return;
+      const phase = parseInt(phaseEl.value || '0', 10);
+      const model = (document.getElementById('model').value || '').trim();
+      list.innerHTML = '';
+      if (!phase || phase <= 1) {
+        input.value = '';
+        input.disabled = true;
+        input.placeholder = 'phase 1 starts the career';
+        return;
+      }
+      input.disabled = false;
+      input.placeholder = `finished phase ${phase - 1} cell for this model`;
+      (boardCache || [])
+        .filter(c => c.state === 'done' && c.rollup && c.rollup.phase === phase - 1 && c.rollup.model === model)
+        .forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          const pts = c.rollup.career && c.rollup.career.points != null ? c.rollup.career.points : c.rollup.points;
+          opt.label = `${fmt1(pts || 0)} career pts`;
+          list.appendChild(opt);
+        });
+    }
+
     /// The one campaign launcher (round-10 U6): model and effort come from
     /// the picker above, the lock is honoured here and server-side.
     async function startCampaign() {
@@ -2660,22 +2709,31 @@
       const budget = parseFloat(document.getElementById('campaignBudget').value || '0');
       const wall = parseInt(document.getElementById('campaignWall').value || '0', 10);
       const effort = (document.getElementById('effortSelect') || {}).value || 'high';
+      const phaseEl = document.getElementById('campaignPhase');
+      const chainEl = document.getElementById('campaignChain');
+      const phase = phaseEl && phaseEl.value ? parseInt(phaseEl.value, 10) : null;
+      const chain = phase && phase > 1 && chainEl ? (chainEl.value || '').trim() : null;
       const msg = document.getElementById('campaignStartMsg');
       const cmd = document.getElementById('campaignCmd');
       if (!model) { msg.textContent = 'Pick a model first.'; return; }
+      if (phase && phase > 1 && !chain) {
+        msg.textContent = `Pick the finished phase ${phase - 1} cell to continue from.`;
+        return;
+      }
       const running = boardCache.find(c => c.state === 'running');
       if (running) {
         msg.innerHTML = `a cell is already running — one at a time · <a href="#live" style="color:var(--primary);">Live ↗</a>`;
         return;
       }
-      const resolved = `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 20`;
+      const extra = `${phase ? ` --phase ${phase}` : ''}${chain ? ` --chain ${chain}` : ''}`;
+      const resolved = `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 20${extra}`;
       cmd.innerHTML = `resolved: <code>${escapeHtml(resolved)}</code>`;
       msg.textContent = 'starting…';
       try {
         const res = await fetch('/api/campaigns', {
           method: 'POST',
           headers: authHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({model, budget_usd: budget, wall_min: wall, effort}),
+          body: JSON.stringify({model, budget_usd: budget, wall_min: wall, effort, phase, chain}),
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) { msg.textContent = body.error || `failed (${res.status})`; return; }

@@ -15,7 +15,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Feedback repair rounds inside one ticket attempt. Campaign work is
@@ -158,6 +158,15 @@ pub enum LadderMode {
     Continue,
 }
 
+/// One career phase: a contiguous slice of the ladder that runs as its own
+/// cell (round-17 P1). Phase ids are 1-based and consecutive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseSpec {
+    pub id: u32,
+    pub title: String,
+    pub stages: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CampaignSpec {
     pub name: String,
@@ -170,6 +179,10 @@ pub struct CampaignSpec {
     #[serde(default)]
     pub description: String,
     pub stages: Vec<StageSpec>,
+    /// Optional career split: phases partition the stage ids. Empty for
+    /// single-cell campaigns (the archived app suites and pre-P1 specs).
+    #[serde(default)]
+    pub phases: Vec<PhaseSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -685,7 +698,184 @@ pub fn validate_spec(spec: &CampaignSpec, root: &Path) -> Result<()> {
             );
         }
     }
+    // Career phases (P1): a partition of the ladder, contiguous and in
+    // order; no stage may need a ticket from a later phase.
+    if !spec.phases.is_empty() {
+        let defined: HashSet<u32> = spec.stages.iter().map(|s| s.id).collect();
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut last_phase_stage: Option<u32> = None;
+        for (pos, phase) in spec.phases.iter().enumerate() {
+            let want_id = (pos + 1) as u32;
+            if phase.id != want_id {
+                bail!(
+                    "campaign '{}': phases must be numbered 1..=n in order (found id {} at position {pos}, wanted {want_id})",
+                    spec.name,
+                    phase.id
+                );
+            }
+            if phase.title.trim().is_empty() {
+                bail!(
+                    "campaign '{}': phase {} has an empty title",
+                    spec.name,
+                    phase.id
+                );
+            }
+            if phase.stages.is_empty() {
+                bail!("campaign '{}': phase {} has no stages", spec.name, phase.id);
+            }
+            for id in &phase.stages {
+                if !defined.contains(id) {
+                    bail!(
+                        "campaign '{}': phase {} names unknown stage {}",
+                        spec.name,
+                        phase.id,
+                        id
+                    );
+                }
+                if !seen.insert(*id) {
+                    bail!(
+                        "campaign '{}': stage {} appears in more than one phase",
+                        spec.name,
+                        id
+                    );
+                }
+                if let Some(prev) = last_phase_stage {
+                    if *id <= prev {
+                        bail!(
+                            "campaign '{}': phase stages must be contiguous and in order (stage {} after {})",
+                            spec.name,
+                            id,
+                            prev
+                        );
+                    }
+                }
+                last_phase_stage = Some(*id);
+            }
+            for st in spec.stages.iter().filter(|s| phase.stages.contains(&s.id)) {
+                for need in &st.needs {
+                    let need_phase = spec
+                        .phases
+                        .iter()
+                        .find(|p| p.stages.contains(need))
+                        .map(|p| p.id)
+                        .unwrap_or(0);
+                    if need_phase > phase.id {
+                        bail!(
+                            "campaign '{}': stage {} (phase {}) needs stage {} from later phase {}",
+                            spec.name,
+                            st.id,
+                            phase.id,
+                            need,
+                            need_phase
+                        );
+                    }
+                }
+            }
+        }
+        if seen.len() != defined.len() {
+            bail!(
+                "campaign '{}': phases do not partition the stages ({} of {} covered)",
+                spec.name,
+                seen.len(),
+                defined.len()
+            );
+        }
+    }
     Ok(())
+}
+
+/// Points ceiling for one phase: the sum of its stages' tiers.
+pub fn phase_max_points(phase: &PhaseSpec, stages: &[StageSpec]) -> f64 {
+    phase
+        .stages
+        .iter()
+        .filter_map(|id| stages.iter().find(|s| s.id == *id))
+        .map(|s| s.tier as f64)
+        .sum()
+}
+
+/// The phase that owns a stage id, if the spec has phases.
+pub fn phase_of(spec: &CampaignSpec, stage: u32) -> Option<&PhaseSpec> {
+    spec.phases.iter().find(|p| p.stages.contains(&stage))
+}
+
+/// Validate a career chain and return its ladder state (P1). The previous
+/// cell must be the immediately preceding phase, the same model/harness/
+/// effort/rules, finished, and carry a ladder state.
+pub fn validate_chain(
+    prev: &CampaignRollup,
+    state: Option<&LadderState>,
+    phase: u32,
+    model: &str,
+    harness: &str,
+    effort: &str,
+    rules_version: &str,
+) -> Result<LadderState> {
+    if phase <= 1 {
+        bail!("phase 1 has no chain");
+    }
+    if prev.phase != Some(phase - 1) {
+        bail!(
+            "chain cell {} is phase {:?}, expected phase {}",
+            prev.campaign_id,
+            prev.phase,
+            phase - 1
+        );
+    }
+    if prev.model != model {
+        bail!(
+            "chain cell {} used model {}, not {}",
+            prev.campaign_id,
+            prev.model,
+            model
+        );
+    }
+    if prev.harness != harness || prev.effort != effort {
+        bail!(
+            "chain cell {} used {} / {}, not {} / {}",
+            prev.campaign_id,
+            prev.harness,
+            prev.effort,
+            harness,
+            effort
+        );
+    }
+    if prev.rules_version != rules_version {
+        bail!(
+            "chain cell {} ran rules {}, not {}",
+            prev.campaign_id,
+            prev.rules_version,
+            rules_version
+        );
+    }
+    if prev.finished_at.trim().is_empty() {
+        bail!("chain cell {} did not finish", prev.campaign_id);
+    }
+    if prev.harness_fault.is_some() {
+        bail!(
+            "chain cell {} is a non-result (harness fault) and cannot be continued",
+            prev.campaign_id
+        );
+    }
+    state
+        .or(prev.ladder_state.as_ref())
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "chain cell {} has no ladder state (run it with P1 or newer)",
+                prev.campaign_id
+            )
+        })
+}
+
+/// Career totals carried into the next phase; older cells with no career
+/// block start from their own phase totals.
+pub fn career_from(prev: &CampaignRollup) -> CareerRollup {
+    prev.career.clone().unwrap_or_else(|| CareerRollup {
+        points: prev.points,
+        total_cost_usd: prev.total_cost_usd,
+        cells: vec![prev.campaign_id.clone()],
+    })
 }
 
 /// Severity weight for a verifier stage id: protocol/keyspace/durability
@@ -1485,6 +1675,10 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         points: 0.0,
         max_points: 0.0,
+        phase: None,
+        chain_from: None,
+        career: None,
+        ladder_state: None,
         harness_fault: None,
     }
 }
@@ -1501,7 +1695,20 @@ pub const CELL_WALL_MIN: u64 = 150;
 /// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
 /// test pins that the real clap definition accepts it (round-8 finding 2).
 pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) -> Vec<String> {
-    [
+    launcher_args_with_phase(model, effort, budget_usd, wall_min, None, None)
+}
+
+/// Launcher argv with the optional career phase/chain (P1). Kept separate
+/// so the existing launcher callers and their CLI-parse test stay stable.
+pub fn launcher_args_with_phase(
+    model: &str,
+    effort: &str,
+    budget_usd: f64,
+    wall_min: u64,
+    phase: Option<u32>,
+    chain: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = [
         "campaign",
         "run",
         "--name",
@@ -1519,7 +1726,16 @@ pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) 
     ]
     .iter()
     .map(|s| s.to_string())
-    .collect()
+    .collect();
+    if let Some(p) = phase {
+        args.push("--phase".into());
+        args.push(p.to_string());
+    }
+    if let Some(c) = chain.filter(|c| !c.is_empty()) {
+        args.push("--chain".into());
+        args.push(c.to_string());
+    }
+    args
 }
 
 /// The launcher's resolved binary: the repo's release build when present
@@ -1713,6 +1929,25 @@ pub fn ladder(
     out
 }
 
+/// The ladder state that survives a phase boundary (P1 career chaining).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LadderState {
+    pub outcomes: BTreeMap<u32, LadderOutcome>,
+    pub passed: Vec<u32>,
+    pub liters: BTreeMap<u32, Vec<String>>,
+    pub best: BTreeMap<u32, bool>,
+    pub dirty: bool,
+    pub last_green: Option<String>,
+}
+
+/// Career totals across chained phase cells (P1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CareerRollup {
+    pub points: f64,
+    pub total_cost_usd: f64,
+    pub cells: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CampaignRollup {
     pub campaign_id: String,
@@ -1759,11 +1994,41 @@ pub struct CampaignRollup {
     /// Ceiling: every stage full (sum of tiers).
     #[serde(default)]
     pub max_points: f64,
+    /// Career phase this cell ran, when the spec is split (P1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u32>,
+    /// Previous cell this phase continued from, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_from: Option<String>,
+    /// Career totals across the chain (points, spend and cell ids).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub career: Option<CareerRollup>,
+    /// The persisted ladder state for a chained next phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder_state: Option<LadderState>,
     /// Round-14 N2: the ladder stopped because an attempt measured nothing
     /// (the agent never started, or a billing/auth trip). The cell is a
     /// non-result: the runner poisons it and no board publishes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_fault: Option<String>,
+}
+
+fn snapshot_state(
+    outcomes: &HashMap<u32, LadderOutcome>,
+    passed_all: &std::collections::BTreeSet<u32>,
+    liters: &std::collections::BTreeMap<u32, Vec<String>>,
+    best: &HashMap<u32, bool>,
+    dirty: bool,
+    last_green: Option<String>,
+) -> LadderState {
+    LadderState {
+        outcomes: outcomes.iter().map(|(k, v)| (*k, *v)).collect(),
+        passed: passed_all.iter().copied().collect(),
+        liters: liters.clone(),
+        best: best.iter().map(|(k, v)| (*k, *v)).collect(),
+        dirty,
+        last_green,
+    }
 }
 
 impl CampaignRollup {
@@ -1820,6 +2085,44 @@ pub struct CampaignRunOptions {
 pub async fn run_campaign<F, Fut>(
     lc: &LoadedCampaign,
     opts: &CampaignRunOptions,
+    exec: F,
+    on_stage: Option<&dyn Fn(&CampaignRollup)>,
+) -> Result<CampaignRollup>
+where
+    F: FnMut(&StageAttempt<'_>) -> Fut,
+    Fut: std::future::Future<Output = Result<StageOutcome>>,
+{
+    run_campaign_ctx(lc, opts, None, None, None, None, exec, on_stage).await
+}
+
+/// Career-phase run (P1): the ladder is filtered to `phase`, the state comes
+/// from `chain` and the career totals from `career`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_campaign_phase<F, Fut>(
+    lc: &LoadedCampaign,
+    opts: &CampaignRunOptions,
+    phase: Option<&PhaseSpec>,
+    chain: Option<&LadderState>,
+    chain_from: Option<&str>,
+    career: Option<&CareerRollup>,
+    exec: F,
+    on_stage: Option<&dyn Fn(&CampaignRollup)>,
+) -> Result<CampaignRollup>
+where
+    F: FnMut(&StageAttempt<'_>) -> Fut,
+    Fut: std::future::Future<Output = Result<StageOutcome>>,
+{
+    run_campaign_ctx(lc, opts, phase, chain, chain_from, career, exec, on_stage).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_campaign_ctx<F, Fut>(
+    lc: &LoadedCampaign,
+    opts: &CampaignRunOptions,
+    phase: Option<&PhaseSpec>,
+    chain: Option<&LadderState>,
+    chain_from: Option<&str>,
+    career: Option<&CareerRollup>,
     mut exec: F,
     on_stage: Option<&dyn Fn(&CampaignRollup)>,
 ) -> Result<CampaignRollup>
@@ -1829,8 +2132,10 @@ where
 {
     let started_at = chrono::Utc::now().to_rfc3339();
     let wall_start = std::time::Instant::now();
-    let mut best: HashMap<u32, bool> = HashMap::new();
-    let mut reached: Option<u32> = None;
+    let mut best: HashMap<u32, bool> = chain
+        .map(|c| c.best.iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default();
+    let mut reached: Option<u32> = chain.and_then(|c| c.passed.iter().copied().max());
     let mut total_cost = 0.0f64;
     // API spend of the same attempts: OMP enforces budgets on API dollars,
     // the cap bounds effective dollars, so the clamp converts (round-11
@@ -1838,17 +2143,22 @@ where
     let mut api_cost = 0.0f64;
     // Ladder bookkeeping (continue mode): per-stage outcome + whether the
     // last attempt left the workspace dirty (needs a rollback first).
-    let mut outcomes: HashMap<u32, LadderOutcome> = HashMap::new();
+    let mut outcomes: HashMap<u32, LadderOutcome> = chain
+        .map(|c| c.outcomes.iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default();
     // Which stages passed on a lite variant (stage -> profile).
     let mut liters: std::collections::BTreeMap<u32, Vec<String>> =
-        std::collections::BTreeMap::new();
+        chain.map(|c| c.liters.clone()).unwrap_or_default();
     // Every stage passed so far (full or lite): the declared acceptance
     // list is intersected with it, so a failed stage sinks nothing later.
-    let mut passed_all: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut passed_all: std::collections::BTreeSet<u32> = chain
+        .map(|c| c.passed.iter().copied().collect())
+        .unwrap_or_default();
     // Largest single call seen anywhere in this cell; the cap reserves it
     // before the next ticket (round-17 P0).
     let mut largest_call_usd = 0.0f64;
-    let mut dirty = false;
+    let mut dirty = chain.map(|c| c.dirty).unwrap_or(false);
+    let chain_last_green = chain.and_then(|c| c.last_green.clone());
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
         name: lc.spec.name.clone(),
@@ -1859,7 +2169,7 @@ where
         started_at: started_at.clone(),
         finished_at: String::new(),
         stages: Vec::new(),
-        reached: None,
+        reached,
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
         over_budget: false,
@@ -1869,11 +2179,26 @@ where
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         points: 0.0,
-        max_points: max_points(&lc.spec.stages),
+        max_points: phase
+            .map(|p| phase_max_points(p, &lc.spec.stages))
+            .unwrap_or_else(|| max_points(&lc.spec.stages)),
+        phase: phase.map(|p| p.id),
+        chain_from: chain_from.map(str::to_string),
+        career: None,
+        ladder_state: None,
         harness_fault: None,
     };
 
-    for stage in &lc.spec.stages {
+    let stage_list: Vec<&StageSpec> = match phase {
+        Some(p) => lc
+            .spec
+            .stages
+            .iter()
+            .filter(|s| p.stages.contains(&s.id))
+            .collect(),
+        None => lc.spec.stages.iter().collect(),
+    };
+    for stage in stage_list.iter().copied() {
         // Caps are checked between tickets; both flags are set when both
         // were crossed at the same boundary (round-7 finding 5; the stop
         // reason stays budget-first). Round-10 D3: the cap also stops when
@@ -1913,6 +2238,14 @@ where
             rollup.over_budget |= over_budget_now;
             rollup.cap_reached |= floor_now && !over_budget_now;
             rollup.over_wall |= over_wall_now;
+            rollup.ladder_state = Some(snapshot_state(
+                &outcomes,
+                &passed_all,
+                &liters,
+                &best,
+                dirty,
+                chain_last_green.clone(),
+            ));
             if let Some(cb) = on_stage {
                 cb(&rollup);
             }
@@ -1933,6 +2266,14 @@ where
             rollup.reached = reached;
             rollup.total_cost_usd = total_cost;
             rollup.points = rollup.stages.iter().map(|r| r.points).sum();
+            rollup.ladder_state = Some(snapshot_state(
+                &outcomes,
+                &passed_all,
+                &liters,
+                &best,
+                dirty,
+                chain_last_green.clone(),
+            ));
             if let Some(cb) = on_stage {
                 cb(&rollup);
             }
@@ -1989,6 +2330,14 @@ where
             // cell instead of letting one crash block its dependants.
             outcomes.insert(stage.id, LadderOutcome::Failed);
             stop_on_harness_fault(&mut rollup, stage.id, reason, reached, total_cost);
+            rollup.ladder_state = Some(snapshot_state(
+                &outcomes,
+                &passed_all,
+                &liters,
+                &best,
+                dirty,
+                chain_last_green.clone(),
+            ));
             if let Some(cb) = on_stage {
                 cb(&rollup);
             }
@@ -2074,6 +2423,14 @@ where
                 if let Some(reason) = &out2.harness_fault {
                     outcomes.insert(stage.id, LadderOutcome::Failed);
                     stop_on_harness_fault(&mut rollup, stage.id, reason, reached, total_cost);
+                    rollup.ladder_state = Some(snapshot_state(
+                        &outcomes,
+                        &passed_all,
+                        &liters,
+                        &best,
+                        dirty,
+                        chain_last_green.clone(),
+                    ));
                     if let Some(cb) = on_stage {
                         cb(&rollup);
                     }
@@ -2105,6 +2462,14 @@ where
             .iter()
             .filter(|r| r.passed && r.regressed.is_empty())
             .count() as u32;
+        rollup.ladder_state = Some(snapshot_state(
+            &outcomes,
+            &passed_all,
+            &liters,
+            &best,
+            dirty,
+            chain_last_green.clone(),
+        ));
         if let Some(cb) = on_stage {
             cb(&rollup);
         }
@@ -2120,6 +2485,24 @@ where
         }
     }
 
+    rollup.ladder_state = Some(snapshot_state(
+        &outcomes,
+        &passed_all,
+        &liters,
+        &best,
+        dirty,
+        chain_last_green.clone(),
+    ));
+    if phase.is_some() || career.is_some() {
+        let prev = career.cloned().unwrap_or_default();
+        let mut cells = prev.cells.clone();
+        cells.push(opts.campaign_id.clone());
+        rollup.career = Some(CareerRollup {
+            points: prev.points + rollup.points,
+            total_cost_usd: prev.total_cost_usd + total_cost,
+            cells,
+        });
+    }
     rollup.finished_at = chrono::Utc::now().to_rfc3339();
     Ok(rollup)
 }
@@ -2381,6 +2764,7 @@ fn tmp_dir(tag: &str) -> PathBuf {
 
 /// One stage's outcome under the continue-past-failures ladder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LadderOutcome {
     /// The full ticket's acceptance passed.
     Full,
@@ -2672,6 +3056,10 @@ mod tests {
             points: 0.0,
             max_points: 0.0,
             harness_fault: None,
+            phase: None,
+            chain_from: None,
+            career: None,
+            ladder_state: None,
         };
         // Ticket 3 passed before this attempt: stage 3 failing again is a
         // regression, not an own-stage miss.
@@ -2887,6 +3275,7 @@ mod tests {
                 stage(2, vec![1]),
                 stage(3, vec![2]),
             ],
+            phases: Vec::new(),
         };
         let record = |id: u32, passed: bool, variant: &str, status: &str| StageRecord {
             id,
@@ -2945,6 +3334,10 @@ mod tests {
             points: 1.0,
             max_points: 4.0,
             harness_fault: None,
+            phase: None,
+            chain_from: None,
+            career: None,
+            ladder_state: None,
         };
         // 1's full attempt failed, its lite attempt passed.
         rollup.stages.push(record(1, false, "full", "failed"));
@@ -3074,6 +3467,7 @@ mod tests {
                     lite: None,
                 },
             ],
+            phases: Vec::new(),
         };
         std::fs::write(
             dir.join("campaign.json"),
@@ -4089,6 +4483,7 @@ mod tests {
                 st(3, 1, vec![2], None),
                 st(4, 1, vec![], None),
             ],
+            phases: Vec::new(),
         };
         std::fs::write(
             dir.join("campaign.json"),
@@ -4103,6 +4498,273 @@ mod tests {
     /// what is blocked). It shipped without the field once, silently
     /// pass-stopping at the first red ticket and hiding the round-3
     /// finding-1 fix from every cell.
+    #[test]
+    fn launcher_args_carry_the_phase_and_chain() {
+        let a = launcher_args_with_phase("m", "high", 0.99, 150, Some(2), Some("prev"));
+        assert!(a.windows(2).any(|w| w[0] == "--phase" && w[1] == "2"));
+        assert!(a.windows(2).any(|w| w[0] == "--chain" && w[1] == "prev"));
+        let b = launcher_args("m", "high", 0.99, 150);
+        assert!(!b.iter().any(|s| s == "--phase"));
+        assert!(!b.iter().any(|s| s == "--chain"));
+    }
+
+    #[test]
+    fn shipped_career_phases_partition_and_score() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        validate_spec(&lc.spec, &lc.root).expect("phases validate");
+        assert_eq!(lc.spec.phases.len(), 4);
+        let sums: Vec<f64> = lc
+            .spec
+            .phases
+            .iter()
+            .map(|p| phase_max_points(p, &lc.spec.stages))
+            .collect();
+        assert_eq!(sums, vec![10.0, 12.0, 22.0, 32.0]);
+        assert_eq!(sums.iter().sum::<f64>(), 76.0);
+        for phase in &lc.spec.phases {
+            for id in &phase.stages {
+                assert!(phase_of(&lc.spec, *id).is_some(), "stage {id} has no phase");
+            }
+        }
+        // Dropping a stage from a phase breaks the partition.
+        let mut bad = lc.spec.clone();
+        bad.phases[0].stages.pop();
+        assert!(validate_spec(&bad, &lc.root).is_err());
+    }
+
+    fn chain_rollup(phase: u32, finished: bool) -> CampaignRollup {
+        CampaignRollup {
+            campaign_id: "prev".into(),
+            name: "sdb-sql".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            task: "sql".into(),
+            started_at: "2026-10-21T00:00:00Z".into(),
+            finished_at: if finished {
+                "2026-10-21T01:00:00Z".into()
+            } else {
+                String::new()
+            },
+            stages: Vec::new(),
+            reached: Some(6),
+            regression_free_tickets: 0,
+            total_cost_usd: 0.5,
+            over_budget: false,
+            cap_reached: false,
+            over_wall: false,
+            rules_version: crate::report::rules::RULES_VERSION.to_string(),
+            budget_usd: 0.99,
+            wall_min: 150,
+            points: 10.0,
+            max_points: 10.0,
+            phase: Some(phase),
+            chain_from: None,
+            career: Some(CareerRollup {
+                points: 10.0,
+                total_cost_usd: 0.5,
+                cells: vec!["prev".into()],
+            }),
+            ladder_state: None,
+            harness_fault: None,
+        }
+    }
+
+    fn phase1_state() -> LadderState {
+        let mut st = LadderState::default();
+        for id in [0, 1, 2, 3, 5, 6] {
+            st.passed.push(id);
+            st.outcomes.insert(id, LadderOutcome::Full);
+            st.best.insert(id, true);
+        }
+        st.outcomes.insert(4, LadderOutcome::Failed);
+        st.best.insert(4, false);
+        st.dirty = true;
+        st.last_green = Some("abc1234".into());
+        st
+    }
+
+    #[test]
+    fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
+        let state = phase1_state();
+        let prev = chain_rollup(1, true);
+        validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+        )
+        .expect("the matching chain validates");
+        let err = validate_chain(
+            &chain_rollup(0, true),
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected phase 1"), "{err}");
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "other",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("used model"), "{err}");
+        let err = validate_chain(
+            &chain_rollup(1, false),
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err}");
+        let err = validate_chain(
+            &prev,
+            None,
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no ladder state"), "{err}");
+        let mut faulted = chain_rollup(1, true);
+        faulted.harness_fault = Some("provider billing".into());
+        let err = validate_chain(
+            &faulted,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("non-result"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_phase_filters_its_stages_and_skips_needs_from_the_chain() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+        let opts = CampaignRunOptions {
+            campaign_id: "phase3".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let state = phase1_state();
+        let seen = std::cell::RefCell::new(Vec::<u32>::new());
+        let rollup = run_campaign_phase(
+            &lc,
+            &opts,
+            Some(phase),
+            Some(&state),
+            Some("prev"),
+            Some(&CareerRollup {
+                points: 10.0,
+                total_cost_usd: 0.5,
+                cells: vec!["prev".into()],
+            }),
+            |attempt| {
+                seen.borrow_mut().push(attempt.stage.id);
+                let id = attempt.stage.id;
+                async move { Ok(outcome(false, &[(id, false)])) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        assert!(!seen.is_empty(), "stage 12 must run");
+        assert!(
+            seen.iter().all(|id| *id == 12),
+            "only stage 12 is runnable (full and lite): {seen:?}"
+        );
+        assert_eq!(rollup.phase, Some(3));
+        assert_eq!(rollup.chain_from.as_deref(), Some("prev"));
+        assert!((rollup.max_points - 22.0).abs() < 1e-9);
+        assert!((rollup.points - 0.0).abs() < 1e-9);
+        assert_eq!(
+            rollup.career.as_ref().unwrap().cells,
+            vec!["prev", "phase3"]
+        );
+        assert!((rollup.career.as_ref().unwrap().points - 10.0).abs() < 1e-9);
+        for id in [11u32, 13, 14, 15] {
+            let r = rollup.stages.iter().find(|r| r.id == id).expect("record");
+            assert!(!r.passed);
+            assert!((r.effective_cost_usd - 0.0).abs() < 1e-9, "stage {id} cost");
+            assert_eq!(r.status, "skipped", "stage {id}");
+        }
+        assert!(
+            rollup.stages.iter().all(|r| !(7..=10).contains(&r.id)),
+            "phase 2 must stay untouched: {:?}",
+            rollup.stages.iter().map(|r| r.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_phase2_attempt_sees_phase1s_pass_lite_and_rollback() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 2).unwrap();
+        let opts = CampaignRunOptions {
+            campaign_id: "phase2".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let mut state = phase1_state();
+        state.liters.insert(5, vec!["crash-acked-only".into()]);
+        let first = std::cell::RefCell::new(None);
+        let rollup = run_campaign_phase(
+            &lc,
+            &opts,
+            Some(phase),
+            Some(&state),
+            Some("prev"),
+            None,
+            |attempt| {
+                if first.borrow().is_none() {
+                    *first.borrow_mut() = Some((
+                        attempt.passed.clone(),
+                        attempt.passed_lite.clone(),
+                        attempt.rollback_first,
+                    ));
+                }
+                async move { Ok(outcome(true, &[(7, true)])) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let (passed, passed_lite, rollback) = first.into_inner().expect("an attempt");
+        assert!(passed.contains(&5) && passed.contains(&6), "{passed:?}");
+        assert!(passed_lite
+            .iter()
+            .any(|(s, p)| *s == 5 && p[0] == "crash-acked-only"));
+        assert!(rollback, "the chain was dirty");
+        assert_eq!(rollup.phase, Some(2));
+        assert!((rollup.max_points - 12.0).abs() < 1e-9);
+    }
+
     #[test]
     fn shipped_sdb_sql_campaign_continues() {
         let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
