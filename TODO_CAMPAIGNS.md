@@ -254,6 +254,31 @@ Career phases and chaining are implemented:
   passed / 6 ignored / 8 filtered**; the skipped set is the P0/host
   memory failure, not P1. Bins **60**; fmt/clippy clean.
 
+### P2 landed (2026-10-21, rules `2026-10-19.34`)
+
+Career catch-up and hints are implemented:
+
+- At a phase start, up to **two** earlier failed tickets that phase tickets
+  need (directly or through their needs closure) are retried first, ordered
+  by the phase points they unblock and then id. A catch-up uses the lite
+  variant when one exists (else the full ticket at its budget), scores
+  **0.4 x tier**, satisfies `needs`, and is recorded
+  `status: "catch-up"`. It runs through the normal SPEC/rollback/preamble
+  machinery; a catch-up whose reserve plus floor does not fit is skipped.
+- The phase preamble adds a career hint for each recorded failed/skipped
+  ticket that blocks a phase ticket: the last failure line, the stored
+  repro/detail, the blocked phase tickets and points, and the SPEC.md
+  section. Hints cost no points and never contain reference code. The
+  assisted-unblock alternative is assessed (not built) in
+  `docs/ASSESSMENT-assisted-unblock.md`.
+- Gates: 50 campaign tests, including catch-up ordering (4/8/11 by blocked
+  points), the cap of two, 0.4 x tier and the unblocked phase ticket, the
+  no-headroom skip, the hint text/repro, and the `.29` replay (t8 at the
+  phase-3 start, t11 at the phase-4 start). The lib suite with the eight
+  known memory-cap live proofs skipped is **980 passed / 6 ignored / 8
+  filtered**; bins **61**; fmt/clippy clean. The skipped proofs remain the
+  host/environment failure from P0, not P2.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and

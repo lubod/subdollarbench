@@ -8,6 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.34`: career phases P2 — a phase start gets at most two
+///   catch-up slots for earlier failed tickets needed by phase tickets,
+///   ordered by blocked points (lite variant if present, else the full
+///   ticket at its budget); a catch-up pass unblocks `needs` but scores
+///   0.4 x tier and is recorded `status: "catch-up"`. A phase preamble
+///   names each recorded broken ticket with its failure line, repro,
+///   blocked phase tickets and points, and its SPEC.md section. The
+///   assisted-unblock alternative is assessed and not built.
+///   `docs/ASSESSMENT-assisted-unblock.md`. Ladder unchanged (76 points).
 /// - `2026-10-19.33`: career phases P1 — the sdb-sql spec splits the ladder
 ///   into four phases (0-6, 7-10, 11-15, 16-20), validated as a contiguous
 ///   partition with no forward needs; `campaign run --phase N --chain <id>`
@@ -639,7 +648,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.33";
+pub const RULES_VERSION: &str = "2026-10-19.34";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

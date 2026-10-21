@@ -958,6 +958,9 @@ pub struct StageAttempt<'a> {
     /// Effective cap headroom after the reserve, for the pipeline's per-round
     /// `max_effective_usd`. None when uncapped.
     pub cap_headroom_usd: Option<f64>,
+    /// P2: the harness hint block for the phase's attempts (recorded
+    /// failures and blocked tickets); None outside a chained phase.
+    pub hints: Option<String>,
     /// True when the workspace/data must be rolled back to the last green
     /// state before this attempt (a predecessor failed; lite attempts after
     /// a failed full always roll back).
@@ -1938,6 +1941,10 @@ pub struct LadderState {
     pub best: BTreeMap<u32, bool>,
     pub dirty: bool,
     pub last_green: Option<String>,
+    /// P2 harness hint block for the next phase (recorded failures and the
+    /// phase tickets they block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hints: Option<String>,
 }
 
 /// Career totals across chained phase cells (P1).
@@ -2013,6 +2020,12 @@ pub struct CampaignRollup {
     pub harness_fault: Option<String>,
 }
 
+fn outcomes_vec(m: &HashMap<u32, LadderOutcome>) -> Vec<(u32, LadderOutcome)> {
+    let mut v: Vec<(u32, LadderOutcome)> = m.iter().map(|(k, o)| (*k, *o)).collect();
+    v.sort_by_key(|(id, _)| *id);
+    v
+}
+
 fn snapshot_state(
     outcomes: &HashMap<u32, LadderOutcome>,
     passed_all: &std::collections::BTreeSet<u32>,
@@ -2020,6 +2033,7 @@ fn snapshot_state(
     best: &HashMap<u32, bool>,
     dirty: bool,
     last_green: Option<String>,
+    hints: Option<String>,
 ) -> LadderState {
     LadderState {
         outcomes: outcomes.iter().map(|(k, v)| (*k, *v)).collect(),
@@ -2028,6 +2042,7 @@ fn snapshot_state(
         best: best.iter().map(|(k, v)| (*k, *v)).collect(),
         dirty,
         last_green,
+        hints,
     }
 }
 
@@ -2082,6 +2097,128 @@ pub struct CampaignRunOptions {
 /// and unit-tested with a mock executor. `on_stage` receives the
 /// rollup-so-far after every ticket (and on budget stop) so callers can
 /// publish live progress.
+fn needs_closure_contains(spec: &CampaignSpec, stage: u32, target: u32) -> bool {
+    let mut stack = vec![stage];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(st) = spec.stages.iter().find(|s| s.id == id) {
+            for need in &st.needs {
+                if *need == target {
+                    return true;
+                }
+                stack.push(*need);
+            }
+        }
+    }
+    false
+}
+
+/// P2: failed tickets that a phase ticket needs (directly or through its
+/// needs closure), ordered by the phase points they unblock, then id.
+pub fn catch_up_targets(
+    spec: &CampaignSpec,
+    phase: &PhaseSpec,
+    outcomes: &HashMap<u32, LadderOutcome>,
+) -> Vec<(u32, f64)> {
+    let mut out = Vec::new();
+    for (id, outcome) in outcomes {
+        if *outcome != LadderOutcome::Failed {
+            continue;
+        }
+        let points: f64 = phase
+            .stages
+            .iter()
+            .filter(|sid| needs_closure_contains(spec, **sid, *id))
+            .filter_map(|sid| spec.stages.iter().find(|s| s.id == *sid))
+            .map(|s| s.tier as f64)
+            .sum();
+        if points > 0.0 {
+            out.push((*id, points));
+        }
+    }
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    out
+}
+
+/// P2: the phase-start hint block. It is built only from recorded verifier
+/// output (the previous rollup's failure line/detail), never a reference
+/// solution.
+pub fn phase_hints(
+    prev: &CampaignRollup,
+    spec: &CampaignSpec,
+    phase: &PhaseSpec,
+    state: &LadderState,
+) -> Option<String> {
+    let mut broken: Vec<u32> = state
+        .outcomes
+        .iter()
+        .filter(|(_, o)| matches!(o, LadderOutcome::Failed | LadderOutcome::Skipped))
+        .map(|(id, _)| *id)
+        .collect();
+    broken.sort_unstable();
+    let mut block = String::new();
+    for id in broken {
+        let blocked: Vec<(u32, String, f64)> = phase
+            .stages
+            .iter()
+            .filter(|sid| needs_closure_contains(spec, **sid, id))
+            .filter_map(|sid| spec.stages.iter().find(|s| s.id == *sid))
+            .map(|s| (s.id, s.title.clone(), s.tier as f64))
+            .collect();
+        if blocked.is_empty() {
+            continue;
+        }
+        let title = spec
+            .stages
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.clone())
+            .unwrap_or_else(|| format!("ticket {id}"));
+        let rec = prev.stages.iter().rev().find(|r| r.id == id);
+        let line = rec
+            .and_then(|r| r.failure.as_ref())
+            .map(|f| f.line.clone())
+            .unwrap_or_else(|| "(no recorded failure line)".to_string());
+        let detail = rec
+            .and_then(|r| r.failure.as_ref())
+            .map(|f| f.detail.clone())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "(no reproduction recorded)".to_string());
+        let blocked_txt = blocked
+            .iter()
+            .map(|(i, t, p)| format!("ticket {i} ({t}, {} pts)", crate::campaign::fmt_points(*p)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        block.push_str(&format!(
+            "- Ticket {id} ({title}) is still broken. Last failure: {line}\n  Repro: {detail}\n  Blocks: {blocked_txt}\n  SPEC.md section: Ticket {id} - {title}\n"
+        ));
+    }
+    if block.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "## Career hints for phase {}\nThe previous phase recorded these blockers. They cost no points to read; the catch-up slots below may retry at most two of them.\n{}",
+            phase.id, block
+        ))
+    }
+}
+
+/// Format a points value without trailing zeroes, for the hint text.
+fn fmt_points(p: f64) -> String {
+    if (p.fract()).abs() < 1e-9 {
+        format!("{}", p as u32)
+    } else {
+        format!("{p:.1}")
+    }
+}
+
 pub async fn run_campaign<F, Fut>(
     lc: &LoadedCampaign,
     opts: &CampaignRunOptions,
@@ -2159,6 +2296,7 @@ where
     let mut largest_call_usd = 0.0f64;
     let mut dirty = chain.map(|c| c.dirty).unwrap_or(false);
     let chain_last_green = chain.and_then(|c| c.last_green.clone());
+    let chain_hints = chain.and_then(|c| c.hints.clone());
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
         name: lc.spec.name.clone(),
@@ -2198,6 +2336,120 @@ where
             .collect(),
         None => lc.spec.stages.iter().collect(),
     };
+    // P2: career catch-up slots. Before the phase's first ticket, retry up to
+    // two earlier failed tickets that a phase ticket needs, ordered by the
+    // phase points they unblock. A pass satisfies `needs` but scores only
+    // 0.4 x tier; the normal SPEC/rollback/preamble path runs them.
+    if let Some(phase) = phase {
+        let targets = catch_up_targets(&lc.spec, phase, &outcomes);
+        for (target, _blocked_points) in targets.into_iter().take(2) {
+            if !cap_allows(opts.budget_usd, total_cost, largest_call_usd) {
+                break;
+            }
+            let Some(stage) = lc.spec.stages.iter().find(|s| s.id == target) else {
+                continue;
+            };
+            let headroom = if opts.budget_usd > 0.0 {
+                (opts.budget_usd - total_cost - cap_reserve(largest_call_usd)).max(0.0)
+            } else {
+                f64::INFINITY
+            };
+            let api_ratio = if total_cost > 0.0 && api_cost > 0.0 {
+                (api_cost / total_cost).clamp(0.01, 1.0)
+            } else {
+                0.25
+            };
+            let (variant, prompt_path, budget, max_turns, lite_profile) = match &stage.lite {
+                Some(lite) => (
+                    StageVariant::Lite,
+                    lc.root.join(&lite.prompt),
+                    lite.budget_usd,
+                    lite.max_turns,
+                    lite.profile.clone(),
+                ),
+                None => (
+                    StageVariant::Full,
+                    lc.prompt_path(stage),
+                    stage.budget_usd,
+                    stage.max_turns,
+                    Vec::new(),
+                ),
+            };
+            let attempt = StageAttempt {
+                stage,
+                variant,
+                prompt_path,
+                budget_usd: budget.min(headroom * api_ratio),
+                max_turns,
+                lite_profile: lite_profile.clone(),
+                passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                passed: passed_all.iter().copied().collect(),
+                outcomes: outcomes_vec(&outcomes),
+                weight: 0.4,
+                cap_headroom_usd: (opts.budget_usd > 0.0).then_some(headroom),
+                hints: chain_hints.clone(),
+                rollback_first: dirty,
+            };
+            let out = exec(&attempt)
+                .await
+                .with_context(|| format!("catch-up stage {} ({})", target, stage.title))?;
+            api_cost += out.api_cost_usd;
+            largest_call_usd = largest_call_usd.max(out.max_call_usd);
+            let (regressed, severity) = detect_regressions(&best, &out.stage_results);
+            for r in &out.stage_results {
+                let e = best.entry(r.stage).or_insert(false);
+                *e = *e || r.passed;
+            }
+            total_cost += out.effective_cost_usd;
+            push_attempt_record(
+                &mut rollup,
+                stage,
+                variant,
+                &out,
+                regressed,
+                severity,
+                "catch-up",
+            );
+            if out.passed {
+                outcomes.insert(target, LadderOutcome::Lite);
+                passed_all.insert(target);
+                if variant == StageVariant::Lite {
+                    liters.insert(target, lite_profile);
+                }
+                reached = Some(reached.map(|r| r.max(target)).unwrap_or(target));
+                dirty = false;
+            } else {
+                outcomes.insert(target, LadderOutcome::Failed);
+                dirty = true;
+            }
+            rollup.reached = reached;
+            rollup.total_cost_usd = total_cost;
+            rollup.points = rollup.stages.iter().map(|r| r.points).sum();
+            rollup.regression_free_tickets = rollup
+                .stages
+                .iter()
+                .filter(|r| r.passed && r.regressed.is_empty())
+                .count() as u32;
+            rollup.ladder_state = Some(snapshot_state(
+                &outcomes,
+                &passed_all,
+                &liters,
+                &best,
+                dirty,
+                chain_last_green.clone(),
+                chain_hints.clone(),
+            ));
+            if let Some(cb) = on_stage {
+                cb(&rollup);
+            }
+            if let Some(reason) = &out.harness_fault {
+                outcomes.insert(target, LadderOutcome::Failed);
+                rollup.harness_fault = Some(reason.clone());
+                break;
+            }
+        }
+    }
+
     for stage in stage_list.iter().copied() {
         // Caps are checked between tickets; both flags are set when both
         // were crossed at the same boundary (round-7 finding 5; the stop
@@ -2245,6 +2497,7 @@ where
                 &best,
                 dirty,
                 chain_last_green.clone(),
+                chain_hints.clone(),
             ));
             if let Some(cb) = on_stage {
                 cb(&rollup);
@@ -2273,6 +2526,7 @@ where
                 &best,
                 dirty,
                 chain_last_green.clone(),
+                chain_hints.clone(),
             ));
             if let Some(cb) = on_stage {
                 cb(&rollup);
@@ -2295,6 +2549,7 @@ where
             outcomes: outcomes_snapshot(&outcomes),
             weight: 1.0,
             cap_headroom_usd: (opts.budget_usd > 0.0).then_some(headroom),
+            hints: chain_hints.clone(),
             rollback_first: dirty,
         };
         let out = exec(&attempt_full)
@@ -2337,6 +2592,7 @@ where
                 &best,
                 dirty,
                 chain_last_green.clone(),
+                chain_hints.clone(),
             ));
             if let Some(cb) = on_stage {
                 cb(&rollup);
@@ -2390,6 +2646,7 @@ where
                     outcomes: outcomes_snapshot(&outcomes),
                     weight: lite.weight,
                     cap_headroom_usd: (opts.budget_usd > 0.0).then_some(headroom2),
+                    hints: chain_hints.clone(),
                     rollback_first: true,
                 };
                 let out2 = exec(&attempt_lite)
@@ -2430,6 +2687,7 @@ where
                         &best,
                         dirty,
                         chain_last_green.clone(),
+                        chain_hints.clone(),
                     ));
                     if let Some(cb) = on_stage {
                         cb(&rollup);
@@ -2469,6 +2727,7 @@ where
             &best,
             dirty,
             chain_last_green.clone(),
+            chain_hints.clone(),
         ));
         if let Some(cb) = on_stage {
             cb(&rollup);
@@ -2492,6 +2751,7 @@ where
         &best,
         dirty,
         chain_last_green.clone(),
+        chain_hints.clone(),
     ));
     if phase.is_some() || career.is_some() {
         let prev = career.cloned().unwrap_or_default();
@@ -2568,12 +2828,18 @@ fn push_attempt_record(
     regression_severity: u32,
     status: &str,
 ) {
-    let points = match (status, variant) {
-        ("passed", StageVariant::Full) => stage.tier as f64,
-        ("passed", StageVariant::Lite) => {
-            stage.tier as f64 * stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.4)
+    let points = if status == "catch-up" && out.passed {
+        // P2: a catch-up unblocks `needs` but never outranks a first-time
+        // pass; it always scores the lite weight (0.4 x tier).
+        stage.tier as f64 * 0.4
+    } else {
+        match (status, variant) {
+            ("passed", StageVariant::Full) => stage.tier as f64,
+            ("passed", StageVariant::Lite) => {
+                stage.tier as f64 * stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.4)
+            }
+            _ => 0.0,
         }
-        _ => 0.0,
     };
     rollup.stages.push(StageRecord {
         id: stage.id,
@@ -4694,9 +4960,10 @@ mod tests {
         let seen = seen.into_inner();
         assert!(!seen.is_empty(), "stage 12 must run");
         assert!(
-            seen.iter().all(|id| *id == 12),
-            "only stage 12 is runnable (full and lite): {seen:?}"
+            seen.iter().all(|id| *id == 4 || *id == 12),
+            "only the catch-up 4 and stage 12 are runnable: {seen:?}"
         );
+        assert_eq!(seen.first().copied(), Some(4), "the catch-up runs first");
         assert_eq!(rollup.phase, Some(3));
         assert_eq!(rollup.chain_from.as_deref(), Some("prev"));
         assert!((rollup.max_points - 22.0).abs() < 1e-9);
@@ -4717,6 +4984,262 @@ mod tests {
             "phase 2 must stay untouched: {:?}",
             rollup.stages.iter().map(|r| r.id).collect::<Vec<_>>()
         );
+    }
+
+    fn failed_record(id: u32, title: &str, line: &str, detail: &str) -> StageRecord {
+        StageRecord {
+            id,
+            title: title.into(),
+            kind: "relational".into(),
+            passed: false,
+            pass_rate: 0.0,
+            passed_stages: 0,
+            total_stages: 1,
+            regressed: Vec::new(),
+            regression_severity: 0,
+            effective_cost_usd: 0.1,
+            turns: Some(10),
+            duration_seconds: Some(60.0),
+            status: "failed".into(),
+            variant: "full".into(),
+            tier: 3,
+            points: 0.0,
+            run_id: "r".into(),
+            git_commit: None,
+            git_stat: None,
+            rounds: Vec::new(),
+            failure: Some(FailureSummary {
+                kind: "own_stage".into(),
+                stage: Some(id),
+                line: line.into(),
+                detail: detail.into(),
+                stderr_tail: None,
+            }),
+        }
+    }
+
+    fn phase_state_with_failed(ids: &[u32]) -> LadderState {
+        let mut st = LadderState::default();
+        for id in 0..=20 {
+            if ids.contains(&id) {
+                st.outcomes.insert(id, LadderOutcome::Failed);
+                st.best.insert(id, false);
+            } else {
+                st.passed.push(id);
+                st.outcomes.insert(id, LadderOutcome::Full);
+                st.best.insert(id, true);
+            }
+        }
+        st.dirty = true;
+        st.last_green = Some("abc1234".into());
+        st
+    }
+
+    #[test]
+    fn phase_hints_name_blocked_tickets_and_include_the_repro() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+        let state = phase_state_with_failed(&[8]);
+        let mut prev = chain_rollup(2, true);
+        prev.stages.push(failed_record(
+            8,
+            "Joins",
+            "LEFT JOIN result had the wrong row count",
+            "seed 42: SELECT ... LEFT JOIN ... expected 3 rows, got 4",
+        ));
+        let hint = phase_hints(&prev, &lc.spec, phase, &state).expect("hint block");
+        assert!(hint.contains("Ticket 8"), "{hint}");
+        assert!(hint.contains("LEFT JOIN result"), "{hint}");
+        assert!(hint.contains("expected 3 rows"), "{hint}");
+        assert!(hint.contains("ticket 15"), "{hint}");
+        assert!(hint.contains("SPEC.md section"), "{hint}");
+        assert!(hint.contains("pts"), "{hint}");
+    }
+
+    #[test]
+    fn catch_up_targets_order_by_unblocked_points_then_id() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 4).unwrap();
+        let state = phase_state_with_failed(&[4, 8, 11]);
+        let outcomes: HashMap<u32, LadderOutcome> =
+            state.outcomes.iter().map(|(k, v)| (*k, *v)).collect();
+        let targets = catch_up_targets(&lc.spec, phase, &outcomes);
+        assert_eq!(targets.len(), 3);
+        // 4 blocks the whole phase-4 closure (32 pts), 8 blocks t16/t18,
+        // 11 blocks t16.
+        assert_eq!(targets[0].0, 4, "{targets:?}");
+        assert_eq!(targets[1].0, 8, "{targets:?}");
+        assert_eq!(targets[2].0, 11, "{targets:?}");
+        assert!(targets[0].1 >= targets[1].1 && targets[1].1 >= targets[2].1);
+        assert_eq!(targets.iter().map(|(id, _)| *id).collect::<Vec<_>>(), {
+            let mut ids: Vec<u32> = targets.iter().map(|(id, _)| *id).collect();
+            ids.sort_by(|a, b| {
+                let pa = targets.iter().find(|(i, _)| i == a).unwrap().1;
+                let pb = targets.iter().find(|(i, _)| i == b).unwrap().1;
+                pb.partial_cmp(&pa).unwrap().then(a.cmp(b))
+            });
+            ids
+        });
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_scores_four_tenths_and_unblocks_the_phase() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+        let mut state = phase_state_with_failed(&[8]);
+        state.hints = Some("HINT BLOCK".into());
+        let opts = CampaignRunOptions {
+            campaign_id: "catchup".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let seen =
+            std::cell::RefCell::new(Vec::<(u32, Option<StageVariant>, Option<String>)>::new());
+        let rollup = run_campaign_phase(
+            &lc,
+            &opts,
+            Some(phase),
+            Some(&state),
+            Some("prev"),
+            None,
+            |attempt| {
+                seen.borrow_mut().push((
+                    attempt.stage.id,
+                    Some(attempt.variant),
+                    attempt.hints.clone(),
+                ));
+                let id = attempt.stage.id;
+                async move { Ok(outcome(true, &[(id, true)])) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        assert_eq!(seen[0].0, 8, "the catch-up runs first: {seen:?}");
+        assert_eq!(seen[0].1, Some(StageVariant::Lite));
+        assert_eq!(seen[0].2.as_deref(), Some("HINT BLOCK"));
+        assert!(
+            seen.iter().any(|(id, _, _)| *id == 15),
+            "t15 unblocked: {seen:?}"
+        );
+        let rec = rollup
+            .stages
+            .iter()
+            .find(|r| r.id == 8)
+            .expect("catch-up record");
+        assert_eq!(rec.status, "catch-up");
+        let tier = lc.spec.stages.iter().find(|s| s.id == 8).unwrap().tier as f64;
+        assert!((rec.points - tier * 0.4).abs() < 1e-9, "{}", rec.points);
+        assert!(rollup.stages.iter().any(|r| r.id == 15 && r.passed));
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_is_capped_at_two_and_skipped_without_headroom() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 4).unwrap();
+        let state = phase_state_with_failed(&[2, 4, 8, 11]);
+        let opts = CampaignRunOptions {
+            campaign_id: "catchup2".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let rollup = run_campaign_phase(
+            &lc,
+            &opts,
+            Some(phase),
+            Some(&state),
+            Some("prev"),
+            None,
+            |attempt| {
+                let id = attempt.stage.id;
+                async move { Ok(outcome(false, &[(id, false)])) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let catch_ups = rollup
+            .stages
+            .iter()
+            .filter(|r| r.status == "catch-up")
+            .count();
+        assert_eq!(catch_ups, 2, "at most two catch-ups");
+
+        // A $0.03 cap cannot fit the $0.02 reserve plus $0.02 floor, so the
+        // catch-up (and the phase) never starts.
+        let opts = CampaignRunOptions {
+            campaign_id: "catchup3".into(),
+            ..opts
+        };
+        let tight = CampaignRunOptions {
+            budget_usd: 0.03,
+            ..opts
+        };
+        let seen = std::cell::RefCell::new(Vec::<u32>::new());
+        let rollup = run_campaign_phase(
+            &lc,
+            &tight,
+            Some(phase),
+            Some(&state),
+            Some("prev"),
+            None,
+            |attempt| {
+                seen.borrow_mut().push(attempt.stage.id);
+                let id = attempt.stage.id;
+                async move { Ok(outcome(true, &[(id, true)])) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(seen.into_inner().is_empty(), "no headroom, no catch-up");
+        assert!(rollup.cap_reached);
+    }
+
+    #[tokio::test]
+    async fn the_29_t8_and_t11_failures_catch_up_at_phase_starts() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let opts = CampaignRunOptions {
+            campaign_id: "replay".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        for (phase_id, failed) in [(3u32, 8u32), (4u32, 11u32)] {
+            let phase = lc.spec.phases.iter().find(|p| p.id == phase_id).unwrap();
+            let state = phase_state_with_failed(&[failed]);
+            let first = std::cell::RefCell::new(None::<(u32, Option<StageVariant>)>);
+            let _ = run_campaign_phase(
+                &lc,
+                &opts,
+                Some(phase),
+                Some(&state),
+                Some("prev"),
+                None,
+                |attempt| {
+                    if first.borrow().is_none() {
+                        *first.borrow_mut() = Some((attempt.stage.id, Some(attempt.variant)));
+                    }
+                    let id = attempt.stage.id;
+                    async move { Ok(outcome(true, &[(id, true)])) }
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            let (id, variant) = first.into_inner().expect("a catch-up attempt");
+            assert_eq!(id, failed, "phase {phase_id} catch-up");
+            assert_eq!(variant, Some(StageVariant::Lite), "phase {phase_id} lite");
+        }
     }
 
     #[tokio::test]

@@ -357,6 +357,16 @@ pub fn dry_run(name: &str, model: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Append the P2 career hints below the harness note (which the pipeline
+/// prepends to the prompt).
+fn with_hints(preamble: Option<String>, hints: Option<&str>) -> Option<String> {
+    match (preamble, hints) {
+        (Some(p), Some(h)) => Some(format!("{p}\n\n{h}")),
+        (None, Some(h)) => Some(h.to_string()),
+        (p, None) => p,
+    }
+}
+
 /// Persist the career ladder state at every phase boundary (P1).
 fn write_ladder_state(cdir: &Path, state: &campaign::LadderState) {
     atomic_write_json(
@@ -442,7 +452,7 @@ pub async fn run(
             .ok()
             .and_then(|t| serde_json::from_str::<campaign::LadderState>(&t).ok());
         let phase = phase.expect("a chain implies a phase");
-        let state = campaign::validate_chain(
+        let mut state = campaign::validate_chain(
             &rollup,
             state.as_ref(),
             phase,
@@ -451,6 +461,9 @@ pub async fn run(
             &effort,
             subdollarbench::report::rules::RULES_VERSION,
         )?;
+        if let Some(ps) = &phase_spec {
+            state.hints = campaign::phase_hints(&rollup, &lc.spec, ps, &state);
+        }
         let career = campaign::career_from(&rollup);
         (Some(state), Some(career))
     } else {
@@ -620,6 +633,7 @@ pub async fn run(
                 passed: attempt.passed.clone(),
                 outcomes: attempt.outcomes.clone(),
                 cap_headroom_usd: attempt.cap_headroom_usd,
+                hints: attempt.hints.clone(),
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -730,6 +744,7 @@ struct StageJob {
     /// SPEC.md sections and the harness note.
     outcomes: Vec<(u32, campaign::LadderOutcome)>,
     cap_headroom_usd: Option<f64>,
+    hints: Option<String>,
     rollback_first: bool,
 }
 
@@ -891,6 +906,8 @@ async fn run_one_stage(
     } else {
         None
     };
+    // P2: the phase-start career hints ride on every attempt's preamble.
+    let preamble = with_hints(preamble, job.hints.as_deref());
     let run_id = format!("{campaign_id}_s{}_{variant_tag}", stage.id);
     let stage_dir = cdir.join(format!("s{}_{variant_tag}", stage.id));
     std::fs::create_dir_all(&stage_dir)?;
@@ -1534,6 +1551,7 @@ mod tests {
             passed: Vec::new(),
             outcomes: Vec::new(),
             cap_headroom_usd: None,
+            hints: None,
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1562,7 +1580,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `run` fails on a missing campaign name in load_campaign — before the
+    #[test]
+    fn hint_preamble_appends_below_the_harness_note() {
+        assert_eq!(
+            with_hints(Some("note".into()), Some("hint")),
+            Some("note\n\nhint".to_string())
+        );
+        assert_eq!(with_hints(None, Some("hint")), Some("hint".to_string()));
+        assert_eq!(
+            with_hints(Some("note".into()), None),
+            Some("note".to_string())
+        );
+        assert_eq!(with_hints(None, None), None);
+    }
+
+    /// `run` fails on a missing campaign name in load_campaign    /// `run` fails on a missing campaign name in load_campaign — before the
     /// engine status probe, so no live engine is touched and nothing is
     /// written under the temp runs dir.
     #[tokio::test]
