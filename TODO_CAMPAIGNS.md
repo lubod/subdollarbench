@@ -468,7 +468,7 @@ The operator decisions D1-D3 and the reviewer's R1-R3 are implemented:
 The separate memory-cap investigation is not part of `.36`; phase 4
 remains unrunnable until it is understood.
 
-### Round-21 work: memory proofs, S1, S2 (opened 2026-10-21)
+### Round-21 work: memory proofs, S1-S3 (opened 2026-10-21)
 
 Review: `REVIEW.md` round 20. `.36` is accepted. Its findings are S1 and
 S2, and one planning point decides the order of everything else.
@@ -507,6 +507,37 @@ real data. It can't reach phase 4 and is not the published career.
     the first `read_dir` hit.
   - Test: `P1 -> old`, `P1 -> retry (refork of old)`; then
     `--chain old` is refused without `--refork`.
+- **S3: the phase view in the GUI (operator report 2026-10-21: "I do
+  not see 4 phases, it is one line from 0 to 20").** This is display
+  only; grading doesn't change.
+  - **S3c: the live key clash.** The career phase number must not share
+    `live.phase` with the activity (`agent`/`verifying`/…).
+    - Write the phase as `live.career_phase` (and top-level
+      `career_phase` in status.json).
+    - `live_rollup_stub` reads it, and sets `max_points` to the phase's
+      points (10/12/22/32), not 76.
+  - **S3b: a phase-aware strip.** For a phase cell, `campaign::ladder`
+    returns all 21 entries, each with a `phase` field.
+    - Tickets of the cell's own phase keep today's statuses.
+    - Earlier-phase tickets come from the carried `ladder_state`
+      (`outcomes`): status `carried` (pass/lite/failed).
+    - Later-phase tickets get status `later_phase`, never "skipped" or
+      "not reached".
+    - The strip draws the 4 phases as 4 separated groups, labelled
+      P1 0–6, P2 7–10, P3 11–15 and P4 16–20. The legend gets the two new
+      statuses.
+  - **S3a: the career row the P1 spec asked for.**
+    - The career's top row shows one strip that merges every phase cell
+      in the chain, each group coloured from the cell that ran it.
+    - It adds 4 per-phase cells, each showing points and cost, e.g.
+      `P1 8.2/10 · $0.45`. A phase not run yet reads `—`, and a running
+      one reads `running`.
+    - Then the career total `x/76` and the career cost.
+    - Expanding the row still lists the individual phase cells.
+  - **Tests:** the smoke fixture checks a phase-1 cell (7–20
+    `later_phase`, `0/10`), a running phase-1 cell (`career_phase` 1,
+    `0/10`), and a phase-2 career row (4 groups, P1 and P2 filled, P3 and
+    P4 `—`). Add a Rust test for the phase-aware `ladder`.
 - **Gates:**
   - niced `cargo test`, with the full lib suite unfiltered;
   - fmt and clippy;
