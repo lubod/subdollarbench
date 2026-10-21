@@ -5,6 +5,179 @@ tickets, cumulative acceptance, cost-first scoring, runtime faults.
 See `docs/PROPOSAL-iterative-campaigns.md` (ladder + contracts) and
 `docs/PROPOSAL-scoring-v2.md` (protocol/curve/Pareto).
 
+## sdb-sql career phases: four cells under $1 each (opened 2026-10-21)
+
+**Operator decision (2026-10-21):** the 21-ticket ladder is split into
+**4 phases**. Each phase is its own cell under the M5 cap ($0.99 / 150
+min), run in **career mode**: phase N continues the same model's
+workspace, data dir and ladder state from its phase N-1 cell. A model's
+career score is the sum of its phase points (max 76). Reviewer: Claude
+Code (REVIEW.md). Do the items in order, and **commit each item
+separately** with its own rules bump.
+
+| Phase | Tickets | Tiers | Max points | Ticket budgets (API) | Haiku 5.5 `.31` actual |
+|---|---|---|---|---|---|
+| 1. Core + durability | 0-6 | 1-2 | 10 | $0.97 | $0.49 |
+| 2. Relational | 7-10 | 3 | 12 | $0.54 | $0.56 |
+| 3. Engine | 11-15 | 4-5 | 22 | $0.79 | - |
+| 4. Hard | 16-20 | 6-7 | 32 | $0.90 | - |
+
+### P0. Cap enforcement (rules `.32`): prerequisite, nothing else is safe without it
+
+The first Haiku 5.5 cell ended at **$1.0495 against $0.99**
+(`runs/campaign_sdb-sql_openrouter_anthropic_claude-haiku-5.5_20261020_200329`).
+A reviewer patch was lost in a reboot, so this is a spec to implement:
+
+1. **One API budget per attempt.**
+   - Today every repair round gets `max_budget_usd: Some(config.budget_usd)`
+     again (`pipeline.rs`, round 0 and the repair loop). Ticket 9 metered
+     $0.1307 of $0.12 in round 0 and then $0.055 more in its repair.
+   - Add `cost_usd` (the live-metered API spend: OMP `accumulated_cost`,
+     opencode Σ step cost) and `max_call_usd` (the largest single call) to
+     `OmpSessionStats`. Sum them across rounds.
+   - Add a pure `repair_round_spend(budget, api_spent, cap_left) ->
+     Result<(Option<f64>, Option<f64>), String>`. A repair round gets
+     `budget - spent` and does not start (log `[LIMIT] Repair round N not
+     started: …`, and break *before* stopping the candidate or writing
+     FEEDBACK_REPORT.md) when less than `BUDGET_FLOOR_USD` ($0.02) is
+     left of the budget or of the cap.
+2. **In-session stop at the cell's effective headroom.**
+   - Add `AgentExecutionLimits::max_effective_usd: Option<f64>`. Check it
+     in the runner's wait loop (OMP status loop, opencode `waited` loop),
+     not per session line, because the time floor grows between calls.
+   - Spend there = metered API + `calculate_effective_cost` floor of the
+     elapsed seconds, fresh tokens and cache-read tokens. OMP must start
+     counting cache reads (`accumulated_cached`).
+   - On a trip, log `[LIMIT] Reached the campaign cap's headroom ($x / $y
+     effective)` and stop like a budget trip (Ok, partial stats).
+   - The pipeline passes, per round: `cap_headroom - (attempt API so far +
+     compute floor of the pipeline's elapsed time and tokens so far)`.
+3. **Reserve.**
+   - `CAP_RESERVE_USD = 0.02`; `cap_reserve(max_call) =
+     max(cell's largest call so far, 0.02)`. Haiku's largest was $0.033,
+     DeepSeek's $0.0225.
+   - `StageAttempt` / `StageJob` / `CampaignStageConfig` carry
+     `cap_headroom_usd = cap - total - reserve` (INFINITY, or None when
+     uncapped). `StageOutcome::max_call_usd` comes back via
+     `PipelineOutput`.
+   - A ticket starts only if `cap - total >= reserve + BUDGET_FLOOR_USD`;
+     the lite check uses the reserve the full attempt just raised. The
+     api_ratio clamp stays, applied to the net headroom.
+   - Log one `[COST] metered … largest call …` line per attempt.
+4. **Gates:**
+   - unit tests for `repair_round_spend` (the $0.1307/$0.12 and
+     $0.0364/$0.02 cases);
+   - a fake-docker `cap` scenario in **both** harnesses (two calls, $0.01
+     then $0.03, `max_effective_usd = 0.02`, $1.00 API budget: the cap line
+     trips, never the budget line; stats carry `cost_usd` 0.04 and
+     `max_call_usd` 0.03);
+   - a ladder replay of the Haiku ending: cap $0.99, $0.9553 spent with
+     the largest call $0.0333, so ticket 10 is **not** started;
+   - a lite test showing the raised reserve skips a lite;
+   - update `test_ladder_cap_converts_headroom_to_api_dollars` (first
+     budget 0.045, cap headroom 0.18, ends as `cap_reached`).
+5. **Score impact (put it in the rules history):** a ticket whose round 0
+   spends its budget is no longer repaired. Haiku's t9 (3 points) and
+   DeepSeek `.29`'s t19 (7 points) passed only that way.
+
+### P1. Phases + career chaining (rules `.33`)
+
+1. **Phase list in the spec:**
+   - `campaigns/sdb-sql/campaign.json` gains
+     `"phases": [{"id": 1, "title": "Core + durability", "stages": [0,1,2,3,4,5,6]}, …]`.
+   - The validator checks that phases partition the stage ids, are
+     contiguous and in order, and that no stage `needs` a stage from a
+     *later* phase.
+   - `max_points(phase)` = Σ tier over the phase's stages (10 / 12 / 22 /
+     32).
+2. **CLI:** `campaign run sdb-sql --phase N --chain <prev_campaign_id>`.
+   - `--phase 1` needs no chain.
+   - `--phase N>1` **requires** `--chain`. The previous cell must be
+     phase N-1, same model, same harness and effort, same rules version,
+     and finished. Otherwise refuse with the reason.
+3. **Carry-over from the chained cell:**
+   - the workspace (as-is, including `.git`, so the stage history
+     continues), `sql-data` and `sql-data.snap`, the sentinels, and
+     `baseline.json` (the perf gate's genesis baseline);
+   - the ladder state: `outcomes`, `passed_all`, `liters` (lite profiles),
+     `best` (for regression detection), `dirty`, and the last-green commit.
+   - Persist that state in the cell dir (for example `ladder_state.json`
+     written at every stage boundary) instead of re-deriving it from
+     `campaign.json`.
+4. **Rollup:**
+   - `phase`, `chain_from`, `max_points` for the phase;
+   - a `career` block: points so far, total spend across the chain, and
+     the cell ids.
+5. **Console:**
+   - Launch form: a phase picker plus a "continue from" dropdown listing
+     finished cells of the previous phase for that model.
+   - Board: one row per model career, with per-phase points and cost
+     columns and the career total. Group by rules version as today.
+   - Run view: the chain links.
+6. **`scripts/sql-cell.sh`:** add an optional `PHASE CHAIN` (keep the
+   defaults $0.99 / 150).
+7. **Gates:**
+   - a spec-validation test (partition, no forward needs, points
+     10+12+22+32 = 76);
+   - a chain test with a fake exec: phase 1 fails t4, so phase 3's 11 and
+     13 are recorded skipped and cost nothing, and phase 2 is untouched;
+   - the refusal paths (wrong phase, other model, unfinished cell);
+   - a carry-over test: phase 2's first attempt sees phase 1's `passed`,
+     lite profiles and `rollback_first` state.
+
+### P2. Career hints: keep a failure from sinking later phases (rules `.34`)
+
+In career mode one red ticket compounds. Failing t4 blocks 5, 6, 11, 13,
+16, 17 and 19, which is 30 of 76 points. Two mechanisms, both bounded by
+the phase cap:
+
+1. **Catch-up slot at phase start.**
+   - Before phase N's first ticket, re-attempt each earlier *failed*
+     ticket that a phase-N ticket `needs`. Run its lite variant if it has
+     one, else the full ticket at its lite budget.
+   - Order: by how many phase-N points it unblocks, then by id. At most
+     2 catch-ups per phase.
+   - A catch-up pass unblocks `needs`, but scores only the lite weight
+     (0.4 x tier) and is recorded `status: "catch-up"`. Repeating cannot
+     beat passing first time.
+   - It runs with the normal SPEC/rollback/preamble machinery.
+2. **Hints in the harness note (no points cost).** When a phase starts
+   with failed or skipped tickets, the preamble adds per broken ticket:
+   - its classified failure from the last attempt
+     (`FailureSummary.line` plus the minimal repro already produced by
+     the verifier);
+   - the SPEC.md section that the ticket owns;
+   - which phase-N tickets it blocks, and their points.
+
+   The hint is written by the harness from recorded verifier output,
+   never from a reference solution.
+3. **Alternative to evaluate, not to build yet: "assisted unblock".**
+   - If a catch-up also fails, the harness applies a reference patch for
+     just that ticket (a verified per-ticket diff on top of the model's
+     code). The ticket scores 0, and the career continues with its
+     `needs` met.
+   - It needs per-ticket reference patches that apply to arbitrary model
+     code, which is likely infeasible in general. Write a half-page
+     assessment in REVIEW-style before anyone builds it.
+4. **Gates:**
+   - catch-up ordering and the cap of 2;
+   - a catch-up pass scores 0.4 x tier and unblocks;
+   - a catch-up skipped when the reserve plus floor isn't left;
+   - the hint preamble names the blocked tickets and their points, and
+     includes the stored repro;
+   - a replay of the `.29` DeepSeek ladder as a phase split: t8 and t11
+     failures produce catch-ups at phase 2 and 3 starts.
+
+### Rules for this work
+
+- Each item is a rules bump with a history entry (what changed, why,
+  score impact).
+- Run the full `cargo test` niced, plus fmt and clippy. Do not restart
+  the services and do not launch paid cells. The operator does that
+  after review.
+- Cells from before `.33` stay single-ladder rows under their own rules
+  version.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and
