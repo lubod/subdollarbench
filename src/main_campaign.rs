@@ -356,43 +356,6 @@ pub fn dry_run(name: &str, model: &str) -> Result<()> {
     Ok(())
 }
 
-/// Q6: find a finished, non-faulted cell that already names `chain_id` as
-/// its predecessor. Careers are chains, not best-of-k forks.
-fn chain_already_used(runs_dir: &Path, chain_id: &str) -> Option<String> {
-    let rd = std::fs::read_dir(runs_dir).ok()?;
-    for e in rd.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if name == chain_id || !name.starts_with("campaign_") || !e.path().is_dir() {
-            continue;
-        }
-        let read = |f: &str| {
-            std::fs::read_to_string(e.path().join(f))
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        };
-        let rollup = read("campaign.json").or_else(|| {
-            read("status.json").and_then(|v| v.get("rollup").cloned().filter(|r| !r.is_null()))
-        });
-        let Some(r) = rollup else { continue };
-        if r.get("chain_from").and_then(|v| v.as_str()) != Some(chain_id) {
-            continue;
-        }
-        if r.get("finished_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            continue;
-        }
-        if r.get("harness_fault").filter(|v| !v.is_null()).is_some() {
-            continue;
-        }
-        return Some(name);
-    }
-    None
-}
-
 /// Append the P2 career hints below the harness note (which the pipeline
 /// prepends to the prompt).
 fn with_hints(preamble: Option<String>, hints: Option<&str>) -> Option<String> {
@@ -432,6 +395,7 @@ pub async fn run(
     workspace: Option<String>,
     phase: Option<u32>,
     chain: Option<String>,
+    refork: Option<String>,
 ) -> Result<()> {
     let lc = campaign::load_campaign(&name).context("load campaign")?;
     // Foreground campaigns use the canonical worker-0 ports (6379/6380/…);
@@ -466,7 +430,15 @@ pub async fn run(
         }
         _ => {}
     }
+    if refork.is_some() && chain.is_none() {
+        anyhow::bail!("--refork requires --chain");
+    }
+    let refork_reason = refork.as_deref().map(str::trim).unwrap_or("");
+    if refork.is_some() && refork_reason.is_empty() {
+        anyhow::bail!("--refork needs a non-empty reason");
+    }
     let runs_dir = RunArchiver::resolve_runs_dir();
+    let mut refork_info: Option<campaign::ReforkInfo> = None;
 
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let model_tag = model.replace(['/', ':'], "_");
@@ -480,13 +452,13 @@ pub async fn run(
         if chain_id.contains('/') || chain_id.contains("..") {
             anyhow::bail!("invalid --chain id {chain_id:?}");
         }
-        // Q6: a phase cell may be continued only once; the campaign lock
-        // is held here, so the scan is race-free.
-        if let Some(other) = chain_already_used(&runs_dir, chain_id) {
-            anyhow::bail!(
-                "chain cell {chain_id} was already continued by {other}; careers are not best-of-k"
-            );
-        }
+        // R1 (D2): any existing successor uses up the chain, including
+        // running, cancelled and crashed cells; a harness-faulted cell is a
+        // non-result and does not. The campaign lock is held here.
+        let successor = campaign::chain_already_used(&runs_dir, chain_id);
+        refork_info =
+            campaign::resolve_refork(successor.as_deref(), Some(chain_id), refork.as_deref())
+                .map_err(|e| anyhow::anyhow!(e))?;
         let chain_dir = runs_dir.join(chain_id);
         let status: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(chain_dir.join("status.json"))
@@ -549,7 +521,10 @@ pub async fn run(
             "campaign_spent": 0.0,
             "phase": phase,
             "chain_from": chain,
+            "refork": refork_info,
         });
+        v["chain_from"] = serde_json::json!(chain);
+        v["refork"] = serde_json::json!(refork_info);
     });
     let workdir = cdir.join("workspace");
 
@@ -768,6 +743,7 @@ pub async fn run(
         write_ladder_state(&cdir, st);
     }
 
+    rollup.refork = refork_info.clone();
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
@@ -1378,6 +1354,7 @@ mod tests {
             budget_usd: 0.0,
             wall_min: 0,
             harness_fault: None,
+            refork: None,
         }
     }
 
@@ -1683,6 +1660,58 @@ mod tests {
     }
 
     #[test]
+    fn r1_a_cancelled_or_status_only_successor_blocks_the_chain() {
+        let dir = tmp("r1_scan");
+        let runs = dir.join("runs");
+        let cancelled = runs.join("campaign_cancelled");
+        std::fs::create_dir_all(&cancelled).unwrap();
+        std::fs::write(
+            cancelled.join("status.json"),
+            serde_json::json!({
+                "state": "cancelled",
+                "chain_from": "campaign_root",
+                "finished_at": ""
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            campaign::chain_already_used(&runs, "campaign_root").as_deref(),
+            Some("campaign_cancelled")
+        );
+
+        // A successor that only reached status.json blocks too.
+        let running = runs.join("campaign_running");
+        std::fs::create_dir_all(&running).unwrap();
+        std::fs::write(
+            running.join("status.json"),
+            serde_json::json!({"state": "running", "live": {"chain_from": "campaign_root"}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(campaign::chain_already_used(&runs, "campaign_root").is_some());
+
+        // A harness-faulted successor alone is a non-result and does not.
+        let fdir = tmp("r1_fault");
+        let fruns = fdir.join("runs");
+        let faulted = fruns.join("campaign_faulted");
+        std::fs::create_dir_all(&faulted).unwrap();
+        std::fs::write(
+            faulted.join("campaign.json"),
+            serde_json::json!({
+                "chain_from": "campaign_root",
+                "harness_fault": "provider billing"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(campaign::chain_already_used(&fruns, "campaign_root").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fdir);
+    }
+
+    #[test]
     fn q6_a_chain_cell_cannot_be_continued_twice() {
         let dir = tmp("chain_reuse");
         let runs = dir.join("runs");
@@ -1701,7 +1730,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            chain_already_used(&runs, "campaign_root").as_deref(),
+            campaign::chain_already_used(&runs, "campaign_root").as_deref(),
             Some("campaign_child")
         );
         // An unfinished or faulted cell does not claim the chain.
@@ -1717,9 +1746,9 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert!(chain_already_used(&runs, "campaign_root").is_some());
+        assert!(campaign::chain_already_used(&runs, "campaign_root").is_some());
         // A different parent is not a fork of this chain.
-        assert!(chain_already_used(&runs, "campaign_other").is_none());
+        assert!(campaign::chain_already_used(&runs, "campaign_other").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1739,6 +1768,7 @@ mod tests {
             5,
             None,
             true,
+            None,
             None,
             None,
             None,

@@ -2013,6 +2013,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 workspace,
                 phase,
                 chain,
+                refork,
             } => {
                 main_campaign::run(
                     name,
@@ -2027,6 +2028,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     workspace,
                     phase,
                     chain,
+                    refork,
                 )
                 .await?
             }
@@ -2895,6 +2897,7 @@ mod tests {
             150,
             Some(2),
             Some("campaign_prev"),
+            None,
         );
         let cli = Cli::try_parse_from(
             std::iter::once("subdollarbench").chain(args.iter().map(String::as_str)),
@@ -4863,6 +4866,7 @@ mod tests {
                     workspace: None,
                     phase: None,
                     chain: None,
+                    refork: None,
                 },
             },
         })

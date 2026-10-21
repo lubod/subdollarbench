@@ -1192,6 +1192,8 @@
             <div><span class="hint">Continue from</span><br>
               <input id="campaignChain" list="campaignChainList" placeholder="previous phase cell id" style="width:220px;" />
               <datalist id="campaignChainList"></datalist></div>
+            <div id="campaignReforkWrap" style="display:none;"><span class="hint">Refork reason</span><br>
+              <input id="campaignRefork" placeholder="why this fork is deliberate" style="width:240px;" /></div>
             <button class="btn" id="campaignStartBtn" onclick="startCampaign()">Start campaign</button>
           </div>
           <div class="hint" id="campaignChoice" style="margin-top:6px;">model: <b>—</b> · effort: <b>—</b></div>
@@ -2318,18 +2320,51 @@
       return '';
     }
 
-    function careerRoot(r, fallback) {
-      return (r.career && r.career.cells && r.career.cells.length)
-        ? r.career.cells[0]
-        : fallback;
+    function careerRoot(r, fallback, byId) {
+      if (r.career && r.career.cells && r.career.cells.length) {
+        return r.career.cells[0];
+      }
+      // R2: a running phase cell has no career block yet; follow its
+      // chain_from through the cells we can see to the root.
+      let id = r.chain_from || null;
+      const seen = new Set();
+      while (id && !seen.has(id)) {
+        seen.add(id);
+        const pred = byId && byId[id];
+        if (!pred) break;
+        const pr = cellRollup(pred);
+        if (pr.career && pr.career.cells && pr.career.cells.length) {
+          return pr.career.cells[0];
+        }
+        id = pr.chain_from || null;
+      }
+      return id || fallback;
+    }
+    function careerLeaf(cells) {
+      // R2: the finished cell no other cell in the group names as its
+      // chain_from; a refork's older child ties, so take the newest
+      // started_at (then id).
+      const finished = cells.filter(c => c.state === 'done' && !cellRollup(c).harness_fault);
+      // Only finished children count: a running next phase is shown under
+      // the root as a running row, not as the successor that dethrones the
+      // last finished leaf.
+      const children = new Set(finished.map(c => cellRollup(c).chain_from).filter(Boolean));
+      const leaves = finished.filter(c => !children.has(c.id));
+      const pool = leaves.length ? leaves : finished;
+      return pool.slice().sort((a, b) => {
+        const ra = cellRollup(a), rb = cellRollup(b);
+        const ta = ra.started_at || a.started_at || '';
+        const tb = rb.started_at || b.started_at || '';
+        return String(tb).localeCompare(String(ta)) || String(b.id).localeCompare(String(a.id));
+      })[0] || null;
     }
     function careerPoints(cells) {
-      const leaf = cells.slice().sort((a, b) => (cellRollup(b).phase || 0) - (cellRollup(a).phase || 0))[0];
+      const leaf = careerLeaf(cells);
       const c = leaf && cellRollup(leaf).career;
       return c ? Number(c.points || 0) : 0;
     }
     function careerCost(cells) {
-      const leaf = cells.slice().sort((a, b) => (cellRollup(b).phase || 0) - (cellRollup(a).phase || 0))[0];
+      const leaf = careerLeaf(cells);
       const c = leaf && cellRollup(leaf).career;
       return c ? Number(c.total_cost_usd || 0) : 0;
     }
@@ -2339,14 +2374,19 @@
       // to a generic model group with phase 1 and phase 4 mixed. Full-ladder
       // cells keep their own row class. The API's career-aware key orders
       // the groups; the UI re-sorts careers by their cumulative score.
+      const byId = {};
+      if (typeof boardCache !== 'undefined' && Array.isArray(boardCache)) {
+        boardCache.forEach(c => { byId[c.id] = c; });
+      }
+      cells.forEach(c => { byId[c.id] = c; });
       const groups = {};
       cells.forEach(c => {
         const r = cellRollup(c);
-        if (!r.model) return;
+        if (!r.model || r.harness_fault) return; // R2: a non-result is not in a career
         const base = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}\u0001${r.rules_version || ''}`;
         const phase = r.phase != null;
         const key = phase
-          ? `career:${careerRoot(r, c.id)}\u0001${base}`
+          ? `career:${careerRoot(r, c.id, byId)}\u0001${base}`
           : `full\u0001${base}`;
         const g = groups[key] = groups[key] || { key, cells: [], career: phase };
         g.cells.push(c);
@@ -2465,12 +2505,15 @@
       const indent = opts && opts.indent ? 'padding-left:28px;opacity:.8;' : '';
       const extra = (opts && opts.extra) ? opts.extra : '';
       const state = cellState(cell);
+      const refork = r.refork
+        ? ` <span class="badge" style="border-color:var(--warning);color:var(--warning);font-size:.62rem;" title="fork of ${escapeHtml(r.refork.of || '?')}">refork: ${escapeHtml(r.refork.reason || '')}</span>`
+        : '';
       const href = `#run/${encodeURIComponent(cell.id)}`;
       return `<tr style="${indent}" onclick="location.hash='run/${encodeURIComponent(cell.id)}'" onkeydown="if(event.key==='Enter'){location.hash='run/${encodeURIComponent(cell.id)}';}" tabindex="0" title="${escapeHtml(cell.id)}">
         <td style="text-align:center;color:var(--text-muted);width:34px;">${rank}</td>
         <td><a href="${href}" style="color:inherit;text-decoration:none;font-weight:600;" onclick="event.stopPropagation();"><b>${escapeHtml(shortModel(r.model || cell.id))}</b></a>${extra}
           <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))}</div>
-          <div class="hint" style="${state.cls}">${escapeHtml(state.text)}${stale}</div></td>
+          <div class="hint" style="${state.cls}">${escapeHtml(state.text)}${stale}${refork}</div></td>
         <td style="width:100%;">${ladderStrip(cell.ladder, cell)}</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt1(pts)}/${Math.round(maxPts)} pts</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">$${fmtMoney(cost)}</td>
@@ -2517,13 +2560,10 @@
       let rows = '';
       let dividerDone = false;
       groupCells(visible).forEach(({ key, cells, career }) => {
-        // A career group's rows are phases, not repeat runs: the leaf
-        // (highest phase, cumulative career) is the top row; the rest are
-        // the expanded phase cells.
-        if (career) {
-          cells.sort((a, b) => (cellRollup(b).phase || 0) - (cellRollup(a).phase || 0));
-        }
-        const top = cells[0];
+        // R2: a career's top is the finished leaf (no other cell names it),
+        // not merely the highest phase; a refork's older child ties, so the
+        // newest started_at wins. The rest are expanded phase rows.
+        const top = career ? (careerLeaf(cells) || cells[0]) : cells[0];
         if (boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
           rows += `<tr><td colspan="6" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
           dividerDone = true;
@@ -2537,8 +2577,22 @@
         rows += boardRowHtml(top, rank, { extra, careerView: career });
         if (expanded && n > 1) {
           if (career) {
+            const topRollup = cellRollup(top);
+            const topFrom = topRollup.chain_from;
+            const topStarted = topRollup.started_at || '';
             rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">career phases (leaf first): the top row is the cumulative career; these are the individual phase cells</td></tr>`;
-            cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
+            cells
+              .filter(c => c.id !== top.id)
+              .sort((a, b) => (cellRollup(a).phase || 0) - (cellRollup(b).phase || 0))
+              .forEach(c => {
+                const cr = cellRollup(c);
+                let label = '';
+                if (c.state === 'running') label = 'running';
+                else if (topFrom && cr.chain_from === topFrom
+                         && String(cr.started_at || '') < String(topStarted)) label = 'superseded';
+                const extra = label ? ` <span class="hint">${label}</span>` : '';
+                rows += boardRowHtml(c, '\u00b7', { indent: true, extra });
+              });
           } else {
             const sorted = cells.map(cellPoints).sort((a, b) => a - b);
             // P1 (round 14): an even count's median is the mean of the middles.
@@ -2725,6 +2779,10 @@
       const phase = parseInt(phaseEl.value || '0', 10);
       const model = (document.getElementById('model').value || '').trim();
       list.innerHTML = '';
+      const reforkWrap = document.getElementById('campaignReforkWrap');
+      const reforkEl = document.getElementById('campaignRefork');
+      if (reforkWrap) reforkWrap.style.display = 'none';
+      if (reforkEl) reforkEl.value = '';
       if (!phase || phase <= 1) {
         input.value = '';
         input.disabled = true;
@@ -2753,8 +2811,13 @@
       const effort = (document.getElementById('effortSelect') || {}).value || 'high';
       const phaseEl = document.getElementById('campaignPhase');
       const chainEl = document.getElementById('campaignChain');
+      const reforkWrap = document.getElementById('campaignReforkWrap');
+      const reforkEl = document.getElementById('campaignRefork');
       const phase = phaseEl && phaseEl.value ? parseInt(phaseEl.value, 10) : null;
       const chain = phase && phase > 1 && chainEl ? (chainEl.value || '').trim() : null;
+      const refork = (chain && reforkWrap && reforkWrap.style.display !== 'none' && reforkEl)
+        ? (reforkEl.value || '').trim()
+        : null;
       const msg = document.getElementById('campaignStartMsg');
       const cmd = document.getElementById('campaignCmd');
       if (!model) { msg.textContent = 'Pick a model first.'; return; }
@@ -2767,7 +2830,7 @@
         msg.innerHTML = `a cell is already running — one at a time · <a href="#live" style="color:var(--primary);">Live ↗</a>`;
         return;
       }
-      const extra = `${phase ? ` --phase ${phase}` : ''}${chain ? ` --chain ${chain}` : ''}`;
+      const extra = `${phase ? ` --phase ${phase}` : ''}${chain ? ` --chain ${chain}` : ''}${refork ? ` --refork "${refork}"` : ''}`;
       const resolved = `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 20${extra}`;
       cmd.innerHTML = `resolved: <code>${escapeHtml(resolved)}</code>`;
       msg.textContent = 'starting…';
@@ -2775,10 +2838,19 @@
         const res = await fetch('/api/campaigns', {
           method: 'POST',
           headers: authHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({model, budget_usd: budget, wall_min: wall, effort, phase, chain}),
+          body: JSON.stringify({model, budget_usd: budget, wall_min: wall, effort, phase, chain, refork}),
         });
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) { msg.textContent = body.error || `failed (${res.status})`; return; }
+        if (!res.ok) {
+          if (body.refork_required) {
+            if (reforkWrap) reforkWrap.style.display = '';
+            if (reforkEl) reforkEl.focus();
+            msg.textContent = `${body.error || 'this chain is already continued'} — give a refork reason and start again for a deliberate fork.`;
+            return;
+          }
+          msg.textContent = body.error || `failed (${res.status})`;
+          return;
+        }
         msg.innerHTML = `started (pid ${body.pid}) · <code>${escapeHtml(body.cmd || resolved)}</code> — watch it on the Board/Live tabs`;
         refreshBoard();
       } catch (e) { msg.textContent = 'failed: ' + e.message; }

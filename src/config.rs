@@ -77,6 +77,10 @@ pub enum CampaignAction {
         /// Previous phase cell id to continue from (P1 career chaining).
         #[arg(long)]
         chain: Option<String>,
+        /// R1: deliberately fork a chain an existing cell already continued;
+        /// requires --chain and a reason.
+        #[arg(long)]
+        refork: Option<String>,
     },
 }
 

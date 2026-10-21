@@ -238,16 +238,17 @@ impl LoadedCampaign {
                 continue;
             }
             let outcome = outcomes.iter().find(|(id, _)| *id == s.id).map(|(_, o)| *o);
-            if matches!(
-                outcome,
-                Some(LadderOutcome::Full) | Some(LadderOutcome::Lite)
-            ) {
-                push(
-                    &mut out,
-                    &format!("Ticket {}: {}", s.id, s.title),
-                    &self.root.join(&s.prompt),
-                )?;
-            }
+            // R3: `passed` is the filter; the label comes from `outcomes`.
+            let label = match outcome {
+                Some(LadderOutcome::Full) => "full",
+                Some(LadderOutcome::Lite) => "lite",
+                _ => "passed",
+            };
+            push(
+                &mut out,
+                &format!("Ticket {}: {} ({label})", s.id, s.title),
+                &self.root.join(&s.prompt),
+            )?;
         }
         push(
             &mut out,
@@ -855,6 +856,105 @@ pub fn phase_max_points(phase: &PhaseSpec, stages: &[StageSpec]) -> f64 {
 /// The phase that owns a stage id, if the spec has phases.
 pub fn phase_of(spec: &CampaignSpec, stage: u32) -> Option<&PhaseSpec> {
     spec.phases.iter().find(|p| p.stages.contains(&stage))
+}
+
+/// R1: any cell that names `chain_id` in `chain_from` uses up the chain.
+/// This counts running, cancelled, crashed and unfinished cells; only a
+/// harness-faulted cell (a non-result) is ignored. It reads the rollup when
+/// present and the status-level marker (written at cell creation) when a
+/// cell died before its first stage.
+pub fn chain_already_used(runs_dir: &std::path::Path, chain_id: &str) -> Option<String> {
+    let rd = std::fs::read_dir(runs_dir).ok()?;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == chain_id || !name.starts_with("campaign_") || !e.path().is_dir() {
+            continue;
+        }
+        let read = |f: &str| {
+            std::fs::read_to_string(e.path().join(f))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        };
+        let campaign = read("campaign.json");
+        let status = read("status.json");
+        let rollup = campaign.or_else(|| {
+            status
+                .as_ref()
+                .and_then(|s| s.get("rollup").cloned().filter(|r| !r.is_null()))
+        });
+        let chain_from = rollup
+            .as_ref()
+            .and_then(|r| r.get("chain_from"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                status
+                    .as_ref()
+                    .and_then(|s| s.get("chain_from"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                status
+                    .as_ref()
+                    .and_then(|s| s.pointer("/live/chain_from"))
+                    .and_then(|v| v.as_str())
+            });
+        if chain_from != Some(chain_id) {
+            continue;
+        }
+        let faulted = rollup
+            .as_ref()
+            .and_then(|r| r.get("harness_fault"))
+            .filter(|v| !v.is_null())
+            .is_some()
+            || status
+                .as_ref()
+                .and_then(|s| s.get("harness_fault"))
+                .filter(|v| !v.is_null())
+                .is_some()
+            || status
+                .as_ref()
+                .and_then(|s| s.pointer("/rollup/harness_fault"))
+                .filter(|v| !v.is_null())
+                .is_some();
+        if faulted {
+            continue;
+        }
+        return Some(name);
+    }
+    None
+}
+
+/// R1 (D2): decide whether this run may proceed given the chain's existing
+/// successor. A successor without `refork` is refused with the existing id;
+/// `refork` without `--chain` or with an empty reason is refused; a refork
+/// on an unused chain is refused.
+pub fn resolve_refork(
+    successor: Option<&str>,
+    chain: Option<&str>,
+    refork: Option<&str>,
+) -> Result<Option<ReforkInfo>, String> {
+    if refork.is_some() && chain.is_none() {
+        return Err("--refork requires --chain".to_string());
+    }
+    let reason = refork.unwrap_or("").trim();
+    if refork.is_some() && reason.is_empty() {
+        return Err("--refork needs a non-empty reason".to_string());
+    }
+    match (successor, refork) {
+        (Some(other), None) => Err(format!(
+            "chain cell {} was already continued by {other}; rerun with --refork \"<reason>\" only for a deliberate fork",
+            chain.unwrap_or("?")
+        )),
+        (Some(other), Some(_)) => Ok(Some(ReforkInfo {
+            of: other.to_string(),
+            reason: reason.to_string(),
+        })),
+        (None, Some(_)) => Err(format!(
+            "chain cell {} is not used by any existing cell; drop --refork",
+            chain.unwrap_or("?")
+        )),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Validate a career chain and return its ladder state (P1). The previous
@@ -1739,9 +1839,17 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         points: 0.0,
         max_points: 0.0,
-        phase: None,
-        chain_from: None,
+        phase: v["live"]["phase"].as_u64().map(|p| p as u32),
+        chain_from: v["live"]["chain_from"]
+            .as_str()
+            .or_else(|| v["chain_from"].as_str())
+            .map(str::to_string),
         career: None,
+        refork: if v["live"]["refork"].is_null() {
+            None
+        } else {
+            serde_json::from_value(v["live"]["refork"].clone()).ok()
+        },
         ladder_state: None,
         harness_fault: None,
     }
@@ -1759,7 +1867,7 @@ pub const CELL_WALL_MIN: u64 = 150;
 /// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
 /// test pins that the real clap definition accepts it (round-8 finding 2).
 pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) -> Vec<String> {
-    launcher_args_with_phase(model, effort, budget_usd, wall_min, None, None)
+    launcher_args_with_phase(model, effort, budget_usd, wall_min, None, None, None)
 }
 
 /// Launcher argv with the optional career phase/chain (P1). Kept separate
@@ -1771,6 +1879,7 @@ pub fn launcher_args_with_phase(
     wall_min: u64,
     phase: Option<u32>,
     chain: Option<&str>,
+    refork: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = [
         "campaign",
@@ -1798,6 +1907,10 @@ pub fn launcher_args_with_phase(
     if let Some(c) = chain.filter(|c| !c.is_empty()) {
         args.push("--chain".into());
         args.push(c.to_string());
+    }
+    if let Some(r) = refork.filter(|r| !r.trim().is_empty()) {
+        args.push("--refork".into());
+        args.push(r.to_string());
     }
     args
 }
@@ -2017,6 +2130,14 @@ pub struct LadderState {
     pub last_failures: BTreeMap<u32, FailureSummary>,
 }
 
+/// R1 (D2): an explicit fork of an already-used chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReforkInfo {
+    /// The successor that already claimed the predecessor.
+    pub of: String,
+    pub reason: String,
+}
+
 /// Career totals across chained phase cells (P1).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CareerRollup {
@@ -2080,6 +2201,9 @@ pub struct CampaignRollup {
     /// Career totals across the chain (points, spend and cell ids).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub career: Option<CareerRollup>,
+    /// R1: a deliberate fork of an already-used chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refork: Option<ReforkInfo>,
     /// The persisted ladder state for a chained next phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ladder_state: Option<LadderState>,
@@ -2420,6 +2544,7 @@ where
         career: None,
         ladder_state: None,
         harness_fault: None,
+        refork: None,
     };
 
     let stage_list: Vec<&StageSpec> = match phase {
@@ -3444,6 +3569,7 @@ mod tests {
             chain_from: None,
             career: None,
             ladder_state: None,
+            refork: None,
         };
         // Ticket 3 passed before this attempt: stage 3 failing again is a
         // regression, not an own-stage miss.
@@ -3722,6 +3848,7 @@ mod tests {
             chain_from: None,
             career: None,
             ladder_state: None,
+            refork: None,
         };
         // 1's full attempt failed, its lite attempt passed.
         rollup.stages.push(record(1, false, "full", "failed"));
@@ -4880,7 +5007,7 @@ mod tests {
     /// P1: the launcher argv carries the phase and chain.
     #[test]
     fn launcher_args_carry_the_phase_and_chain() {
-        let a = launcher_args_with_phase("m", "high", 0.99, 150, Some(2), Some("prev"));
+        let a = launcher_args_with_phase("m", "high", 0.99, 150, Some(2), Some("prev"), None);
         assert!(a.windows(2).any(|w| w[0] == "--phase" && w[1] == "2"));
         assert!(a.windows(2).any(|w| w[0] == "--chain" && w[1] == "prev"));
         let b = launcher_args("m", "high", 0.99, 150);
@@ -4947,6 +5074,7 @@ mod tests {
             }),
             ladder_state: None,
             harness_fault: None,
+            refork: None,
         }
     }
 
@@ -5440,6 +5568,23 @@ mod tests {
         assert!(hint.contains("old joins failure"), "{hint}");
         assert!(hint.contains("old seed 7 repro"), "{hint}");
         assert!(hint.contains("# Ticket 8"), "{hint}");
+    }
+
+    #[test]
+    fn q6_refork_resolution_and_recording() {
+        assert_eq!(resolve_refork(None, Some("root"), None), Ok(None));
+        let err = resolve_refork(Some("child"), Some("root"), None).unwrap_err();
+        assert!(err.contains("child") && err.contains("--refork"), "{err}");
+        let r = resolve_refork(Some("child"), Some("root"), Some("retry it"))
+            .unwrap()
+            .expect("refork");
+        assert_eq!((r.of.as_str(), r.reason.as_str()), ("child", "retry it"));
+        let err = resolve_refork(None, None, Some("x")).unwrap_err();
+        assert!(err.contains("requires --chain"), "{err}");
+        let err = resolve_refork(None, Some("root"), Some("x")).unwrap_err();
+        assert!(err.contains("not used"), "{err}");
+        let err = resolve_refork(Some("child"), Some("root"), Some("  ")).unwrap_err();
+        assert!(err.contains("non-empty"), "{err}");
     }
 
     #[test]

@@ -8,10 +8,21 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.36`: round-20 pre-cell — a chain successor counts any
+///   running, cancelled, crashed or unfinished cell (only harness-faulted
+///   non-results are ignored); the cell writes `chain_from` to status.json
+///   at creation; `--refork "<reason>"` records `{of, reason}` and shows a
+///   Board badge, with the server refusing an already-used chain until a
+///   reason is supplied; the Board's career leaf is the finished cell no
+///   finished child names, newest started_at on a refork tie, faulted cells
+///   are excluded and running cells hang under the root; a refork's
+///   superseded child is labelled; catch-up SPEC.md labels full/lite. The
+///   three-slot catch-up decision is recorded as the operator decision of
+///   2026-10-21. The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.35`: round-19 review — career catch-ups are greedy over
 ///   Failed *or* Skipped tickets whose own needs are met, with **three**
-///   slots (the operator-facing choice for the common 4 -> 5 -> 6 chain;
-///   supersedes P2's two-slot cap); a catch-up harness fault stops the cell;
+///   slots (the operator decision 2026-10-21 for the common 4 -> 5 -> 6
+///   chain; supersedes P2's two-slot cap); a catch-up harness fault stops the cell;
 ///   a catch-up's SPEC.md includes every passed ticket and its acceptance is
 ///   the declared list plus `passed_all`; the Board ranks a career by
 ///   `career.points`/spend and expands its phase cells, and the portal keeps
@@ -660,7 +671,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.35";
+pub const RULES_VERSION: &str = "2026-10-19.36";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

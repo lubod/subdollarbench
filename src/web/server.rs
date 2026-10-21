@@ -1730,6 +1730,9 @@ pub(crate) struct CampaignStartRequest {
     /// Previous phase cell id to continue from.
     #[serde(default)]
     pub chain: Option<String>,
+    /// R1: deliberate fork reason for an already-used chain.
+    #[serde(default)]
+    pub refork: Option<String>,
 }
 
 /// Start a campaign run (gui-spec.md §4.4): what `scripts/sql-cell.sh`
@@ -1850,6 +1853,53 @@ pub(crate) async fn start_campaign(
                 .into_response();
         }
     }
+    if req.refork.is_some() && req.chain.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "--refork requires a chain cell"})),
+        )
+            .into_response();
+    }
+    let refork = req
+        .refork
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if req.refork.is_some() && refork.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "a refork reason is required"})),
+        )
+            .into_response();
+    }
+    if let Some(chain_id) = req.chain.as_deref() {
+        let runs_dir = RunArchiver::resolve_runs_dir();
+        match crate::campaign::chain_already_used(&runs_dir, chain_id) {
+            Some(other) if refork.is_none() => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "chain cell {chain_id} was already continued by {other}; give a refork reason to fork deliberately"
+                        ),
+                        "refork_required": true,
+                        "chain_used_by": other
+                    })),
+                )
+                    .into_response()
+            }
+            None if req.refork.is_some() => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "this chain cell is not used by an existing cell; drop the refork reason"
+                    })),
+                )
+                    .into_response()
+            }
+            _ => {}
+        }
+    }
     let Some(exe) = crate::campaign::launcher_binary() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1878,6 +1928,7 @@ pub(crate) async fn start_campaign(
         wall,
         req.phase,
         req.chain.as_deref(),
+        refork,
     );
     let cmd = format!("subdollarbench {}", args.join(" "));
     let mut command = std::process::Command::new(exe);
@@ -5568,6 +5619,33 @@ global.fetch = async (url) => {
   if (!b2.includes('campaign_old_cell')) fail.push('board-rules-folded-into-one-group');
   if (b2.includes('\u00d72 runs') || b2.includes('×2 runs')) fail.push('board-grouped-across-rules');
   if (!b2.includes('0.0/76 pts')) fail.push('board-live-cell-max-points');
+
+  // R2: career leaf fixture: phase 1, a faulted phase 2, a phase-2 refork
+  // retry, and a running phase 3. The faulted cell is not in the career; the
+  // leaf is the newest finished child (the retry), not the older child, and
+  // the running cell hangs under the same root.
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.36',max_points:76};
+  const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
+    phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
+  const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
+    phase:2, chain_from:'campaign_career_p1', started_at:'2026-10-21T00:10:00Z',
+    career:{cells:['campaign_career_p1','campaign_career_old'],points:15,total_cost_usd:0.7}})};
+  const fault = {id:'campaign_career_fault', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
+    phase:2, chain_from:'campaign_career_p1', started_at:'2026-10-21T00:20:00Z', harness_fault:'provider billing'})};
+  const retry = {id:'campaign_career_retry', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
+    phase:2, chain_from:'campaign_career_p1', started_at:'2026-10-21T00:30:00Z',
+    refork:{of:'campaign_career_old',reason:'cancelled retry'},
+    career:{cells:['campaign_career_p1','campaign_career_retry'],points:18,total_cost_usd:0.8}})};
+  const running = {id:'campaign_career_running', state:'running', ladder:[], rollup:Object.assign({}, cbase, {
+    phase:3, chain_from:'campaign_career_retry', points:0, total_cost_usd:0.0})};
+  const cgroups = groupCells([p1, old, fault, retry, running]);
+  const cg = cgroups.find(g => g.career && g.cells.some(c => c.id === 'campaign_career_retry'));
+  if (!cg) fail.push('career-group-missing');
+  if (cg && cg.cells.some(c => c.id === 'campaign_career_fault')) fail.push('faulted-cell-in-career');
+  const cleaf = cg && careerLeaf(cg.cells);
+  if (!cleaf || cleaf.id !== 'campaign_career_retry') fail.push('career-leaf:' + (cleaf && cleaf.id));
+  if (cg && !cg.cells.some(c => c.id === 'campaign_career_running')) fail.push('running-not-under-root');
+  if (cg && careerPoints(cg.cells) !== 18) fail.push('career-points:' + careerPoints(cg.cells));
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
   console.log('smoke OK');
 })();

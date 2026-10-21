@@ -286,9 +286,9 @@ Applied in the reviewer's order:
 - **Q1 (HIGH)**: catch-up selection is greedy over `Failed` *and* `Skipped`
   tickets whose own needs are met, recomputed after each slot. The common
   phase-1 ticket-4 failure (4 -> 5 -> 6) needs three slots; the P2 two-slot
-  cap is raised to **three** (`CATCH_UP_SLOTS`). This is the operator-facing
-  decision recorded in the rules history; a two-slot "lost career" policy
-  would be a one-line change if preferred. The 4 -> 5 -> 6 test shows 12
+  cap is raised to **three** (`CATCH_UP_SLOTS`). This is the operator
+  decision 2026-10-21 recorded in the rules history; a two-slot "lost
+  career" policy would be a one-line change if preferred. The 4 -> 5 -> 6 test shows 12
   and 14 unblocked.
 - **Q2 (MEDIUM)**: a catch-up target must have its own `needs` in
   `passed_all`; the loop no longer pays for ticket 5 on top of a failed 4.
@@ -432,6 +432,41 @@ live proofs on kernel `7.0.0-38`.**
    scripts/sql-cell.sh <model>`.
 4. **Phase 3**, which is the first live catch-up and hints. Phase 4 runs
    only after the memory proofs are green.
+
+### Round-20 pre-cell fixes (2026-10-21, rules `2026-10-19.36`)
+
+The operator decisions D1-D3 and the reviewer's R1-R3 are implemented:
+
+- **D1:** `CATCH_UP_SLOTS = 3` stays; the rules history says "operator
+  decision 2026-10-21".
+- **R1 (D2):** `chain_already_used` counts any cell whose rollup or status
+  names the predecessor, including running, cancelled, crashed and
+  unfinished cells; only a harness-faulted non-result is ignored. The cell
+  writes `chain_from` to status.json at creation, so a cell that dies
+  before its first stage still blocks. `--refork "<reason>"` (requires
+  `--chain`, only when the chain is used) records `{of, reason}` in the new
+  rollup and shows a refork badge; without it the error names the existing
+  successor and suggests `--refork`. The server pre-check returns
+  `refork_required`/`chain_used_by`, the console reveals a reason field,
+  and the POST carries `refork`.
+- **R2:** the Board excludes harness-faulted cells from a career, takes the
+  finished cell no finished child names as the leaf (newest `started_at`
+  on a refork tie), shows the leaf's cumulative points/cost, labels the
+  older refork child "superseded", and puts a running phase cell under its
+  root as a running row. The JS smoke fixture covers phase 1, a faulted
+  phase 2, a phase-2 refork and a running phase 3.
+- **R3:** `render_spec_md_catch_up` filters on `passed` only and labels
+  each section full/lite from `outcomes`.
+- **Gates:** campaign/main tests for the scan, the refork resolution, the
+  status-only/cancelled/faulted cases and the existing chain tests; the
+  GUI smoke test with the career fixture; fmt/clippy. The lib suite with
+  the eight memory-cap live proofs skipped is **985 passed / 6 ignored /
+  8 filtered**; bins **63**. The skipped proofs remain the separate
+  kernel-`-38` task and are named. Services were not restarted,
+  `target/release` was not rebuilt and no cell was launched.
+
+The separate memory-cap investigation is not part of `.36`; phase 4
+remains unrunnable until it is understood.
 
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
