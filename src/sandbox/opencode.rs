@@ -56,7 +56,8 @@ impl OpenCodeRunner {
         stats.completion_tokens += output + reasoning;
         stats.cached_tokens += cache_read;
         stats.total_tokens += input + output + reasoning;
-        let _ = cost;
+        stats.cost_usd += cost;
+        stats.max_call_usd = stats.max_call_usd.max(cost);
     }
 
     /// Provider rate-limit signal on one `--format json` event or raw line.
@@ -891,6 +892,40 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 .output();
                             break None;
                         }
+                        // Campaign cap headroom: the compute floor grows
+                        // between calls, so check it in the wait loop rather
+                        // than only on a step event (round-17 P0).
+                        if let Some(max_eff) = limits.max_effective_usd {
+                            let st = Self::snapshot_stats(
+                                &stats,
+                                &turns,
+                                Some(Self::resolve_effort_effective(
+                                    &variant_id,
+                                    variant_disabled.load(Ordering::SeqCst),
+                                )),
+                            );
+                            let elapsed = SystemTime::now()
+                                .duration_since(start_time)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0);
+                            let total = st.prompt_tokens + st.completion_tokens + st.cached_tokens;
+                            if let Some(msg) = crate::sandbox::omp::cap_headroom_reason(
+                                max_eff,
+                                *spent.lock().unwrap(),
+                                elapsed,
+                                total,
+                                st.cached_tokens,
+                            ) {
+                                let _ = tx.send(msg.clone());
+                                *limit_msg.lock().unwrap() = Some(msg);
+                                limit_hit.store(true, Ordering::SeqCst);
+                                running.store(false, Ordering::SeqCst);
+                                let _ = Command::new("docker")
+                                    .args(["rm", "-f", &container_name])
+                                    .output();
+                                break None;
+                            }
+                        }
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(_) => break None,
@@ -1606,6 +1641,7 @@ mod tests {
         crate::sandbox::omp::AgentExecutionLimits {
             max_turns: Some(max_turns),
             max_budget_usd: Some(max_budget),
+            max_effective_usd: None,
             timeout_seconds: Some(timeout),
         }
     }
@@ -1715,6 +1751,14 @@ case "$1" in
       budget_limit)
         printf '%s\n' '{"type":"step_start"}' '{"type":"step_finish","part":{"tokens":{"input":10,"output":10},"cost":1.0}}'
         exit 0
+        ;;
+      cap)
+        printf '%s\n' \
+          '{"type":"step_start"}' \
+          '{"type":"step_finish","part":{"tokens":{"input":0,"output":0},"cost":0.01}}' \
+          '{"type":"step_start"}' \
+          '{"type":"step_finish","part":{"tokens":{"input":0,"output":0},"cost":0.03}}'
+        wait_for_kill
         ;;
       ready)
         if [ -n "$SDB_COVTEST_WORKDIR" ]; then : > "$SDB_COVTEST_WORKDIR/READY"; fi
@@ -1976,7 +2020,28 @@ exit 1
             passed += 1;
         }
 
-        // 13. READY signal scores exactly like a normal exit.
+        // 13. Campaign cap headroom: two calls ($0.01, $0.03) with a $0.02
+        // effective ceiling trip the cap line, never the $1.00 API budget,
+        // and the attempt reports the metered sum and largest call.
+        {
+            let mut limits = covtest_limits(10, 1.0, 10);
+            limits.max_effective_usd = Some(0.02);
+            let (res, logs) = run_oc_scenario("cap", &root, limits, None);
+            let st = res.expect("cap trip is a normal conclusion");
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("Reached the campaign cap's headroom")));
+            assert!(!logs.iter().any(|l| l.contains("budget $1.00 exceeded")));
+            assert!((st.cost_usd - 0.04).abs() < 1e-9, "cost {}", st.cost_usd);
+            assert!(
+                (st.max_call_usd - 0.03).abs() < 1e-9,
+                "max {}",
+                st.max_call_usd
+            );
+            passed += 1;
+        }
+
+        // 14. READY signal scores exactly like a normal exit.
         {
             let (res, logs) = run_oc_scenario("ready", &root, covtest_limits(10, 1.0, 10), None);
             res.expect("READY conclusion must be Ok");

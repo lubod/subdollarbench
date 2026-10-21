@@ -1365,6 +1365,9 @@ pub struct PipelineOutput {
     /// reached its first turn (after one retry), or the provider rejected
     /// the key/billing. A campaign stops on it and never publishes the cell.
     pub harness_fault: Option<String>,
+    /// The largest single provider call this attempt made (the campaign
+    /// cap's reserve, round-17 P0).
+    pub max_call_usd: f64,
 }
 
 /// How an agent session that returned `Err` ended (round-14 N3): its partial
@@ -5068,7 +5071,14 @@ impl BenchmarkPipeline {
         // Campaign rounds (§5.1 of gui-spec.md): one record per
         // verification, the initial try and every repair round.
         let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
+        let attempt_started = std::time::Instant::now();
         let mut round_started = std::time::Instant::now();
+        // Effective cap headroom for this attempt, after the cell's spend and
+        // largest-call reserve. None outside capped campaigns (round-17 P0).
+        let cap_headroom = config
+            .campaign_stage
+            .as_ref()
+            .and_then(|c| c.cap_headroom_usd);
         let (mut omp_stats, mut prompt_tokens, mut cached_tokens, mut completion_tokens) =
             if !config.eval_only {
                 logger.log(&format!(
@@ -5089,6 +5099,7 @@ impl BenchmarkPipeline {
                     } else {
                         None
                     },
+                    max_effective_usd: cap_headroom,
                     timeout_seconds: if config.timeout_min > 0 {
                         Some(config.timeout_min * 60)
                     } else {
@@ -5128,6 +5139,8 @@ impl BenchmarkPipeline {
                             acc.completion_tokens += stats.completion_tokens;
                             acc.total_tokens += stats.total_tokens;
                             acc.steps_taken += stats.steps_taken;
+                            acc.cost_usd += stats.cost_usd;
+                            acc.max_call_usd = acc.max_call_usd.max(stats.max_call_usd);
                             acc.effort_effective = stats.effort_effective.clone();
                             ran = true;
                             break;
@@ -5145,6 +5158,8 @@ impl BenchmarkPipeline {
                             acc.completion_tokens += end.partial.completion_tokens;
                             acc.total_tokens += end.partial.total_tokens;
                             acc.steps_taken += end.partial.steps_taken;
+                            acc.cost_usd += end.partial.cost_usd;
+                            acc.max_call_usd = acc.max_call_usd.max(end.partial.max_call_usd);
                             logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
                             if let Some(reason) = end.billing {
                                 // Round-14 N3: a dead key or exhausted
@@ -5310,6 +5325,45 @@ impl BenchmarkPipeline {
                         }
                     }
 
+                    // Cap/budget spend guard FIRST (round-17 P0): a repair
+                    // gets only what the attempt's API budget has left, and
+                    // must not start when either floor is gone. Break before
+                    // stopping the candidate or writing FEEDBACK_REPORT.md.
+                    let spent_api = omp_stats.cost_usd;
+                    let total_tokens_so_far = prompt_tokens + cached_tokens + completion_tokens;
+                    let floor_so_far = crate::cost::calculator::ModelPricing::compute_cost(
+                        attempt_started.elapsed().as_secs_f64(),
+                        total_tokens_so_far,
+                        cached_tokens,
+                    );
+                    let attempt_budget = if config.budget_usd > 0.0 {
+                        config.budget_usd
+                    } else {
+                        f64::INFINITY
+                    };
+                    let (repair_budget, repair_cap) = match crate::campaign::repair_round_spend(
+                        attempt_budget,
+                        spent_api,
+                        cap_headroom,
+                    ) {
+                        Ok(v) => v,
+                        Err(reason) => {
+                            logger.log(&format!(
+                                "[LIMIT] Repair round {round} not started: {reason}"
+                            ));
+                            break;
+                        }
+                    };
+                    let repair_effective = repair_cap.map(|cap| cap - (spent_api + floor_so_far));
+                    if let Some(eff) = repair_effective {
+                        if eff < crate::campaign::BUDGET_FLOOR_USD {
+                            logger.log(&format!(
+                                "[LIMIT] Repair round {round} not started: effective headroom ${eff:.4} below the floor"
+                            ));
+                            break;
+                        }
+                    }
+
                     // Pool check FIRST: an exhausted pool must break before
                     // stopping the candidate, writing FEEDBACK_REPORT.md, or
                     // recording a round that never runs. (Previously all three
@@ -5358,11 +5412,8 @@ impl BenchmarkPipeline {
                     // 3. Launch agent for surgical fix with feedback prompt
                     let round_limits = AgentExecutionLimits {
                         max_turns: turns_remaining,
-                        max_budget_usd: if config.budget_usd > 0.0 {
-                            Some(config.budget_usd)
-                        } else {
-                            None
-                        },
+                        max_budget_usd: repair_budget,
+                        max_effective_usd: repair_effective,
                         timeout_seconds: if config.timeout_min > 0 {
                             Some(config.timeout_min * 60)
                         } else {
@@ -5396,6 +5447,9 @@ impl BenchmarkPipeline {
                                 completion_tokens += r_stats.completion_tokens;
                                 omp_stats.steps_taken += r_stats.steps_taken;
                                 omp_stats.total_tokens += r_stats.total_tokens;
+                                omp_stats.cost_usd += r_stats.cost_usd;
+                                omp_stats.max_call_usd =
+                                    omp_stats.max_call_usd.max(r_stats.max_call_usd);
                                 round_steps = Some(r_stats.steps_taken);
                                 logger.log(&format!(
                                     "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
@@ -5417,6 +5471,9 @@ impl BenchmarkPipeline {
                                 completion_tokens += end.partial.completion_tokens;
                                 omp_stats.steps_taken += end.partial.steps_taken;
                                 omp_stats.total_tokens += end.partial.total_tokens;
+                                omp_stats.cost_usd += end.partial.cost_usd;
+                                omp_stats.max_call_usd =
+                                    omp_stats.max_call_usd.max(end.partial.max_call_usd);
                                 if let Some(ref cf) = cancel_flag {
                                     if cf.load(Ordering::SeqCst) {
                                         break;
@@ -5552,6 +5609,11 @@ impl BenchmarkPipeline {
                 }
             }
         }
+
+        logger.log(&format!(
+            "[COST] metered ${:.4}, largest call ${:.4}",
+            omp_stats.cost_usd, omp_stats.max_call_usd
+        ));
 
         let mut pass_rate = v_outcome.pass_rate;
         let mut passed_stages = v_outcome.passed_stages;
@@ -6271,6 +6333,7 @@ impl BenchmarkPipeline {
             disqualified,
             infra_error,
             harness_fault,
+            max_call_usd: omp_stats.max_call_usd,
         })
     }
 }
@@ -8783,6 +8846,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8840,6 +8904,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8894,6 +8959,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -8944,6 +9010,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9001,6 +9068,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9059,6 +9127,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9119,6 +9188,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: Some("# SPEC.md fixture\n".to_string()),
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9178,6 +9248,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9234,6 +9305,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9290,6 +9362,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9351,6 +9424,7 @@ main()
             passed_stages: (0..=5).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9410,6 +9484,7 @@ main()
             passed_stages: vec![0, 1, 2, 3, 4],
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9484,6 +9559,7 @@ main()
             passed_stages: (0..14).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9627,6 +9703,7 @@ main()
             passed_stages: (0..15).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9752,6 +9829,7 @@ main()
             passed_stages: (0..16).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9826,6 +9904,7 @@ main()
             passed_stages: (0..17).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9900,6 +9979,7 @@ main()
             passed_stages: (0..18).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -9975,6 +10055,7 @@ main()
             passed_stages: (0..19).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10049,6 +10130,7 @@ main()
             passed_stages: (0..19).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10124,6 +10206,7 @@ main()
             passed_stages: (0..20).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10198,6 +10281,7 @@ main()
             passed_stages: (0..20).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10267,6 +10351,7 @@ main()
             passed_stages: (0..13).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10325,6 +10410,7 @@ main()
             passed_stages: (0..11).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10389,6 +10475,7 @@ main()
             passed_stages: (0..10).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10441,6 +10528,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10493,6 +10581,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10544,6 +10633,7 @@ main()
             passed_stages: (0..11).collect(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10596,6 +10686,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10644,6 +10735,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10697,6 +10789,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10757,6 +10850,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
@@ -10813,6 +10907,7 @@ main()
             passed_stages: Vec::new(),
             spec_md: None,
             preamble: None,
+            cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)

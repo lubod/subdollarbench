@@ -8,6 +8,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.32`: career-phase P0 cap enforcement — one API budget per
+///   attempt (a repair gets only the remainder and does not start below
+///   $0.02); the cell cap keeps the largest single call seen so far in
+///   reserve, and a ticket starts only when the reserve plus the floor fit;
+///   the runners stop in-session at the effective-cost headroom (API plus
+///   compute floor), checked in their wait loops; stats carry `cost_usd`
+///   and `max_call_usd`, stage outcomes carry `max_call_usd`. Score impact:
+///   a ticket whose round 0 spends its API budget is no longer repaired;
+///   Haiku 5.5 t9 and DeepSeek `.29` t19 passed only through that repair.
+///   The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.31`: M5 — the sdb-sql cell cap is $0.99 / 150 min (from
 ///   $0.75 / 120): the console launcher, the engine's start default and
 ///   `scripts/sql-cell.sh` all default to `campaign::CELL_BUDGET_USD` /
@@ -619,7 +629,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.31";
+pub const RULES_VERSION: &str = "2026-10-19.32";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

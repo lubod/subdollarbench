@@ -493,6 +493,7 @@ pub async fn run(
                 passed_lite: attempt.passed_lite.clone(),
                 passed: attempt.passed.clone(),
                 outcomes: attempt.outcomes.clone(),
+                cap_headroom_usd: attempt.cap_headroom_usd,
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -598,6 +599,7 @@ struct StageJob {
     /// Ladder state before this attempt (round-10 D2): drives the collapsed
     /// SPEC.md sections and the harness note.
     outcomes: Vec<(u32, campaign::LadderOutcome)>,
+    cap_headroom_usd: Option<f64>,
     rollback_first: bool,
 }
 
@@ -845,6 +847,7 @@ async fn run_one_stage(
             passed_stages: job.passed.clone(),
             spec_md,
             preamble,
+            cap_headroom_usd: job.cap_headroom_usd,
         }),
         baseline_rps,
     };
@@ -978,6 +981,7 @@ async fn run_one_stage(
         api_cost_usd: br.total_cost_usd,
         turns: output.manifest.turns,
         duration_seconds: Some(output.manifest.duration_seconds),
+        max_call_usd: output.max_call_usd,
         agent_failed: output.agent_failed,
         infra_error: output.infra_error,
         disqualified: output.disqualified,
@@ -1394,6 +1398,7 @@ mod tests {
             passed_lite: Vec::new(),
             passed: Vec::new(),
             outcomes: Vec::new(),
+            cap_headroom_usd: None,
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));

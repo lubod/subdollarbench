@@ -16,6 +16,10 @@ use tracing::{info, warn};
 pub struct AgentExecutionLimits {
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
+    /// Effective-cost ceiling for this round (API + compute floor). The
+    /// campaign cap's reserve-adjusted headroom, minus what this attempt has
+    /// already spent (round-17 P0).
+    pub max_effective_usd: Option<f64>,
     pub timeout_seconds: Option<u64>,
 }
 
@@ -24,9 +28,33 @@ impl Default for AgentExecutionLimits {
         Self {
             max_turns: Some(100),
             max_budget_usd: Some(0.50),
+            max_effective_usd: None,
             timeout_seconds: Some(900), // 15 minutes default
         }
     }
+}
+
+/// Effective spend = metered API + the compute floor of elapsed time and
+/// tokens. The campaign cap's headroom is checked against this, while the
+/// per-round API budget is checked separately (round-17 P0).
+pub fn cap_headroom_reason(
+    cap_effective_usd: f64,
+    api_spent_usd: f64,
+    elapsed_seconds: f64,
+    total_tokens: u64,
+    cached_tokens: u64,
+) -> Option<String> {
+    let floor = crate::cost::calculator::ModelPricing::compute_cost(
+        elapsed_seconds,
+        total_tokens,
+        cached_tokens,
+    );
+    let spend = api_spent_usd + floor;
+    (spend >= cap_effective_usd).then(|| {
+        format!(
+            "[LIMIT] Reached the campaign cap's headroom (${spend:.4} / ${cap_effective_usd:.4} effective)"
+        )
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,6 +65,12 @@ pub struct OmpSessionStats {
     pub cached_tokens: u64,
     pub total_tokens: u64,
     pub steps_taken: u32,
+    /// Live-metered provider spend for this attempt (sum of every call).
+    /// The campaign cap is enforced against this plus the compute floor.
+    pub cost_usd: f64,
+    /// The largest single provider call in this attempt (the campaign cap's
+    /// reserve).
+    pub max_call_usd: f64,
     /// Effective effort as negotiated, harness-interpreted: OMP records the
     /// session's `thinking_level_change` value (CLI downgrades included);
     /// OpenCode records `#<variant>` or `prose-only`. Requested effort
@@ -302,7 +336,9 @@ pub struct TailSessionContext {
     pub limits: AgentExecutionLimits,
     pub turn_counter: Arc<std::sync::atomic::AtomicU32>,
     pub accumulated_cost: Arc<Mutex<f64>>,
+    pub max_call_usd: Arc<Mutex<f64>>,
     pub accumulated_tokens: Arc<std::sync::atomic::AtomicU64>,
+    pub accumulated_cached: Arc<std::sync::atomic::AtomicU64>,
     pub limit_reached: Arc<AtomicBool>,
     pub limit_reason: Arc<Mutex<Option<String>>>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
@@ -706,7 +742,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 
         let turn_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let accumulated_cost = Arc::new(Mutex::new(0.0f64));
+        let max_call_usd = Arc::new(Mutex::new(0.0f64));
         let accumulated_tokens = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let accumulated_cached = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let limit_reached = Arc::new(AtomicBool::new(false));
         let limit_reason = Arc::new(Mutex::new(Option::<String>::None));
 
@@ -747,7 +785,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             limits,
             turn_counter: turn_counter.clone(),
             accumulated_cost: accumulated_cost.clone(),
+            max_call_usd: max_call_usd.clone(),
             accumulated_tokens: accumulated_tokens.clone(),
+            accumulated_cached: accumulated_cached.clone(),
             limit_reached: limit_reached.clone(),
             limit_reason: limit_reason.clone(),
             cancel_flag: cancel_flag.clone(),
@@ -843,6 +883,29 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 }
             }
 
+            // Campaign cap headroom: effective spend includes the compute
+            // floor, which grows between calls, so check here rather than
+            // only when a session line arrives (round-17 P0).
+            if let Some(max_eff) = limits.max_effective_usd {
+                let api = accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
+                let fresh = accumulated_tokens.load(Ordering::SeqCst);
+                let cached = accumulated_cached.load(Ordering::SeqCst);
+                if let Some(msg) = crate::sandbox::omp::cap_headroom_reason(
+                    max_eff,
+                    api,
+                    start_instant.elapsed().as_secs_f64(),
+                    fresh + cached,
+                    cached,
+                ) {
+                    log_fn(msg.clone());
+                    limit_reached.store(true, Ordering::SeqCst);
+                    *limit_reason.lock().unwrap() = Some(msg);
+                    kill_agent();
+                    let _ = child.kill();
+                    break None;
+                }
+            }
+
             // Check if model signaled completion early via /workspace/READY
             if take_ready_signal(&canonical_workdir) {
                 log_fn("[LIVE] Model signaled completion via /workspace/READY! Triggering verification...".to_string());
@@ -895,12 +958,14 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             // Stats survive the trip: extract before returning so the
             // persisted trial keeps real turns/tokens (backfillable cost)
             // instead of zeros. Pass rates are verifier output, unaffected.
-            let stats = active_file
+            let mut stats = active_file
                 .lock()
                 .ok()
                 .and_then(|l| l.clone())
                 .map(|p| Self::extract_latest_session_stats(Some(&p)).unwrap_or_default())
                 .unwrap_or_default();
+            stats.cost_usd = accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
+            stats.max_call_usd = max_call_usd.lock().map(|l| *l).unwrap_or(0.0);
             let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
             return Err(anyhow::Error::new(OmpBillingError {
                 reason: "provider billing/auth/throttle tripped mid-session (see [BILLING] log)"
@@ -910,10 +975,12 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         }
         let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
         let final_path = active_file.lock().unwrap().clone();
-        let stats = match final_path.as_deref() {
+        let mut stats = match final_path.as_deref() {
             Some(p) => Self::extract_latest_session_stats(Some(p)).unwrap_or_default(),
             None => OmpSessionStats::default(),
         };
+        stats.cost_usd = accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
+        stats.max_call_usd = max_call_usd.lock().map(|l| *l).unwrap_or(0.0);
 
         let has_runnable = canonical_workdir.join("Dockerfile").exists()
             || canonical_workdir.join("start.sh").exists();
@@ -1163,6 +1230,9 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                 if let Ok(mut c_lock) = ctx.accumulated_cost.lock() {
                                     *c_lock += cost;
                                     cost_updated = true;
+                                    if let Ok(mut m) = ctx.max_call_usd.lock() {
+                                        *m = m.max(cost);
+                                    }
                                     let current_spend = *c_lock;
                                     if let Some(max_b) = ctx.limits.max_budget_usd {
                                         if current_spend >= max_b {
@@ -1189,9 +1259,23 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                     .or_else(|| usage.get("completion_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
+                                let tcached = usage
+                                    .get("cacheRead")
+                                    .or_else(|| usage.get("cache_read_input_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .or_else(|| {
+                                        usage
+                                            .get("prompt_tokens_details")
+                                            .and_then(|d| d.get("cached_tokens"))
+                                            .and_then(|x| x.as_u64())
+                                    })
+                                    .unwrap_or(0);
                                 if tin + tout > 0 {
                                     ctx.accumulated_tokens
                                         .fetch_add(tin + tout, Ordering::SeqCst);
+                                }
+                                if tcached > 0 {
+                                    ctx.accumulated_cached.fetch_add(tcached, Ordering::SeqCst);
                                 }
                             }
 
@@ -1798,6 +1882,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         let mut completion_tokens = 0u64;
         let mut cached_tokens = 0u64;
         let mut steps = 0u32;
+        let mut cost_usd = 0.0f64;
+        let mut max_call_usd = 0.0f64;
         // Last negotiated thinking level wins: the session records the
         // EFFECTIVE level (CLI downgrades included), which is what ran.
         let mut thinking_effective: Option<String> = None;
@@ -1846,6 +1932,14 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                             cached_tokens += c;
                         }
                     }
+                    if let Some(c) = usage
+                        .get("cost")
+                        .and_then(|c| c.get("total"))
+                        .and_then(|x| x.as_f64())
+                    {
+                        cost_usd += c;
+                        max_call_usd = max_call_usd.max(c);
+                    }
                 }
             }
         }
@@ -1856,6 +1950,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             cached_tokens,
             total_tokens: prompt_tokens + cached_tokens + completion_tokens,
             steps_taken: steps,
+            cost_usd,
+            max_call_usd,
             effort_effective: thinking_effective,
         })
     }
@@ -2576,6 +2672,7 @@ mod tests {
             max_turns: Some(10),
             max_budget_usd: Some(0.20),
             timeout_seconds: Some(600),
+            max_effective_usd: None,
         };
         assert_eq!(limits.max_turns, Some(10));
         assert_eq!(limits.max_budget_usd, Some(0.20));
@@ -2603,6 +2700,7 @@ mod tests {
             max_turns: Some(5),
             max_budget_usd: Some(0.10),
             timeout_seconds: Some(10),
+            max_effective_usd: None,
         };
 
         let running_tailer = running.clone();
@@ -2623,6 +2721,8 @@ mod tests {
             extension_feed_active: Arc::new(AtomicBool::new(false)),
             model: "test-model".to_string(),
             billing_tripped: Arc::new(AtomicBool::new(false)),
+            max_call_usd: Arc::new(Mutex::new(0.0f64)),
+            accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2665,6 +2765,7 @@ mod tests {
                     max_turns: Some(5),
                     max_budget_usd: Some(0.10),
                     timeout_seconds: Some(10),
+                    max_effective_usd: None,
                 },
                 turn_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 accumulated_cost: Arc::new(Mutex::new(0.0f64)),
@@ -2675,6 +2776,8 @@ mod tests {
                 extension_feed_active: Arc::new(AtomicBool::new(false)),
                 model: "test-model".to_string(),
                 billing_tripped: Arc::new(AtomicBool::new(false)),
+                max_call_usd: Arc::new(Mutex::new(0.0f64)),
+                accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             },
             active_file,
         )
@@ -2872,6 +2975,7 @@ mod tests {
             max_turns: Some(1),         // Should trigger limit immediately
             max_budget_usd: Some(0.20), // Should also trigger budget limit
             timeout_seconds: Some(10),
+            max_effective_usd: None,
         };
 
         let running_tailer = running.clone();
@@ -2894,6 +2998,8 @@ mod tests {
             extension_feed_active: Arc::new(AtomicBool::new(false)),
             model: "test-model".to_string(),
             billing_tripped: Arc::new(AtomicBool::new(false)),
+            max_call_usd: Arc::new(Mutex::new(0.0f64)),
+            accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2918,6 +3024,7 @@ mod tests {
             max_turns: Some(1),
             max_budget_usd: Some(0.10),
             timeout_seconds: Some(5),
+            max_effective_usd: None,
         };
 
         let res = OmpRunner::run_agent(AgentRunSpec {
@@ -2949,6 +3056,7 @@ mod tests {
             max_turns: Some(1),
             max_budget_usd: Some(0.10),
             timeout_seconds: Some(5),
+            max_effective_usd: None,
         };
 
         let res = OmpRunner::run_agent(AgentRunSpec {
@@ -2994,6 +3102,7 @@ mod tests {
             max_turns: Some(100),
             max_budget_usd: Some(0.20),
             timeout_seconds: Some(10),
+            max_effective_usd: None,
         };
         let tail_ctx = TailSessionContext {
             session_dir: temp_dir.clone(),
@@ -3012,6 +3121,8 @@ mod tests {
             extension_feed_active: Arc::new(AtomicBool::new(false)),
             model: "google/gemini-2.5-flash".to_string(),
             billing_tripped: Arc::new(AtomicBool::new(false)),
+            max_call_usd: Arc::new(Mutex::new(0.0f64)),
+            accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -3574,6 +3685,7 @@ mod tests {
         AgentExecutionLimits {
             max_turns: Some(max_turns),
             max_budget_usd: Some(max_budget),
+            max_effective_usd: None,
             timeout_seconds: Some(timeout),
         }
     }
@@ -3650,6 +3762,17 @@ case "$1" in
         ;;
       max_turns)
         seed_turn_session
+        wait_for_kill
+        ;;
+      cap)
+        if [ -n "$sessions" ]; then
+          mkdir -p "$sessions"
+          {
+            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.01}},"content":[{"type":"text","text":"one"}]}}'
+            sleep 0.15
+            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.03}},"content":[{"type":"text","text":"two"}]}}'
+          } > "$sessions/session.jsonl"
+        fi
         wait_for_kill
         ;;
       billing)
@@ -3835,7 +3958,28 @@ exit 1
             passed += 1;
         }
 
-        // 7. Billing phrase on stderr: pause envelope, never a score.
+        // 7. Campaign cap headroom: two calls ($0.01, $0.03) with a $0.02
+        // effective ceiling trip the cap line, never the $1.00 API budget,
+        // and the attempt reports the metered sum and largest call.
+        {
+            let mut limits = covtest_limits(10, 1.0, 10);
+            limits.max_effective_usd = Some(0.02);
+            let (res, logs, _, _) = run_omp_scenario("cap", &root, limits, None);
+            let st = res.expect("cap trip is a normal conclusion");
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("Reached the campaign cap's headroom")));
+            assert!(!logs.iter().any(|l| l.contains("Reached budget cap")));
+            assert!((st.cost_usd - 0.04).abs() < 1e-9, "cost {}", st.cost_usd);
+            assert!(
+                (st.max_call_usd - 0.03).abs() < 1e-9,
+                "max {}",
+                st.max_call_usd
+            );
+            passed += 1;
+        }
+
+        // 8. Billing phrase on stderr: pause envelope, never a score.
         {
             let (res, logs, _, _) =
                 run_omp_scenario("billing", &root, covtest_limits(10, 1.0, 10), None);

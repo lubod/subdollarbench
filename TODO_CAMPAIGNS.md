@@ -178,6 +178,50 @@ the phase cap:
 - Cells from before `.33` stay single-ladder rows under their own rules
   version.
 
+### P0 landed (2026-10-21, rules `2026-10-19.32`)
+
+The cap-enforcement prerequisite is implemented and committed separately:
+
+- `OmpSessionStats` now carries `cost_usd` and `max_call_usd` (summed across
+  rounds in the pipeline); the OMP tailer tracks cache reads and the largest
+  call, and the OpenCode `step_finish` reader does the same.
+- `AgentExecutionLimits.max_effective_usd` is checked in both runners' wait
+  loops (OMP status loop, OpenCode `waited` loop): effective spend = metered
+  API + the compute floor of elapsed time and fresh/cached tokens; the trip
+  logs `[LIMIT] Reached the campaign cap's headroom ($x / $y effective)` and
+  stops normally with partial stats.
+- One API budget per attempt: `repair_round_spend` gives a repair only
+  `budget - spent` and refuses to start below $0.02 of budget or cap; the
+  guard runs before the candidate stop/FEEDBACK_REPORT.md.
+- The cell cap reserves `max(largest call so far, $0.02)` and starts a
+  ticket only when `cap - total >= reserve + $0.02`; `StageAttempt`,
+  `StageJob` and `CampaignStageConfig` carry `cap_headroom_usd`, and
+  `StageOutcome.max_call_usd` feeds the next reserve. The lite check uses
+  the reserve the full attempt just raised; `api_ratio` applies to the net
+  headroom.
+- `[COST] metered $x, largest call $y` is logged once per attempt.
+- Gates: unit tests for `repair_round_spend` ($0.1307/$0.12 and
+  $0.0364/$0.02), `cap_reserve`/`cap_allows` (the Haiku $0.99 / $0.9553 /
+  $0.0333 replay, and a lite skipped by the raised reserve), the updated
+  headroom conversion test, and fake-docker `cap` scenarios in both
+  harnesses: calls $0.01 then $0.03 against `max_effective_usd = $0.02` and
+  a $1.00 API budget, the cap line trips (never the budget line) and the
+  stats carry `cost_usd = $0.04` / `max_call_usd = $0.03`. fmt/clippy and
+  the full suite are the shared gates below.
+- Score impact (also in the rules history): a ticket whose round 0 spends
+  its API budget is no longer repaired; Haiku 5.5 t9 and DeepSeek `.29` t19
+  passed only that way. Services are not restarted and no cell is launched
+  from this work.
+- Gate evidence (2026-10-21): fmt/clippy clean; bins 60 passed; the focused
+  P0 tests (campaign cap/repair/lite/headroom, both fake-docker `cap`
+  scenarios) pass. The full serial suite is **970 passed / 8 failed / 6
+  ignored**; all 8 are the memory-cap live proofs (SQL T16 and the T17-20
+  cascade, plus the unrelated KV stage 14). The **same T16 proof fails
+  identically at pre-P0 HEAD `9f2ff24`** in a scratch worktree: the
+  reference is OOM-killed (exit 137) after ~100k rows under the 64 MiB
+  cgroup, so this is a host/page-cache environment regression, not P0.
+  The P0 code paths themselves are covered by the focused tests above.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and

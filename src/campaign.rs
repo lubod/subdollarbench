@@ -293,6 +293,58 @@ pub fn fmt_stage_ids(ids: &[u32]) -> String {
 /// rather than overshooting the cap by one attempt's cost.
 pub const BUDGET_FLOOR_USD: f64 = 0.02;
 
+/// The campaign cap keeps the largest single call seen so far in reserve, so
+/// a ticket never starts with less than one call's worth of headroom
+/// (round-17 P0). The floor covers a cheap attempt when no call has been
+/// observed yet.
+pub const CAP_RESERVE_USD: f64 = 0.02;
+
+/// Reserve for the next ticket: the largest call so far, or the floor.
+pub fn cap_reserve(max_call_usd: f64) -> f64 {
+    max_call_usd.max(CAP_RESERVE_USD)
+}
+
+/// Effective headroom after the reserve. `None` when the cell is uncapped.
+pub fn cap_headroom(cap_usd: f64, spent_usd: f64, max_call_usd: f64) -> Option<f64> {
+    (cap_usd > 0.0).then(|| (cap_usd - spent_usd - cap_reserve(max_call_usd)).max(0.0))
+}
+
+/// A ticket starts only when the cap can fund the reserve plus the floor.
+pub fn cap_allows(cap_usd: f64, spent_usd: f64, max_call_usd: f64) -> bool {
+    cap_usd <= 0.0 || (cap_usd - spent_usd) >= cap_reserve(max_call_usd) + BUDGET_FLOOR_USD
+}
+
+/// Budget and effective headroom for a repair round. The round gets only
+/// the attempt's remaining API budget and never starts below the floor of
+/// either the budget or the cap (round-17 P0).
+pub fn repair_round_spend(
+    budget: f64,
+    api_spent: f64,
+    cap_left: Option<f64>,
+) -> Result<(Option<f64>, Option<f64>), String> {
+    if budget.is_finite() {
+        let left = budget - api_spent;
+        if left < BUDGET_FLOOR_USD {
+            return Err(format!(
+                "budget floor: ${left:.4} left of ${budget:.4} (floor ${BUDGET_FLOOR_USD:.2})"
+            ));
+        }
+    }
+    if let Some(cap) = cap_left {
+        if cap < BUDGET_FLOOR_USD {
+            return Err(format!(
+                "cap floor: ${cap:.4} left (floor ${BUDGET_FLOOR_USD:.2})"
+            ));
+        }
+    }
+    let budget_left = if budget.is_finite() {
+        Some(budget - api_spent)
+    } else {
+        None
+    };
+    Ok((budget_left, cap_left))
+}
+
 /// The harness note prepended to an attempt's prompt (round-10 D2, item
 /// 11): what earlier tickets failed or were skipped, that the workspace was
 /// rolled back, and the suite that actually grades this ticket. Generated
@@ -399,6 +451,9 @@ pub fn attempt_preamble(
 #[derive(Debug, Clone)]
 pub struct CampaignStageConfig {
     pub campaign: String,
+    /// Effective cap headroom for this attempt, after the cell's total spend
+    /// and the largest-call reserve. None when the campaign is uncapped.
+    pub cap_headroom_usd: Option<f64>,
     pub stage: u32,
     pub prompt_path: PathBuf,
     /// true when the workspace already exists and must be preserved
@@ -710,6 +765,9 @@ pub struct StageAttempt<'a> {
     pub outcomes: Vec<(u32, LadderOutcome)>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
+    /// Effective cap headroom after the reserve, for the pipeline's per-round
+    /// `max_effective_usd`. None when uncapped.
+    pub cap_headroom_usd: Option<f64>,
     /// True when the workspace/data must be rolled back to the last green
     /// state before this attempt (a predecessor failed; lite attempts after
     /// a failed full always roll back).
@@ -733,6 +791,10 @@ pub struct StageOutcome {
     pub api_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
+    /// The largest single provider call this attempt made; the campaign cap
+    /// reserves it before the next ticket (round-17 P0).
+    #[serde(default)]
+    pub max_call_usd: f64,
     pub agent_failed: bool,
     pub infra_error: bool,
     pub disqualified: bool,
@@ -1783,6 +1845,9 @@ where
     // Every stage passed so far (full or lite): the declared acceptance
     // list is intersected with it, so a failed stage sinks nothing later.
     let mut passed_all: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    // Largest single call seen anywhere in this cell; the cap reserves it
+    // before the next ticket (round-17 P0).
+    let mut largest_call_usd = 0.0f64;
     let mut dirty = false;
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
@@ -1817,9 +1882,12 @@ where
         // finding 2: crossing the cap (`over_budget`) and stopping on the
         // floor short of it (`cap_reached`) are separate flags.
         let over_budget_now = opts.budget_usd > 0.0 && total_cost >= opts.budget_usd;
-        let floor_now = opts.budget_usd > 0.0 && opts.budget_usd - total_cost < BUDGET_FLOOR_USD;
+        // The next ticket must fit the largest call seen so far plus the
+        // floor; the reserve is subtracted from the headroom the pipeline
+        // and the API-budget conversion see (round-17 P0).
+        let floor_now = !cap_allows(opts.budget_usd, total_cost, largest_call_usd);
         let headroom = if opts.budget_usd > 0.0 {
-            opts.budget_usd - total_cost
+            (opts.budget_usd - total_cost - cap_reserve(largest_call_usd)).max(0.0)
         } else {
             f64::INFINITY
         };
@@ -1885,12 +1953,14 @@ where
             passed: passed_all.iter().copied().collect(),
             outcomes: outcomes_snapshot(&outcomes),
             weight: 1.0,
+            cap_headroom_usd: (opts.budget_usd > 0.0).then_some(headroom),
             rollback_first: dirty,
         };
         let out = exec(&attempt_full)
             .await
             .with_context(|| format!("stage {} ({})", stage.id, stage.title))?;
         api_cost += out.api_cost_usd;
+        largest_call_usd = largest_call_usd.max(out.max_call_usd);
         let (regressed, regression_severity) = detect_regressions(&best, &out.stage_results);
         for r in &out.stage_results {
             let e = best.entry(r.stage).or_insert(false);
@@ -1937,13 +2007,15 @@ where
             dirty = true;
         } else if let Some(lite) = &stage.lite {
             // Lite attempt: the workspace rolls back to the last green
-            // commit (and the data dir) before the fresh session.
+            // commit (and the data dir) before the fresh session. The full
+            // attempt just raised the largest-call reserve; the lite check
+            // uses the raised value (round-17 P0).
             let headroom2 = if opts.budget_usd > 0.0 {
-                opts.budget_usd - total_cost
+                (opts.budget_usd - total_cost - cap_reserve(largest_call_usd)).max(0.0)
             } else {
                 f64::INFINITY
             };
-            if headroom2 < BUDGET_FLOOR_USD {
+            if !cap_allows(opts.budget_usd, total_cost, largest_call_usd) {
                 // D3: the full attempt already spent; no lite when the
                 // remaining headroom is below the floor. The stage stays
                 // failed and the next iteration stops on budget.
@@ -1968,12 +2040,14 @@ where
                     passed: passed_all.iter().copied().collect(),
                     outcomes: outcomes_snapshot(&outcomes),
                     weight: lite.weight,
+                    cap_headroom_usd: (opts.budget_usd > 0.0).then_some(headroom2),
                     rollback_first: true,
                 };
                 let out2 = exec(&attempt_lite)
                     .await
                     .with_context(|| format!("stage {} lite", stage.id))?;
                 api_cost += out2.api_cost_usd;
+                largest_call_usd = largest_call_usd.max(out2.max_call_usd);
                 let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
                 for r in &out2.stage_results {
                     let e = best.entry(r.stage).or_insert(false);
@@ -2915,6 +2989,7 @@ mod tests {
             api_cost_usd: 0.01,
             turns: Some(10),
             duration_seconds: Some(60.0),
+            max_call_usd: 0.0,
             agent_failed: false,
             infra_error: false,
             rounds: Vec::new(),
@@ -3513,12 +3588,13 @@ mod tests {
         .unwrap();
         let seen = seen.into_inner();
         assert_eq!(seen.len(), 2, "the cap stops the ladder: {seen:?}");
-        // No observation yet: the conservative 0.25 default converts the
-        // whole 0.20 headroom into a 0.05 API budget.
-        assert!((seen[0].1 - 0.05).abs() < 1e-9, "first: {}", seen[0].1);
-        // Then the cell's own ratio (0.05 API / 0.17 effective) converts
-        // the remaining 0.03 effective.
-        let expect = (0.20 - 0.17) * (0.05 / 0.17);
+        // Round-17 P0: the cap keeps a $0.02 largest-call reserve, so the
+        // first API budget is (0.20 - 0.02) * 0.25 = 0.045.
+        assert!((seen[0].1 - 0.045).abs() < 1e-9, "first: {}", seen[0].1);
+        // Then the cell's own ratio converts the remaining effective
+        // headroom after the reserve.
+        let first_effective = seen[0].1 * 3.4;
+        let expect = (0.20 - first_effective - 0.02) * (seen[0].1 / first_effective);
         assert!(
             (seen[1].1 - expect).abs() < 1e-9,
             "second: {} vs {expect}",
@@ -3529,7 +3605,98 @@ mod tests {
             "the cap is respected: {}",
             rollup.total_cost_usd
         );
-        assert!(rollup.over_budget && !rollup.cap_reached);
+        // The reserve makes the next start impossible before the cap is
+        // crossed, so the stop is "cap reached", not an overshoot.
+        assert!(rollup.cap_reached && !rollup.over_budget);
+    }
+
+    #[test]
+    fn repair_round_spend_respects_the_budget_and_cap_floors() {
+        // Ticket 9 metered $0.1307 of a $0.12 API budget.
+        let e = repair_round_spend(0.12, 0.1307, Some(0.50)).unwrap_err();
+        assert!(e.contains("budget floor"), "{e}");
+        // $0.0364 budget with $0.02 spent leaves $0.0164, below the floor.
+        let e = repair_round_spend(0.0364, 0.02, Some(0.50)).unwrap_err();
+        assert!(e.contains("budget floor"), "{e}");
+        let (budget, cap) = repair_round_spend(0.05, 0.02, Some(0.03)).unwrap();
+        assert!((budget.unwrap() - 0.03).abs() < 1e-9);
+        assert!((cap.unwrap() - 0.03).abs() < 1e-9);
+        // The cap floor is checked too.
+        let e = repair_round_spend(0.05, 0.02, Some(0.01)).unwrap_err();
+        assert!(e.contains("cap floor"), "{e}");
+        // An uncapped campaign passes the budget through and returns no cap.
+        let (budget, cap) = repair_round_spend(0.05, 0.02, None).unwrap();
+        assert!((budget.unwrap() - 0.03).abs() < 1e-9);
+        assert!(cap.is_none());
+    }
+
+    #[test]
+    fn cap_reserve_replays_the_haiku_ending_and_a_lite_skip() {
+        // Haiku 5.5 `.31`: $0.9553 spent, largest call $0.0333, cap $0.99.
+        // Only $0.0014 is left after the reserve, below the $0.02 floor, so
+        // the next ticket is not started.
+        assert!(!cap_allows(0.99, 0.9553, 0.0333));
+        let headroom = cap_headroom(0.99, 0.9553, 0.0333).unwrap();
+        assert!(headroom < BUDGET_FLOOR_USD, "{headroom}");
+        // At $0.94 the floor-only rule would start the ticket, but the
+        // observed $0.0333 largest call raises the reserve past the $0.05
+        // left and the ticket is skipped.
+        assert!(cap_allows(0.99, 0.94, 0.0));
+        assert!(!cap_allows(0.99, 0.94, 0.0333));
+        // A full attempt whose largest call is $0.035 raises the reserve for
+        // its lite: $0.04 left < $0.035 + $0.02, so the lite is skipped.
+        assert!(!cap_allows(0.10, 0.06, 0.035));
+        assert!(cap_allows(0.10, 0.06, 0.015));
+    }
+
+    #[tokio::test]
+    async fn test_a_full_attempts_largest_call_skips_its_lite() {
+        let lc = ladder_fixture();
+        let opts = CampaignRunOptions {
+            campaign_id: "cap-lite".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 0.20,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::<(u32, StageVariant)>::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let id = attempt.stage.id;
+                let variant = attempt.variant;
+                seen.borrow_mut().push((id, variant));
+                let mut out = if id == 0 {
+                    outcome(true, &[(0, true)])
+                } else {
+                    outcome(false, &[(1, false)])
+                };
+                if id == 0 {
+                    out.effective_cost_usd = 0.01;
+                    out.max_call_usd = 0.001;
+                } else if id == 1 {
+                    out.effective_cost_usd = 0.10;
+                    // The full attempt's largest call raises the reserve past
+                    // the remaining headroom.
+                    out.max_call_usd = 0.15;
+                }
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        assert!(
+            !seen
+                .iter()
+                .any(|(id, v)| *id == 1 && *v == StageVariant::Lite),
+            "the lite must be skipped: {seen:?}"
+        );
+        assert!(rollup.cap_reached, "the reserve stops the cell");
+        assert_eq!(rollup.stages.len(), 2);
     }
 
     #[tokio::test]
@@ -4086,9 +4253,10 @@ mod tests {
             model: "m".into(),
             harness: "omp".into(),
             effort: "high".into(),
-            // One stage costs 0.01; after it the remaining 0.01 is under
-            // the $0.02 floor, so the second never starts (round-10 D3).
-            budget_usd: 0.02,
+            // One stage costs 0.01; the reserve is $0.02 and the floor is
+            // $0.02, so a $0.04 cap starts exactly one ticket and the
+            // second cannot fit the reserve plus floor (round-17 P0).
+            budget_usd: 0.04,
             wall_min: None,
         };
         let rollup = run_campaign(
