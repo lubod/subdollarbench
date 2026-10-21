@@ -5079,6 +5079,11 @@ impl BenchmarkPipeline {
             .campaign_stage
             .as_ref()
             .and_then(|c| c.cap_headroom_usd);
+        // Q8: the in-session stop leaves room for the final verification's
+        // compute floor (the Haiku tickets 8-10 measured ~$0.0006; $0.002
+        // is a conservative reserve under the $0.01 margin).
+        const FINAL_VERIFY_RESERVE_USD: f64 = 0.002;
+        let cap_effective = cap_headroom.map(|c| (c - FINAL_VERIFY_RESERVE_USD).max(0.0));
         let (mut omp_stats, mut prompt_tokens, mut cached_tokens, mut completion_tokens) =
             if !config.eval_only {
                 logger.log(&format!(
@@ -5099,7 +5104,7 @@ impl BenchmarkPipeline {
                     } else {
                         None
                     },
-                    max_effective_usd: cap_headroom,
+                    max_effective_usd: cap_effective,
                     timeout_seconds: if config.timeout_min > 0 {
                         Some(config.timeout_min * 60)
                     } else {
@@ -5344,7 +5349,7 @@ impl BenchmarkPipeline {
                     let (repair_budget, repair_cap) = match crate::campaign::repair_round_spend(
                         attempt_budget,
                         spent_api,
-                        cap_headroom,
+                        cap_effective,
                     ) {
                         Ok(v) => v,
                         Err(reason) => {

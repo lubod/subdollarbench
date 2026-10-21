@@ -8,6 +8,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.35`: round-19 review — career catch-ups are greedy over
+///   Failed *or* Skipped tickets whose own needs are met, with **three**
+///   slots (the operator-facing choice for the common 4 -> 5 -> 6 chain;
+///   supersedes P2's two-slot cap); a catch-up harness fault stops the cell;
+///   a catch-up's SPEC.md includes every passed ticket and its acceptance is
+///   the declared list plus `passed_all`; the Board ranks a career by
+///   `career.points`/spend and expands its phase cells, and the portal keeps
+///   phase cells off the public board until its career row exists; a chained
+///   cell cannot be continued twice; hints carry each broken ticket's last
+///   failure across phases; the pipeline reserves $0.002 for the final
+///   verification floor; the shown phase ceiling includes catch-up weight.
+///   The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.34`: career phases P2 — a phase start gets at most two
 ///   catch-up slots for earlier failed tickets needed by phase tickets,
 ///   ordered by blocked points (lite variant if present, else the full
@@ -648,7 +660,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.34";
+pub const RULES_VERSION: &str = "2026-10-19.35";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

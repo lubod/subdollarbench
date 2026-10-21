@@ -279,6 +279,56 @@ Career catch-up and hints are implemented:
   filtered**; bins **61**; fmt/clippy clean. The skipped proofs remain the
   host/environment failure from P0, not P2.
 
+### Round-19 review fixes (2026-10-21, rules `2026-10-19.35`)
+
+Applied in the reviewer's order:
+
+- **Q1 (HIGH)**: catch-up selection is greedy over `Failed` *and* `Skipped`
+  tickets whose own needs are met, recomputed after each slot. The common
+  phase-1 ticket-4 failure (4 -> 5 -> 6) needs three slots; the P2 two-slot
+  cap is raised to **three** (`CATCH_UP_SLOTS`). This is the operator-facing
+  decision recorded in the rules history; a two-slot "lost career" policy
+  would be a one-line change if preferred. The 4 -> 5 -> 6 test shows 12
+  and 14 unblocked.
+- **Q2 (MEDIUM)**: a catch-up target must have its own `needs` in
+  `passed_all`; the loop no longer pays for ticket 5 on top of a failed 4.
+- **Q3 (MEDIUM)**: a catch-up harness fault calls
+  `stop_on_harness_fault`, snapshots the state and exits the phase; the
+  main loop does not run. The reason carries the `ticket N:` prefix.
+- **Q4 (MEDIUM)**: a catch-up's SPEC.md includes every passed ticket with
+  the target last, and its acceptance is the declared list plus
+  `passed_all`; a catch-up at 4 with 7-10 passed verifies 7-10.
+- **Q5 (MEDIUM)**: the Board groups a career chain and ranks it on
+  `career.points`/`career.total_cost_usd`, with the phase cells expanded;
+  full-ladder cells keep a separate class. The public portal hides phase
+  cells until it has a career row of its own.
+- **Q6 (MEDIUM)**: a chain cell cannot be continued twice. The
+  `chain_already_used` scan runs under the campaign lock; a finished,
+  non-faulted cell already naming the predecessor in `chain_from` refuses
+  the new chain (no best-of-k careers).
+- **Q7 (LOW)**: `LadderState.last_failures` carries each broken ticket's
+  last `FailureSummary` across phases; hints fall back to it when the
+  immediate predecessor no longer has the record.
+- **Q8 (LOW)**: the pipeline reserves $0.002 for the final verification's
+  compute floor in `max_effective_usd`; the `[COST]` line remains the place
+  to check the first phase-4 cell.
+- **Q9 (LOW)**: the shown phase ceiling includes the catch-up's 0.4 x tier,
+  so a full phase plus a catch-up cannot read above its max.
+- **Nits**: the duplicate doc comment, the stray `too_many_arguments`
+  allow, the misplaced launcher test, the `SPEC.md` heading, the stale
+  "slots below" phrase and the test-only `cap_headroom` are fixed. The
+  `$0` commit-message expansion is left (already on master).
+- **Environment**: the eight memory-cap live proofs still fail on kernel
+  `-38`; the reviewer reports phase 4 is not runnable as graded until the
+  cgroup/page-cache issue is understood. Phases 1-3 are unaffected.
+  No service was restarted and no cell was launched.
+
+Gates: 54 campaign tests (including Q1's 4 -> 5 -> 6, Q2 eligibility, Q3
+fault stop, Q4 acceptance/SPEC, Q7 carried failure, Q9 ceiling); the Q6
+chain-reuse test; the portal phase-cell guard; lib suite with the eight
+memory live proofs skipped: **984 passed / 6 ignored / 8 filtered**;
+bins **62**; fmt/clippy clean.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and

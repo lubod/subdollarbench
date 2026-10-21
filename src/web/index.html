@@ -2318,21 +2318,55 @@
       return '';
     }
 
+    function careerRoot(r, fallback) {
+      return (r.career && r.career.cells && r.career.cells.length)
+        ? r.career.cells[0]
+        : fallback;
+    }
+    function careerPoints(cells) {
+      const leaf = cells.slice().sort((a, b) => (cellRollup(b).phase || 0) - (cellRollup(a).phase || 0))[0];
+      const c = leaf && cellRollup(leaf).career;
+      return c ? Number(c.points || 0) : 0;
+    }
+    function careerCost(cells) {
+      const leaf = cells.slice().sort((a, b) => (cellRollup(b).phase || 0) - (cellRollup(a).phase || 0))[0];
+      const c = leaf && cellRollup(leaf).career;
+      return c ? Number(c.total_cost_usd || 0) : 0;
+    }
+
     function groupCells(cells) {
-      // The API already returns cells in the one Rust board order
-      // (campaign::board_order); the grouping preserves it: the first cell
-      // of a group is its best, and groups keep first-seen order. A group
-      // is one model, harness, effort *and rule set*: points from different
-      // rule sets (or ladders) are not comparable, so they never share a
-      // row or a median.
+      // Q5: a phase cell belongs to its career chain (root -> leaf), never
+      // to a generic model group with phase 1 and phase 4 mixed. Full-ladder
+      // cells keep their own row class. The API's career-aware key orders
+      // the groups; the UI re-sorts careers by their cumulative score.
       const groups = {};
       cells.forEach(c => {
         const r = cellRollup(c);
         if (!r.model) return;
-        const key = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}\u0001${r.rules_version || ''}`;
-        (groups[key] = groups[key] || []).push(c);
+        const base = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}\u0001${r.rules_version || ''}`;
+        const phase = r.phase != null;
+        const key = phase
+          ? `career:${careerRoot(r, c.id)}\u0001${base}`
+          : `full\u0001${base}`;
+        const g = groups[key] = groups[key] || { key, cells: [], career: phase };
+        g.cells.push(c);
       });
-      return Object.entries(groups).map(([key, list]) => ({ key, cells: list }));
+      const cur = window.__SDB_RULES__ || '';
+      const current = (g) => !!cur && cellRules(g.cells[0]) === cur;
+      return Object.values(groups).sort((a, b) => {
+        const ca = current(a), cb = current(b);
+        if (ca !== cb) return ca ? -1 : 1;
+        if (a.career && b.career) {
+          const pa = careerPoints(a.cells), pb = careerPoints(b.cells);
+          if (pb !== pa) return pb - pa;
+          const da = careerCost(a.cells), db = careerCost(b.cells);
+          const ra = da > 0 ? pa / da : -1, rb = db > 0 ? pb / db : -1;
+          if (rb !== ra) return rb - ra;
+          return da - db;
+        }
+        if (a.career !== b.career) return a.career ? -1 : 1;
+        return 0;
+      });
     }
 
     function updatePageTitle() {
@@ -2418,7 +2452,11 @@
 
     function boardRowHtml(cell, rank, opts) {
       const r = cellRollup(cell);
-      const pd = cellPerDollar(cell);
+      const career = opts && opts.careerView && r.career;
+      const pts = career ? Number(r.career.points || 0) : cellPoints(cell);
+      const cost = career ? Number(r.career.total_cost_usd || 0) : cellCost(cell);
+      const pd = career ? (cost > 0 ? pts / cost : null) : cellPerDollar(cell);
+      const maxPts = career ? 76 : (r.max_points || 0);
       const cur = window.__SDB_RULES__ || '';
       const rules = cellRules(cell);
       const stale = (cur && rules && rules !== cur)
@@ -2434,8 +2472,8 @@
           <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))}</div>
           <div class="hint" style="${state.cls}">${escapeHtml(state.text)}${stale}</div></td>
         <td style="width:100%;">${ladderStrip(cell.ladder, cell)}</td>
-        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt1(cellPoints(cell))}/${Math.round(r.max_points || 0)} pts</td>
-        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">$${fmtMoney(r.total_cost_usd)}</td>
+        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt1(pts)}/${Math.round(maxPts)} pts</td>
+        <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">$${fmtMoney(cost)}</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${pd == null ? '\u2014' : fmt1(pd)} pts/$</td>
       </tr>`;
     }
@@ -2478,7 +2516,13 @@
       let rank = 0;
       let rows = '';
       let dividerDone = false;
-      groupCells(visible).forEach(({ key, cells }) => {
+      groupCells(visible).forEach(({ key, cells, career }) => {
+        // A career group's rows are phases, not repeat runs: the leaf
+        // (highest phase, cumulative career) is the top row; the rest are
+        // the expanded phase cells.
+        if (career) {
+          cells.sort((a, b) => (cellRollup(b).phase || 0) - (cellRollup(a).phase || 0));
+        }
         const top = cells[0];
         if (boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
           rows += `<tr><td colspan="6" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
@@ -2488,25 +2532,22 @@
         const n = cells.length;
         const expanded = !!boardExpandedGroups[key];
         const extra = n > 1
-          ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">\u00d7${n} runs ${expanded ? '\u25be' : '\u25b8'}</a>`
+          ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">\u00d7${n} ${career ? 'phases' : 'runs'} ${expanded ? '\u25be' : '\u25b8'}</a>`
           : '';
-        // P1: the career total across phase cells (the top row stays the
-        // model/effort group; the expanded rows are the phase cells).
-        const careerCell = cells
-          .filter(c => c.rollup && c.rollup.career)
-          .sort((a, b) => (b.rollup.phase || 0) - (a.rollup.phase || 0))[0];
-        const careerExtra = careerCell
-          ? ` <span class="hint" title="career total across chained phases">career ${fmt1(careerCell.rollup.career.points || 0)} pts \u00b7 $${fmtMoney(careerCell.rollup.career.total_cost_usd || 0)}</span>`
-          : '';
-        rows += boardRowHtml(top, rank, { extra: careerExtra + extra });
+        rows += boardRowHtml(top, rank, { extra, careerView: career });
         if (expanded && n > 1) {
-          const sorted = cells.map(cellPoints).sort((a, b) => a - b);
-          // P1 (round 14): an even count's median is the mean of the middles.
-          const med = sorted.length % 2 === 0
-            ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
-            : sorted[Math.floor(sorted.length / 2)];
-          rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
-          cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
+          if (career) {
+            rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">career phases (leaf first): the top row is the cumulative career; these are the individual phase cells</td></tr>`;
+            cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
+          } else {
+            const sorted = cells.map(cellPoints).sort((a, b) => a - b);
+            // P1 (round 14): an even count's median is the mean of the middles.
+            const med = sorted.length % 2 === 0
+              ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+              : sorted[Math.floor(sorted.length / 2)];
+            rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
+            cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
+          }
         }
       });
       body.innerHTML = table(rows);

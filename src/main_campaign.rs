@@ -356,7 +356,43 @@ pub fn dry_run(name: &str, model: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Q6: find a finished, non-faulted cell that already names `chain_id` as
+/// its predecessor. Careers are chains, not best-of-k forks.
+fn chain_already_used(runs_dir: &Path, chain_id: &str) -> Option<String> {
+    let rd = std::fs::read_dir(runs_dir).ok()?;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == chain_id || !name.starts_with("campaign_") || !e.path().is_dir() {
+            continue;
+        }
+        let read = |f: &str| {
+            std::fs::read_to_string(e.path().join(f))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        };
+        let rollup = read("campaign.json").or_else(|| {
+            read("status.json").and_then(|v| v.get("rollup").cloned().filter(|r| !r.is_null()))
+        });
+        let Some(r) = rollup else { continue };
+        if r.get("chain_from").and_then(|v| v.as_str()) != Some(chain_id) {
+            continue;
+        }
+        if r.get("finished_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            continue;
+        }
+        if r.get("harness_fault").filter(|v| !v.is_null()).is_some() {
+            continue;
+        }
+        return Some(name);
+    }
+    None
+}
+
 /// Append the P2 career hints below the harness note (which the pipeline
 /// prepends to the prompt).
 fn with_hints(preamble: Option<String>, hints: Option<&str>) -> Option<String> {
@@ -431,9 +467,25 @@ pub async fn run(
         _ => {}
     }
     let runs_dir = RunArchiver::resolve_runs_dir();
+
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let model_tag = model.replace(['/', ':'], "_");
+    let campaign_id = format!("campaign_{}_{}_{}", lc.spec.name, model_tag, ts);
+    // One campaign at a time, CLI or GUI: the lock covers every path and
+    // is released when this process ends (round-7 finding 1).
+    let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id)
+        .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
+
     let (chain_state, chain_career) = if let Some(chain_id) = chain.as_deref() {
         if chain_id.contains('/') || chain_id.contains("..") {
             anyhow::bail!("invalid --chain id {chain_id:?}");
+        }
+        // Q6: a phase cell may be continued only once; the campaign lock
+        // is held here, so the scan is race-free.
+        if let Some(other) = chain_already_used(&runs_dir, chain_id) {
+            anyhow::bail!(
+                "chain cell {chain_id} was already continued by {other}; careers are not best-of-k"
+            );
         }
         let chain_dir = runs_dir.join(chain_id);
         let status: serde_json::Value = serde_json::from_str(
@@ -464,19 +516,19 @@ pub async fn run(
         if let Some(ps) = &phase_spec {
             state.hints = campaign::phase_hints(&rollup, &lc.spec, ps, &state);
         }
+        // Q7: carry the predecessor's failure records forward; the hints
+        // for a later phase must not depend on the immediate cell still
+        // holding the ticket.
+        for rec in &rollup.stages {
+            if let Some(f) = &rec.failure {
+                state.last_failures.insert(rec.id, f.clone());
+            }
+        }
         let career = campaign::career_from(&rollup);
         (Some(state), Some(career))
     } else {
         (None, None)
     };
-
-    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let model_tag = model.replace(['/', ':'], "_");
-    let campaign_id = format!("campaign_{}_{}_{}", lc.spec.name, model_tag, ts);
-    // One campaign at a time, CLI or GUI: the lock covers every path and
-    // is released when this process ends (round-7 finding 1).
-    let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id)
-        .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
     let cdir = runs_dir.join(&campaign_id);
     std::fs::create_dir_all(&cdir)?;
     // The campaign-level live fields (round-8 improvement A): every later
@@ -607,11 +659,27 @@ pub async fn run(
     write_ladder_state(&cdir, &initial_state);
     let state_cdir = cdir.clone();
     let state_green = last_green.clone();
-    let on_stage = move |r: &CampaignRollup| {
-        write_status(&state_cdir, "running", None, Some(r));
-        if let Some(mut st) = r.ladder_state.clone() {
-            st.last_green = state_green.lock().map(|g| g.clone()).unwrap_or(None);
-            write_ladder_state(&state_cdir, &st);
+    let state_failures = Arc::new(Mutex::new(
+        chain_state
+            .as_ref()
+            .map(|s| s.last_failures.clone())
+            .unwrap_or_default(),
+    ));
+    let on_stage = {
+        let failures = state_failures.clone();
+        move |r: &CampaignRollup| {
+            write_status(&state_cdir, "running", None, Some(r));
+            if let Some(mut st) = r.ladder_state.clone() {
+                st.last_green = state_green.lock().map(|g| g.clone()).unwrap_or(None);
+                let mut lf = failures.lock().unwrap_or_else(|e| e.into_inner());
+                for rec in &r.stages {
+                    if let Some(f) = &rec.failure {
+                        lf.insert(rec.id, f.clone());
+                    }
+                }
+                st.last_failures = lf.clone();
+                write_ladder_state(&state_cdir, &st);
+            }
         }
     };
     let rollup = campaign::run_campaign_phase(
@@ -634,6 +702,7 @@ pub async fn run(
                 outcomes: attempt.outcomes.clone(),
                 cap_headroom_usd: attempt.cap_headroom_usd,
                 hints: attempt.hints.clone(),
+                catch_up: attempt.catch_up,
                 rollback_first: attempt.rollback_first,
             };
             let stage = job.stage.clone();
@@ -685,8 +754,17 @@ pub async fn run(
             return Err(e);
         }
     };
+    {
+        let mut lf = state_failures.lock().unwrap_or_else(|e| e.into_inner());
+        for rec in &rollup.stages {
+            if let Some(f) = &rec.failure {
+                lf.insert(rec.id, f.clone());
+            }
+        }
+    }
     if let Some(st) = rollup.ladder_state.as_mut() {
         st.last_green = last_green.lock().map(|g| g.clone()).unwrap_or(None);
+        st.last_failures = state_failures.lock().map(|l| l.clone()).unwrap_or_default();
         write_ladder_state(&cdir, st);
     }
 
@@ -722,7 +800,6 @@ pub async fn run(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// One attempt handed from the orchestrator to this executor: the ticket
 /// (full or lite), its prompt/budget/turns, and whether the workspace must
 /// roll back to the last green commit first.
@@ -745,6 +822,7 @@ struct StageJob {
     outcomes: Vec<(u32, campaign::LadderOutcome)>,
     cap_headroom_usd: Option<f64>,
     hints: Option<String>,
+    catch_up: bool,
     rollback_first: bool,
 }
 
@@ -882,15 +960,24 @@ async fn run_one_stage(
     let _ = std::fs::remove_file(&feedback_report);
     // The suite that actually grades this ticket (round-10 D2): the same
     // list drives the verifier, the log header, and the harness note.
-    let effective = campaign::Acceptance::accepted_for(
+    let mut effective = campaign::Acceptance::accepted_for(
         stage.acceptance.stages_for(&lc.spec.task),
         &job.passed,
         stage.id,
     );
+    if job.catch_up {
+        // Q4: a catch-up grades the target's declared list plus every
+        // ticket the career already passed (7-10 when retrying 4).
+        effective = campaign::catch_up_accepted(effective, &job.passed);
+    }
     // sdb-sql: the harness-owned contract so far. The pipeline writes it
     // once the workspace is prepared (genesis wipes it first).
     let spec_md = if lc.spec.task == "sql" {
-        Some(lc.render_spec_md(stage, &job.prompt_path, &job.outcomes)?)
+        if job.catch_up {
+            Some(lc.render_spec_md_catch_up(stage, &job.prompt_path, &job.outcomes, &job.passed)?)
+        } else {
+            Some(lc.render_spec_md(stage, &job.prompt_path, &job.outcomes)?)
+        }
     } else {
         None
     };
@@ -1552,6 +1639,7 @@ mod tests {
             outcomes: Vec::new(),
             cap_headroom_usd: None,
             hints: None,
+            catch_up: false,
             rollback_first: false,
         };
         let last_green: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1594,7 +1682,48 @@ mod tests {
         assert_eq!(with_hints(None, None), None);
     }
 
-    /// `run` fails on a missing campaign name in load_campaign    /// `run` fails on a missing campaign name in load_campaign — before the
+    #[test]
+    fn q6_a_chain_cell_cannot_be_continued_twice() {
+        let dir = tmp("chain_reuse");
+        let runs = dir.join("runs");
+        let root = runs.join("campaign_root");
+        let child = runs.join("campaign_child");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(
+            child.join("campaign.json"),
+            serde_json::json!({
+                "chain_from": "campaign_root",
+                "finished_at": "2026-10-21T12:00:00Z",
+                "harness_fault": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            chain_already_used(&runs, "campaign_root").as_deref(),
+            Some("campaign_child")
+        );
+        // An unfinished or faulted cell does not claim the chain.
+        let faulted = runs.join("campaign_faulted");
+        std::fs::create_dir_all(&faulted).unwrap();
+        std::fs::write(
+            faulted.join("campaign.json"),
+            serde_json::json!({
+                "chain_from": "campaign_root",
+                "finished_at": "2026-10-21T12:00:00Z",
+                "harness_fault": "provider billing"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(chain_already_used(&runs, "campaign_root").is_some());
+        // A different parent is not a fork of this chain.
+        assert!(chain_already_used(&runs, "campaign_other").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `run` fails on a missing campaign name in load_campaign — before the
     /// engine status probe, so no live engine is touched and nothing is
     /// written under the temp runs dir.
     #[tokio::test]

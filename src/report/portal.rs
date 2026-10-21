@@ -1440,6 +1440,11 @@ impl PortalExporter {
                 // spec failures simply drops the strip.
                 let parsed: Option<crate::campaign::CampaignRollup> =
                     serde_json::from_value(rollup.clone()).ok();
+                // Q5: phase cells stay off the public board until careers
+                // have their own ranked row; the console can show them.
+                if rollup.get("phase").and_then(|p| p.as_u64()).is_some() {
+                    continue;
+                }
                 // The sort key comes from the raw fields, so an
                 // unparseable (or sparse) rollup still ranks correctly.
                 let points_v = rollup["points"].as_f64().unwrap_or(0.0);
@@ -3246,13 +3251,42 @@ mod tests {
         // m4's stage run was killed by infrastructure: never a measurement.
         fs::create_dir_all(runs.join("run_m4_poisoned")).unwrap();
         fs::write(runs.join("run_m4_poisoned").join(".poisoned"), "").unwrap();
+        // Q5: phase cells stay off the public board until careers have their
+        // own ranked row.
+        let phase_dir = runs.join("campaign_sdb-sql_phase_hidden");
+        fs::create_dir_all(&phase_dir).unwrap();
+        let phase_rollup = serde_json::json!({
+            "campaign_id": "campaign_sdb-sql_phase_hidden",
+            "name": "sdb-sql",
+            "model": "phase_model",
+            "harness": "omp",
+            "effort": "high",
+            "task": "sql",
+            "started_at": "2026-10-21T00:00:00Z",
+            "finished_at": "2026-10-21T01:00:00Z",
+            "stages": [],
+            "phase": 1,
+            "career": {"points": 10.0, "total_cost_usd": 0.5, "cells": ["campaign_sdb-sql_phase_hidden"]},
+            "points": 10.0,
+            "max_points": 10.0,
+            "rules_version": RULES_VERSION,
+            "total_cost_usd": 0.5,
+            "over_budget": false,
+            "over_wall": false
+        });
+        fs::write(phase_dir.join("campaign.json"), phase_rollup.to_string()).unwrap();
+        fs::write(
+            phase_dir.join("status.json"),
+            serde_json::json!({"state": "done", "rollup": phase_rollup}).to_string(),
+        )
+        .unwrap();
 
         let summary =
             PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
                 .expect("sql board");
         assert_eq!(
             summary.run_count, 5,
-            "poisoned and retired cells never publish"
+            "poisoned, retired and phase cells never publish"
         );
         let html = fs::read_to_string(out.join("index.html")).unwrap();
         let pos = |m: &str| {
