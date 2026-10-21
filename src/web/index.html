@@ -2382,7 +2382,7 @@
       const groups = {};
       cells.forEach(c => {
         const r = cellRollup(c);
-        if (!r.model || r.harness_fault) return; // R2: a non-result is not in a career
+        if (!r.model) return; // S1: faulted cells stay on the Board
         const base = `${r.model}\u0001${r.harness || ''}\u0001${r.effort || ''}\u0001${r.rules_version || ''}`;
         const phase = r.phase != null;
         const key = phase
@@ -2587,7 +2587,8 @@
               .forEach(c => {
                 const cr = cellRollup(c);
                 let label = '';
-                if (c.state === 'running') label = 'running';
+                if (cr.harness_fault) label = 'faulted (non-result)';
+                else if (c.state === 'running') label = 'running';
                 else if (topFrom && cr.chain_from === topFrom
                          && String(cr.started_at || '') < String(topStarted)) label = 'superseded';
                 const extra = label ? ` <span class="hint">${label}</span>` : '';

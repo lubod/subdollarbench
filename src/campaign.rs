@@ -865,6 +865,11 @@ pub fn phase_of(spec: &CampaignSpec, stage: u32) -> Option<&PhaseSpec> {
 /// cell died before its first stage.
 pub fn chain_already_used(runs_dir: &std::path::Path, chain_id: &str) -> Option<String> {
     let rd = std::fs::read_dir(runs_dir).ok()?;
+    // S2: a chain cell named by any non-faulted cell's refork.of is used
+    // too (the old branch was superseded), and the successor chosen for the
+    // error/refork record is the newest by started_at, not the first
+    // read_dir hit.
+    let mut candidates: Vec<(String, String)> = Vec::new();
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if name == chain_id || !name.starts_with("campaign_") || !e.path().is_dir() {
@@ -882,23 +887,16 @@ pub fn chain_already_used(runs_dir: &std::path::Path, chain_id: &str) -> Option<
                 .as_ref()
                 .and_then(|s| s.get("rollup").cloned().filter(|r| !r.is_null()))
         });
-        let chain_from = rollup
-            .as_ref()
-            .and_then(|r| r.get("chain_from"))
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                status
-                    .as_ref()
-                    .and_then(|s| s.get("chain_from"))
-                    .and_then(|v| v.as_str())
-            })
-            .or_else(|| {
-                status
-                    .as_ref()
-                    .and_then(|s| s.pointer("/live/chain_from"))
-                    .and_then(|v| v.as_str())
-            });
-        if chain_from != Some(chain_id) {
+        let str_at = |v: Option<&serde_json::Value>| -> Option<String> {
+            v.and_then(|x| x.as_str()).map(str::to_string)
+        };
+        let chain_from = str_at(rollup.as_ref().and_then(|r| r.get("chain_from")))
+            .or_else(|| str_at(status.as_ref().and_then(|s| s.get("chain_from"))))
+            .or_else(|| str_at(status.as_ref().and_then(|s| s.pointer("/live/chain_from"))));
+        let refork_of = str_at(rollup.as_ref().and_then(|r| r.pointer("/refork/of")))
+            .or_else(|| str_at(status.as_ref().and_then(|s| s.pointer("/refork/of"))))
+            .or_else(|| str_at(status.as_ref().and_then(|s| s.pointer("/live/refork/of"))));
+        if chain_from.as_deref() != Some(chain_id) && refork_of.as_deref() != Some(chain_id) {
             continue;
         }
         let faulted = rollup
@@ -919,9 +917,14 @@ pub fn chain_already_used(runs_dir: &std::path::Path, chain_id: &str) -> Option<
         if faulted {
             continue;
         }
-        return Some(name);
+        let started_at = str_at(rollup.as_ref().and_then(|r| r.get("started_at")))
+            .or_else(|| str_at(status.as_ref().and_then(|s| s.get("started_at"))))
+            .or_else(|| str_at(status.as_ref().and_then(|s| s.pointer("/live/started_at"))))
+            .unwrap_or_default();
+        candidates.push((started_at, name));
     }
-    None
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    candidates.into_iter().next().map(|(_, name)| name)
 }
 
 /// R1 (D2): decide whether this run may proceed given the chain's existing
@@ -5568,6 +5571,74 @@ mod tests {
         assert!(hint.contains("old joins failure"), "{hint}");
         assert!(hint.contains("old seed 7 repro"), "{hint}");
         assert!(hint.contains("# Ticket 8"), "{hint}");
+    }
+
+    #[test]
+    fn s2_a_superseded_branch_is_used_and_newest_wins() {
+        let dir = tmp_dir("s2_scan");
+        let runs = dir.join("runs");
+        let old = runs.join("campaign_old");
+        let retry = runs.join("campaign_retry");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&retry).unwrap();
+        std::fs::write(
+            old.join("campaign.json"),
+            serde_json::json!({
+                "chain_from": "campaign_p1",
+                "started_at": "2026-10-21T00:10:00Z",
+                "finished_at": "2026-10-21T00:20:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            retry.join("campaign.json"),
+            serde_json::json!({
+                "chain_from": "campaign_p1",
+                "started_at": "2026-10-21T00:30:00Z",
+                "finished_at": "2026-10-21T00:40:00Z",
+                "refork": {"of": "campaign_old", "reason": "retry"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Newest chain successor: the retry, not the first directory hit.
+        assert_eq!(
+            chain_already_used(&runs, "campaign_p1").as_deref(),
+            Some("campaign_retry")
+        );
+        // S2: the superseded branch old is named by retry.refork.of and is
+        // therefore used; continuing it needs --refork.
+        assert_eq!(
+            chain_already_used(&runs, "campaign_old").as_deref(),
+            Some("campaign_retry")
+        );
+        let err = resolve_refork(Some("campaign_retry"), Some("campaign_old"), None).unwrap_err();
+        assert!(
+            err.contains("campaign_retry") && err.contains("--refork"),
+            "{err}"
+        );
+        let r = resolve_refork(
+            Some("campaign_retry"),
+            Some("campaign_old"),
+            Some("deliberate fork"),
+        )
+        .unwrap()
+        .expect("refork");
+        assert_eq!(r.of, "campaign_retry");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn s2_refork_of_uses_the_newest_successor() {
+        // The scan's newest choice is covered in main_campaign's chain test;
+        // this pins the refork record's `of` semantics.
+        let r = resolve_refork(Some("newest"), Some("old"), Some("retry"))
+            .unwrap()
+            .expect("refork");
+        assert_eq!(r.of, "newest");
+        let err = resolve_refork(Some("newest"), Some("old"), None).unwrap_err();
+        assert!(err.contains("newest") && err.contains("--refork"), "{err}");
     }
 
     #[test]

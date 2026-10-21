@@ -547,6 +547,44 @@ real data. It can't reach phase 4 and is not the published career.
 then the real career on `.37`: phases 1 to 4 in order, each chained to
 the previous cell.
 
+### Round-21 fixes (2026-10-21, rules `2026-10-19.37`)
+
+**Memory-cap live proofs (the eight failures).** The host `/tmp` is a
+28 GB tmpfs. `covtest_dir()` put the live proofs' multi-hundred-MB scratch
+stores there: the SQL stage-16 store and the sdb-kv stage-14 `/data`
+datadir. Under `--memory=64m` / `--memory=192m`, those files are **shmem**
+charged to the candidate cgroup, not reclaimable file page cache. The
+cgroup telemetry showed `memory.stat file == shmem`, `active_file` and
+`inactive_file` zero, `memory.events max` climbing, and the store growing
+with the DB; `fsync` + `POSIX_FADV_DONTNEED`, `memory.high` and
+`memory.reclaim` could not evict it (the last returned EIO). The verifier
+fix is the test scratch root: `covtest_dir()` now uses `/var/tmp` on a real
+disk (`SDB_COVTEST_ROOT` overrides); the production campaign directories
+were already disk-backed. The 64/192 MiB caps and the candidate launch are
+unchanged; no page-cache or reference-adapter loosening. All eight proofs
+pass: the SQL stage-16 memory proof in 174.5 s, the sdb-kv disk/admin
+proof in 127.1 s, and the cumulative T17/T18/T19 full+lite/T20 full+lite
+live proofs. The unfiltered lib suite is **995 passed / 6 ignored / 0
+filtered**; bins **63**; integration **2**; the niced full `cargo test`
+passed. fmt/clippy clean.
+
+**S1:** `groupCells` keeps harness-faulted cells. A faulted full-ladder
+cell is a normal full row; a faulted phase cell is included in its career
+and renders indented as `faulted (non-result)`. `careerLeaf` and
+`careerPoints` still ignore faulted cells. The smoke fixture carries both
+a faulted phase cell and a faulted full cell.
+
+**S2:** `chain_already_used` counts a cell named by any non-faulted cell's
+`refork.of`, and chooses the newest existing successor by `started_at`;
+the CLI and the server pre-check both refuse a superseded branch without
+`--refork`. Tests cover `P1 -> old`, `P1 -> retry (refork of old)`, the
+refusal of `--chain old` without a reason, and the newest-successor
+`refork.of` record.
+
+No services were restarted, `target/release` was not rebuilt and no cell
+was launched; the `.36` shakedown career was untouched. The real career on
+`.37` (phases 1-4, chained) waits for review and operator go-ahead.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and

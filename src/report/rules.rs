@@ -8,6 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.37`: round-21 review fixes — the memory-cap live proofs
+///   keep their heavy scratch stores on a disk-backed test root (`/var/tmp`
+///   by default, `SDB_COVTEST_ROOT` override). The host `/tmp` is a tmpfs;
+///   its shmem pages are not reclaimable under the 64/192 MiB cgroup caps,
+///   so the old proofs measured the scratch store, not the candidate. The
+///   caps are unchanged. S1: the Board keeps harness-faulted cells; a
+///   faulted full-ladder cell stays a normal row, a faulted phase cell is
+///   an indented `faulted (non-result)` under its career, and careerLeaf /
+///   career points still ignore faulted cells. S2: a chain cell named by a
+///   non-faulted cell's `refork.of` counts as used (continuing it needs
+///   `--refork` in both the CLI and the server pre-check), and a refork
+///   names the newest existing successor by `started_at`, not the first
+///   `read_dir` hit. The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.36`: round-20 pre-cell — a chain successor counts any
 ///   running, cancelled, crashed or unfinished cell (only harness-faulted
 ///   non-results are ignored); the cell writes `chain_from` to status.json
@@ -671,7 +684,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.36";
+pub const RULES_VERSION: &str = "2026-10-19.37";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
