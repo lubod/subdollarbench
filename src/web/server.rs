@@ -5624,7 +5624,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.36',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.37',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
@@ -5638,14 +5638,22 @@ global.fetch = async (url) => {
     career:{cells:['campaign_career_p1','campaign_career_retry'],points:18,total_cost_usd:0.8}})};
   const running = {id:'campaign_career_running', state:'running', ladder:[], rollup:Object.assign({}, cbase, {
     phase:3, chain_from:'campaign_career_retry', points:0, total_cost_usd:0.0})};
-  const cgroups = groupCells([p1, old, fault, retry, running]);
+  const fullFault = {id:'campaign_full_fault', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
+    started_at:'2026-10-21T00:40:00Z', finished_at:'2026-10-21T00:50:00Z',
+    harness_fault:'provider billing', points:0, total_cost_usd:0.1})};
+  const cgroups = groupCells([p1, old, fault, retry, running, fullFault]);
   const cg = cgroups.find(g => g.career && g.cells.some(c => c.id === 'campaign_career_retry'));
   if (!cg) fail.push('career-group-missing');
-  if (cg && cg.cells.some(c => c.id === 'campaign_career_fault')) fail.push('faulted-cell-in-career');
+  // S1: a faulted phase cell stays in the career (rendered as an indented
+  // non-result), while the leaf and points still ignore it.
+  if (cg && !cg.cells.some(c => c.id === 'campaign_career_fault')) fail.push('faulted-phase-missing');
+  if (cg && !cg.cells.some(c => c.id === 'campaign_career_running')) fail.push('running-not-under-root');
   const cleaf = cg && careerLeaf(cg.cells);
   if (!cleaf || cleaf.id !== 'campaign_career_retry') fail.push('career-leaf:' + (cleaf && cleaf.id));
-  if (cg && !cg.cells.some(c => c.id === 'campaign_career_running')) fail.push('running-not-under-root');
   if (cg && careerPoints(cg.cells) !== 18) fail.push('career-points:' + careerPoints(cg.cells));
+  // S1: a faulted full-ladder cell stays a normal (non-career) row.
+  const fg = cgroups.find(g => !g.career && g.cells.some(c => c.id === 'campaign_full_fault'));
+  if (!fg) fail.push('faulted-full-row-missing');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
   console.log('smoke OK');
 })();

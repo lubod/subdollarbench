@@ -6440,7 +6440,17 @@ mod tests {
 
     /// Temp fixture root unique to this process and test tag.
     fn covtest_dir(tag: &str) -> TestDir {
-        let dir = std::env::temp_dir().join(format!("covtest-{}-{}", std::process::id(), tag));
+        // The host's /tmp is a tmpfs. The live memory/disk proofs keep
+        // multi-hundred-MB stores under this directory and cap the
+        // candidate at 64/192 MiB; on tmpfs those files are unreclaimable
+        // shmem, so the cap would test the host's scratch store instead of
+        // the candidate. Keep this test scratch on a real disk, matching
+        // the production campaign directories. SDB_COVTEST_ROOT overrides
+        // it on CI hosts where /var/tmp is small.
+        let root = std::env::var_os("SDB_COVTEST_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"));
+        let dir = root.join(format!("covtest-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         TestDir(dir)
     }
