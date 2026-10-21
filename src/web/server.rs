@@ -1561,16 +1561,52 @@ pub(crate) async fn get_run_log(AxumPath(run_id): AxumPath<String>) -> Response 
 /// renders with its current ticket running and sorts first as its own
 /// group (round-8 findings 8 and 9). One spec load per campaign name.
 #[allow(clippy::type_complexity)]
-fn campaign_board_view(
+/// S3: a live stub's phase and ceiling. A cell started before S3 lost its
+/// numeric phase to the activity key; a chained cell's phase is then the
+/// phase of its current ticket. The stub reads 0 of the phase's points
+/// (0 of the ladder's for a full-ladder cell), not 0 of 0.
+fn live_stub_phase(
+    rollup: &mut crate::campaign::CampaignRollup,
+    spec: &crate::campaign::CampaignSpec,
     v: &serde_json::Value,
-    specs: &mut std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>>,
-    campaign_id: &str,
-) -> Option<(
+) {
+    if rollup.phase.is_none() && rollup.chain_from.is_some() {
+        rollup.phase = v["current_stage"]
+            .as_u64()
+            .and_then(|c| crate::campaign::phase_of(spec, c as u32))
+            .map(|p| p.id);
+    }
+    rollup.max_points = rollup
+        .phase
+        .and_then(|p| spec.phases.iter().find(|ph| ph.id == p))
+        .map(|ph| crate::campaign::phase_max_points(ph, &spec.stages))
+        .unwrap_or_else(|| crate::campaign::max_points(&spec.stages));
+}
+
+/// S3: a cell's own `ladder_state.json` (a running cell's carried state
+/// before its rollup holds one).
+fn cell_ladder_state(campaign_id: &str) -> Option<crate::campaign::LadderState> {
+    let path = RunArchiver::resolve_runs_dir()
+        .join(campaign_id)
+        .join("ladder_state.json");
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// The ladder, stop reason, sort key, live stub and phase table of one
+/// Board cell.
+type BoardView = (
     Vec<crate::campaign::LadderEntry>,
     String,
     crate::campaign::BoardSortKey,
     Option<crate::campaign::CampaignRollup>,
-)> {
+    serde_json::Value,
+);
+
+fn campaign_board_view(
+    v: &serde_json::Value,
+    specs: &mut std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>>,
+    campaign_id: &str,
+) -> Option<BoardView> {
     let parsed: Option<crate::campaign::CampaignRollup> = v
         .get("rollup")
         .filter(|r| !r.is_null())
@@ -1586,8 +1622,7 @@ fn campaign_board_view(
         })
         .clone()?;
     if live {
-        // The stub reads 0 of the ladder's points, not 0 of 0.
-        rollup.max_points = crate::campaign::max_points(&spec.stages);
+        live_stub_phase(&mut rollup, &spec, v);
     }
     // Only a *running* cell marks its current ticket running: a stalled
     // cell must not read `running` anywhere.
@@ -1596,7 +1631,8 @@ fn campaign_board_view(
         .as_u64()
         .filter(|_| running)
         .map(|c| c as u32);
-    let ladder = crate::campaign::ladder(&spec, &rollup, current);
+    let carried = cell_ladder_state(campaign_id);
+    let ladder = crate::campaign::phase_ladder(&spec, &rollup, current, carried.as_ref());
     let mut key = crate::campaign::BoardSortKey::of(&rollup);
     key.live = live;
     let stop = if live {
@@ -1618,7 +1654,7 @@ fn campaign_board_view(
     // from the Board for the whole first ticket. A stalled or dead cell
     // without a rollup keeps none: the stub's current rules would misfile it.
     let stub = (live && running).then_some(rollup);
-    Some((ladder, stop, key, stub))
+    Some((ladder, stop, key, stub, crate::campaign::phases_json(&spec)))
 }
 
 pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
@@ -1676,8 +1712,11 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 .unwrap_or(serde_json::Value::Null);
             // The full ladder (attempted and not) + the stop reason: one
             // derivation for the console and the board (gui-spec.md §5.3).
-            if let Some((ladder, stop, key, stub)) = campaign_board_view(&v, &mut specs, &name) {
+            if let Some((ladder, stop, key, stub, phases)) =
+                campaign_board_view(&v, &mut specs, &name)
+            {
                 v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
+                v["phases"] = phases;
                 v["stop_reason"] = serde_json::json!(stop);
                 v["board_key"] = serde_json::to_value(key).unwrap_or_default();
                 if let Some(stub) = stub {
@@ -2051,9 +2090,18 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
     let wall = rollup.wall_min;
     let running = state == "running";
     let current = current_stage.filter(|_| running).map(|c| c as u32);
-    let ladder = crate::campaign::load_campaign(&rollup.name)
+    let spec = crate::campaign::load_campaign(&rollup.name)
         .ok()
-        .map(|lc| crate::campaign::ladder(&lc.spec, &rollup, current));
+        .map(|lc| lc.spec);
+    if live {
+        if let (Some(spec), Some(v)) = (spec.as_ref(), status.as_ref()) {
+            live_stub_phase(&mut rollup, spec, v);
+        }
+    }
+    let carried = cell_ladder_state(&clean);
+    let ladder = spec
+        .as_ref()
+        .map(|spec| crate::campaign::phase_ladder(spec, &rollup, current, carried.as_ref()));
     let mut body = serde_json::json!({
         "id": clean,
         "state": state,
@@ -2065,6 +2113,9 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
     });
     if let Some(ladder) = ladder {
         body["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(spec) = spec.as_ref() {
+        body["phases"] = crate::campaign::phases_json(spec);
     }
     body["live_run"] = serde_json::json!(live);
     body["updated_at"] = status
@@ -5624,7 +5675,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.37',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.36',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
@@ -5654,6 +5705,33 @@ global.fetch = async (url) => {
   // S1: a faulted full-ladder cell stays a normal (non-career) row.
   const fg = cgroups.find(g => !g.career && g.cells.some(c => c.id === 'campaign_full_fault'));
   if (!fg) fail.push('faulted-full-row-missing');
+
+  // S3: the phase view. A phase-1 cell draws four labelled groups with its
+  // own score on P1; a career row merges the chain and summarises a
+  // running phase 2 and the unrun phases 3 and 4.
+  const phases = [{id:1,title:'Core',stages:[0,1,2,3,4,5,6],max_points:10},
+    {id:2,title:'Relational',stages:[7,8,9,10],max_points:12},
+    {id:3,title:'Engine',stages:[11,12,13,14,15],max_points:22},
+    {id:4,title:'Hard',stages:[16,17,18,19,20],max_points:32}];
+  const lad = st => Array.from({length: 21}, (_, i) => ({id: i, title: 't' + i, status: st(i), variant: 'full'}));
+  const ph1 = {id:'campaign_ph_p1', state:'done', phases, ladder: lad(i => i <= 6 ? 'pass' : 'later_phase'),
+    rollup: Object.assign({}, cbase, {phase:1, points:8.8, max_points:10, total_cost_usd:0.49,
+      started_at:'2026-10-21T01:00:00Z', career:{cells:['campaign_ph_p1'], points:8.8, total_cost_usd:0.49}})};
+  const ph2 = {id:'campaign_ph_p2', state:'running', phases,
+    ladder: lad(i => i <= 6 ? 'carried' : i === 7 ? 'pass' : i === 8 ? 'running' : i <= 10 ? 'not_reached' : 'later_phase'),
+    rollup: Object.assign({}, cbase, {phase:2, chain_from:'campaign_ph_p1', points:3, max_points:12, total_cost_usd:0.1})};
+  const s1 = ladderStrip(ph1.ladder, ph1);
+  if ((s1.match(/class="ladderPhase( own)?( later)?"/g) || []).length !== 4) fail.push('phase-groups');
+  if (!s1.includes('8.8/10 ')) fail.push('phase-own-summary');
+  if (!s1.includes('ladderPhase later')) fail.push('phase-later-dimmed');
+  const cv = careerView(ph1, [ph1, ph2]);
+  if (cv.ladder[3].status !== 'pass') fail.push('career-p1-from-owner');
+  if (cv.ladder[8].status !== 'running') fail.push('career-p2-from-running');
+  if (!String(cv.summaries[2]).startsWith('running')) fail.push('career-running-summary:' + cv.summaries[2]);
+  if (!cv.running || cv.running.id !== 'campaign_ph_p2') fail.push('career-running-cell');
+  if (cv.summaries[3] !== '\u2014/22') fail.push('career-unrun-summary:' + cv.summaries[3]);
+  const pg = groupCells([ph1, ph2]).find(g => g.career && g.cells.some(c => c.id === 'campaign_ph_p2'));
+  if (!pg || !pg.cells.some(c => c.id === 'campaign_ph_p1')) fail.push('running-phase-2-not-in-career');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
   console.log('smoke OK');
 })();

@@ -507,7 +507,7 @@ real data. It can't reach phase 4 and is not the published career.
     the first `read_dir` hit.
   - Test: `P1 -> old`, `P1 -> retry (refork of old)`; then
     `--chain old` is refused without `--refork`.
-- **S3: the phase view in the GUI (operator report 2026-10-21: "I do
+- **S3 (done by the reviewer in the round-21 merge): the phase view in the GUI (operator report 2026-10-21: "I do
   not see 4 phases, it is one line from 0 to 20").** This is display
   only; grading doesn't change.
   - **S3c: the live key clash.** The career phase number must not share
@@ -547,7 +547,15 @@ real data. It can't reach phase 4 and is not the published career.
 then the real career on `.37`: phases 1 to 4 in order, each chained to
 the previous cell.
 
-### Round-21 fixes (2026-10-21, rules `2026-10-19.37`)
+### Round-21 fixes (2026-10-21, rules stay `2026-10-19.36`)
+
+**Operator decision (2026-10-21, after review round 21):** nothing in
+round 21 changes grading. The memory-cap failures were a test-setup bug
+(`/tmp` is tmpfs), and production cells were always disk-backed. So the
+`.37` bump is folded back into `.36`, and the Haiku career on `.36` is
+the real career: phase 3, then phase 4, chained from phase 2
+(`campaign_sdb-sql_openrouter_anthropic_claude-haiku-5.5_20261021_163524`).
+S3 (the GUI phase view) was done by the reviewer in the same merge.
 
 **Memory-cap live proofs (the eight failures).** The host `/tmp` is a
 28 GB tmpfs. `covtest_dir()` put the live proofs' multi-hundred-MB scratch

@@ -8,7 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
-/// - `2026-10-19.37`: round-21 review fixes — the memory-cap live proofs
+/// - `2026-10-19.36` (unchanged, 2026-10-21 round 21): no grading change,
+///   so no bump (operator decision 2026-10-21: the `.36` Haiku career
+///   continues). The agent's `.37` bump was folded back into `.36`. S3:
+///   the console draws a phase cell's ladder as four phase groups
+///   (`campaign::phase_ladder`: earlier phases `carried`, later
+///   `later_phase`, carried passes count towards `needs`), a career row
+///   summarises every phase, and the career phase is `live.career_phase`.
+///   Also in this round: the memory-cap live proofs
 ///   keep their heavy scratch stores on a disk-backed test root (`/var/tmp`
 ///   by default, `SDB_COVTEST_ROOT` override). The host `/tmp` is a tmpfs;
 ///   its shmem pages are not reclaimable under the 64/192 MiB cgroup caps,
@@ -684,7 +691,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.37";
+pub const RULES_VERSION: &str = "2026-10-19.36";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

@@ -1842,7 +1842,14 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         points: 0.0,
         max_points: 0.0,
-        phase: v["live"]["phase"].as_u64().map(|p| p as u32),
+        // S3: `live.phase` is the activity ("agent", "verifying"); the
+        // career phase is `career_phase` (a numeric `phase` is the
+        // pre-S3 creation write).
+        phase: v["live"]["career_phase"]
+            .as_u64()
+            .or_else(|| v["career_phase"].as_u64())
+            .or_else(|| v["live"]["phase"].as_u64())
+            .map(|p| p as u32),
         chain_from: v["live"]["chain_from"]
             .as_str()
             .or_else(|| v["chain_from"].as_str())
@@ -2023,11 +2030,22 @@ pub fn ladder(
     rollup: &CampaignRollup,
     current: Option<u32>,
 ) -> Vec<LadderEntry> {
+    ladder_inner(spec, rollup, current, &[])
+}
+
+/// `ladder` with tickets passed in earlier phases counted towards `needs`.
+fn ladder_inner(
+    spec: &CampaignSpec,
+    rollup: &CampaignRollup,
+    current: Option<u32>,
+    carried_passed: &[u32],
+) -> Vec<LadderEntry> {
     let passed: Vec<u32> = rollup
         .stages
         .iter()
         .filter(|r| r.passed)
         .map(|r| r.id)
+        .chain(carried_passed.iter().copied())
         .collect();
     let mut out = Vec::new();
     for stage in &spec.stages {
@@ -2113,6 +2131,67 @@ pub fn ladder(
         out.push(entry);
     }
     out
+}
+
+/// S3: the ladder a phase cell shows. Every ticket is listed; tickets of
+/// an earlier phase that this cell did not attempt are `carried` (variant =
+/// the carried outcome), tickets of a later phase are `later_phase`, and
+/// the cell's own tickets count the carried passes towards their `needs`.
+/// A full-ladder cell gets the plain `ladder`.
+pub fn phase_ladder(
+    spec: &CampaignSpec,
+    rollup: &CampaignRollup,
+    current: Option<u32>,
+    carried: Option<&LadderState>,
+) -> Vec<LadderEntry> {
+    let Some(cell_phase) = rollup.phase.filter(|_| !spec.phases.is_empty()) else {
+        return ladder(spec, rollup, current);
+    };
+    let carried = carried.or(rollup.ladder_state.as_ref());
+    let carried_passed = carried.map(|s| s.passed.clone()).unwrap_or_default();
+    let mut out = ladder_inner(spec, rollup, current, &carried_passed);
+    for e in &mut out {
+        let Some(p) = phase_of(spec, e.id).map(|p| p.id) else {
+            continue;
+        };
+        let attempted = current == Some(e.id) || rollup.stages.iter().any(|r| r.id == e.id);
+        if p > cell_phase {
+            e.status = "later_phase".to_string();
+            e.variant.clear();
+            e.points = 0.0;
+            e.cause = Some(format!("phase {p}: not part of this cell"));
+        } else if p < cell_phase && !attempted {
+            let label = match carried.and_then(|s| s.outcomes.get(&e.id)) {
+                Some(LadderOutcome::Full) => "full",
+                Some(LadderOutcome::Lite) => "lite",
+                Some(LadderOutcome::Failed) => "failed",
+                Some(LadderOutcome::Skipped) => "skipped",
+                None => "unknown",
+            };
+            e.status = "carried".to_string();
+            e.variant = label.to_string();
+            e.points = 0.0;
+            e.cause = Some(format!("phase {p}, carried over: {label}"));
+        }
+    }
+    out
+}
+
+/// S3: the phase table the console draws the strip groups from.
+pub fn phases_json(spec: &CampaignSpec) -> serde_json::Value {
+    serde_json::Value::Array(
+        spec.phases
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "stages": p.stages,
+                    "max_points": phase_max_points(p, &spec.stages),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The ladder state that survives a phase boundary (P1 career chaining).
@@ -5079,6 +5158,40 @@ mod tests {
             harness_fault: None,
             refork: None,
         }
+    }
+
+    /// S3: a phase cell's ladder lists all 21 tickets: earlier phases are
+    /// carried with their outcome, later ones are `later_phase`, and the
+    /// carried passes satisfy the cell's own `needs`.
+    #[test]
+    fn s3_phase_ladder_carries_earlier_and_marks_later_phases() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut rollup = chain_rollup(2, false);
+        rollup.career = None;
+        rollup.stages = vec![failed_record(7, "t7", "own stage: boom", "")];
+        let carried = phase1_state();
+        let e = phase_ladder(&lc.spec, &rollup, Some(8), Some(&carried));
+        assert_eq!(e.len(), 21);
+        assert_eq!(
+            (e[0].status.as_str(), e[0].variant.as_str()),
+            ("carried", "full")
+        );
+        assert_eq!(
+            (e[4].status.as_str(), e[4].variant.as_str()),
+            ("carried", "failed")
+        );
+        assert_eq!(e[7].status, "fail");
+        assert_eq!(e[8].status, "running");
+        // 9 needs 3, passed in phase 1: runnable, not "skipped: needs 3".
+        assert_eq!(e[9].status, "not_reached");
+        // 10 needs 7, which failed here.
+        assert_eq!(e[10].status, "skipped");
+        assert!(e[11..].iter().all(|x| x.status == "later_phase"));
+        // A full-ladder cell keeps the plain ladder.
+        rollup.phase = None;
+        let plain = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        assert_eq!(plain[9].status, "skipped");
+        assert!(plain.iter().all(|x| x.status != "later_phase"));
     }
 
     fn phase1_state() -> LadderState {

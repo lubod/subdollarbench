@@ -79,6 +79,13 @@
       font-size: 9px; color: #0d1117; font-weight: 700; border: 1px solid var(--border);
     }
     .ladderStrip { display: flex; flex-wrap: wrap; gap: 2px; }
+    /* S3: a phase cell's strip is four phase groups, each with its label. */
+    .ladderStrip.phased { gap: 8px; align-items: flex-start; }
+    .ladderPhase { display: inline-flex; flex-direction: column; gap: 3px; padding: 3px 5px 4px; border-radius: 4px; background: rgba(110, 118, 129, 0.10); border: 1px solid transparent; }
+    .ladderPhase.own { border-color: var(--border); }
+    .ladderPhase.later { opacity: .55; }
+    .ladderPhaseLbl { font-size: .62rem; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .ladderPhaseSq { display: flex; flex-wrap: wrap; gap: 2px; }
     .causeCell {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; max-width: 380px;
@@ -2037,7 +2044,7 @@
           const text = `last check ${clockOf(live.last_check_at)}${frac ? ' \u00b7 ' + frac : ''} \u00b7 ${live.first_fail || (ok ? 'all checks passed' : 'in flight')}`;
           return `<div style="border-left:3px solid ${colour};padding:2px 8px;background:rgba(88,166,255,0.05);font-size:.76rem;color:${colour};">${escapeHtml(text)}</div>`;
         })()}
-        <div style="display:flex;align-items:center;gap:8px;">${ladderStrip(ladder)}</div>
+        <div style="display:flex;align-items:center;gap:8px;">${ladderStrip(ladder, cell || d)}</div>
       </div>`;
     }
 
@@ -2123,7 +2130,12 @@
       skipped: { color: 'var(--text-muted)', label: 'skipped' },
       running: { color: 'var(--primary)', label: 'running' },
       not_reached: { color: 'transparent', label: 'not reached' },
+      // S3: phase cells. A carried ticket is drawn in its carried
+      // outcome's colour, dimmed; a later phase's ticket is an outline.
+      carried: { color: 'var(--success)', label: 'carried (earlier phase)', dim: true },
+      later_phase: { color: 'transparent', label: 'later phase', dashed: true },
     };
+    const CARRIED_COLOR = { full: 'var(--success)', lite: 'var(--warning)', failed: 'var(--danger)' };
 
     function fmtMoney(v) { return Number(v || 0).toFixed(4); }
     function fmt1(v) { return Number(v || 0).toFixed(1); }
@@ -2252,9 +2264,13 @@
     /// story on hover (round-10 U2).
     function ladderSquare(entry, records) {
       const st = LADDER_STATUS[entry.status] || LADDER_STATUS.not_reached;
-      const bg = st.stripe
-        ? `repeating-linear-gradient(45deg, ${st.color}, ${st.color} 2px, transparent 2px, transparent 4px)`
+      const color = entry.status === 'carried'
+        ? (CARRIED_COLOR[entry.variant] || 'var(--text-muted)')
         : st.color;
+      const bg = st.stripe
+        ? `repeating-linear-gradient(45deg, ${color}, ${color} 2px, transparent 2px, transparent 4px)`
+        : color;
+      const look = `${st.dim ? 'opacity:.45;' : ''}${st.dashed ? 'border-style:dashed;' : ''}`;
       const recs = (records || []).filter(r => r.id === entry.id);
       const tries = recs.map(r => {
         const rounds = r.rounds || [];
@@ -2269,13 +2285,87 @@
       if (cost) parts.push(`$${fmtMoney(cost)}`);
       if (entry.cause) parts.push(entry.cause);
       const pulse = entry.status === 'running' ? ' ladderRun' : '';
-      return `<span class="ladderSq${pulse}" title="${escapeHtml(parts.join(' \u00b7 '))}" style="background:${bg};">${entry.id}</span>`;
+      return `<span class="ladderSq${pulse}" title="${escapeHtml(parts.join(' \u00b7 '))}" style="background:${bg};${look}">${entry.id}</span>`;
     }
 
-    function ladderStrip(ladder, cell) {
+    function ladderStrip(ladder, cell, opts) {
       if (!ladder || !ladder.length) return '<span class="hint">no ladder</span>';
       const records = (cell && cell.rollup && cell.rollup.stages) || [];
-      return `<span class="ladderStrip">${ladder.map(e => ladderSquare(e, records)).join('')}</span>`;
+      const recordsFor = (opts && opts.recordsFor) || (() => records);
+      const phases = (cell && cell.phases) || [];
+      if (!phases.length) {
+        return `<span class="ladderStrip">${ladder.map(e => ladderSquare(e, recordsFor(e))).join('')}</span>`;
+      }
+      // S3: one group per phase, labelled with its tickets; a phase cell's
+      // own group carries its points and spend, a career row every phase's.
+      const r = (cell && cell.rollup) || {};
+      const groups = phases.map(p => {
+        const entries = ladder.filter(e => (p.stages || []).includes(e.id));
+        if (!entries.length) return '';
+        const span = `${Math.min(...p.stages)}\u2013${Math.max(...p.stages)}`;
+        const own = !(opts && opts.summaries) && r.phase === p.id;
+        const later = entries.every(e => e.status === 'later_phase');
+        const sum = opts && opts.summaries
+          ? (opts.summaries[p.id] || '')
+          : (own ? phaseSummary(r, p) : '');
+        const cls = `ladderPhase${own ? ' own' : ''}${later ? ' later' : ''}`;
+        return `<span class="${cls}" title="Phase ${p.id}: ${escapeHtml(p.title || '')} \u00b7 tickets ${span}"><span class="ladderPhaseLbl"><b>P${p.id}</b> ${span}${sum ? ' \u00b7 ' + escapeHtml(sum) : ''}</span><span class="ladderPhaseSq">${entries.map(e => ladderSquare(e, recordsFor(e))).join('')}</span></span>`;
+      }).join('');
+      return `<span class="ladderStrip phased">${groups}</span>`;
+    }
+
+    function fmtMax(v) { const n = Number(v || 0); return Number.isInteger(n) ? String(n) : fmt1(n); }
+    function phaseSummary(r, p) {
+      const max = r.max_points || (p && p.max_points) || 0;
+      return `${fmt1(r.points || 0)}/${fmtMax(max)} \u00b7 $${Number(r.total_cost_usd || 0).toFixed(2)}`;
+    }
+
+    /// S3: the cells of one career from its root to `top`, plus a running
+    /// next phase chained from `top`.
+    function careerChain(top, cells) {
+      const byId = {};
+      cells.forEach(c => { byId[c.id] = c; });
+      const path = [];
+      const seen = new Set();
+      for (let c = top; c && !seen.has(c.id); c = byId[cellRollup(c).chain_from]) {
+        seen.add(c.id);
+        path.unshift(c);
+      }
+      cells.forEach(c => {
+        if (c.state === 'running' && cellRollup(c).chain_from === top.id) path.push(c);
+      });
+      return path;
+    }
+
+    /// S3: a career's merged strip. Each ticket comes from the latest cell
+    /// in the chain that attempted it (a catch-up beats the original
+    /// phase), and each phase is summarised from the cell that ran it.
+    function careerView(top, cells) {
+      const path = careerChain(top, cells);
+      const phases = top.phases || [];
+      const owner = {};
+      path.forEach(c => { const p = cellRollup(c).phase; if (p != null) owner[p] = c; });
+      const source = {};
+      const ladder = (top.ladder || []).map(e => {
+        for (let i = path.length - 1; i >= 0; i -= 1) {
+          const x = (path[i].ladder || []).find(y => y.id === e.id);
+          if (x && x.status !== 'carried' && x.status !== 'later_phase') {
+            source[e.id] = path[i];
+            return x;
+          }
+        }
+        return e;
+      });
+      const summaries = {};
+      phases.forEach(p => {
+        const c = owner[p.id];
+        summaries[p.id] = c
+          ? `${c.state === 'running' ? 'running \u00b7 ' : ''}${phaseSummary(cellRollup(c), p)}`
+          : `\u2014/${fmtMax(p.max_points)}`;
+      });
+      const recordsFor = e => (source[e.id] && cellRollup(source[e.id]).stages) || [];
+      const running = path.find(c => c.state === 'running') || null;
+      return { ladder, summaries, recordsFor, running };
     }
 
     /// The one legend for every strip (round-10 U2).
@@ -2504,17 +2594,22 @@
         : '';
       const indent = opts && opts.indent ? 'padding-left:28px;opacity:.8;' : '';
       const extra = (opts && opts.extra) ? opts.extra : '';
-      const state = cellState(cell);
+      const view = career && opts.careerCells ? careerView(cell, opts.careerCells) : null;
+      // S3: a career with a phase in flight says so, not the leaf's "done".
+      const state = view && view.running
+        ? (s => ({ text: `phase ${cellRollup(view.running).phase} ${s.text}`, cls: s.cls }))(cellState(view.running))
+        : cellState(cell);
       const refork = r.refork
         ? ` <span class="badge" style="border-color:var(--warning);color:var(--warning);font-size:.62rem;" title="fork of ${escapeHtml(r.refork.of || '?')}">refork: ${escapeHtml(r.refork.reason || '')}</span>`
         : '';
       const href = `#run/${encodeURIComponent(cell.id)}`;
+      const strip = view ? ladderStrip(view.ladder, cell, view) : ladderStrip(cell.ladder, cell);
       return `<tr style="${indent}" onclick="location.hash='run/${encodeURIComponent(cell.id)}'" onkeydown="if(event.key==='Enter'){location.hash='run/${encodeURIComponent(cell.id)}';}" tabindex="0" title="${escapeHtml(cell.id)}">
         <td style="text-align:center;color:var(--text-muted);width:34px;">${rank}</td>
         <td><a href="${href}" style="color:inherit;text-decoration:none;font-weight:600;" onclick="event.stopPropagation();"><b>${escapeHtml(shortModel(r.model || cell.id))}</b></a>${extra}
           <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))}</div>
           <div class="hint" style="${state.cls}">${escapeHtml(state.text)}${stale}${refork}</div></td>
-        <td style="width:100%;">${ladderStrip(cell.ladder, cell)}</td>
+        <td style="width:100%;">${strip}</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt1(pts)}/${Math.round(maxPts)} pts</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">$${fmtMoney(cost)}</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${pd == null ? '\u2014' : fmt1(pd)} pts/$</td>
@@ -2574,7 +2669,7 @@
         const extra = n > 1
           ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">\u00d7${n} ${career ? 'phases' : 'runs'} ${expanded ? '\u25be' : '\u25b8'}</a>`
           : '';
-        rows += boardRowHtml(top, rank, { extra, careerView: career });
+        rows += boardRowHtml(top, rank, { extra, careerView: career, careerCells: career ? cells : null });
         if (expanded && n > 1) {
           if (career) {
             const topRollup = cellRollup(top);
@@ -2752,7 +2847,7 @@
             ${next ? `<a href="#run/${encodeURIComponent(next.id)}" style="color:var(--primary);">next \u203a</a>` : '<span style="opacity:.4;">next \u203a</span>'}
           </div>
         </div>
-        <div>${ladderStrip(ladder, { rollup: r })}${ladderLegend()}</div>
+        <div>${ladderStrip(ladder, { rollup: r, phases: d.phases })}${ladderLegend()}</div>
         <div title="$ / cap (effective)" style="height:8px;border-radius:3px;overflow:hidden;background:#05070a;border:1px solid var(--border);max-width:420px;">
           <span style="display:block;height:100%;width:${capPct.toFixed(1)}%;background:${total > cap && cap > 0 ? 'var(--warning)' : 'var(--success)'};"></span>
         </div>

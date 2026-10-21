@@ -519,10 +519,11 @@ pub async fn run(
             "effort": effort,
             "campaign_budget": budget_usd,
             "campaign_spent": 0.0,
-            "phase": phase,
+            "career_phase": phase,
             "chain_from": chain,
             "refork": refork_info,
         });
+        v["career_phase"] = serde_json::json!(phase);
         v["chain_from"] = serde_json::json!(chain);
         v["refork"] = serde_json::json!(refork_info);
     });
