@@ -329,6 +329,110 @@ chain-reuse test; the portal phase-cell guard; lib suite with the eight
 memory live proofs skipped: **984 passed / 6 ignored / 8 filtered**;
 bins **62**; fmt/clippy clean.
 
+### Round-20 work: the last fixes before the first phase cell (opened 2026-10-21)
+
+**Operator decisions (2026-10-21):**
+
+- **D1. Three catch-up slots: confirmed.** Keep `CATCH_UP_SLOTS = 3`.
+  Change the rules-history wording from "operator-facing choice" to
+  "operator decision 2026-10-21".
+- **D2. A started successor uses up its predecessor.** A rerun needs an
+  explicit `--refork "<reason>"`.
+- **D3. No real phase cell runs until this work is reviewed.** The first
+  phase-1 cell runs on `.36`. A chain needs the same rules version, so a
+  phase 1 on `.35` could not be continued.
+
+**The work, in this order: one commit, rules `2026-10-19.36`.**
+
+1. **R1: cancel, crash and rerun (D2).**
+   - **What counts:** `chain_already_used` counts **any** cell whose
+     rollup (in `campaign.json` or `status.json`) names the predecessor
+     in `chain_from`. That includes running, cancelled, crashed and
+     unfinished cells. The only exception is a harness-faulted cell (a
+     non-result).
+   - **Fault at start:** a cell that dies before its first `on_stage` has
+     no rollup yet. Write `chain_from` into `status.json` at cell
+     creation (already done for the live fields) and read it from there
+     too.
+   - **The override:** add `campaign run … --refork "<reason>"`. It is
+     allowed only with `--chain` and only when the chain is already used.
+     It records `refork: {of: <previous successor id>, reason}` in the
+     new rollup.
+   - **Without it:** the error names the existing successor and suggests
+     `--refork`.
+   - **Board:** show a `refork` badge with the reason on the career row.
+   - **Console:** give the launcher a "refork reason" field, shown only
+     when the server answers that the chain is used. `POST
+     /api/campaigns` accepts `refork`.
+   - **Tests:**
+     - a cancelled successor (`status.json` state `cancelled`, empty
+       `finished_at`) blocks the chain;
+     - a successor that is only in `status.json` blocks it;
+     - a faulted successor alone does **not** block (assert this with no
+       other child present; the current test can't tell);
+     - `--refork` passes and is recorded;
+     - `--refork` without `--chain` is refused.
+2. **R2: the Board's career leaf.**
+   - **Grouping:** don't group harness-faulted cells into a career.
+   - **The leaf:** the finished cell in the group that no other cell in
+     the group names as `chain_from`. On a tie (a refork), take the newest
+     `started_at`.
+   - **Everything else:** the cumulative points and cost come from that
+     leaf. A refork's superseded cell is listed under the expanded rows
+     as "superseded".
+   - **A running phase cell:** list it under its root as a "running" row.
+     It carries `chain_from` in its live rollup, so its root is the root
+     of its predecessor.
+   - **Test:** do it in Rust if the ordering lives in `board_order`.
+     Otherwise add a small JS check that the existing web test harness
+     runs. Fixture: phase 1, a faulted phase 2, and a phase-2 retry → the
+     leaf is the retry.
+3. **R3 (nit):** `render_spec_md_catch_up` should take `passed` only and
+   label each ticket from `outcomes` (Full or Lite). Remove the redundant
+   filter.
+
+**Rules for this work:**
+
+- Bump `RULES_VERSION` to `2026-10-19.36`, with a history line.
+- Gates: a niced `cargo test` (the eight memory-cap live proofs may stay
+  skipped and named), fmt and clippy.
+- Do not restart services, rebuild `target/release` or launch any cell.
+  The reviewer reviews first.
+
+**Separate task (not part of `.36`, may run in parallel): the memory-cap
+live proofs on kernel `7.0.0-38`.**
+
+- **Background:** SQL T16, the T17-20 cascade and KV stage 14 fail. The
+  reference is OOM-killed (exit 137) after about 100k rows under the
+  64 MiB cgroup, also at `9f2ff24`. It started after the reboot from
+  `7.0.0-31`.
+- **Find out why:**
+  - Compare `memory.stat` of the proof container (`file`, `anon`,
+    `file_dirty`, `file_writeback`) during the proof.
+  - Check whether page cache from the store's writes is now charged
+    and not reclaimed before the OOM. cgroup v2 under the systemd
+    driver; look at `memory.high`/`memory.max`, swap, and `oom.group`.
+- **Fix only on the verifier side, never by loosening the ticket:** for
+  example, `memory.high` slightly below `memory.max`, or an explicit
+  fsync/`posix_fadvise(DONTNEED)` in the *harness's* reference adapter.
+- **Write it down:** record findings here. Bump the rules only if the
+  grading changes.
+- **Until then:** phase 4 is not runnable as graded, and phases 1-3 are
+  unaffected.
+
+**After the review (operator go-ahead needed for each):**
+
+1. Build `target/release`, then restart `subdollarbench-engine` and
+   `subdollarbench-gui`.
+2. **Phase-1 cell:** `SDB_CELL_PHASE=1 scripts/sql-cell.sh <model>`
+   ($0.99 / 150 min).
+   - Check the `[COST]` and `[LIMIT]` lines.
+   - Check that `ladder_state.json` exists and the cell stays under $1.
+3. **Phase 2:** `SDB_CELL_PHASE=2 SDB_CELL_CHAIN=<phase-1 id>
+   scripts/sql-cell.sh <model>`.
+4. **Phase 3**, which is the first live catch-up and hints. Phase 4 runs
+   only after the memory proofs are green.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and
