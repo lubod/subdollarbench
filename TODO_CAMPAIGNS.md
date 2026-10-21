@@ -468,6 +468,54 @@ The operator decisions D1-D3 and the reviewer's R1-R3 are implemented:
 The separate memory-cap investigation is not part of `.36`; phase 4
 remains unrunnable until it is understood.
 
+### Round-21 work: memory proofs, S1, S2 (opened 2026-10-21)
+
+Review: `REVIEW.md` round 20. `.36` is accepted. Its findings are S1 and
+S2, and one planning point decides the order of everything else.
+
+**Planning point:** `validate_chain` requires the same `rules_version`
+in every phase of a career. A career that is meant to reach phase 4
+therefore has to start on the rules that contain the memory-cap fix.
+
+**Operator decision (2026-10-21):** run a shakedown career on `.36` now:
+phases 1, 2 and 3 with `openrouter/anthropic/claude-haiku-5.5`, effort
+high. It tests carry-over, catch-up, hints and the Board career row on
+real data. It can't reach phase 4 and is not the published career.
+
+**Work (one commit, rules `2026-10-19.37`):**
+
+- **While a shakedown cell runs:**
+  - work in your own worktree or branch;
+  - don't touch master's working tree, `target/release` or the services.
+- **Memory-cap live proofs (kernel 7.0.0-38):** the 8 failing proofs.
+  - Find out why they fail: `memory.stat`, page cache, and
+    `memory.high`/`memory.max`.
+  - Fix on the verifier side only.
+  - The proofs must pass unfiltered.
+- **S1: faulted cells on the Board.**
+  - Don't drop harness-faulted cells in `groupCells`.
+  - A faulted full-ladder cell stays a normal row, as before `.36`.
+  - A faulted phase cell renders as an indented `faulted (non-result)`
+    row under its career.
+  - `careerLeaf` and the career points keep ignoring faulted cells.
+  - Add both cases to the smoke fixture.
+- **S2: superseded branches.**
+  - A chain cell named in any non-faulted cell's `refork.of` counts as
+    used. Continuing it needs `--refork`, both in the CLI and in the
+    server pre-check.
+  - `refork.of` names the newest existing successor by `started_at`, not
+    the first `read_dir` hit.
+  - Test: `P1 -> old`, `P1 -> retry (refork of old)`; then
+    `--chain old` is refused without `--refork`.
+- **Gates:**
+  - niced `cargo test`, with the full lib suite unfiltered;
+  - fmt and clippy;
+  - no restart, no rebuild and no cell.
+
+**After review (each step on operator go-ahead):** rebuild and restart,
+then the real career on `.37`: phases 1 to 4 in order, each chained to
+the previous cell.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and
