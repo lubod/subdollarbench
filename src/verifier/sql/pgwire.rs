@@ -16,6 +16,7 @@
 //!
 //! The lite variant grades the simple-query protocol only.
 
+use super::wire::describe_read_error;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -72,8 +73,11 @@ struct Outcome {
     txn: u8,
 }
 
+#[derive(Debug)]
 struct PgConn {
     stream: TcpStream,
+    timeout: Duration,
+    step: &'static str,
     saw_cleartext: bool,
     server_version: Option<String>,
     client_encoding: Option<String>,
@@ -96,7 +100,7 @@ impl PgConn {
         let mut ssl = [0u8; 1];
         stream
             .read_exact(&mut ssl)
-            .map_err(|e| format!("SSLRequest answer: {e}"))?;
+            .map_err(|e| describe_read_error(&e, cfg.timeout, "the SSLRequest startup step"))?;
         if ssl != [b'N'] {
             return Err(format!(
                 "SSLRequest answered {:?}, expected N",
@@ -119,6 +123,8 @@ impl PgConn {
             .map_err(|e| format!("startup: {e}"))?;
         let mut c = PgConn {
             stream,
+            timeout: cfg.timeout,
+            step: "the startup step",
             saw_cleartext: false,
             server_version: None,
             client_encoding: None,
@@ -195,12 +201,12 @@ impl PgConn {
         match self.stream.read_exact(&mut t) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(format!("read: {e}")),
+            Err(e) => return Err(describe_read_error(&e, self.timeout, self.step)),
         }
         let mut l = [0u8; 4];
         self.stream
             .read_exact(&mut l)
-            .map_err(|e| format!("read length: {e}"))?;
+            .map_err(|e| describe_read_error(&e, self.timeout, self.step))?;
         let n = i32::from_be_bytes(l);
         if !(4..=64 * 1024 * 1024).contains(&n) {
             return Err(format!("bad message length {n}"));
@@ -208,7 +214,7 @@ impl PgConn {
         let mut body = vec![0u8; (n - 4) as usize];
         self.stream
             .read_exact(&mut body)
-            .map_err(|e| format!("read body: {e}"))?;
+            .map_err(|e| describe_read_error(&e, self.timeout, self.step))?;
         Ok(Some((t[0], body)))
     }
 
@@ -246,6 +252,7 @@ impl PgConn {
     }
 
     fn simple(&mut self, sql: &str) -> Result<Outcome, String> {
+        self.step = "the simple-query step";
         let mut body = sql.as_bytes().to_vec();
         body.push(0);
         self.send_msg(b'Q', &body)?;
@@ -253,6 +260,7 @@ impl PgConn {
     }
 
     fn extended(&mut self, sql: &str, params: &[&str]) -> Result<Outcome, String> {
+        self.step = "the extended-query step";
         // Parse.
         let mut p = Vec::new();
         p.extend_from_slice(&cstr(""));
@@ -881,6 +889,25 @@ mod tests {
             extended,
             unique_keys: true,
         }
+    }
+
+    #[test]
+    fn startup_timeout_is_readable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept the probe");
+            std::thread::sleep(Duration::from_millis(300));
+            drop(stream);
+        });
+        let mut c = cfg(true);
+        c.timeout = Duration::from_millis(100);
+        let err = PgConn::connect(&addr, &c).unwrap_err();
+        assert!(
+            err.contains("no answer within 0.1s to the SSLRequest startup step"),
+            "{err}"
+        );
+        let _ = handle.join();
     }
 
     #[test]

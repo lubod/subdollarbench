@@ -1089,14 +1089,17 @@ async fn run_one_stage(
 
     // Evidence: console + manifest + git commit + diff.
     let console = buf.lock().unwrap().join("\n");
-    std::fs::write(stage_dir.join("console.log"), console)?;
+    std::fs::write(stage_dir.join("console.log"), &console)?;
     if let Ok(m) = serde_json::to_string_pretty(&output.manifest) {
         let _ = std::fs::write(stage_dir.join("manifest.json"), m);
     }
     let passed = output.benchmark_result.pass_rate >= 100.0 && !output.disqualified;
+    // F2: an agent that exited after the round was graded is a candidate
+    // failure, not a harness fault. Only a real harness fault / infra error
+    // measured nothing.
     let verdict = if passed {
         "pass"
-    } else if output.agent_failed || output.infra_error {
+    } else if output.infra_error || output.harness_fault.is_some() {
         "fault"
     } else {
         "fail"
@@ -1174,9 +1177,17 @@ async fn run_one_stage(
             &job.passed,
             &stages,
             output.agent_failed,
-            output.infra_error,
+            output.infra_error || output.harness_fault.is_some(),
             tail,
         );
+    }
+    // F2: the manager-era crash shape is an output-limit truncation
+    // (Haiku hit 65,536 completion tokens, an unterminated edit JSON, then a
+    // provider 400). Keep it in the stage record so the Board can say why.
+    if output.agent_failed && output.harness_fault.is_none() {
+        if let Some(f) = rounds.last_mut().and_then(|r| r.failure.as_mut()) {
+            campaign::mark_agent_crash(f, &console);
+        }
     }
     let failure = rounds.last().and_then(|r| r.failure.clone());
     Ok(StageOutcome {

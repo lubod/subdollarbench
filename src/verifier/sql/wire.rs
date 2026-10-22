@@ -21,7 +21,8 @@
 //! line cannot be mistaken for it.
 
 use super::oracle::Value;
-use std::io::BufRead;
+use std::io::{BufRead, ErrorKind};
+use std::time::Duration;
 
 /// One decoded server response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +86,28 @@ pub fn encode_value(v: &Value) -> String {
     }
 }
 
+/// F1: turn a socket read failure into the words the candidate can act on.
+/// A timeout is not a mysterious errno: it says how long the verifier waited
+/// and which statement/step was waiting.
+pub fn describe_read_error(e: &std::io::Error, timeout: Duration, what: &str) -> String {
+    if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+        let secs = timeout.as_secs_f64();
+        let n = if (secs.fract()).abs() < f64::EPSILON {
+            format!("{}", secs as u64)
+        } else {
+            format!("{secs:.1}")
+        };
+        format!("no answer within {n}s to {what}: the server did not reply")
+    } else {
+        format!("read: {e}")
+    }
+}
+
 /// Read one line without its `\n`. `Ok(None)` is a clean EOF.
-fn read_line<R: BufRead>(r: &mut R) -> Result<Option<String>, String> {
+fn read_line<R: BufRead>(
+    r: &mut R,
+    timeout: Option<(Duration, &str)>,
+) -> Result<Option<String>, String> {
     let mut buf = String::new();
     match r.read_line(&mut buf) {
         Ok(0) => Ok(None),
@@ -96,7 +117,10 @@ fn read_line<R: BufRead>(r: &mut R) -> Result<Option<String>, String> {
             }
             Ok(Some(buf))
         }
-        Err(e) => Err(format!("read: {e}")),
+        Err(e) => Err(match timeout {
+            Some((d, what)) => describe_read_error(&e, d, what),
+            None => format!("read: {e}"),
+        }),
     }
 }
 
@@ -110,9 +134,20 @@ fn end_marker(line: &str) -> Option<u64> {
 }
 
 /// Read exactly one response. Errors are protocol violations or EOF; a
-/// timeout surfaces as an I/O error from the underlying reader.
+/// timeout surfaces as an I/O error from the underlying reader. The
+/// no-context form is for in-memory readers and tests.
 pub fn read_response<R: BufRead>(r: &mut R) -> Result<Response, String> {
-    let first = read_line(r)?.ok_or_else(|| "connection closed before a response".to_string())?;
+    read_response_ctx(r, None)
+}
+
+/// [`read_response`] with the read timeout and a human-readable statement
+/// or security step, so a timeout names what was waiting (F1).
+pub fn read_response_ctx<R: BufRead>(
+    r: &mut R,
+    timeout: Option<(Duration, &str)>,
+) -> Result<Response, String> {
+    let first =
+        read_line(r, timeout)?.ok_or_else(|| "connection closed before a response".to_string())?;
     if let Some(n) = first.strip_prefix("OK ") {
         let n: u64 = n
             .parse()
@@ -130,13 +165,13 @@ pub fn read_response<R: BufRead>(r: &mut R) -> Result<Response, String> {
         let ncols: usize = n
             .parse()
             .map_err(|_| format!("bad ROWS line {first:?}: column count is not a number"))?;
-        let header =
-            read_line(r)?.ok_or_else(|| "connection closed before the header line".to_string())?;
+        let header = read_line(r, timeout)?
+            .ok_or_else(|| "connection closed before the header line".to_string())?;
         let headers: Vec<String> = header.split('\t').map(str::to_string).collect();
         let mut rows = Vec::new();
         loop {
-            let line =
-                read_line(r)?.ok_or_else(|| "connection closed before the END line".to_string())?;
+            let line = read_line(r, timeout)?
+                .ok_or_else(|| "connection closed before the END line".to_string())?;
             if let Some(end_count) = end_marker(&line) {
                 return Ok(Response::Rows {
                     ncols,
@@ -235,6 +270,29 @@ mod tests {
             Response::Rows { rows, .. } => assert_eq!(rows, vec![vec![String::new()]]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn timeout_names_the_step_and_wait() {
+        struct Never;
+        impl std::io::Read for Never {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Resource temporarily unavailable (os error 11)",
+                ))
+            }
+        }
+        let mut r = std::io::BufReader::new(Never);
+        let e = read_response_ctx(
+            &mut r,
+            Some((Duration::from_secs(5), "the hostile-input step")),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "no answer within 5s to the hostile-input step: the server did not reply"
+        );
     }
 
     #[test]

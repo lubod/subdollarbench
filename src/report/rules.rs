@@ -8,6 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.37`: round-22 review fixes — F2: a round that was graded
+///   before the agent exited non-zero (including the 65,536-token output
+///   truncation) is a candidate failure, not a harness fault: it records
+///   `failed`, runs the lite, and the stage failure can say `agent_crash`;
+///   only a real harness fault (never-started, provider billing/auth, an
+///   infra error) stays `fault`, stops the cell and skips the lite. The
+///   backfill and git verdict use the same rule. F1: text-protocol and
+///   pgwire read timeouts say `no answer within Ns to <statement/step>`
+///   instead of a raw errno. F3: a ladder ticket whose unmet need is still
+///   pending shows `waiting` (cause `needs N`) until the need is decided,
+///   then `skipped`. The `.36` Haiku career is complete and is not
+///   comparable with `.37` careers on tickets with a lite. The ladder is
+///   unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.36` (unchanged, 2026-10-21 round 21): no grading change,
 ///   so no bump (operator decision 2026-10-21: the `.36` Haiku career
 ///   continues). The agent's `.37` bump was folded back into `.36`. S3:
@@ -691,7 +704,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.36";
+pub const RULES_VERSION: &str = "2026-10-19.37";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

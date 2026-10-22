@@ -5675,7 +5675,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.36',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.37',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
@@ -5730,6 +5730,10 @@ global.fetch = async (url) => {
   if (!String(cv.summaries[2]).startsWith('running')) fail.push('career-running-summary:' + cv.summaries[2]);
   if (!cv.running || cv.running.id !== 'campaign_ph_p2') fail.push('career-running-cell');
   if (cv.summaries[3] !== '\u2014/22') fail.push('career-unrun-summary:' + cv.summaries[3]);
+  // F3: a waiting ladder ticket renders with the waiting legend and cause.
+  if (!ladderLegend().includes('waiting')) fail.push('waiting-legend');
+  const ws = ladderSquare({id:14, title:'Waiting', status:'waiting', variant:'', points:0, cause:'needs 11'}, []);
+  if (!ws.includes('waiting') || !ws.includes('needs 11')) fail.push('waiting-square:' + ws);
   const pg = groupCells([ph1, ph2]).find(g => g.career && g.cells.some(c => c.id === 'campaign_ph_p2'));
   if (!pg || !pg.cells.some(c => c.id === 'campaign_ph_p1')) fail.push('running-phase-2-not-in-career');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
