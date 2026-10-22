@@ -11,7 +11,7 @@ from `TEMPLATE.md`.
 | [23](23.md) | "What does a dollar buy": dollars, not turns, limit a session | merged `bd7477f` |
 | [24](24.md) | The rules fingerprint covers sdb-sql (freeze prerequisite) | merged `fed6519` |
 | [25](25.md) | Display follow-ups from round 22 (crash label, `waiting`) | draft |
-| [26](26.md) | Turns inside an attempt follow the dollar rule (R23-7) | draft |
+| [26](26.md) | Turns inside an attempt follow the dollar rule (R23-7) | open |
 
 **Status values:**
 
