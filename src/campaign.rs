@@ -1648,10 +1648,36 @@ pub fn effective_state_with(state: &str, updated_at: Option<&str>, lock_live: bo
     }
 }
 
+/// R22-5: apply F2's `fault` -> `failed` relabel to every loaded rollup,
+/// independently of the rounds backfill. The rule is unchanged: the stage
+/// manifest says `agent_failed`, and the cell has no `harness_fault`.
+pub fn relabel_graded_crashes(rollup: &mut CampaignRollup, campaign_dir: &std::path::Path) {
+    if rollup.harness_fault.is_some() {
+        return;
+    }
+    for rec in &mut rollup.stages {
+        if rec.status != "fault" {
+            continue;
+        }
+        let manifest: Option<serde_json::Value> = std::fs::read_to_string(
+            campaign_dir
+                .join(format!("s{}_{}", rec.id, rec.variant))
+                .join("manifest.json"),
+        )
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+        if manifest.as_ref().and_then(|m| m["status"].as_str()) == Some("agent_failed") {
+            rec.status = "failed".to_string();
+        }
+    }
+}
+
 /// Fill `rounds`/`failure` on records written before they were recorded
 /// (gui-spec.md §6.1): read each attempt's manifest from the campaign dir
-/// and mark the derived rounds. Cells with live rounds are untouched.
+/// and mark the derived rounds. The crash relabel is applied first, because
+/// it also applies to cells with recorded rounds.
 pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Path) {
+    relabel_graded_crashes(rollup, campaign_dir);
     for i in 0..rollup.stages.len() {
         if !rollup.stages[i].rounds.is_empty() {
             continue;
@@ -1676,14 +1702,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
         let agent_failed = manifest
             .as_ref()
             .map(|m| m["status"].as_str() == Some("agent_failed"))
-            .unwrap_or(rollup.stages[i].status == "fault");
-        // F2: the F2-era campaign records `failed` for a graded agent crash.
-        // Old rows wrote `fault`; correct them on read when the cell has no
-        // real harness fault. A real fault (billing, never-started) keeps
-        // the cell-level harness_fault and the fault label.
-        if agent_failed && rollup.harness_fault.is_none() && rollup.stages[i].status == "fault" {
-            rollup.stages[i].status = "failed".to_string();
-        }
+            .unwrap_or(false);
         let stages_of = |m: &serde_json::Value| -> Vec<crate::verifier::StageResult> {
             m.get("stages")
                 .and_then(|s| serde_json::from_value(s.clone()).ok())
@@ -3881,6 +3900,40 @@ mod tests {
         rollup.harness_fault = Some("provider billing/auth: exhausted".into());
         backfill_rounds(&mut rollup, &dir);
         assert_eq!(rollup.stages[0].status, "fault");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R22-5 acceptance: the relabel is independent of the rounds backfill,
+    /// so a stage that already has recorded rounds still reads `failed`.
+    #[test]
+    fn r22_5_a_stage_with_recorded_rounds_still_relabels() {
+        let dir = tmp_dir("r22_5rounds");
+        let stage = dir.join("s8_full");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(
+            stage.join("manifest.json"),
+            serde_json::json!({"status": "agent_failed"}).to_string(),
+        )
+        .unwrap();
+        let mut rec = failed_record(8, "Joins", "agent stopped", "");
+        rec.status = "fault".into();
+        rec.rounds = vec![RoundRecord {
+            round: 0,
+            passed_stages: 1,
+            total_stages: 1,
+            turns: Some(12),
+            cost_usd: 0.01,
+            duration_seconds: Some(60.0),
+            git_commit: None,
+            failure: None,
+            stop_reason: Some("crash".into()),
+            derived: false,
+        }];
+        let mut rollup = chain_rollup(1, true);
+        rollup.stages = vec![rec];
+        rollup.harness_fault = None;
+        backfill_rounds(&mut rollup, &dir);
+        assert_eq!(rollup.stages[0].status, "failed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
