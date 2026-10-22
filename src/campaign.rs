@@ -1236,7 +1236,8 @@ pub struct RoundRecord {
 /// (gui-spec.md §5.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureSummary {
-    /// fault | no_start | regression | late_check | own_stage | agent
+    /// fault | no_start | regression | late_check | own_stage | agent |
+    /// agent_crash (max-output truncation after grading)
     pub kind: String,
     /// The verifier stage that failed first, when the round has one.
     #[serde(default)]
@@ -1473,6 +1474,20 @@ pub fn classify_failure(
     Some(mk("own_stage", own.map(|s| s.stage).or(stage), what))
 }
 
+/// F2: annotate a classified agent failure with the max-output truncation
+/// when the host console shows it. Returns whether the record changed.
+pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
+    let truncation = console.contains("output: 65536")
+        || console.contains("output limit")
+        || console.contains("not valid JSON");
+    if !truncation {
+        return false;
+    }
+    failure.kind = "agent_crash".to_string();
+    failure.line = "agent hit the 65,536-token output limit and crashed".to_string();
+    true
+}
+
 /// The campaign lock (round-7 finding 1): one campaign at a time, whether
 /// started from the CLI (`scripts/sql-cell.sh`) or the console. A small
 /// JSON file holding `{pid, campaign_id}`; a lock whose holder is gone is
@@ -1653,6 +1668,13 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
             .as_ref()
             .map(|m| m["status"].as_str() == Some("agent_failed"))
             .unwrap_or(rollup.stages[i].status == "fault");
+        // F2: the F2-era campaign records `failed` for a graded agent crash.
+        // Old rows wrote `fault`; correct them on read when the cell has no
+        // real harness fault. A real fault (billing, never-started) keeps
+        // the cell-level harness_fault and the fault label.
+        if agent_failed && rollup.harness_fault.is_none() && rollup.stages[i].status == "fault" {
+            rollup.stages[i].status = "failed".to_string();
+        }
         let stages_of = |m: &serde_json::Value| -> Vec<crate::verifier::StageResult> {
             m.get("stages")
                 .and_then(|s| serde_json::from_value(s.clone()).ok())
@@ -2511,6 +2533,16 @@ pub fn phase_hints(
     }
 }
 
+/// F2: only a real harness/provider fault is a non-result. An agent that
+/// exited non-zero after grading is a candidate failure; its lite attempt
+/// must still run. `infra_error` without a `harness_fault` is still a
+/// measured-nothing fault and stops the cell with this reason.
+fn measured_nothing(out: &StageOutcome) -> Option<&str> {
+    out.harness_fault
+        .as_deref()
+        .or_else(|| out.infra_error.then_some("infrastructure error"))
+}
+
 /// Format a points value without trailing zeroes, for the hint text.
 fn fmt_points(p: f64) -> String {
     if (p.fract()).abs() < 1e-9 {
@@ -2753,7 +2785,7 @@ where
             if let Some(cb) = on_stage {
                 cb(&rollup);
             }
-            if let Some(reason) = &out.harness_fault {
+            if let Some(reason) = measured_nothing(&out) {
                 // Q3: a catch-up fault is a cell fault, not a reason to run
                 // the rest of the phase against a non-result.
                 outcomes.insert(target, LadderOutcome::Failed);
@@ -2890,7 +2922,10 @@ where
             *e = *e || r.passed;
         }
         total_cost += out.effective_cost_usd;
-        let fault = out.agent_failed || out.infra_error;
+        // F2: a non-zero agent exit after the round was graded is a
+        // candidate failure; only a real harness fault (or an infra fault)
+        // measured nothing and keeps the `fault` label.
+        let fault = out.infra_error || out.harness_fault.is_some();
         let status = if out.passed {
             "passed"
         } else if fault {
@@ -2907,7 +2942,7 @@ where
             regression_severity,
             status,
         );
-        if let Some(reason) = &out.harness_fault {
+        if let Some(reason) = measured_nothing(&out) {
             // Round-14 N2: a harness fault is not a ladder step. Stop the
             // cell instead of letting one crash block its dependants.
             outcomes.insert(stage.id, LadderOutcome::Failed);
@@ -2985,7 +3020,7 @@ where
                     *e = *e || r.passed;
                 }
                 total_cost += out2.effective_cost_usd;
-                let fault2 = out2.agent_failed || out2.infra_error;
+                let fault2 = out2.infra_error || out2.harness_fault.is_some();
                 let status2 = if out2.passed {
                     "passed"
                 } else if fault2 {
@@ -3002,7 +3037,7 @@ where
                     severity2,
                     status2,
                 );
-                if let Some(reason) = &out2.harness_fault {
+                if let Some(reason) = measured_nothing(&out2) {
                     outcomes.insert(stage.id, LadderOutcome::Failed);
                     stop_on_harness_fault(&mut rollup, stage.id, reason, reached, total_cost);
                     rollup.ladder_state = Some(snapshot_state(
@@ -3412,6 +3447,60 @@ mod tests {
     use super::*;
     use crate::verifier::StageResult;
 
+    /// F2: a provider billing/auth fault is a real harness fault: it keeps
+    /// the fault label and stops without a lite.
+    #[tokio::test]
+    async fn f2_a_provider_billing_fault_stays_fault_and_stops() {
+        let lc = fixture_campaign_with_lite();
+        let opts = CampaignRunOptions {
+            campaign_id: "f2billing".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 10.0,
+            wall_min: None,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = calls.clone();
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            move |attempt| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let out = if attempt.stage.id == 0 {
+                    outcome(true, &[(1, true), (2, true)])
+                } else {
+                    let mut o = outcome(false, &[]);
+                    o.agent_failed = true;
+                    o.harness_fault = Some("provider billing/auth: exhausted".into());
+                    o
+                };
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(rollup.stages[1].status, "fault");
+        assert!(
+            !rollup
+                .stages
+                .iter()
+                .any(|r| r.id == 1 && r.variant == "lite"),
+            "a billing fault must not get a lite"
+        );
+        assert!(
+            rollup
+                .harness_fault
+                .as_deref()
+                .unwrap_or("")
+                .contains("provider billing"),
+            "{:?}",
+            rollup.harness_fault
+        );
+    }
+
     /// gui-spec.md §5.2: the classifier's six kinds, one fixture each.
     #[test]
     fn failure_classifier_kinds() {
@@ -3720,6 +3809,36 @@ mod tests {
         let f = rounds[1].failure.as_ref().expect("classified");
         assert_eq!(f.kind, "regression");
         assert!(f.line.starts_with("broke ticket 3"), "{}", f.line);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F2: old rows wrote `fault` for a graded agent crash. The backfill
+    /// corrects that to `failed` unless the cell has a real harness fault.
+    #[test]
+    fn f2_backfill_reads_an_old_graded_crash_as_failed() {
+        let dir = tmp_dir("f2backfill");
+        let stage = dir.join("s8_full");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(
+            stage.join("manifest.json"),
+            serde_json::json!({"status": "agent_failed"}).to_string(),
+        )
+        .unwrap();
+        let mut rec = failed_record(8, "Joins", "agent stopped", "");
+        rec.status = "fault".into();
+        let mut rollup = chain_rollup(1, true);
+        rollup.stages = vec![rec];
+        rollup.harness_fault = None;
+        backfill_rounds(&mut rollup, &dir);
+        assert_eq!(rollup.stages[0].status, "failed");
+        // A real harness fault (provider billing) keeps the fault label.
+        let mut rec = failed_record(8, "Joins", "provider billing", "");
+        rec.status = "fault".into();
+        let mut rollup = chain_rollup(1, true);
+        rollup.stages = vec![rec];
+        rollup.harness_fault = Some("provider billing/auth: exhausted".into());
+        backfill_rounds(&mut rollup, &dir);
+        assert_eq!(rollup.stages[0].status, "fault");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4068,6 +4187,21 @@ mod tests {
         )
         .unwrap();
         LoadedCampaign { spec, root: dir }
+    }
+
+    /// The same three-ticket fixture, with a lite variant on ticket 1 so the
+    /// F2 crash path can prove that the lite still runs.
+    fn fixture_campaign_with_lite() -> LoadedCampaign {
+        let mut lc = fixture_campaign();
+        lc.spec.stages[1].lite = Some(LiteSpec {
+            prompt: "stages/1-lite.md".into(),
+            profile: Vec::new(),
+            budget_usd: 0.1,
+            max_turns: 10,
+            weight: 0.4,
+        });
+        std::fs::write(lc.root.join("stages/1-lite.md"), "# lite ticket").unwrap();
+        lc
     }
 
     #[test]
@@ -5664,6 +5798,71 @@ mod tests {
         assert!(fault.contains("never reached"), "{fault}");
     }
 
+    /// F2: a graded catch-up crash is a candidate failure, not a cell fault.
+    #[tokio::test]
+    async fn f2_a_graded_catch_up_crash_does_not_stop_the_cell() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+        let state = phase_state_with_failed(&[4]);
+        let opts = CampaignRunOptions {
+            campaign_id: "f2catchup".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::<u32>::new());
+        let rollup = run_campaign_phase(
+            &lc,
+            &opts,
+            Some(phase),
+            Some(&state),
+            Some("prev"),
+            None,
+            |attempt| {
+                seen.borrow_mut().push(attempt.stage.id);
+                let mut out = outcome(false, &[(attempt.stage.id, false)]);
+                out.agent_failed = true;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        assert_eq!(seen.first(), Some(&4), "ticket 4 is the catch-up: {seen:?}");
+        assert!(
+            rollup.harness_fault.is_none(),
+            "a graded catch-up crash is not a harness fault"
+        );
+        let rec = rollup
+            .stages
+            .iter()
+            .find(|r| r.id == 4 && r.status == "catch-up")
+            .expect("the catch-up record");
+        assert!(!rec.passed);
+    }
+
+    #[test]
+    fn f2_mark_agent_crash_records_the_output_limit() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        assert!(!mark_agent_crash(&mut failure, "ordinary console"));
+        assert_eq!(failure.kind, "agent");
+        assert!(mark_agent_crash(
+            &mut failure,
+            "[TOKENS] Turn usage - input: 1, output: 65536, cached: 0"
+        ));
+        assert_eq!(failure.kind, "agent_crash");
+        assert!(failure.line.contains("65,536"), "{}", failure.line);
+    }
+
     #[test]
     fn q7_hints_use_the_carried_last_failure() {
         let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
@@ -6062,7 +6261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_orchestrator_records_regression_and_fault() {
+    async fn test_orchestrator_records_regression_and_agent_failure() {
         let lc = fixture_campaign();
         let opts = CampaignRunOptions {
             campaign_id: "c3".into(),
@@ -6093,8 +6292,59 @@ mod tests {
         .unwrap();
         let s1 = &rollup.stages[1];
         assert_eq!(s1.regressed, vec![1]);
-        assert_eq!(s1.status, "fault");
+        // F2: an agent exit after grading is a candidate failure, not a
+        // harness fault.
+        assert_eq!(s1.status, "failed");
         assert_eq!(rollup.regression_free_tickets, 1);
+    }
+
+    /// F2: the round was graded and the agent then exited non-zero. The
+    /// result is a candidate failure, so the lite still runs.
+    #[tokio::test]
+    async fn f2_a_graded_agent_crash_fails_and_runs_the_lite() {
+        let lc = fixture_campaign_with_lite();
+        let opts = CampaignRunOptions {
+            campaign_id: "f2crash".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 10.0,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let out = if attempt.stage.id == 0 {
+                    outcome(true, &[(1, true), (2, true)])
+                } else if attempt.stage.id == 1 && attempt.variant == StageVariant::Full {
+                    let mut o = outcome(false, &[(1, false)]);
+                    o.agent_failed = true;
+                    o
+                } else if attempt.stage.id == 1 && attempt.variant == StageVariant::Lite {
+                    outcome(true, &[(1, true)])
+                } else {
+                    outcome(true, &[(1, true), (2, true)])
+                };
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let full = rollup
+            .stages
+            .iter()
+            .find(|r| r.id == 1 && r.variant == "full")
+            .expect("full ticket 1");
+        assert_eq!(full.status, "failed");
+        let lite = rollup
+            .stages
+            .iter()
+            .find(|r| r.id == 1 && r.variant == "lite")
+            .expect("the lite must run after a graded crash");
+        assert_eq!(lite.status, "passed");
+        assert!(lite.points > 0.0, "the lite keeps its points: {lite:?}");
     }
 
     /// Round-14 N2: a harness fault (the agent never started, a billing
@@ -6102,7 +6352,7 @@ mod tests {
     /// lets the cell publish as a normal measurement.
     #[tokio::test]
     async fn test_orchestrator_stops_on_harness_fault() {
-        let lc = fixture_campaign();
+        let lc = fixture_campaign_with_lite();
         assert!(lc.spec.stages.len() > 2, "the fixture needs a ladder");
         let opts = CampaignRunOptions {
             campaign_id: "c4".into(),
@@ -6140,6 +6390,13 @@ mod tests {
         );
         assert_eq!(rollup.stages.len(), 2);
         assert_eq!(rollup.stages[1].status, "fault");
+        assert!(
+            !rollup
+                .stages
+                .iter()
+                .any(|r| r.id == 1 && r.variant == "lite"),
+            "a never-started agent must not get a lite"
+        );
         let why = rollup
             .harness_fault
             .as_deref()
