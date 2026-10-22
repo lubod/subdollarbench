@@ -37,7 +37,8 @@ change it here, in the same commit as the work that needs it.
      says so, and the round file records it under **Changes after
      open**.
 4. **Gate.**
-   - The implementer runs `scripts/gate.sh` on the final, clean commit.
+   - The implementer runs `scripts/gate.sh` on the final, clean commit
+     (full or `--fast`, as "Gates" says).
    - It records the result for that exact commit (see "Gates").
 5. **Ready.**
    - The implementer sets `Status: ready <commit>` in the round file
@@ -150,14 +151,31 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
 
 - `cargo fmt --check`;
 - `cargo clippy --all-targets -- -D warnings`;
-- the full niced `cargo test` (unfiltered).
+- the niced `cargo test`, in one of two modes:
+  - **full** (the default): unfiltered, about 33 min;
+  - **fast** (`--fast`): everything except the live SQL ladder proofs
+    that hold the `SQL_PERF_LIVE` lock (about 12 tests, which run one at a
+    time and take about 28 of the 33 min). The skip list is read from
+    `src/pipeline.rs`, so a new proof is skipped automatically.
 
-It writes `<git-common-dir>/sdb-gates/<commit>.txt` and prints the path.
-That directory lives inside `.git`, so it is shared by every worktree and
-never committed.
+It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full) or
+`<commit>.fast.txt` (fast) and prints the path. That directory lives
+inside `.git`, so it is shared by every worktree and never committed.
 
-The reviewer reads the gate file for the `ready` commit instead of
-rerunning the whole suite. It reruns only what the change puts at risk.
+**Which mode:**
+
+- **In-between commits:** fast, or none.
+- **The `ready` commit:**
+  - **Full** when the round changes a graded path since master:
+    `src/verifier`, `src/pipeline.rs`, `src/sandbox`, `src/campaign.rs`,
+    `src/scoring.rs`, `src/cost`, `src/prompts`, `src/report/rules.rs`
+    or `campaigns/`. A rules bump always lands in one of these.
+  - **Fast** otherwise (GUI, docs, tooling, other report code).
+  - The record's `scope:` line says which one applies, so the
+    implementer doesn't have to work it out.
+- **The reviewer** reads the gate file for the `ready` commit instead of
+  rerunning the whole suite. It reruns only what the change puts at risk,
+  and may ask for the full gate on any round.
 
 ## Pointers
 
