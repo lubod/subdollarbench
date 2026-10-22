@@ -17,7 +17,7 @@
         ]
       },
       "budget_usd": 0.2,
-      "max_turns": 40
+      "max_turns": 200
     },
     {
       "id": 1,
@@ -31,7 +31,7 @@
         ]
       },
       "budget_usd": 0.12,
-      "max_turns": 30,
+      "max_turns": 200,
       "needs": [
         0
       ]
@@ -49,7 +49,7 @@
         ]
       },
       "budget_usd": 0.1,
-      "max_turns": 24,
+      "max_turns": 200,
       "needs": [
         1
       ]
@@ -68,7 +68,7 @@
         ]
       },
       "budget_usd": 0.1,
-      "max_turns": 24,
+      "max_turns": 200,
       "needs": [
         1
       ]
@@ -88,7 +88,7 @@
         ]
       },
       "budget_usd": 0.15,
-      "max_turns": 30,
+      "max_turns": 200,
       "tier": 2,
       "needs": [
         0
@@ -110,7 +110,7 @@
         ]
       },
       "budget_usd": 0.15,
-      "max_turns": 36,
+      "max_turns": 200,
       "tier": 2,
       "needs": [
         4
@@ -121,7 +121,7 @@
           "crash-acked-only"
         ],
         "budget_usd": 0.09,
-        "max_turns": 22,
+        "max_turns": 200,
         "weight": 0.4
       }
     },
@@ -142,7 +142,7 @@
         ]
       },
       "budget_usd": 0.15,
-      "max_turns": 30,
+      "max_turns": 200,
       "tier": 2,
       "needs": [
         5
@@ -166,7 +166,7 @@
         ]
       },
       "budget_usd": 0.12,
-      "max_turns": 30,
+      "max_turns": 200,
       "tier": 3,
       "needs": [
         1
@@ -191,7 +191,7 @@
         ]
       },
       "budget_usd": 0.15,
-      "max_turns": 30,
+      "max_turns": 200,
       "tier": 3,
       "needs": [
         1
@@ -202,7 +202,7 @@
           "join-inner-only"
         ],
         "budget_usd": 0.09,
-        "max_turns": 18,
+        "max_turns": 200,
         "weight": 0.4
       }
     },
@@ -226,7 +226,7 @@
         ]
       },
       "budget_usd": 0.12,
-      "max_turns": 30,
+      "max_turns": 200,
       "tier": 3,
       "needs": [
         3
@@ -253,7 +253,7 @@
         ]
       },
       "budget_usd": 0.15,
-      "max_turns": 30,
+      "max_turns": 200,
       "tier": 3,
       "needs": [
         7
@@ -281,7 +281,7 @@
         ]
       },
       "budget_usd": 0.15,
-      "max_turns": 36,
+      "max_turns": 200,
       "tier": 4,
       "needs": [
         3,
@@ -293,7 +293,7 @@
           "index-equality-only"
         ],
         "budget_usd": 0.09,
-        "max_turns": 18,
+        "max_turns": 200,
         "weight": 0.4
       }
     },
@@ -327,14 +327,14 @@
       "title": "Concurrency and isolation",
       "id": 12,
       "budget_usd": 0.2,
-      "max_turns": 40,
+      "max_turns": 200,
       "lite": {
         "prompt": "stages/12_concurrency_lite/prompt.md",
         "profile": [
           "concurrency-global-lock"
         ],
         "budget_usd": 0.12,
-        "max_turns": 24,
+        "max_turns": 200,
         "weight": 0.4
       }
     },
@@ -366,7 +366,7 @@
       "title": "Schema change",
       "id": 13,
       "budget_usd": 0.12,
-      "max_turns": 30
+      "max_turns": 200
     },
     {
       "acceptance": {
@@ -398,7 +398,7 @@
       "title": "Observability",
       "id": 14,
       "budget_usd": 0.12,
-      "max_turns": 24
+      "max_turns": 200
     },
     {
       "acceptance": {
@@ -431,14 +431,14 @@
       "title": "Tests and CI gate",
       "id": 15,
       "budget_usd": 0.2,
-      "max_turns": 36,
+      "max_turns": 200,
       "lite": {
         "prompt": "stages/15_tests_ci_lite/prompt.md",
         "profile": [
           "coverage-60"
         ],
         "budget_usd": 0.12,
-        "max_turns": 22,
+        "max_turns": 200,
         "weight": 0.4
       }
     },
@@ -478,7 +478,7 @@
       "title": "Larger than memory",
       "id": 16,
       "budget_usd": 0.2,
-      "max_turns": 40
+      "max_turns": 200
     },
     {
       "acceptance": {
@@ -512,7 +512,7 @@
       "title": "Incident: disk full",
       "id": 17,
       "budget_usd": 0.15,
-      "max_turns": 30
+      "max_turns": 200
     },
     {
       "acceptance": {
@@ -550,7 +550,7 @@
       "title": "Hostile input and limits",
       "id": 18,
       "budget_usd": 0.15,
-      "max_turns": 30
+      "max_turns": 200
     },
     {
       "acceptance": {
@@ -586,14 +586,14 @@
       "title": "Replication and failover",
       "id": 19,
       "budget_usd": 0.2,
-      "max_turns": 40,
+      "max_turns": 200,
       "lite": {
         "prompt": "stages/19_replication_lite/prompt.md",
         "profile": [
           "two-nodes-promote"
         ],
         "budget_usd": 0.12,
-        "max_turns": 24,
+        "max_turns": 200,
         "weight": 0.4
       }
     },
@@ -634,14 +634,14 @@
       "title": "PostgreSQL wire protocol",
       "id": 20,
       "budget_usd": 0.2,
-      "max_turns": 40,
+      "max_turns": 200,
       "lite": {
         "prompt": "stages/20_pgwire_lite/prompt.md",
         "profile": [
           "pg-simple"
         ],
         "budget_usd": 0.12,
-        "max_turns": 24,
+        "max_turns": 200,
         "weight": 0.4
       }
     }

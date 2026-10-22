@@ -967,7 +967,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .map(|f| f.load(Ordering::SeqCst))
                 .unwrap_or(false);
             let msg = limit_msg.lock().unwrap().clone().unwrap_or_default();
-            let st = Self::snapshot_stats(
+            let mut st = Self::snapshot_stats(
                 &stats,
                 &turns,
                 Some(Self::resolve_effort_effective(
@@ -988,6 +988,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 // the operative fact — a simultaneously-set throttle flag
                 // must not drive a resume whose backoff would be cut short.
                 _ if timed_out || cancelled => {
+                    st.stop_reason = Some(if cancelled { "crash" } else { "wall" }.to_string());
                     break Err(anyhow!(OmpExecutionError {
                         message: if cancelled {
                             "opencode run cancelled by user".to_string()
@@ -1145,7 +1146,32 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // AGENTS.md is runner-owned scaffolding, never candidate code.
         let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
 
-        outcome
+        // R23 D1/D5: classify the normal end; the error paths above set
+        // wall/crash where they build their partial stats.
+        outcome.map(|mut st| {
+            if st.stop_reason.is_none() {
+                st.stop_reason = Some(
+                    if limit_hit.load(Ordering::SeqCst) {
+                        let msg = limit_msg
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.clone())
+                            .unwrap_or_default();
+                        if msg.contains("max turns") {
+                            "turns"
+                        } else if msg.contains("budget") {
+                            "dollars"
+                        } else {
+                            "crash"
+                        }
+                    } else {
+                        "ready"
+                    }
+                    .to_string(),
+                );
+            }
+            st
+        })
     }
 }
 

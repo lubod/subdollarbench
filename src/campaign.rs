@@ -1152,6 +1152,10 @@ pub struct StageOutcome {
     /// reserves it before the next ticket (round-17 P0).
     #[serde(default)]
     pub max_call_usd: f64,
+    /// R23 D1/D5: why the agent session ended: dollars | turns | wall |
+    /// ready | crash. None on eval-only/short paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     pub agent_failed: bool,
     pub infra_error: bool,
     pub disqualified: bool,
@@ -1187,6 +1191,10 @@ pub struct StageRecord {
     /// passed | failed | fault (harness/provider fault, not a model verdict)
     /// | skipped (a `needs` prerequisite failed)
     pub status: String,
+    /// R23 D1/D5: why the agent session ended: dollars | turns | wall |
+    /// ready | crash. None on eval-only/short paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// full | lite (which variant produced this record).
     #[serde(default)]
     pub variant: String,
@@ -1892,6 +1900,8 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
 /// the old $0.75 cap at ticket 19 after 71 of 120 min; a full ladder costs
 /// about $1.03 at its rate, so reaching the top stays part of the score.
 pub const CELL_BUDGET_USD: f64 = 0.99;
+/// R23 D1: turns are only a runaway guard; dollars are the session limit.
+pub const TURN_GUARD: u32 = 200;
 /// The wall that goes with [`CELL_BUDGET_USD`], with room for the late
 /// checks that rerun in every later verification.
 pub const CELL_WALL_MIN: u64 = 150;
@@ -3174,6 +3184,7 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         turns: None,
         duration_seconds: None,
         status: "skipped".to_string(),
+        stop_reason: None,
         variant: match stage.lite {
             Some(_) => "full".to_string(),
             None => "full".to_string(),
@@ -3226,6 +3237,7 @@ fn push_attempt_record(
         turns: out.turns,
         duration_seconds: out.duration_seconds,
         status: status.to_string(),
+        stop_reason: out.stop_reason.clone(),
         variant: match variant {
             StageVariant::Full => "full".to_string(),
             StageVariant::Lite => "lite".to_string(),
@@ -3769,6 +3781,7 @@ mod tests {
             turns: Some(12),
             duration_seconds: Some(200.0),
             status: "passed".into(),
+            stop_reason: None,
             variant: "full".into(),
             tier: 1,
             points: 1.0,
@@ -3792,6 +3805,7 @@ mod tests {
             turns: Some(30),
             duration_seconds: Some(900.0),
             status: "failed".into(),
+            stop_reason: None,
             variant: "full".into(),
             tier: 3,
             points: 0.0,
@@ -4013,6 +4027,7 @@ mod tests {
             turns: Some(3),
             duration_seconds: Some(10.0),
             status: status.to_string(),
+            stop_reason: None,
             variant: variant.to_string(),
             tier: 1,
             points: if passed && variant == "lite" {
@@ -4106,6 +4121,7 @@ mod tests {
             turns: Some(10),
             duration_seconds: Some(60.0),
             max_call_usd: 0.0,
+            stop_reason: None,
             agent_failed: false,
             infra_error: false,
             rounds: Vec::new(),
@@ -4288,6 +4304,47 @@ mod tests {
     /// schema change (differential), observability (scenario-only) and the
     /// tests/CI gate (scenario-only, lite). Pins each stage's spec and the
     /// ladder's max points.
+    /// R23 D1: dollars are the limit; every sdb-sql stage and lite uses the
+    /// 200-turn runaway guard.
+    #[test]
+    fn r23_d1_sql_turn_limits_are_the_guard() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        assert_eq!(TURN_GUARD, 200);
+        for s in &lc.spec.stages {
+            assert_eq!(s.max_turns, TURN_GUARD, "stage {}", s.id);
+            if let Some(lite) = &s.lite {
+                assert_eq!(lite.max_turns, TURN_GUARD, "stage {} lite", s.id);
+            }
+        }
+    }
+
+    /// R23 D1: the stop reason reaches the campaign stage record.
+    #[tokio::test]
+    async fn r23_d1_stage_record_carries_the_dollar_stop() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d1".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 10.0,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |_| {
+                let mut out = outcome(false, &[(0, false)]);
+                out.stop_reason = Some("dollars".into());
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rollup.stages[0].stop_reason.as_deref(), Some("dollars"));
+    }
+
     #[test]
     fn test_real_sdb_sql_spec_has_ticket_12() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
@@ -5533,6 +5590,7 @@ mod tests {
             turns: Some(10),
             duration_seconds: Some(60.0),
             status: "failed".into(),
+            stop_reason: None,
             variant: "full".into(),
             tier: 3,
             points: 0.0,

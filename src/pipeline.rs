@@ -1368,6 +1368,9 @@ pub struct PipelineOutput {
     /// The largest single provider call this attempt made (the campaign
     /// cap's reserve, round-17 P0).
     pub max_call_usd: f64,
+    /// R23 D1/D5: why the final agent session ended: dollars | turns | wall |
+    /// ready | crash. None for eval-only runs.
+    pub stop_reason: Option<String>,
 }
 
 /// How an agent session that returned `Err` ended (round-14 N3): its partial
@@ -5147,6 +5150,7 @@ impl BenchmarkPipeline {
                             acc.cost_usd += stats.cost_usd;
                             acc.max_call_usd = acc.max_call_usd.max(stats.max_call_usd);
                             acc.effort_effective = stats.effort_effective.clone();
+                            acc.stop_reason = stats.stop_reason.clone();
                             ran = true;
                             break;
                         }
@@ -5165,6 +5169,7 @@ impl BenchmarkPipeline {
                             acc.steps_taken += end.partial.steps_taken;
                             acc.cost_usd += end.partial.cost_usd;
                             acc.max_call_usd = acc.max_call_usd.max(end.partial.max_call_usd);
+                            acc.stop_reason = end.partial.stop_reason.clone();
                             logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
                             if let Some(reason) = end.billing {
                                 // Round-14 N3: a dead key or exhausted
@@ -6331,6 +6336,11 @@ impl BenchmarkPipeline {
                 )),
             }
         }
+        let stop_reason = omp_stats.stop_reason.clone().or_else(|| {
+            // A non-zero exit / billing trip can end before the runner
+            // classifies its stats; the pipeline still knows it crashed.
+            (agent_failed || harness_fault.is_some()).then(|| "crash".to_string())
+        });
         Ok(PipelineOutput {
             manifest,
             benchmark_result,
@@ -6339,6 +6349,7 @@ impl BenchmarkPipeline {
             infra_error,
             harness_fault,
             max_call_usd: omp_stats.max_call_usd,
+            stop_reason,
         })
     }
 }
