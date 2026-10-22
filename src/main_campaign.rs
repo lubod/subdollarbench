@@ -396,6 +396,11 @@ pub async fn run(
     refork: Option<String>,
 ) -> Result<()> {
     let lc = campaign::load_campaign(&name).context("load campaign")?;
+    // R23 D3: dollars are the denominator; a paid launch without a list
+    // price has no dollar bound. Eval-only runs do not spend.
+    campaign::require_model_list_price(&model, eval_only)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
     // Foreground campaigns use the canonical worker-0 ports (6379/6380/…);
     // a live engine wave holds them. Fail fast instead of colliding.
     if let Ok(v) = subdollarbench::remote::get_json("http://127.0.0.1:3000", "/api/status").await {

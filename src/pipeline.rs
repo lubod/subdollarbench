@@ -5074,19 +5074,14 @@ impl BenchmarkPipeline {
         // Campaign rounds (§5.1 of gui-spec.md): one record per
         // verification, the initial try and every repair round.
         let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
-        let attempt_started = std::time::Instant::now();
         let mut round_started = std::time::Instant::now();
-        // Effective cap headroom for this attempt, after the cell's spend and
-        // largest-call reserve. None outside capped campaigns (round-17 P0).
+        // R23 D3: the attempt's remaining provider API dollars after the
+        // cell's spend and largest-call reserve. None outside capped
+        // campaigns. The compute floor is reported only, never enforced.
         let cap_headroom = config
             .campaign_stage
             .as_ref()
             .and_then(|c| c.cap_headroom_usd);
-        // Q8: the in-session stop leaves room for the final verification's
-        // compute floor (the Haiku tickets 8-10 measured ~$0.0006; $0.002
-        // is a conservative reserve under the $0.01 margin).
-        const FINAL_VERIFY_RESERVE_USD: f64 = 0.002;
-        let cap_effective = cap_headroom.map(|c| (c - FINAL_VERIFY_RESERVE_USD).max(0.0));
         let (mut omp_stats, mut prompt_tokens, mut cached_tokens, mut completion_tokens) =
             if !config.eval_only {
                 logger.log(&format!(
@@ -5107,7 +5102,7 @@ impl BenchmarkPipeline {
                     } else {
                         None
                     },
-                    max_effective_usd: cap_effective,
+                    max_effective_usd: None,
                     timeout_seconds: if config.timeout_min > 0 {
                         Some(config.timeout_min * 60)
                     } else {
@@ -5340,21 +5335,15 @@ impl BenchmarkPipeline {
                     // must not start when either floor is gone. Break before
                     // stopping the candidate or writing FEEDBACK_REPORT.md.
                     let spent_api = omp_stats.cost_usd;
-                    let total_tokens_so_far = prompt_tokens + cached_tokens + completion_tokens;
-                    let floor_so_far = crate::cost::calculator::ModelPricing::compute_cost(
-                        attempt_started.elapsed().as_secs_f64(),
-                        total_tokens_so_far,
-                        cached_tokens,
-                    );
                     let attempt_budget = if config.budget_usd > 0.0 {
                         config.budget_usd
                     } else {
                         f64::INFINITY
                     };
-                    let (repair_budget, repair_cap) = match crate::campaign::repair_round_spend(
+                    let (repair_budget, _repair_cap) = match crate::campaign::repair_round_spend(
                         attempt_budget,
                         spent_api,
-                        cap_effective,
+                        cap_headroom,
                     ) {
                         Ok(v) => v,
                         Err(reason) => {
@@ -5364,15 +5353,6 @@ impl BenchmarkPipeline {
                             break;
                         }
                     };
-                    let repair_effective = repair_cap.map(|cap| cap - (spent_api + floor_so_far));
-                    if let Some(eff) = repair_effective {
-                        if eff < crate::campaign::BUDGET_FLOOR_USD {
-                            logger.log(&format!(
-                                "[LIMIT] Repair round {round} not started: effective headroom ${eff:.4} below the floor"
-                            ));
-                            break;
-                        }
-                    }
 
                     // Pool check FIRST: an exhausted pool must break before
                     // stopping the candidate, writing FEEDBACK_REPORT.md, or
@@ -5423,7 +5403,7 @@ impl BenchmarkPipeline {
                     let round_limits = AgentExecutionLimits {
                         max_turns: turns_remaining,
                         max_budget_usd: repair_budget,
-                        max_effective_usd: repair_effective,
+                        max_effective_usd: None,
                         timeout_seconds: if config.timeout_min > 0 {
                             Some(config.timeout_min * 60)
                         } else {

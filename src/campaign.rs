@@ -398,9 +398,9 @@ pub fn runnable_tier_sum(stage_list: &[&StageSpec], outcomes: &HashMap<u32, Ladd
         .sum()
 }
 
-/// Budget and effective headroom for a repair round. The round gets only
-/// the attempt's remaining API budget and never starts below the floor of
-/// either the budget or the cap (round-17 P0).
+/// Budget and API headroom for a repair round. The round gets only the
+/// attempt's remaining API budget and never starts below the floor of
+/// either the budget or the cap (round-17 P0; R23 D3 counts API only).
 pub fn repair_round_spend(
     budget: f64,
     api_spent: f64,
@@ -1137,8 +1137,8 @@ pub struct StageAttempt<'a> {
     pub outcomes: Vec<(u32, LadderOutcome)>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
-    /// Effective cap headroom after the reserve, for the pipeline's per-round
-    /// `max_effective_usd`. None when uncapped.
+    /// R23 D3: API-bill headroom after the reserve. None when uncapped.
+    /// The compute floor is reported only, never a stopping condition.
     pub cap_headroom_usd: Option<f64>,
     /// P2: the harness hint block for the phase's attempts (recorded
     /// failures and blocked tickets); None outside a chained phase.
@@ -1162,10 +1162,8 @@ pub struct StageOutcome {
     pub total_stages: u32,
     pub stage_results: Vec<crate::verifier::StageResult>,
     pub effective_cost_usd: f64,
-    /// Provider-billed API spend. The campaign cap bounds *effective* cost,
-    /// but OMP enforces an attempt's budget on API spend only, so the cap's
-    /// remaining headroom is converted into this unit before it is handed
-    /// to an attempt (round-11 finding 1).
+    /// Provider-billed API spend at list price. R23 D3: the campaign cap
+    /// and the ticket pool count this number only.
     pub api_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
@@ -1927,6 +1925,33 @@ pub const TURN_GUARD: u32 = 200;
 /// checks that rerun in every later verification.
 pub const CELL_WALL_MIN: u64 = 150;
 
+/// R23 D3: a paid campaign launch must have a real list price. The live
+/// OpenRouter catalog is tried first, then the offline table; eval-only
+/// runs do not spend and are exempt. `_at` is the offline-testable form.
+pub async fn require_model_list_price_at(
+    model: &str,
+    url: &str,
+    eval_only: bool,
+) -> Result<(), String> {
+    if eval_only {
+        return Ok(());
+    }
+    if crate::cost::calculator::ModelPricing::list_price_for_model_async_at(model, url)
+        .await
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "model {model} has no list price in the OpenRouter catalog or offline table; refusing a paid campaign launch"
+        ))
+    }
+}
+
+pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<(), String> {
+    require_model_list_price_at(model, "https://openrouter.ai/api/v1/models", eval_only).await
+}
+
 /// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
 /// test pins that the real clap definition accepts it (round-8 finding 2).
 pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) -> Vec<String> {
@@ -2425,8 +2450,8 @@ pub struct CampaignRunOptions {
     pub model: String,
     pub harness: String,
     pub effort: String,
-    /// Campaign-wide cap: the ladder stops (over_budget) once cumulative
-    /// effective cost reaches it.
+    /// R23 D3: campaign-wide cap in provider API dollars at list price.
+    /// The ladder stops when cumulative API spend reaches it.
     pub budget_usd: f64,
     /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour);
     /// the ladder stops with `over_wall` when reached.
@@ -2648,11 +2673,10 @@ where
         .map(|c| c.best.iter().map(|(k, v)| (*k, *v)).collect())
         .unwrap_or_default();
     let mut reached: Option<u32> = chain.and_then(|c| c.passed.iter().copied().max());
+    // R23 D3: the cap counts the provider API bill at list price. The
+    // compute floor remains a reported number in each StageRecord, never a
+    // stopping condition.
     let mut total_cost = 0.0f64;
-    // API spend of the same attempts: OMP enforces budgets on API dollars,
-    // the cap bounds effective dollars, so the clamp converts (round-11
-    // finding 1).
-    let mut api_cost = 0.0f64;
     // Ladder bookkeeping (continue mode): per-stage outcome + whether the
     // last attempt left the workspace dirty (needs a rollback first).
     let mut outcomes: HashMap<u32, LadderOutcome> = chain
@@ -2735,11 +2759,6 @@ where
             };
             let headroom = cap_headroom(opts.budget_usd, total_cost, largest_call_usd)
                 .unwrap_or(f64::INFINITY);
-            let api_ratio = if total_cost > 0.0 && api_cost > 0.0 {
-                (api_cost / total_cost).clamp(0.01, 1.0)
-            } else {
-                0.25
-            };
             let (variant, prompt_path, max_turns, lite_profile) = match &stage.lite {
                 Some(lite) => (
                     StageVariant::Lite,
@@ -2761,7 +2780,7 @@ where
                 stage,
                 variant,
                 prompt_path,
-                budget_usd: pool_budget(headroom * api_ratio, stage.tier, catch_up_weight),
+                budget_usd: pool_budget(headroom, stage.tier, catch_up_weight),
                 max_turns,
                 lite_profile: lite_profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -2779,14 +2798,13 @@ where
             let out = exec(&attempt)
                 .await
                 .with_context(|| format!("catch-up stage {} ({})", target, stage.title))?;
-            api_cost += out.api_cost_usd;
             largest_call_usd = largest_call_usd.max(out.max_call_usd);
             let (regressed, severity) = detect_regressions(&best, &out.stage_results);
             for r in &out.stage_results {
                 let e = best.entry(r.stage).or_insert(false);
                 *e = *e || r.passed;
             }
-            total_cost += out.effective_cost_usd;
+            total_cost += out.api_cost_usd;
             push_attempt_record(
                 &mut rollup,
                 stage,
@@ -2869,15 +2887,6 @@ where
         let floor_now = !cap_allows(opts.budget_usd, total_cost, largest_call_usd);
         let headroom =
             cap_headroom(opts.budget_usd, total_cost, largest_call_usd).unwrap_or(f64::INFINITY);
-        // Effective dollars -> API dollars (round-11 finding 1). Before the
-        // first attempt the observed ratio is unknown: 0.25 is conservative
-        // (the DeepSeek cell's was ~0.29; a smaller share gives a smaller
-        // API budget). An uncapped campaign passes INFINITY through.
-        let api_ratio = if total_cost > 0.0 && api_cost > 0.0 {
-            (api_cost / total_cost).clamp(0.01, 1.0)
-        } else {
-            0.25
-        };
         // R23 D2: the phase pool is split by tier over the undecided
         // tickets; a cheap pass leaves more for the next ticket.
         let phase_weight = runnable_tier_sum(&stage_list, &outcomes);
@@ -2945,7 +2954,7 @@ where
             prompt_path: lc.prompt_path(stage),
             // D3 + finding 1: the cap's effective headroom converts to the
             // API dollars OMP actually enforces.
-            budget_usd: pool_budget(headroom * api_ratio, stage.tier, phase_weight),
+            budget_usd: pool_budget(headroom, stage.tier, phase_weight),
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -2960,14 +2969,13 @@ where
         let out = exec(&attempt_full)
             .await
             .with_context(|| format!("stage {} ({})", stage.id, stage.title))?;
-        api_cost += out.api_cost_usd;
         largest_call_usd = largest_call_usd.max(out.max_call_usd);
         let (regressed, regression_severity) = detect_regressions(&best, &out.stage_results);
         for r in &out.stage_results {
             let e = best.entry(r.stage).or_insert(false);
             *e = *e || r.passed;
         }
-        total_cost += out.effective_cost_usd;
+        total_cost += out.api_cost_usd;
         // F2: a non-zero agent exit after the round was graded is a
         // candidate failure; only a real harness fault (or an infra fault)
         // measured nothing and keeps the `fault` label.
@@ -3032,12 +3040,6 @@ where
                 outcomes.insert(stage.id, LadderOutcome::Failed);
                 dirty = true;
             } else {
-                // The full attempt just moved the ratio; recompute for it.
-                let api_ratio2 = if total_cost > 0.0 && api_cost > 0.0 {
-                    (api_cost / total_cost).clamp(0.01, 1.0)
-                } else {
-                    0.25
-                };
                 // R23 D2: the lite is the same ticket, so it draws the same
                 // pool share after the failed full attempt.
                 let attempt_lite = StageAttempt {
@@ -3045,7 +3047,7 @@ where
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
                     budget_usd: pool_budget(
-                        headroom2 * api_ratio2,
+                        headroom2,
                         stage.tier,
                         runnable_tier_sum(&stage_list, &outcomes),
                     ),
@@ -3063,14 +3065,13 @@ where
                 let out2 = exec(&attempt_lite)
                     .await
                     .with_context(|| format!("stage {} lite", stage.id))?;
-                api_cost += out2.api_cost_usd;
                 largest_call_usd = largest_call_usd.max(out2.max_call_usd);
                 let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
                 for r in &out2.stage_results {
                     let e = best.entry(r.stage).or_insert(false);
                     *e = *e || r.passed;
                 }
-                total_cost += out2.effective_cost_usd;
+                total_cost += out2.api_cost_usd;
                 let fault2 = out2.infra_error || out2.harness_fault.is_some();
                 let status2 = if out2.passed {
                     "passed"
@@ -4522,6 +4523,64 @@ mod tests {
             rollup.total_cost_usd
         );
         assert!(!rollup.over_budget);
+    }
+
+    /// R23 D3: the cap counts the API bill, not the compute-inclusive
+    /// effective cost.
+    #[tokio::test]
+    async fn r23_d3_the_cap_uses_api_spend_not_effective() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d3api".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |_| {
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.api_cost_usd = 0.01;
+                o.effective_cost_usd = 0.99;
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rollup.stages.len(),
+            3,
+            "the effective cost must not stop the ladder"
+        );
+        assert!((rollup.total_cost_usd - 0.03).abs() < 1e-9);
+        assert!(!rollup.over_budget);
+        assert!((rollup.stages[0].effective_cost_usd - 0.99).abs() < 1e-9);
+    }
+
+    /// R23 D3: a paid launch refuses a model with no list price; eval-only
+    /// runs are exempt because they do not spend.
+    #[tokio::test]
+    async fn r23_d3_a_model_without_a_list_price_is_refused() {
+        let dead = "http://127.0.0.1:9/models";
+        assert!(
+            require_model_list_price_at("google/gemini-2.5-flash", dead, false)
+                .await
+                .is_ok()
+        );
+        assert!(
+            require_model_list_price_at("made-up/unknown-model", dead, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            require_model_list_price_at("made-up/unknown-model", dead, true)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
