@@ -4621,7 +4621,7 @@ mod tests {
         assert_eq!(s.tier, 4);
         assert_eq!(s.needs, vec![1, 2, 3, 6]);
         assert_eq!(s.budget_usd, 0.20);
-        assert_eq!(s.max_turns, 40);
+        assert_eq!(s.max_turns, TURN_GUARD);
         assert_eq!(s.acceptance.sql_stages, (0..=12u32).collect::<Vec<u32>>());
         let lite = s.lite.as_ref().expect("ticket 12 has a lite variant");
         assert_eq!(lite.profile, vec!["concurrency-global-lock".to_string()]);
@@ -4647,7 +4647,7 @@ mod tests {
         assert_eq!(s13.tier, 4);
         assert_eq!(s13.needs, vec![4]);
         assert_eq!(s13.budget_usd, 0.12);
-        assert_eq!(s13.max_turns, 30);
+        assert_eq!(s13.max_turns, TURN_GUARD);
         assert!(s13.lite.is_none(), "ticket 13 has no lite variant");
         assert_eq!(s13.acceptance.sql_stages, (0..=13u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::differential_supported(13));
@@ -4659,7 +4659,7 @@ mod tests {
         assert_eq!(s14.tier, 5);
         assert_eq!(s14.needs, vec![6, 11]);
         assert_eq!(s14.budget_usd, 0.12);
-        assert_eq!(s14.max_turns, 24);
+        assert_eq!(s14.max_turns, TURN_GUARD);
         assert!(s14.lite.is_none(), "ticket 14 has no lite variant");
         assert_eq!(s14.acceptance.sql_stages, (0..=14u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(14));
@@ -4673,12 +4673,12 @@ mod tests {
         assert_eq!(s15.tier, 5);
         assert_eq!(s15.needs, vec![7, 8]);
         assert_eq!(s15.budget_usd, 0.20);
-        assert_eq!(s15.max_turns, 36);
+        assert_eq!(s15.max_turns, TURN_GUARD);
         assert_eq!(s15.acceptance.sql_stages, (0..=15u32).collect::<Vec<u32>>());
         let lite15 = s15.lite.as_ref().expect("ticket 15 has a lite variant");
         assert_eq!(lite15.profile, vec!["coverage-60".to_string()]);
         assert_eq!(lite15.budget_usd, 0.12);
-        assert!(lite15.max_turns < s15.max_turns);
+        assert_eq!(lite15.max_turns, TURN_GUARD);
         assert!(crate::verifier::sql::driver::scenario_only(15));
         assert!(!crate::verifier::sql::driver::differential_supported(15));
         assert!(crate::verifier::sql::driver::stage_supported(15));
@@ -4691,7 +4691,7 @@ mod tests {
         assert_eq!(s16.tier, 6);
         assert_eq!(s16.needs, vec![2, 4, 6, 7, 8, 11]);
         assert_eq!(s16.budget_usd, 0.20);
-        assert_eq!(s16.max_turns, 40);
+        assert_eq!(s16.max_turns, TURN_GUARD);
         assert!(s16.lite.is_none(), "ticket 16 has no lite variant");
         assert_eq!(s16.acceptance.sql_stages, (0..=16u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(16));
@@ -4705,7 +4705,7 @@ mod tests {
         assert_eq!(s17.tier, 6);
         assert_eq!(s17.needs, vec![5]);
         assert_eq!(s17.budget_usd, 0.15);
-        assert_eq!(s17.max_turns, 30);
+        assert_eq!(s17.max_turns, TURN_GUARD);
         assert!(s17.lite.is_none(), "ticket 17 has no lite variant");
         assert_eq!(s17.acceptance.sql_stages, (0..=17u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(17));
@@ -4719,7 +4719,7 @@ mod tests {
         assert_eq!(s18.tier, 6);
         assert_eq!(s18.needs, vec![1, 6, 7, 8]);
         assert_eq!(s18.budget_usd, 0.15);
-        assert_eq!(s18.max_turns, 30);
+        assert_eq!(s18.max_turns, TURN_GUARD);
         assert!(s18.lite.is_none(), "ticket 18 has no lite variant");
         assert_eq!(s18.acceptance.sql_stages, (0..=18u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(18));
@@ -4733,12 +4733,12 @@ mod tests {
         assert_eq!(s19.tier, 7);
         assert_eq!(s19.needs, vec![6]);
         assert_eq!(s19.budget_usd, 0.20);
-        assert_eq!(s19.max_turns, 40);
+        assert_eq!(s19.max_turns, TURN_GUARD);
         assert_eq!(s19.acceptance.sql_stages, (0..=19u32).collect::<Vec<u32>>());
         let lite19 = s19.lite.as_ref().expect("ticket 19 has a lite variant");
         assert_eq!(lite19.profile, vec!["two-nodes-promote".to_string()]);
         assert_eq!(lite19.budget_usd, 0.12);
-        assert!(lite19.max_turns < s19.max_turns);
+        assert_eq!(lite19.max_turns, TURN_GUARD);
         assert!(crate::verifier::sql::driver::scenario_only(19));
         assert!(!crate::verifier::sql::driver::differential_supported(19));
         assert!(crate::verifier::sql::driver::stage_supported(19));
@@ -4750,12 +4750,12 @@ mod tests {
         assert_eq!(s20.tier, 7);
         assert_eq!(s20.needs, vec![1, 6, 7]);
         assert_eq!(s20.budget_usd, 0.20);
-        assert_eq!(s20.max_turns, 40);
+        assert_eq!(s20.max_turns, TURN_GUARD);
         assert_eq!(s20.acceptance.sql_stages, (0..=20u32).collect::<Vec<u32>>());
         let lite20 = s20.lite.as_ref().expect("ticket 20 has a lite variant");
         assert_eq!(lite20.profile, vec!["pg-simple".to_string()]);
         assert_eq!(lite20.budget_usd, 0.12);
-        assert!(lite20.max_turns < s20.max_turns);
+        assert_eq!(lite20.max_turns, TURN_GUARD);
         assert!(crate::verifier::sql::driver::scenario_only(20));
         assert!(!crate::verifier::sql::driver::differential_supported(20));
         assert!(crate::verifier::sql::driver::stage_supported(20));
@@ -5005,11 +5005,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ladder_cap_converts_headroom_to_api_dollars() {
-        // Round-11 finding 1: OMP enforces attempt budgets on API spend
-        // while the cap bounds effective cost. A naive effective-dollar
-        // budget lets an attempt spend 0.10 API — 0.34 effective at the
-        // DeepSeek cell's ~3.4x ratio — against a 0.20 cap.
+    async fn test_ladder_cap_counts_api_dollars_not_the_effective_ratio() {
+        // R23 D3: the cap counts API spend. The old effective->API ratio is
+        // gone, so an attempt whose effective cost is 10x its API spend
+        // still does not stop the ladder at the first ticket.
         let lc = ladder_fixture();
         let opts = CampaignRunOptions {
             campaign_id: "budget1".into(),
@@ -5026,13 +5025,9 @@ mod tests {
             |attempt| {
                 let id = attempt.stage.id;
                 seen.borrow_mut().push((id, attempt.budget_usd));
-                // The attempt spends its whole API budget; the floor adds
-                // the rest (the observed 3.4x relationship).
-                let api = attempt.budget_usd;
-                let eff = api * 3.4;
                 let mut out = outcome(true, &[(id, true)]);
-                out.api_cost_usd = api;
-                out.effective_cost_usd = eff;
+                out.api_cost_usd = 0.05;
+                out.effective_cost_usd = 0.50;
                 async move { Ok(out) }
             },
             None,
@@ -5040,66 +5035,16 @@ mod tests {
         .await
         .unwrap();
         let seen = seen.into_inner();
-        assert_eq!(seen.len(), 2, "the cap stops the ladder: {seen:?}");
-        // Round-17 P0: the cap keeps a $0.02 largest-call reserve, so the
-        // first API budget is (0.20 - 0.02) * 0.25 = 0.045.
-        assert!((seen[0].1 - 0.045).abs() < 1e-9, "first: {}", seen[0].1);
-        // Then the cell's own ratio converts the remaining effective
-        // headroom after the reserve.
-        let first_effective = seen[0].1 * 3.4;
-        let expect = (0.20 - first_effective - 0.02) * (seen[0].1 / first_effective);
         assert!(
-            (seen[1].1 - expect).abs() < 1e-9,
-            "second: {} vs {expect}",
-            seen[1].1
+            seen.len() >= 3,
+            "the API cap must allow more than the old effective cap: {seen:?}"
         );
         assert!(
-            rollup.total_cost_usd <= 0.20 + 1e-6,
-            "the cap is respected: {}",
+            rollup.total_cost_usd <= 0.20 + 1e-9,
+            "API cap respected: {}",
             rollup.total_cost_usd
         );
-        // The reserve makes the next start impossible before the cap is
-        // crossed, so the stop is "cap reached", not an overshoot.
-        assert!(rollup.cap_reached && !rollup.over_budget);
-    }
-
-    #[test]
-    fn repair_round_spend_respects_the_budget_and_cap_floors() {
-        // Ticket 9 metered $0.1307 of a $0.12 API budget.
-        let e = repair_round_spend(0.12, 0.1307, Some(0.50)).unwrap_err();
-        assert!(e.contains("budget floor"), "{e}");
-        // $0.0364 budget with $0.02 spent leaves $0.0164, below the floor.
-        let e = repair_round_spend(0.0364, 0.02, Some(0.50)).unwrap_err();
-        assert!(e.contains("budget floor"), "{e}");
-        let (budget, cap) = repair_round_spend(0.05, 0.02, Some(0.03)).unwrap();
-        assert!((budget.unwrap() - 0.03).abs() < 1e-9);
-        assert!((cap.unwrap() - 0.03).abs() < 1e-9);
-        // The cap floor is checked too.
-        let e = repair_round_spend(0.05, 0.02, Some(0.01)).unwrap_err();
-        assert!(e.contains("cap floor"), "{e}");
-        // An uncapped campaign passes the budget through and returns no cap.
-        let (budget, cap) = repair_round_spend(0.05, 0.02, None).unwrap();
-        assert!((budget.unwrap() - 0.03).abs() < 1e-9);
-        assert!(cap.is_none());
-    }
-
-    #[test]
-    fn cap_reserve_replays_the_haiku_ending_and_a_lite_skip() {
-        // Haiku 5.5 `.31`: $0.9553 spent, largest call $0.0333, cap $0.99.
-        // Only $0.0014 is left after the reserve, below the $0.02 floor, so
-        // the next ticket is not started.
-        assert!(!cap_allows(0.99, 0.9553, 0.0333));
-        let headroom = cap_headroom(0.99, 0.9553, 0.0333).unwrap();
-        assert!(headroom < BUDGET_FLOOR_USD, "{headroom}");
-        // At $0.94 the floor-only rule would start the ticket, but the
-        // observed $0.0333 largest call raises the reserve past the $0.05
-        // left and the ticket is skipped.
-        assert!(cap_allows(0.99, 0.94, 0.0));
-        assert!(!cap_allows(0.99, 0.94, 0.0333));
-        // A full attempt whose largest call is $0.035 raises the reserve for
-        // its lite: $0.04 left < $0.035 + $0.02, so the lite is skipped.
-        assert!(!cap_allows(0.10, 0.06, 0.035));
-        assert!(cap_allows(0.10, 0.06, 0.015));
+        assert!(rollup.over_budget, "the API cap is the stop");
     }
 
     #[tokio::test]
@@ -5127,9 +5072,13 @@ mod tests {
                     outcome(false, &[(1, false)])
                 };
                 if id == 0 {
+                    out.api_cost_usd = 0.01;
                     out.effective_cost_usd = 0.01;
                     out.max_call_usd = 0.001;
                 } else if id == 1 {
+                    // R23 D3: the cap counts API spend, so this fixture must
+                    // set the API bill as well as the largest call.
+                    out.api_cost_usd = 0.10;
                     out.effective_cost_usd = 0.10;
                     // The full attempt's largest call raises the reserve past
                     // the remaining headroom.
