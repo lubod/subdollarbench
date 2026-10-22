@@ -4159,8 +4159,9 @@ mod tests {
         // 1's full attempt failed, its lite attempt passed.
         rollup.stages.push(record(1, false, "full", "failed"));
         rollup.stages.push(record(1, true, "lite", "passed"));
-        // Ticket 2 was attempted and failed.
+        // Ticket 2's full and lite both failed.
         rollup.stages.push(record(2, false, "full", "failed"));
+        rollup.stages.push(record(2, false, "lite", "failed"));
         let entries = ladder(&spec, &rollup, None);
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].status, "pass");
