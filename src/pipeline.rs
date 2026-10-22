@@ -1315,14 +1315,10 @@ async fn run_ha_stage(
 /// the session should stop on completion or when this API budget is spent.
 pub fn session_budget_line(budget_usd: f64) -> String {
     if budget_usd.is_finite() && budget_usd > 0.0 {
-        format!(
-            "## Session budget
-This session may spend at most ${budget_usd:.2} in provider API dollars at list price. Turns are not the limit; stop when the work is complete or the budget is exhausted."
-        )
+        include_str!("prompts/session_budget.txt")
+            .replace("{{BUDGET}}", &format!("{budget_usd:.2}"))
     } else {
-        "## Session budget
-Turns are not the limit; stop when the work is complete."
-            .to_string()
+        "## Session budget\nTurns are not the limit; stop when the work is complete.".to_string()
     }
 }
 
@@ -5156,6 +5152,7 @@ impl BenchmarkPipeline {
                             acc.prompt_tokens += stats.prompt_tokens;
                             acc.cached_tokens += stats.cached_tokens;
                             acc.completion_tokens += stats.completion_tokens;
+                            acc.cache_write_tokens += stats.cache_write_tokens;
                             acc.total_tokens += stats.total_tokens;
                             acc.steps_taken += stats.steps_taken;
                             acc.cost_usd += stats.cost_usd;
@@ -5176,6 +5173,7 @@ impl BenchmarkPipeline {
                             acc.prompt_tokens += end.partial.prompt_tokens;
                             acc.cached_tokens += end.partial.cached_tokens;
                             acc.completion_tokens += end.partial.completion_tokens;
+                            acc.cache_write_tokens += end.partial.cache_write_tokens;
                             acc.total_tokens += end.partial.total_tokens;
                             acc.steps_taken += end.partial.steps_taken;
                             acc.cost_usd += end.partial.cost_usd;
@@ -5921,11 +5919,15 @@ impl BenchmarkPipeline {
         let duration_seconds = start_time.elapsed().as_secs_f64();
         let total_run_tokens = omp_stats
             .total_tokens
-            .max(prompt_tokens + cached_tokens + completion_tokens);
+            .max(prompt_tokens + cached_tokens + completion_tokens + omp_stats.cache_write_tokens);
 
         let pricing = ModelPricing::for_model_async(&config.model).await;
-        let breakdown =
-            pricing.compute_cost_with_cache(prompt_tokens, cached_tokens, completion_tokens);
+        let breakdown = pricing.compute_cost_with_cache_and_write(
+            prompt_tokens,
+            cached_tokens,
+            completion_tokens,
+            omp_stats.cache_write_tokens,
+        );
 
         let mut live_spend_delta = None;
         if let (Some(key), Some(init)) = (&config.api_key, initial_spend) {
@@ -5937,16 +5939,14 @@ impl BenchmarkPipeline {
             }
         }
 
-        // Cost accounting: the live key-usage delta is ground truth only when
-        // it moves; a zero delta is weekly-counter lag, not zero spend (see
-        // resolve_api_cost). Both measurements stay in the record so a
-        // disagreement is auditable after the fact.
+        // R24 R2: the committed snapshot is the scored cost. The live key
+        // delta is audit-only; a provider promo or lag cannot move a score.
         let (cost_usd, cost_source) =
             ModelPricing::resolve_api_cost(live_spend_delta, breakdown.total_cost_usd);
-        if cost_source == "formula_zero_delta" {
+        if let Some(live) = live_spend_delta {
             logger.log(&format!(
-                "[COST] Live key usage read $0.00 but tokens price at ${:.4} — recording the formula cost (counter lag).",
-                breakdown.total_cost_usd
+                "[COST] snapshot ${:.4}; live key delta ${:.4} recorded for audit only",
+                breakdown.total_cost_usd, live
             ));
         }
         let effective_cost_usd = ModelPricing::calculate_effective_cost(
@@ -6064,6 +6064,7 @@ impl BenchmarkPipeline {
             cost_usd,
             cost_source: Some(cost_source.to_string()),
             cost_formula_usd: Some(breakdown.total_cost_usd),
+            live_spend_delta_usd: live_spend_delta,
             effective_cost_usd: Some(effective_cost_usd),
             savings_percent: breakdown.savings_percent,
             efficiency_score,
@@ -8646,7 +8647,7 @@ main()
         assert!(m.baseline_source.is_none());
         assert_eq!(m.tokens.total_tokens, 0);
         assert_eq!(m.cost_usd, 0.0);
-        assert_eq!(m.cost_source.as_deref(), Some("formula"));
+        assert_eq!(m.cost_source.as_deref(), Some("snapshot"));
         assert_eq!(m.solved, Some(false));
         assert!(m.solved_at.is_none());
         assert_eq!(m.repaired, None);

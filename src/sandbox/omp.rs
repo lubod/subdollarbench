@@ -63,6 +63,9 @@ pub struct OmpSessionStats {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
+    /// R24 R3: new context written into the prompt cache; billed at
+    /// cache_write_per_million, never at $0.
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub steps_taken: u32,
     /// Live-metered provider spend for this attempt (sum of every call).
@@ -671,18 +674,11 @@ impl OmpRunner {
         let test_cmd = crate::config::template_ports_for_worker(base_cmd, base_port, worker);
         let guidance_snippet =
             crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
-        let effective_prompt = format!(
-            "{}
-
-==================================================
-CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
-1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.
-2. RAW TCP SOCKETS ONLY (MANDATORY):
-{}
-3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
-==================================================",
-            prompt, guidance_snippet, target_port, test_cmd
-        );
+        let effective_prompt = include_str!("../prompts/omp_effective.md")
+            .replace("{{PROMPT}}", prompt)
+            .replace("{{GUIDANCE}}", &guidance_snippet)
+            .replace("{{PORT}}", &target_port.to_string())
+            .replace("{{TEST}}", &test_cmd);
 
         // Write AGENTS.md into workspace so omp auto-loads instructions across all turns
         let agents_md_path = canonical_workdir.join("AGENTS.md");
@@ -1211,50 +1207,54 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                                     }
                                 }
                             }
-                            // 2. Budget check: explicit per-event cost wins; when
-                            // `usage.cost.total` is absent, estimate from token counts x
-                            // per-model rates so max_budget_usd still trips mid-session.
+                            // 2. Budget check: every event is priced from
+                            // the committed snapshot. The provider's
+                            // usage.cost.total is ignored; it is an actual
+                            // charge, not the list price (R24 R2).
                             let mut cost_updated = false;
                             let usage_node =
                                 val.pointer("/message/usage").or_else(|| val.get("usage"));
-                            let delta_cost: Option<f64> = val
-                                .pointer("/message/usage/cost/total")
-                                .and_then(|c| c.as_f64())
-                                .or_else(|| {
-                                    let usage = usage_node?;
-                                    let tin = usage
-                                        .get("input")
-                                        .or_else(|| usage.get("prompt_tokens"))
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(0);
-                                    let tout = usage
-                                        .get("output")
-                                        .or_else(|| usage.get("completion_tokens"))
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(0);
-                                    let tcached = usage
-                                        .get("cacheRead")
-                                        .or_else(|| usage.get("cache_read_input_tokens"))
-                                        .and_then(|x| x.as_u64())
-                                        .or_else(|| {
-                                            usage
-                                                .get("prompt_tokens_details")
-                                                .and_then(|d| d.get("cached_tokens"))
-                                                .and_then(|x| x.as_u64())
-                                        })
-                                        .unwrap_or(0);
-                                    if tin + tout + tcached == 0 {
-                                        None
-                                    } else {
-                                        let pricing =
-                                            crate::cost::ModelPricing::for_model(&ctx.model);
-                                        Some(
-                                            pricing
-                                                .compute_cost_with_cache(tin, tcached, tout)
-                                                .total_cost_usd,
-                                        )
-                                    }
-                                });
+                            let delta_cost: Option<f64> = (|| {
+                                let usage = usage_node?;
+                                let tin = usage
+                                    .get("input")
+                                    .or_else(|| usage.get("prompt_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                let tout = usage
+                                    .get("output")
+                                    .or_else(|| usage.get("completion_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                let tcached = usage
+                                    .get("cacheRead")
+                                    .or_else(|| usage.get("cache_read_input_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .or_else(|| {
+                                        usage
+                                            .get("prompt_tokens_details")
+                                            .and_then(|d| d.get("cached_tokens"))
+                                            .and_then(|x| x.as_u64())
+                                    })
+                                    .unwrap_or(0);
+                                let tcwrite = usage
+                                    .get("cacheWrite")
+                                    .or_else(|| usage.get("cache_write_input_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                if tin + tout + tcached + tcwrite == 0 {
+                                    None
+                                } else {
+                                    let pricing = crate::cost::ModelPricing::for_model(&ctx.model);
+                                    Some(
+                                        pricing
+                                            .compute_cost_with_cache_and_write(
+                                                tin, tcached, tout, tcwrite,
+                                            )
+                                            .total_cost_usd,
+                                    )
+                                }
+                            })();
                             if let Some(cost) = delta_cost {
                                 if let Ok(mut c_lock) = ctx.accumulated_cost.lock() {
                                     *c_lock += cost;
@@ -1910,6 +1910,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         let mut prompt_tokens = 0u64;
         let mut completion_tokens = 0u64;
         let mut cached_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut steps = 0u32;
         let mut cost_usd = 0.0f64;
         let mut max_call_usd = 0.0f64;
@@ -1961,6 +1962,13 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                             cached_tokens += c;
                         }
                     }
+                    if let Some(cw) = usage
+                        .get("cacheWrite")
+                        .or_else(|| usage.get("cache_write_input_tokens"))
+                        .and_then(|x| x.as_u64())
+                    {
+                        cache_write_tokens += cw;
+                    }
                     if let Some(c) = usage
                         .get("cost")
                         .and_then(|c| c.get("total"))
@@ -1977,7 +1985,8 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             prompt_tokens,
             completion_tokens,
             cached_tokens,
-            total_tokens: prompt_tokens + cached_tokens + completion_tokens,
+            cache_write_tokens,
+            total_tokens: prompt_tokens + cached_tokens + cache_write_tokens + completion_tokens,
             steps_taken: steps,
             cost_usd,
             max_call_usd,
@@ -2050,15 +2059,10 @@ impl OmpRunner {
     /// AGENTS.md body (pure composer: byte-identical content, templated
     /// by the caller per worker). Split for unit tests.
     fn compose_omp_agents_md(snippet: &str, port: u16, test: &str) -> String {
-        format!(
-            r#"# Instructions for Autonomous Coding Agent
-1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
-2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
-{}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
-"#,
-            snippet, port, test
-        )
+        include_str!("../prompts/omp_agents.md")
+            .replace("{{GUIDANCE}}", snippet)
+            .replace("{{PORT}}", &port.to_string())
+            .replace("{{TEST}}", test)
     }
 
     pub fn task_guidance(
@@ -3802,7 +3806,7 @@ case "$1" in
       budget)
         if [ -n "$sessions" ]; then
           mkdir -p "$sessions"
-          printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.05}},"content":[{"type":"text","text":"over budget"}]}}' > "$sessions/session.jsonl"
+          printf '%s\n' '{"message":{"role":"assistant","usage":{"input":250000,"output":0},"content":[{"type":"text","text":"over budget"}]}}' > "$sessions/session.jsonl"
         fi
         wait_for_kill
         ;;
@@ -3810,9 +3814,9 @@ case "$1" in
         if [ -n "$sessions" ]; then
           mkdir -p "$sessions"
           {
-            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.01}},"content":[{"type":"text","text":"one"}]}}'
+            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":50000,"output":0},"content":[{"type":"text","text":"one"}]}}'
             sleep 0.15
-            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.03}},"content":[{"type":"text","text":"two"}]}}'
+            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":150000,"output":0},"content":[{"type":"text","text":"two"}]}}'
           } > "$sessions/session.jsonl"
         fi
         wait_for_kill

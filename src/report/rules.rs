@@ -5,9 +5,26 @@
 //! hashes the graded inputs so CI fails if content drifts without a bump.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.39`: round-24 freeze prerequisite — the rules stamp now
+///   covers the sdb-sql campaign spec, every stage/lite prompt, all of
+///   `src/verifier/sql`, `src/scoring.rs` (tier/lite/catch-up weights,
+///   `CATCH_UP_SLOTS`, the cap/floor/reserve and the pool weights), the
+///   candidate budget/directive prompt files and the committed price
+///   snapshot. The retired task inputs stay in the shared stamp: they
+///   remain runnable through the generic single-shot path and their
+///   verifier/cost code is shared. The snapshot uses exact catalog ids
+///   after stripping `openrouter/`; a model variant needs its own entry,
+///   and cache-write tokens are billed at the catalog write rate (the
+///   prompt rate when the catalog has none). Cost is priced from the
+///   snapshot at list price; the live key-usage delta is recorded for
+///   audit only. Score impact: none by construction, but `.38` and earlier
+///   costs used the live catalog/key delta and are not comparable with
+///   `.39` on cost-sensitive tickets.
 /// - `2026-10-19.38`: round-23 "what does a dollar buy" — D1: dollars are
 ///   the session limit; every sdb-sql stage and lite uses a 200-turn
 ///   runaway guard. D2: a ticket's API budget is the remaining phase
@@ -724,7 +741,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.38";
+pub const RULES_VERSION: &str = "2026-10-19.39";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
@@ -754,21 +771,88 @@ const GRADED_FILES: &[&str] = &[
     // move every recorded denominator, so they are graded inputs too.
     "src/bench/mod.rs",
     "src/bench/batch_ref.rs",
+    // R24 R1: the active sdb-sql grading inputs. The stage prompts and the
+    // SQL verifier sources are swept as directories below, so a new stage or
+    // verifier file joins without editing this list. The retired task files
+    // above stay: they remain runnable through the generic single-shot path
+    // and their verifier/cost code is still shared.
+    "campaigns/sdb-sql/campaign.json",
+    "src/scoring.rs",
+    "src/cost/model_prices.json",
+    "src/prompts/session_budget.txt",
+    "src/prompts/omp_effective.md",
+    "src/prompts/omp_agents.md",
+    "src/prompts/opencode_effective.md",
+    "src/prompts/opencode_agents.md",
 ];
+
+/// Directories swept recursively into the fingerprint. A new stage prompt
+/// or SQL verifier file is covered without touching `GRADED_FILES`.
+const GRADED_DIRS: &[&str] = &["campaigns/sdb-sql/stages", "src/verifier/sql"];
 
 /// Hash of the graded inputs, as `"{RULES_VERSION}+{hex8}"`.
 pub fn fingerprint() -> String {
-    let root = crate::config::get_repo_root();
+    fingerprint_root(&crate::config::get_repo_root())
+}
+
+/// The static files plus every regular file under [`GRADED_DIRS`], as paths
+/// relative to `root`, sorted and deduplicated.
+pub fn graded_files(root: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = GRADED_FILES.iter().map(PathBuf::from).collect();
+    for dir in GRADED_DIRS {
+        collect_dir(root, Path::new(dir), &mut files);
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn collect_dir(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
+    let dir = root.join(rel_dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let rel = rel_dir.join(entry.file_name());
+        let path = root.join(&rel);
+        if path.is_dir() {
+            collect_dir(root, &rel, out);
+        } else if path.is_file() {
+            out.push(rel);
+        }
+    }
+}
+
+/// Hash exactly these files under `root` (relative paths). The production
+/// entry point uses [`graded_files`]; the tests use this form to perturb a
+/// temporary copy without touching the real tree.
+pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> String {
     let mut h = DefaultHasher::new();
     RULES_VERSION.hash(&mut h);
-    for f in GRADED_FILES {
+    for f in files {
         // A missing graded file must not hash as empty content: that would
         // leave the stamp unchanged when a verifier is deleted or renamed, and
         // results graded by a different code would compare as equal.
-        let content = std::fs::read_to_string(root.join(f)).unwrap_or_else(|e| {
-            panic!("graded file {f} is unreadable: {e}");
+        let content = fs::read_to_string(root.join(f)).unwrap_or_else(|e| {
+            panic!("graded file {} is unreadable: {e}", f.display());
         });
-        f.hash(&mut h);
+        f.to_string_lossy().hash(&mut h);
+        content.hash(&mut h);
+    }
+    format!("{RULES_VERSION}+{:08x}", h.finish() as u32)
+}
+
+pub fn fingerprint_root(root: &Path) -> String {
+    // The production path tolerates a minimal SDB_HOME (the CLI tests point
+    // it at a temp tree): a missing path drops its path+content from the
+    // hash, which still changes the stamp; the test helper below is strict.
+    let mut h = DefaultHasher::new();
+    RULES_VERSION.hash(&mut h);
+    for f in graded_files(root) {
+        let Ok(content) = fs::read_to_string(root.join(&f)) else {
+            continue;
+        };
+        f.to_string_lossy().hash(&mut h);
         content.hash(&mut h);
     }
     format!("{RULES_VERSION}+{:08x}", h.finish() as u32)
@@ -778,6 +862,27 @@ pub fn fingerprint() -> String {
 mod tests {
     use super::*;
 
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rules_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn put(root: &Path, rel: &str, content: &str) -> PathBuf {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        PathBuf::from(rel)
+    }
+
     #[test]
     fn test_fingerprint_starts_with_version() {
         let fp = fingerprint();
@@ -785,5 +890,97 @@ mod tests {
             fp.starts_with(&format!("{RULES_VERSION}+")),
             "fingerprint {fp} must start with RULES_VERSION"
         );
+    }
+
+    #[test]
+    fn r24_r1_the_real_tree_covers_the_sdb_sql_inputs() {
+        let files = graded_files(&crate::config::get_repo_root());
+        for rel in [
+            "campaigns/sdb-sql/campaign.json",
+            "campaigns/sdb-sql/stages/0_genesis/prompt.md",
+            "src/verifier/sql/wire.rs",
+            "src/scoring.rs",
+            "src/cost/model_prices.json",
+            "src/prompts/session_budget.txt",
+            "src/prompts/omp_effective.md",
+            "src/prompts/opencode_agents.md",
+            // Retired task inputs stay in the shared stamp.
+            "tasks/redis/prompt.md",
+        ] {
+            assert!(
+                files.iter().any(|p| p == Path::new(rel)),
+                "graded_files misses {rel}: {files:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r24_r2_editing_the_price_snapshot_changes_the_fingerprint() {
+        let root = temp_root("prices");
+        let rel = put(&root, "src/cost/model_prices.json", r#"{"models":[]}"#);
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
+        put(&root, "src/cost/model_prices.json", r#"{"models":[1]}"#);
+        let b = fingerprint_files(&root, &[rel]);
+        assert_ne!(a, b, "a price-snapshot edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn r24_r1_editing_a_stage_prompt_changes_the_fingerprint() {
+        let root = temp_root("stage");
+        let rel = put(
+            &root,
+            "campaigns/sdb-sql/stages/99_new/prompt.md",
+            "first prompt",
+        );
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
+        put(
+            &root,
+            "campaigns/sdb-sql/stages/99_new/prompt.md",
+            "second prompt",
+        );
+        let b = fingerprint_files(&root, &[rel]);
+        assert_ne!(a, b, "a stage prompt edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn r24_r1_editing_an_sql_verifier_changes_the_fingerprint() {
+        let root = temp_root("sql");
+        let rel = put(&root, "src/verifier/sql/wire.rs", "one verifier");
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
+        put(&root, "src/verifier/sql/wire.rs", "two verifier");
+        let b = fingerprint_files(&root, &[rel]);
+        assert_ne!(a, b, "an SQL verifier edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn r24_r1_editing_a_scoring_constant_changes_the_fingerprint() {
+        let root = temp_root("scoring");
+        let rel = put(&root, "src/scoring.rs", "pub const TURN_GUARD: u32 = 200;");
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
+        put(&root, "src/scoring.rs", "pub const TURN_GUARD: u32 = 201;");
+        let b = fingerprint_files(&root, &[rel]);
+        assert_ne!(a, b, "a scoring constant edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn r24_r1_a_new_stage_directory_is_covered() {
+        let root = temp_root("newstage");
+        put(
+            &root,
+            "campaigns/sdb-sql/stages/99_new/prompt.md",
+            "new stage",
+        );
+        let files = graded_files(&root);
+        assert!(
+            files
+                .iter()
+                .any(|p| p == Path::new("campaigns/sdb-sql/stages/99_new/prompt.md")),
+            "a new stage directory must be swept: {files:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

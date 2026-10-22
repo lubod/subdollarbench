@@ -108,16 +108,18 @@ pub struct RunManifest {
     pub egress_enforced: Option<bool>,
     pub tokens: RunTokenUsage,
     pub cost_usd: f64,
-    /// How `cost_usd` was resolved: `"live"` (key-usage delta moved),
-    /// `"formula"` (token pricing, no live reading), or
-    /// `"formula_zero_delta"` (live read $0.00 while tokens price positive —
-    /// weekly-counter lag; the formula was recorded instead).
+    /// R24 R2: always `"snapshot"` — the committed list-price table.
+    /// The live key delta is in `live_spend_delta_usd` for audit only.
     #[serde(default)]
     pub cost_source: Option<String>,
-    /// Token-priced API cost, kept alongside `cost_usd` so a live/formula
-    /// disagreement stays visible without recomputation.
+    /// Token-priced API cost from the committed snapshot, kept alongside
+    /// `cost_usd`.
     #[serde(default)]
     pub cost_formula_usd: Option<f64>,
+    /// R24 R2: the live key-usage delta, recorded for audit only. The
+    /// scored cost is always the snapshot formula.
+    #[serde(default)]
+    pub live_spend_delta_usd: Option<f64>,
     #[serde(default)]
     pub effective_cost_usd: Option<f64>,
     pub savings_percent: f64,
@@ -588,6 +590,7 @@ mod tests {
             cost_usd: 0.0025,
             cost_source: None,
             cost_formula_usd: None,
+            live_spend_delta_usd: None,
             effective_cost_usd: Some(0.005),
             savings_percent: 65.0,
             efficiency_score: 400.0,
@@ -764,6 +767,7 @@ mod tests {
             cost_usd: 0.0,
             cost_source: None,
             cost_formula_usd: None,
+            live_spend_delta_usd: None,
             effective_cost_usd: None,
             savings_percent: 0.0,
             efficiency_score: 0.0,

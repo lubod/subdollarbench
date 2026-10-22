@@ -42,7 +42,7 @@ impl OpenCodeRunner {
     /// prompt = Σ input, completion = Σ (output + reasoning),
     /// cached = Σ cache.read, total = Σ (input + output + reasoning).
     /// Reasoning bills provider-side as completion, so it joins completion.
-    fn add_step(stats: &mut OmpSessionStats, tokens: &serde_json::Value, cost: f64) {
+    fn add_step(stats: &mut OmpSessionStats, tokens: &serde_json::Value, model: &str) -> f64 {
         let u64f = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_u64()).unwrap_or(0);
         let input = u64f(tokens.get("input"));
         let output = u64f(tokens.get("output"));
@@ -52,12 +52,24 @@ impl OpenCodeRunner {
             .and_then(|c| c.get("read"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0);
+        let cache_write = tokens
+            .get("cache")
+            .and_then(|c| c.get("write"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        // R24 R2/R3: price the event from the committed snapshot, including
+        // cache-write context; never from the provider's own `part.cost`.
+        let cost = crate::cost::ModelPricing::for_model(model)
+            .compute_cost_with_cache_and_write(input, cache_read, output + reasoning, cache_write)
+            .total_cost_usd;
         stats.prompt_tokens += input;
         stats.completion_tokens += output + reasoning;
         stats.cached_tokens += cache_read;
-        stats.total_tokens += input + output + reasoning;
+        stats.cache_write_tokens += cache_write;
+        stats.total_tokens += input + output + reasoning + cache_write;
         stats.cost_usd += cost;
         stats.max_call_usd = stats.max_call_usd.max(cost);
+        cost
     }
 
     /// Provider rate-limit signal on one `--format json` event or raw line.
@@ -356,19 +368,11 @@ impl OpenCodeRunner {
         effort: &str,
         worker: u8,
     ) {
-        let content = format!(
-            r#"# Instructions for Autonomous Coding Agent
-1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
-2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
-{}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
-4. **REASONING EFFORT REQUESTED**: {} (best-effort: honored by some models, ignored by others).
-"#,
-            snippet, port, test, effort
-        );
-        // Worker-templated like the prompt: a canonical port here contradicts
-        // the templated brief (measured: proxy AGENTS.md said 8091 while the
-        // prompt said 8391; the model hedged on both). Alias-shielded.
+        let content = include_str!("../prompts/opencode_agents.md")
+            .replace("{{GUIDANCE}}", snippet)
+            .replace("{{PORT}}", &port.to_string())
+            .replace("{{TEST}}", test)
+            .replace("{{EFFORT}}", effort);
         let content = crate::config::template_ports_for_worker(&content, port, worker);
         let _ = std::fs::write(workdir.join("AGENTS.md"), content);
     }
@@ -447,10 +451,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         let guidance_snippet =
             crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
         let effort_note = format!("reasoning effort requested: {}", effort_level);
-        let effective_prompt = format!(
-            "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.\n4. {}.\n==================================================",
-            prompt, guidance_snippet, target_port, test_cmd, effort_note
-        );
+        let effective_prompt = include_str!("../prompts/opencode_effective.md")
+            .replace("{{PROMPT}}", prompt)
+            .replace("{{GUIDANCE}}", &guidance_snippet)
+            .replace("{{PORT}}", &target_port.to_string())
+            .replace("{{TEST}}", &test_cmd)
+            .replace("{{EFFORT_NOTE}}", &effort_note);
         Self::write_agents_md(
             &canonical_workdir,
             &guidance_snippet,
@@ -689,6 +695,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             // A `type:"error"` event with a rate-limit shape sets the
             // resume flag (handled in the `_` arm below).
             let reader_handle = if let Some(stdout) = child.stdout.take() {
+                let cost_model = effective_model.clone();
                 let tx_o = tx.clone();
                 let stats_o = stats.clone();
                 let turns_o = turns.clone();
@@ -778,13 +785,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                     .or_else(|| v.get("tokens"))
                                     .cloned()
                                     .unwrap_or(serde_json::Value::Null);
-                                let cost = v
-                                    .pointer("/part/cost")
-                                    .or_else(|| v.get("cost"))
-                                    .and_then(|c| c.as_f64())
-                                    .unwrap_or(0.0);
-                                Self::add_step(&mut stats_o.lock().unwrap(), &tokens, cost);
-                                *spent_o.lock().unwrap() += cost;
+                                let step_cost = Self::add_step(
+                                    &mut stats_o.lock().unwrap(),
+                                    &tokens,
+                                    &cost_model,
+                                );
+                                *spent_o.lock().unwrap() += step_cost;
                                 let st = stats_o.lock().unwrap().clone();
                                 let n = turns_o.load(Ordering::SeqCst);
                                 let total_tok =
@@ -1503,11 +1509,21 @@ mod tests {
         assert!(!OpenCodeRunner::is_throttled_noop(false, 0, 0));
     }
 
+    /// R24-3: an event with only cache-write tokens is priced, not free.
+    #[test]
+    fn r24_r3_a_cache_write_only_event_costs_more_than_zero() {
+        let mut st = OmpSessionStats::default();
+        let tokens = ev(r#"{"cache":{"write":1000}}"#);
+        let cost = OpenCodeRunner::add_step(&mut st, &tokens, "anthropic/claude-haiku-5.5");
+        assert!(cost > 0.0, "cache-write-only event cost {cost}");
+        assert_eq!(st.cache_write_tokens, 1000);
+    }
+
     #[test]
     fn test_add_step_maps_usage_losslessly() {
         let mut st = OmpSessionStats::default();
         let tokens = ev(r#"{"input":100,"output":20,"reasoning":5,"cache":{"read":7}}"#);
-        OpenCodeRunner::add_step(&mut st, &tokens, 0.25);
+        OpenCodeRunner::add_step(&mut st, &tokens, "test-model");
         assert_eq!(st.prompt_tokens, 100);
         assert_eq!(
             st.completion_tokens, 25,
@@ -1516,15 +1532,19 @@ mod tests {
         assert_eq!(st.cached_tokens, 7);
         assert_eq!(st.total_tokens, 125);
         // Missing/odd fields degrade to zero, never panic.
-        OpenCodeRunner::add_step(&mut st, &serde_json::Value::Null, 1.0);
-        OpenCodeRunner::add_step(&mut st, &ev(r#"{"input":"nope","output":-3}"#), 0.0);
+        OpenCodeRunner::add_step(&mut st, &serde_json::Value::Null, "test-model");
+        OpenCodeRunner::add_step(
+            &mut st,
+            &ev(r#"{"input":"nope","output":-3}"#),
+            "test-model",
+        );
         assert_eq!(st.prompt_tokens, 100);
         assert_eq!(st.completion_tokens, 25);
         assert_eq!(st.cached_tokens, 7);
         assert_eq!(st.total_tokens, 125);
         // cache as a scalar / missing object is tolerated.
         let mut st2 = OmpSessionStats::default();
-        OpenCodeRunner::add_step(&mut st2, &ev(r#"{"input":4,"cache":3}"#), 0.0);
+        OpenCodeRunner::add_step(&mut st2, &ev(r#"{"input":4,"cache":3}"#), "test-model");
         assert_eq!(st2.prompt_tokens, 4);
         assert_eq!(st2.cached_tokens, 0);
     }
@@ -1779,15 +1799,15 @@ case "$1" in
         exit 0
         ;;
       budget_limit)
-        printf '%s\n' '{"type":"step_start"}' '{"type":"step_finish","part":{"tokens":{"input":10,"output":10},"cost":1.0}}'
+        printf '%s\n' '{"type":"step_start"}' '{"type":"step_finish","part":{"tokens":{"input":10000,"output":10}}}'
         exit 0
         ;;
       cap)
         printf '%s\n' \
           '{"type":"step_start"}' \
-          '{"type":"step_finish","part":{"tokens":{"input":0,"output":0},"cost":0.01}}' \
+          '{"type":"step_finish","part":{"tokens":{"input":50000,"output":0}}}' \
           '{"type":"step_start"}' \
-          '{"type":"step_finish","part":{"tokens":{"input":0,"output":0},"cost":0.03}}'
+          '{"type":"step_finish","part":{"tokens":{"input":150000,"output":0}}}'
         wait_for_kill
         ;;
       ready)
@@ -2048,7 +2068,7 @@ exit 1
             let (res, _) =
                 run_oc_scenario("budget_limit", &root, covtest_limits(10, 0.001, 10), None);
             let st = res.expect("budget stop is a normal conclusion");
-            assert_eq!(st.total_tokens, 20);
+            assert_eq!(st.total_tokens, 10010);
             assert_eq!(st.stop_reason.as_deref(), Some("dollars"));
             passed += 1;
         }

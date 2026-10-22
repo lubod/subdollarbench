@@ -46,9 +46,8 @@ pub struct BenchmarkRunResult {
     #[serde(default)]
     pub total_tokens: u64,
     pub total_cost_usd: f64,
-    /// Cost provenance (`"live"` / `"formula"` / `"formula_zero_delta"`)
-    /// and the token-priced value, so the boards can tell a measured zero
-    /// from a lagging one (a paid model at $0.00 must not read as free).
+    /// R24 R2: `"snapshot"` — the committed list-price table. The
+    /// token-priced value stays alongside for audit.
     #[serde(default)]
     pub cost_source: Option<String>,
     #[serde(default)]

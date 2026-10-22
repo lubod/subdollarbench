@@ -6,5 +6,6 @@ pub mod pipeline;
 pub mod remote;
 pub mod report;
 pub mod sandbox;
+pub mod scoring;
 pub mod verifier;
 pub mod web;
