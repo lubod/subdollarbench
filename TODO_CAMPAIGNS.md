@@ -35,7 +35,7 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | [24](docs/rounds/24.md) | The rules fingerprint covers sdb-sql; price snapshot | merged |
 | [25](docs/rounds/25.md) | Display follow-ups (rounds 22-24) | open |
 | [26](docs/rounds/26.md) | Turns inside an attempt follow the dollar rule (R23-7) | merged |
-| 27 (to write) | Freeze: final rules version, flake bar, CI, stable stamp hash (R24-4), dead snapshot ids (R24-6) | — |
+| 27 (to write) | Freeze: final rules version, flake bar, CI, stable stamp hash (R24-4), dead snapshot ids (R24-6), list price vs bill (R26-2) | — |
 
 ## After the freeze: validation
 
