@@ -1119,6 +1119,10 @@ pub struct StageRecord {
     /// Verifier stage ids that were green earlier and failed now.
     pub regressed: Vec<u32>,
     pub regression_severity: u32,
+    /// R25 R23-8: the provider API bill for this ticket. This is the unit
+    /// the budget and cap use; `effective_cost_usd` adds the compute floor.
+    #[serde(default)]
+    pub api_cost_usd: f64,
     pub effective_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
@@ -3220,6 +3224,7 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         total_stages: 0,
         regressed: Vec::new(),
         regression_severity: 0,
+        api_cost_usd: 0.0,
         effective_cost_usd: 0.0,
         turns: None,
         duration_seconds: None,
@@ -3278,6 +3283,7 @@ fn push_attempt_record(
         total_stages: out.total_stages,
         regressed,
         regression_severity,
+        api_cost_usd: out.api_cost_usd,
         effective_cost_usd: out.effective_cost_usd,
         turns: out.turns,
         duration_seconds: out.duration_seconds,
@@ -3782,6 +3788,7 @@ mod tests {
             total_stages: 3,
             regressed: vec![],
             regression_severity: 0,
+            api_cost_usd: 0.02,
             effective_cost_usd: 0.02,
             turns: Some(12),
             duration_seconds: Some(200.0),
@@ -3806,6 +3813,7 @@ mod tests {
             total_stages: 6,
             regressed: vec![3, 4, 5],
             regression_severity: 3,
+            api_cost_usd: 0.1,
             effective_cost_usd: 0.1,
             turns: Some(30),
             duration_seconds: Some(900.0),
@@ -4093,6 +4101,7 @@ mod tests {
             total_stages: 1,
             regressed: vec![],
             regression_severity: 0,
+            api_cost_usd: 0.01,
             effective_cost_usd: 0.01,
             turns: Some(3),
             duration_seconds: Some(10.0),
@@ -4186,8 +4195,8 @@ mod tests {
                 .iter()
                 .map(|(id, p)| stage_result(*id, *p))
                 .collect(),
-            effective_cost_usd: 0.01,
             api_cost_usd: 0.01,
+            effective_cost_usd: 0.01,
             turns: Some(10),
             duration_seconds: Some(60.0),
             max_call_usd: 0.0,
@@ -4613,6 +4622,49 @@ mod tests {
         assert!((rollup.total_cost_usd - 0.03).abs() < 1e-9);
         assert!(!rollup.over_budget);
         assert!((rollup.stages[0].effective_cost_usd - 0.99).abs() < 1e-9);
+    }
+
+    /// R25 R23-8 acceptance: the per-ticket API field is populated and its
+    /// sum over the stages equals the rollup's API total.
+    #[tokio::test]
+    async fn r23_8_stage_api_cost_sums_to_total() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d8api".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let spend = 0.01 * (attempt.stage.id as f64 + 1.0);
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.api_cost_usd = spend;
+                o.effective_cost_usd = spend + 0.005;
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let sum: f64 = rollup.stages.iter().map(|s| s.api_cost_usd).sum();
+        assert!(
+            (sum - rollup.total_cost_usd).abs() < 1e-9,
+            "stage API {sum} vs total {}: {:?}",
+            rollup.total_cost_usd,
+            rollup.stages
+        );
+        assert!(
+            rollup
+                .stages
+                .iter()
+                .all(|s| s.api_cost_usd > 0.0 && s.effective_cost_usd > s.api_cost_usd),
+            "each stage carries its API bill and the secondary effective cost"
+        );
     }
 
     /// R23 D3: a paid launch refuses a model with no list price; eval-only
@@ -5995,6 +6047,7 @@ mod tests {
             total_stages: 1,
             regressed: Vec::new(),
             regression_severity: 0,
+            api_cost_usd: 0.1,
             effective_cost_usd: 0.1,
             turns: Some(10),
             duration_seconds: Some(60.0),

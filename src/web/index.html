@@ -2263,6 +2263,30 @@
       return [vendor, harness, effort].filter(Boolean).join(' \u00b7 ');
     }
 
+    /// R23-8: per-ticket API dollars, with the compute-inclusive effective
+    /// cost as the secondary figure. Old records without the API field fall
+    /// back to effective so their display does not read as zero.
+    function ticketCosts(recs) {
+      let api = 0, effective = 0;
+      (recs || []).forEach(r => {
+        const eff = Number(r.effective_cost_usd || 0);
+        const a = (r.api_cost_usd !== undefined && r.api_cost_usd !== null)
+          ? Number(r.api_cost_usd) : eff;
+        api += a;
+        effective += eff;
+      });
+      return { api, effective };
+    }
+    function ticketCostText(recs) {
+      const c = ticketCosts(recs);
+      if (!c.api) return '';
+      let text = `$${fmtMoney(c.api)} API`;
+      if (c.effective && Math.abs(c.effective - c.api) > 0.00005) {
+        text += ` \u00b7 $${fmtMoney(c.effective)} effective`;
+      }
+      return text;
+    }
+
     /// One labelled ladder square: 16 px, the ticket number inside, the full
     /// story on hover (round-10 U2).
     function ladderSquare(entry, records) {
@@ -2282,10 +2306,12 @@
           : `${r.passed_stages}/${r.total_stages}`;
         return `${r.variant === 'lite' ? 'lite ' : ''}${cell}`;
       }).join(' \u00b7 ');
-      const cost = recs.reduce((sum, r) => sum + Number(r.effective_cost_usd || 0), 0);
+      const costs = ticketCosts(recs);
       const parts = [`${entry.id} ${entry.title}`, st.label];
       if (tries) parts.push(tries);
-      if (cost) parts.push(`$${fmtMoney(cost)}`);
+      if (costs.api) parts.push(`$${fmtMoney(costs.api)} API`);
+      if (costs.effective && Math.abs(costs.effective - costs.api) > 0.00005)
+        parts.push(`$${fmtMoney(costs.effective)} effective`);
       if (entry.stop_reason) parts.push(`stopped: ${entry.stop_reason}`);
       if (entry.cause) parts.push(entry.cause);
       const pulse = entry.status === 'running' ? ' ladderRun' : '';
@@ -2769,8 +2795,12 @@
             ${f.detail ? `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">full verifier error</summary><pre style="white-space:pre-wrap;font-size:.72rem;background:#05070a;border:1px solid var(--border);border-radius:4px;padding:8px;max-height:240px;overflow:auto;">${escapeHtml(f.detail)}</pre></details>` : ''}
             ${f.stderr_tail ? `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">candidate stderr tail</summary><pre style="white-space:pre-wrap;font-size:.72rem;background:#05070a;border:1px solid var(--border);border-radius:4px;padding:8px;max-height:240px;overflow:auto;">${escapeHtml(f.stderr_tail)}</pre></details>` : ''}
           </div>` : '';
+        const rc = ticketCosts([rec]);
+        const costText = rc.effective && Math.abs(rc.effective - rc.api) > 0.00005
+          ? `$${fmtMoney(rc.api)} API \u00b7 $${fmtMoney(rc.effective)} effective`
+          : `$${fmtMoney(rc.api || rc.effective)}`;
         return `<div style="margin-bottom:8px;">
-          <div><b>${escapeHtml(rec.variant)}</b> \u00b7 ${rec.status} \u00b7 $${fmtMoney(rec.effective_cost_usd)} \u00b7 ${rec.turns ?? '?'} turns${rec.git_commit ? ` \u00b7 <span style="font-family:ui-monospace;">${escapeHtml(String(rec.git_commit).slice(0, 8))}</span>` : ''}
+          <div><b>${escapeHtml(rec.variant)}</b> \u00b7 ${rec.status} \u00b7 ${costText} \u00b7 ${rec.turns ?? '?'} turns${rec.git_commit ? ` \u00b7 <span style="font-family:ui-monospace;">${escapeHtml(String(rec.git_commit).slice(0, 8))}</span>` : ''}
             ${typeof inspectRun === 'function' ? ` \u00b7 <a href="#" onclick="event.preventDefault(); inspectRun('${escapeHtml(rec.run_id)}')" style="color:var(--primary);">console</a>` : ''}
           </div>
           ${roundRows}${fail}
@@ -2820,7 +2850,8 @@
         const recs = byId[e.id] || [];
         const full = recs.find(x => x.variant !== 'lite');
         const lite = recs.find(x => x.variant === 'lite');
-        const cost = recs.reduce((s, x) => s + Number(x.effective_cost_usd || 0), 0);
+        const costs = ticketCosts(recs);
+        const cost = costs.api;
         const expanded = !!runExpandedTickets[e.id];
         const cause = e.cause || '';
         rows += `<tr style="cursor:pointer;" onclick="toggleRunTicket(${e.id})" onkeydown="if(event.key==='Enter'){toggleRunTicket(${e.id});}" tabindex="0">
@@ -2828,7 +2859,7 @@
           <td>${full ? roundsCell(full) : '<span class="hint">\u00b7</span>'}</td>
           <td>${lite ? roundsCell(lite) : '<span class="hint">\u00b7</span>'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt1(e.points)}</td>
-          <td style="text-align:right;font-variant-numeric:tabular-nums;">${cost ? '$' + fmtMoney(cost) : '\u00b7'}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums;" title="${escapeHtml(costs.effective && Math.abs(costs.effective - costs.api) > 0.00005 ? '$' + fmtMoney(costs.api) + ' API \u00b7 $' + fmtMoney(costs.effective) + ' effective' : '')}">${cost ? '$' + fmtMoney(cost) : '\u00b7'}</td>
           <td class="hint" title="${escapeHtml(cause)}"><div class="causeCell">${escapeHtml(cause)}</div></td>
         </tr>
         <tr style="display:${expanded ? 'table-row' : 'none'};"><td colspan="6" style="background:#0b0f18;">${runTicketDetail(recs, e.status === 'running')}</td></tr>`;
