@@ -12,7 +12,7 @@
 //! unknown state: the driver should drop the candidate and connect again.
 
 use super::run::Candidate;
-use super::wire::{read_response, Response};
+use super::wire::{read_response_ctx, Response};
 use std::io::{BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -20,6 +20,7 @@ use std::time::Duration;
 /// A [`Candidate`] speaking the text protocol over one TCP connection.
 pub struct TcpCandidate {
     reader: BufReader<TcpStream>,
+    timeout: Duration,
 }
 
 impl TcpCandidate {
@@ -41,6 +42,7 @@ impl TcpCandidate {
             .map_err(|e| format!("set nodelay: {e}"))?;
         Ok(Self {
             reader: BufReader::new(stream),
+            timeout,
         })
     }
 }
@@ -63,7 +65,10 @@ impl TcpCandidate {
 
     /// Read one response without sending anything (the in-flight probe).
     pub fn recv(&mut self) -> Result<Response, String> {
-        read_response(&mut self.reader)
+        read_response_ctx(
+            &mut self.reader,
+            Some((self.timeout, "the previous statement")),
+        )
     }
 
     /// The read timeout for subsequent reads; the in-flight probe wants a
@@ -72,7 +77,9 @@ impl TcpCandidate {
         self.reader
             .get_ref()
             .set_read_timeout(Some(timeout))
-            .map_err(|e| format!("set read timeout: {e}"))
+            .map_err(|e| format!("set read timeout: {e}"))?;
+        self.timeout = timeout;
+        Ok(())
     }
 }
 
@@ -89,7 +96,9 @@ impl Candidate for TcpCandidate {
             .write_all(sql.as_bytes())
             .and_then(|()| stream.write_all(b"\n"))
             .map_err(|e| format!("write: {e}"))?;
-        read_response(&mut self.reader)
+        let short: String = sql.trim().chars().take(80).collect();
+        let what = format!("statement {short:?}");
+        read_response_ctx(&mut self.reader, Some((self.timeout, &what)))
     }
 }
 
@@ -234,7 +243,9 @@ mod tests {
         });
         let mut c = TcpCandidate::connect(addr, Duration::from_millis(300)).unwrap();
         let err = c.exec("SELECT 1").unwrap_err();
-        assert!(err.starts_with("read:"), "{err}");
+        // F1: the timeout names the wait and the statement, not an errno.
+        assert!(err.contains("no answer within"), "{err}");
+        assert!(err.contains("statement \"SELECT 1\""), "{err}");
     }
 
     /// End to end over a real socket: a server that answers from its own

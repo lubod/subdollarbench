@@ -18,7 +18,7 @@
 //! 7. at most 256 connections are open; the next is refused cleanly, an
 //!    existing one still answers, and the cap releases after closes.
 
-use super::wire::{read_response, Response};
+use super::wire::{read_response_ctx, Response};
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -57,10 +57,12 @@ impl SecurityConfig {
 /// would otherwise treat as statements).
 struct Raw {
     reader: BufReader<TcpStream>,
+    timeout: Duration,
+    step: &'static str,
 }
 
 impl Raw {
-    fn connect(addr: &str, timeout: Duration) -> Result<Self, String> {
+    fn connect(addr: &str, timeout: Duration, step: &'static str) -> Result<Self, String> {
         let stream = TcpStream::connect(addr).map_err(|e| format!("connect: {e}"))?;
         stream
             .set_read_timeout(Some(timeout))
@@ -73,7 +75,13 @@ impl Raw {
             .map_err(|e| format!("nodelay: {e}"))?;
         Ok(Self {
             reader: BufReader::new(stream),
+            timeout,
+            step,
         })
+    }
+
+    fn set_step(&mut self, step: &'static str) {
+        self.step = step;
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -84,7 +92,7 @@ impl Raw {
     }
 
     fn response(&mut self) -> Result<Response, String> {
-        read_response(&mut self.reader)
+        read_response_ctx(&mut self.reader, Some((self.timeout, self.step)))
     }
 
     fn exec(&mut self, sql: &str) -> Result<Response, String> {
@@ -95,7 +103,7 @@ impl Raw {
 }
 
 fn auth(addr: &str, cfg: &SecurityConfig) -> Result<Raw, String> {
-    let mut c = Raw::connect(addr, cfg.timeout)?;
+    let mut c = Raw::connect(addr, cfg.timeout, "AUTH")?;
     c.send(format!("AUTH {}\n", cfg.password).as_bytes())?;
     match c.response()? {
         Response::Ok(_) => Ok(c),
@@ -143,7 +151,7 @@ fn expect_one(c: &mut Raw, what: &str) -> Result<(), String> {
 
 fn auth_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     // No AUTH.
-    let mut c = Raw::connect(addr, cfg.timeout)?;
+    let mut c = Raw::connect(addr, cfg.timeout, "AUTH")?;
     match c.exec("SELECT 1")? {
         Response::Err { class, text } => {
             if class != "auth" {
@@ -163,7 +171,7 @@ fn auth_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
     // Wrong password (deliberately unrelated to the real one, so an echo
     // cannot be mistaken for a leak).
-    let mut c = Raw::connect(addr, cfg.timeout)?;
+    let mut c = Raw::connect(addr, cfg.timeout, "AUTH")?;
     c.send(b"AUTH sdb-wrong-password\n")?;
     match c.response()? {
         Response::Err { class, text } => {
@@ -190,6 +198,7 @@ fn auth_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
 fn fuzz_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut c = auth(addr, cfg)?;
+    c.set_step("byte fuzzing");
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
     for i in 0..60usize {
         x ^= x << 13;
@@ -219,6 +228,7 @@ fn fuzz_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
 fn mutation_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut c = auth(addr, cfg)?;
+    c.set_step("grammar mutations");
     let bases = [
         "SELECT 1",
         "CREATE TABLE mut (a INTEGER)",
@@ -254,6 +264,7 @@ fn mutation_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
 fn nesting_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut c = auth(addr, cfg)?;
+    c.set_step("the deeply nested expression");
     let depth = cfg.max_depth + 1;
     let sql = format!("SELECT {}1{}", "(".repeat(depth), ")".repeat(depth));
     expect_limit(c.exec(&sql)?, "a deeply nested expression")?;
@@ -262,6 +273,7 @@ fn nesting_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
 fn oversize_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut c = auth(addr, cfg)?;
+    c.set_step("the oversized statement");
     let mut sql = String::with_capacity(cfg.max_stmt + 32);
     sql.push_str("SELECT '");
     sql.extend(std::iter::repeat_n('x', cfg.max_stmt + 1));
@@ -274,9 +286,11 @@ fn oversize_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
 fn slow_loris_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut slow = auth(addr, cfg)?;
+    slow.set_step("the slow-loris partial line");
     slow.send(b"SELECT ")?; // a partial statement, no newline
     std::thread::sleep(Duration::from_millis(800));
     let mut c = auth(addr, cfg)?;
+    c.set_step("another connection while slow-loris is pending");
     let started = Instant::now();
     expect_one(&mut c, "while a slow-loris client is pending")?;
     if started.elapsed() > Duration::from_secs(5) {
@@ -291,6 +305,7 @@ fn slow_loris_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
 
 fn statement_timeout_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut c = auth(addr, cfg)?;
+    c.set_step("the statement-budget step");
     for t in ["a", "b", "c", "d"] {
         expect_ok(
             c.exec(&format!("CREATE TABLE {t} (k INTEGER)"))?,
@@ -340,7 +355,7 @@ fn connection_cap_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> 
             }
         }
     }
-    let mut extra = Raw::connect(addr, cfg.timeout)?;
+    let mut extra = Raw::connect(addr, cfg.timeout, "the connection-cap probe")?;
     extra.send(format!("AUTH {}\n", cfg.password).as_bytes())?;
     match extra.response() {
         Ok(Response::Ok(_)) => {
@@ -359,6 +374,7 @@ fn connection_cap_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> 
             ))
         }
     }
+    held[0].set_step("an existing connection with the cap full");
     expect_one(&mut held[0], "an existing connection with the cap full")?;
     drop(extra);
     drop(held);
@@ -540,6 +556,28 @@ mod tests {
             max_conns: 4,
             statement_secs: 0.2,
         }
+    }
+
+    #[test]
+    fn a_never_answering_server_names_the_step() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept the probe");
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let started = Instant::now();
+        let mut c =
+            Raw::connect(&addr, Duration::from_millis(100), "the hostile-input probe").unwrap();
+        let e = c.response().unwrap_err();
+        assert!(
+            e.contains("no answer within 0.1s to the hostile-input probe"),
+            "{e}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(c);
+        let _ = handle.join();
     }
 
     #[test]
