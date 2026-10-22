@@ -5631,6 +5631,15 @@ global.fetch = async (url) => {
   const live = el('liveBody').innerHTML;
   const board = el('boardBody').innerHTML;
   const fail = [];
+  // R23-2: the Board launcher defaults the wall to 480 and its resolved
+  // command prints the 120-minute per-ticket guard.
+  const indexPage = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+  if (!indexPage.includes('id="campaignWall" value="480"')) fail.push('campaign-wall-default');
+  if (typeof campaignCommand !== 'function') fail.push('campaign-command-missing');
+  else {
+    const c = campaignCommand('m', 'high', 0.99, 480, null, null, '');
+    if (!c.includes('--wall-min 480') || !c.includes('--timeout-min 120')) fail.push('campaign-command:' + c);
+  }
   if (!run.includes('interrupted')) fail.push('run-interrupted');
   if (!run.includes('class="causeCell"')) fail.push('cause-inner-div');
   if (/td class="hint causeCell"/.test(run)) fail.push('cause-td-clamped');
@@ -6128,6 +6137,7 @@ global.fetch = async (url) => {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shared.js"), include_str!("shared.js")).unwrap();
         std::fs::write(dir.join("app.js"), scripts[0]).unwrap();
+        std::fs::write(dir.join("index.html"), html).unwrap();
         std::fs::write(dir.join("harness.js"), GUI_SMOKE_HARNESS).unwrap();
         let out = std::process::Command::new("node")
             .arg(dir.join("harness.js"))

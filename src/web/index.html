@@ -1185,9 +1185,9 @@
           </label>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
             <div><span class="hint">Budget $</span><br>
-              <input type="number" id="campaignBudget" value="0.99" step="0.01" min="0.05" style="width:100px;" title="The official cell cap (M5): $0.99 / 150 min" /></div>
+              <input type="number" id="campaignBudget" value="0.99" step="0.01" min="0.05" style="width:100px;" title="The official cell cap: $0.99 / 480 min" /></div>
             <div><span class="hint">Wall min</span><br>
-              <input type="number" id="campaignWall" value="150" min="5" style="width:100px;" /></div>
+              <input type="number" id="campaignWall" value="480" min="5" style="width:100px;" /></div>
             <div><span class="hint">Phase</span><br>
               <select id="campaignPhase" onchange="refreshCampaignChains()" style="width:180px;">
                 <option value="">Full ladder</option>
@@ -2902,6 +2902,13 @@
         });
     }
 
+    /// R23-2: one place for the launcher argv shown to the operator. The
+    /// per-ticket timeout is the 120-minute guard; the wall is the cell guard.
+    function campaignCommand(model, effort, budget, wall, phase, chain, refork) {
+      const extra = `${phase ? ` --phase ${phase}` : ''}${chain ? ` --chain ${chain}` : ''}${refork ? ` --refork "${refork}"` : ''}`;
+      return `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 120${extra}`;
+    }
+
     /// The one campaign launcher (round-10 U6): model and effort come from
     /// the picker above, the lock is honoured here and server-side.
     async function startCampaign() {
@@ -2930,8 +2937,7 @@
         msg.innerHTML = `a cell is already running — one at a time · <a href="#live" style="color:var(--primary);">Live ↗</a>`;
         return;
       }
-      const extra = `${phase ? ` --phase ${phase}` : ''}${chain ? ` --chain ${chain}` : ''}${refork ? ` --refork "${refork}"` : ''}`;
-      const resolved = `subdollarbench campaign run --name sdb-sql --model ${model} --effort ${effort} --budget-usd ${budget} --wall-min ${wall} --timeout-min 20${extra}`;
+      const resolved = campaignCommand(model, effort, budget, wall, phase, chain, refork);
       cmd.innerHTML = `resolved: <code>${escapeHtml(resolved)}</code>`;
       msg.textContent = 'starting…';
       try {
