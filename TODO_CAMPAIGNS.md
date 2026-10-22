@@ -38,8 +38,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 
 ## After the freeze: validation
 
-- **Calibration** (after round 23): one P1 cell each for Haiku and a much
-  cheaper model. Stop reasons should be mostly `dollars`.
+- **Calibration and test cells** (after round 23): the test model is
+  `openrouter/deepseek/deepseek-v4.1-flash-1017` (operator, 2026-10-22;
+  $0.15 / $0.60 per M tokens). Use Haiku only when a second price point is
+  needed. Stop reasons should be mostly `dollars`.
 - **Grid:** 3-4 cheap models x 3 careers each, on the frozen rules.
 - **The bar:** the spread between models must be larger than the spread
   between one model's own careers, and the ranking must hold across
