@@ -593,6 +593,92 @@ No services were restarted, `target/release` was not rebuilt and no cell
 was launched; the `.36` shakedown career was untouched. The real career on
 `.37` (phases 1-4, chained) waits for review and operator go-ahead.
 
+### Round-22 work: findings from the Haiku career (opened 2026-10-22)
+
+Review: `REVIEW.md`, "Haiku 5.5 career on `.36`". The first full career
+ran on `.36` (`openrouter/anthropic/claude-haiku-5.5`, effort high, phases
+1-4 chained): **39.8/76 for $2.6578**. Every phase stayed under the
+$0.99 / 150 min cap, with no harness fault. Carry-over, rollback and the
+catch-up all worked. That career stands as recorded on `.36`. The work
+below changes grading, so it ships as rules `2026-10-19.37`, and the next
+career starts fresh on `.37`.
+
+- **F2 (grading): a crashed agent session is not a fault, and must not
+  lose the lite.** This is the main item.
+  - **What happened, twice:**
+    - P2 ticket 10 (`…_163524`) and P3 ticket 11 (`…_184431`).
+    - Haiku's turn hit the 65,536-token output limit
+      (`[TOKENS] … output: 65536`).
+    - That truncated an `edit` tool call ("Tool call arguments are not
+      valid JSON. Parse Error: Unterminated string").
+    - The next request got `400 Provider returned error`, and OMP exited
+      with status 1.
+  - **Why it loses the lite:**
+    - `pipeline.rs` sets `agent_failed` (~:5200), and `campaign.rs`
+      turns `agent_failed || infra_error` into status `fault` (~:2893,
+      ~:2988).
+    - The `else if fault` branch (~:2935) records `Failed` and skips the
+      lite.
+    - Yet the verifier did grade the workspace (11: 10/11 stages, late
+      perf check failed), and there was no `harness_fault`. The comment
+      "a fault measured nothing" is false here.
+    - Cost: ticket 11 has a lite (`11_indexes_lite`) and never got it.
+      Tickets 14 and 16 were then skipped (they need 11), and the P4
+      catch-up of 11-lite had to retry it.
+  - **Fix:**
+    - When the round was graded and `harness_fault` is `None`, a
+      crashed or non-zero agent exit is a candidate failure: status
+      `failed`, and the lite runs exactly as for any failed full.
+    - `fault` is kept only for a real `harness_fault` (never-started
+      agent, provider billing/auth, infra error), which measured nothing.
+    - Apply this in the full path, the lite path (`status2`) and the
+      catch-up, and in the backfill at ~:1652, which infers
+      `agent_failed` from the manifest.
+  - **Also look at the harness side:** why does a truncated tool call
+    become a fatal `400` instead of a tool error the agent can recover
+    from?
+    - The raw request is in `~/.omp/logs/http-400-requests/` (P2:
+      `1792604062634-1ip1xyd644zg6.json`, P3:
+      `1792609214369-39ux4ljnknnfh.json`). They may hold credentials:
+      don't paste them anywhere.
+    - If OMP can return the parse error to the model and continue, do it,
+      and log it as `[OMP] truncated tool call`.
+    - Either way, record the max-output truncation in the stage record
+      (e.g. `failure.kind = "agent_crash"`) so the Board can say why.
+  - **Tests:**
+    - Agent exits 1 after grading, then the lite runs and status is
+      `failed`.
+    - A never-started agent stays `fault` with no lite.
+    - A provider billing fault stays `fault` and the cell stops.
+- **F1 (feedback): the hostile-input timeout reads as a raw errno.**
+  - Ticket 18 failed both rounds with `[security] read: Resource
+    temporarily unavailable (os error 11)`.
+  - That is `EAGAIN` from a socket read timeout
+    (`src/verifier/sql/wire.rs` `read_line`; same pattern in
+    `pgwire.rs:198`).
+  - The candidate got the identical opaque line twice and couldn't act
+    on it.
+  - Map `WouldBlock`/`TimedOut` to e.g. `no answer within <N>s to
+    <statement or step>`, and name the security-scenario step that was
+    waiting. Do the same for the pgwire reader.
+  - Test: a server that never answers gives the readable message.
+- **F3 (display): `waiting`, not `skipped`, while a cell runs.**
+  - During P3, ticket 14 showed `skipped` while 11 had not yet finished.
+  - Show `waiting` (with the cause `needs 11`) until the need is
+    decided. Only show `skipped` once the need has actually failed.
+  - Add a status to `LADDER_STATUS` and the legend.
+  - Add a smoke-fixture case and a Rust test in `phase_ladder`.
+- **Rules history:**
+  - `.37`: F2 changes grading (lite attempts after a crashed session),
+    and F1 changes candidate feedback in a graded file.
+  - The history entry names both and says the `.36` Haiku career is
+    complete and not comparable with `.37` careers on tickets with a lite.
+- **Gates:**
+  - niced `cargo test`, with the full lib suite unfiltered;
+  - fmt and clippy;
+  - no restart, no rebuild and no cell. The reviewer deploys after
+    review.
+
 ## sdb-sql ladder extension: tickets 12-20 (opened 2026-10-19)
 
 Design of record: `docs/PROPOSAL-sdb-sql.md` §"The ladder" (rows 12-20) and
