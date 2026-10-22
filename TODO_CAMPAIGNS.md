@@ -31,15 +31,18 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | Round | Theme | Status |
 |---|---|---|
 | [22](docs/rounds/22.md) | Crash grading (F2), timeout feedback (F1), `waiting` status (F3) | merged |
-| [23](docs/rounds/23.md) | "What does a dollar buy": dollars, not turns, limit a session | open |
-| [24](docs/rounds/24.md) | The rules fingerprint covers sdb-sql; price snapshot | draft |
+| [23](docs/rounds/23.md) | "What does a dollar buy": dollars, not turns, limit a session | merged |
+| [24](docs/rounds/24.md) | The rules fingerprint covers sdb-sql; price snapshot | open |
 | [25](docs/rounds/25.md) | Display follow-ups from round 22 | draft |
-| 26 (to write) | Freeze: final rules version, flake bar, CI | — |
+| [26](docs/rounds/26.md) | Turns inside an attempt follow the dollar rule (R23-7) | draft |
+| 27 (to write) | Freeze: final rules version, flake bar, CI, stable stamp hash (R24-4) | — |
 
 ## After the freeze: validation
 
-- **Calibration** (after round 23): one P1 cell each for Haiku and a much
-  cheaper model. Stop reasons should be mostly `dollars`.
+- **Calibration and test cells** (after round 23): the test model is
+  `openrouter/deepseek/deepseek-v4.1-flash-1017` (operator, 2026-10-22;
+  $0.15 / $0.60 per M tokens). Use Haiku only when a second price point is
+  needed. Stop reasons should be mostly `dollars`.
 - **Grid:** 3-4 cheap models x 3 careers each, on the frozen rules.
 - **The bar:** the spread between models must be larger than the spread
   between one model's own careers, and the ranking must hold across
