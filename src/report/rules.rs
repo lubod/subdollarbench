@@ -11,11 +11,16 @@ use std::hash::{Hash, Hasher};
 /// - `2026-10-19.38`: round-23 "what does a dollar buy" — D1: dollars are
 ///   the session limit; every sdb-sql stage and lite uses a 200-turn
 ///   runaway guard. D2: a ticket's API budget is the remaining phase
-///   headroom after the largest-call reserve, split by tier over the
-///   still-undecided tickets; lite and catch-up attempts draw the same
-///   pool; the fixed stage/lite budgets are legacy. D3: the cell cap and
-///   the pool count the provider API bill at list price (the compute floor
-///   is reported only); a paid launch refuses a model with no list price.
+///   headroom after the largest-call reserve, split by weight over the
+///   still-undecided tickets; a ticket with a lite weighs
+///   `tier * (1 + lite.weight)` so its full attempt leaves the lite its
+///   share (R23-1), and a ticket whose need already failed or was skipped
+///   weighs nothing; lite and catch-up attempts draw the same pool; the
+///   fixed stage/lite budgets are legacy. D3: the cell cap and the pool
+///   count the provider API bill (the compute floor is reported only); a
+///   paid launch refuses a model with no list price. The recorded cost
+///   still prefers the live key-usage delta to the list price (R23-3,
+///   round 24).
 ///   D4: wall time is a guard (480 min/phase, 120 min/ticket). D5: the
 ///   ticket prompt states its dollars and drops the word-limit/redis
 ///   wording; the stop reason (dollars/turns/wall/ready/crash) is recorded
