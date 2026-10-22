@@ -2172,9 +2172,18 @@ fn ladder_inner(
                 // deciding negative record is still pending. Show waiting
                 // (cause "needs N"), not skipped; once the need fails or
                 // the cell is over, the ordinary skipped label applies.
-                let decided = unmet
-                    .iter()
-                    .any(|n| rollup.stages.iter().any(|r| r.id == *n && !r.passed));
+                // R22-2: a failed full does not decide a need that still
+                // has its lite to run. The need is decided only once it has
+                // failed and either has no lite or already has a lite
+                // record (a passed lite would have removed it from `unmet`).
+                let decided = unmet.iter().any(|n| {
+                    let records: Vec<&StageRecord> =
+                        rollup.stages.iter().filter(|r| r.id == *n).collect();
+                    let failed = records.iter().any(|r| !r.passed);
+                    let has_lite = spec.stages.iter().any(|s| s.id == *n && s.lite.is_some());
+                    let has_lite_record = records.iter().any(|r| r.variant == "lite");
+                    failed && (!has_lite || has_lite_record)
+                });
                 if decided || !rollup.finished_at.is_empty() {
                     ("skipped", format!("skipped: needs {list}"))
                 } else {
@@ -5725,10 +5734,45 @@ mod tests {
         let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
         assert_eq!(t14.status, "waiting", "{t14:?}");
         assert_eq!(t14.cause.as_deref(), Some("needs 11"));
-        // Once 11 has failed, 14 is decided: skipped (not waiting).
+        // R22-2: 11's full failed, but its lite is still pending, so 14
+        // stays waiting rather than reading skipped for the whole lite.
         rollup
             .stages
             .push(failed_record(11, "Indexes", "own stage: boom", ""));
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "waiting", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("needs 11"));
+        // Once the lite has also failed, 14 is decided: skipped.
+        let mut lite = failed_record(11, "Indexes", "own stage: boom", "");
+        lite.variant = "lite".to_string();
+        rollup.stages.push(lite);
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "skipped", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("skipped: needs 11"));
+    }
+
+    /// R22-2 acceptance: a failed full whose lite is still pending leaves
+    /// its dependent waiting; a failed lite decides it as skipped.
+    #[test]
+    fn r22_2_a_full_failure_waits_for_the_lite() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut rollup = chain_rollup(3, false);
+        rollup.career = None;
+        let carried = phase1_state();
+        // Ticket 14 needs 11; 11's full has failed and its lite is pending.
+        rollup
+            .stages
+            .push(failed_record(11, "Indexes", "own stage: boom", ""));
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "waiting", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("needs 11"));
+        // The lite record exists and failed: the need is decided.
+        let mut lite = failed_record(11, "Indexes", "own stage: boom", "");
+        lite.variant = "lite".to_string();
+        rollup.stages.push(lite);
         let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
         let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
         assert_eq!(t14.status, "skipped", "{t14:?}");
