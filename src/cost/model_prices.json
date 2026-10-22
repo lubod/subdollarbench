@@ -1,0 +1,78 @@
+{
+  "as_of": "2026-10-22",
+  "source": "OpenRouter /api/v1/models; cache_read is the catalog input_cache_read, or 0.25 x prompt when the catalog has none",
+  "models": [
+    {
+      "match": "anthropic/claude-haiku-5.5",
+      "prompt_per_million": 0.10,
+      "completion_per_million": 0.50,
+      "cache_read_per_million": 0.01
+    },
+    {
+      "match": "anthropic/claude-3-haiku",
+      "prompt_per_million": 0.80,
+      "completion_per_million": 4.00,
+      "cache_read_per_million": 0.08
+    },
+    {
+      "match": "google/gemini-3.8-flash",
+      "prompt_per_million": 0.825,
+      "completion_per_million": 4.125,
+      "cache_read_per_million": 0.0825
+    },
+    {
+      "match": "google/gemini-2.5-flash-lite",
+      "prompt_per_million": 0.10,
+      "completion_per_million": 0.40,
+      "cache_read_per_million": 0.01
+    },
+    {
+      "match": "google/gemini-2.5-flash",
+      "prompt_per_million": 0.30,
+      "completion_per_million": 2.50,
+      "cache_read_per_million": 0.03
+    },
+    {
+      "match": "deepseek/deepseek-chat",
+      "prompt_per_million": 0.2574,
+      "completion_per_million": 1.0287,
+      "cache_read_per_million": 0.06435
+    },
+    {
+      "match": "qwen/qwen-2.5-coder-32b",
+      "prompt_per_million": 0.66,
+      "completion_per_million": 1.00,
+      "cache_read_per_million": 0.165
+    },
+    {
+      "match": "meta-llama/llama-3.3-70b",
+      "prompt_per_million": 0.10,
+      "completion_per_million": 0.32,
+      "cache_read_per_million": 0.025
+    },
+    {
+      "match": "openai/gpt-4o-mini",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.60,
+      "cache_read_per_million": 0.075
+    },
+    {
+      "match": "mistralai/mistral-small",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.60,
+      "cache_read_per_million": 0.015
+    },
+    {
+      "match": "meta/muse-spark-1.3-contributor",
+      "prompt_per_million": 0.10,
+      "completion_per_million": 0.20,
+      "cache_read_per_million": 0.002
+    },
+    {
+      "match": "meta/muse-spark",
+      "prompt_per_million": 1.25,
+      "completion_per_million": 4.25,
+      "cache_read_per_million": 0.15
+    }
+  ]
+}

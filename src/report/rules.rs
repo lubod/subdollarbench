@@ -10,6 +10,18 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.39`: round-24 freeze prerequisite — the rules stamp now
+///   covers the sdb-sql campaign spec, every stage/lite prompt, all of
+///   `src/verifier/sql`, `src/scoring.rs` (tier/lite/catch-up weights,
+///   `CATCH_UP_SLOTS`, the cap/floor/reserve and the pool weights), the
+///   candidate budget/directive prompt files and the committed price
+///   snapshot. The retired task inputs stay in the shared stamp: they
+///   remain runnable through the generic single-shot path and their
+///   verifier/cost code is shared. Cost is priced from the snapshot at
+///   list price; the live key-usage delta is recorded for audit only.
+///   Score impact: none by construction, but `.38` and earlier costs used
+///   the live catalog/key delta and are not comparable with `.39` on
+///   cost-sensitive tickets.
 /// - `2026-10-19.38`: round-23 "what does a dollar buy" — D1: dollars are
 ///   the session limit; every sdb-sql stage and lite uses a 200-turn
 ///   runaway guard. D2: a ticket's API budget is the remaining phase
@@ -726,7 +738,7 @@ use std::path::{Path, PathBuf};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.38";
+pub const RULES_VERSION: &str = "2026-10-19.39";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
@@ -763,6 +775,7 @@ const GRADED_FILES: &[&str] = &[
     // and their verifier/cost code is still shared.
     "campaigns/sdb-sql/campaign.json",
     "src/scoring.rs",
+    "src/cost/model_prices.json",
     "src/prompts/session_budget.txt",
     "src/prompts/omp_effective.md",
     "src/prompts/omp_agents.md",
@@ -872,6 +885,7 @@ mod tests {
             "campaigns/sdb-sql/stages/0_genesis/prompt.md",
             "src/verifier/sql/wire.rs",
             "src/scoring.rs",
+            "src/cost/model_prices.json",
             "src/prompts/session_budget.txt",
             "src/prompts/omp_effective.md",
             "src/prompts/opencode_agents.md",
@@ -883,6 +897,17 @@ mod tests {
                 "graded_files misses {rel}: {files:?}"
             );
         }
+    }
+
+    #[test]
+    fn r24_r2_editing_the_price_snapshot_changes_the_fingerprint() {
+        let root = temp_root("prices");
+        let rel = put(&root, "src/cost/model_prices.json", r#"{"models":[]}"#);
+        let a = fingerprint_files(&root, &[rel.clone()]);
+        put(&root, "src/cost/model_prices.json", r#"{"models":[1]}"#);
+        let b = fingerprint_files(&root, &[rel]);
+        assert_ne!(a, b, "a price-snapshot edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

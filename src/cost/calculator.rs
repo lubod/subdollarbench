@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostBreakdown {
@@ -130,18 +131,11 @@ impl ModelPricing {
     ///
     /// Returns `(cost, source)` where source is `"live"`, `"formula"`, or
     /// `"formula_zero_delta"` (the disagreement case above).
-    pub fn resolve_api_cost(live_delta: Option<f64>, formula_cost: f64) -> (f64, &'static str) {
-        match live_delta {
-            // The counter moved: it is the measurement, whatever the
-            // formula thinks (credits and promos live here).
-            Some(d) if d > 0.0 => (d, "live"),
-            // A paid model cannot have spent exactly zero; the weekly
-            // counter simply has not caught up.
-            Some(_) if formula_cost > 0.0 => (formula_cost, "formula_zero_delta"),
-            // Zero delta, zero formula (or no live reading at all).
-            Some(_) => (formula_cost, "formula"),
-            None => (formula_cost, "formula"),
-        }
+    /// R24 R2: the list-price snapshot is the scored cost. The live key
+    /// delta is recorded for audit only; promotions/provider routing cannot
+    /// silently move a score.
+    pub fn resolve_api_cost(_live_delta: Option<f64>, formula_cost: f64) -> (f64, &'static str) {
+        (formula_cost, "snapshot")
     }
 
     /// Calculates effective total cost: API spend + compute runtime floor.
@@ -275,70 +269,32 @@ impl ModelPricing {
         }
     }
 
-    pub fn for_model(model_name: &str) -> Self {
+    /// R24 R2: the committed list-price snapshot. It is part of the rules
+    /// fingerprint; a provider catalog change does not move a score until
+    /// this file is edited and the rules bump.
+    pub fn snapshot_rates(model_name: &str) -> Option<Self> {
         let m = model_name.to_lowercase();
-        // NOTE: no muse-spark entry on purpose. It is a real (if cheap) paid
-        // model, and one recorded run is 12073 prompt / 109689 cached / 5467
-        // completion for $0.00504 - not enough to separate the prompt,
-        // completion and cache-read rates. `for_model_async` resolves this
-        // from the live OpenRouter catalog first; this table is only the
-        // offline fallback, and a wrong entry here would silently mis-price
-        // a real run whenever that query fails. Add the real rates once known.
-        if m.contains("gemini-3.8-flash") {
-            ModelPricing {
-                prompt_per_million: 0.75,
-                completion_per_million: 3.75,
-                cache_read_per_million: 0.075,
-            }
-        } else if m.contains("gemini-2.5-flash") {
-            ModelPricing {
-                prompt_per_million: 0.15,
-                completion_per_million: 0.60,
-                cache_read_per_million: 0.0375, // 75% discount
-            }
-        } else if m.contains("deepseek-chat") || m.contains("deepseek-v3") {
-            ModelPricing {
-                prompt_per_million: 0.14,
-                completion_per_million: 0.28,
-                cache_read_per_million: 0.014, // 90% discount
-            }
-        } else if m.contains("qwen-2.5-coder-32b") {
-            ModelPricing {
-                prompt_per_million: 0.06,
-                completion_per_million: 0.15,
-                cache_read_per_million: 0.015, // 75% discount
-            }
-        } else if m.contains("llama-3.3-70b") {
-            ModelPricing {
-                prompt_per_million: 0.12,
-                completion_per_million: 0.30,
-                cache_read_per_million: 0.030, // 75% discount
-            }
-        } else if m.contains("gpt-4o-mini") {
-            ModelPricing {
-                prompt_per_million: 0.15,
-                completion_per_million: 0.60,
-                cache_read_per_million: 0.075, // 50% discount
-            }
-        } else if m.contains("claude-3-haiku") {
-            ModelPricing {
-                prompt_per_million: 0.80,
-                completion_per_million: 4.00,
-                cache_read_per_million: 0.08, // 90% discount
-            }
-        } else if m.contains("mistral-small") {
-            ModelPricing {
-                prompt_per_million: 0.10,
-                completion_per_million: 0.30,
-                cache_read_per_million: 0.025, // 75% discount
-            }
-        } else {
-            ModelPricing {
-                prompt_per_million: 0.20,
-                completion_per_million: 0.60,
-                cache_read_per_million: 0.050, // 75% discount fallback
-            }
+        snapshot_entries().iter().find_map(|e| {
+            m.contains(&e.match_name.to_lowercase()).then_some(Self {
+                prompt_per_million: e.prompt_per_million,
+                completion_per_million: e.completion_per_million,
+                cache_read_per_million: e.cache_read_per_million,
+            })
+        })
+    }
+
+    fn fallback() -> Self {
+        Self {
+            prompt_per_million: 0.20,
+            completion_per_million: 0.60,
+            cache_read_per_million: 0.05,
         }
+    }
+
+    /// The offline fallback is only for unknown models outside a paid
+    /// campaign; a paid launch and the scored cost require a snapshot entry.
+    pub fn for_model(model_name: &str) -> Self {
+        Self::snapshot_rates(model_name).unwrap_or_else(Self::fallback)
     }
 
     pub fn compute_cost_with_cache(
@@ -422,41 +378,50 @@ impl ModelPricing {
     }
 
     /// Asynchronously resolve pricing, querying OpenRouter live catalog first with fallback to hardcoded rates
-    /// R23 D3: the offline list price, or None when the model only has the
-    /// anonymous fallback. The fallback is never a list price; a paid launch
-    /// must resolve a real catalog/table rate.
+    /// R23 D3/R24 R2: the committed snapshot price, or None when the model
+    /// has only the anonymous fallback. The fallback is never a list price.
     pub fn list_price_for_model(model_name: &str) -> Option<Self> {
-        let p = Self::for_model(model_name);
-        let fallback = Self {
-            prompt_per_million: 0.20,
-            completion_per_million: 0.60,
-            cache_read_per_million: 0.050,
-        };
-        let same = (p.prompt_per_million - fallback.prompt_per_million).abs() < 1e-12
-            && (p.completion_per_million - fallback.completion_per_million).abs() < 1e-12
-            && (p.cache_read_per_million - fallback.cache_read_per_million).abs() < 1e-12;
-        (!same).then_some(p)
+        Self::snapshot_rates(model_name)
     }
 
-    /// R23 D3: live catalog list price, then the offline table; None when
-    /// neither knows the model. `_at` keeps the gate offline-testable.
-    pub async fn list_price_for_model_async_at(model_name: &str, url: &str) -> Option<Self> {
-        Self::fetch_openrouter_model_pricing_at(model_name, url)
-            .await
-            .or_else(|| Self::list_price_for_model(model_name))
+    /// Kept for callers/tests that used the catalog URL. R24 R2 makes the
+    /// snapshot the only source; the URL is ignored.
+    pub async fn list_price_for_model_async_at(model_name: &str, _url: &str) -> Option<Self> {
+        Self::list_price_for_model(model_name)
     }
 
     pub async fn list_price_for_model_async(model_name: &str) -> Option<Self> {
-        Self::fetch_openrouter_model_pricing(model_name)
-            .await
-            .or_else(|| Self::list_price_for_model(model_name))
+        Self::list_price_for_model(model_name)
     }
 
     pub async fn for_model_async(model_name: &str) -> Self {
-        Self::list_price_for_model_async(model_name)
-            .await
-            .unwrap_or_else(|| Self::for_model(model_name))
+        Self::for_model(model_name)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PriceEntry {
+    #[serde(rename = "match")]
+    match_name: String,
+    prompt_per_million: f64,
+    completion_per_million: f64,
+    cache_read_per_million: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PriceSnapshot {
+    models: Vec<PriceEntry>,
+}
+
+fn snapshot_entries() -> &'static [PriceEntry] {
+    static SNAPSHOT: OnceLock<Vec<PriceEntry>> = OnceLock::new();
+    SNAPSHOT
+        .get_or_init(|| {
+            let parsed: PriceSnapshot = serde_json::from_str(include_str!("model_prices.json"))
+                .expect("the committed model price snapshot must parse");
+            parsed.models
+        })
+        .as_slice()
 }
 
 #[cfg(test)]
@@ -474,35 +439,34 @@ mod tests {
     /// never beat a positive formula cost.
     #[test]
     fn test_zero_live_delta_never_zeros_a_paid_model() {
+        // R24 R2: the snapshot formula is the scored cost; live deltas are
+        // audit-only, whether zero, below or above the formula.
         let (c, src) = ModelPricing::resolve_api_cost(Some(0.0), 0.0175);
-        assert_eq!(c, 0.0175, "formula must win a zero-delta disagreement");
-        assert_eq!(src, "formula_zero_delta");
+        assert_eq!(c, 0.0175, "the snapshot must win a zero-delta read");
+        assert_eq!(src, "snapshot");
 
-        // A genuinely free model: formula is zero too, so zero stands.
         let (c, src) = ModelPricing::resolve_api_cost(Some(0.0), 0.0);
         assert_eq!(c, 0.0);
-        assert_eq!(src, "formula");
+        assert_eq!(src, "snapshot");
 
-        // Counter moved: it is the measurement, even below the formula
-        // (credits, promos, discounted providers).
         let (c, src) = ModelPricing::resolve_api_cost(Some(0.0021), 0.05);
-        assert_eq!(c, 0.0021);
-        assert_eq!(src, "live");
+        assert_eq!(c, 0.05, "a discounted provider delta is audit-only");
+        assert_eq!(src, "snapshot");
 
-        // No live reading available: formula only.
         let (c, src) = ModelPricing::resolve_api_cost(None, 0.0333);
         assert_eq!(c, 0.0333);
-        assert_eq!(src, "formula");
+        assert_eq!(src, "snapshot");
     }
 
     /// A disagreement must stay visible in the record, not just the log:
     /// the board reader needs to know the cost came from the formula
     /// because the live counter read zero.
     #[test]
-    fn test_disagreement_source_is_distinguishable_from_plain_formula() {
-        let (_, a) = ModelPricing::resolve_api_cost(Some(0.0), 0.01);
-        let (_, b) = ModelPricing::resolve_api_cost(None, 0.01);
-        assert_ne!(a, b, "source strings must distinguish the disagreement");
+    fn test_live_delta_is_audit_only_not_a_second_source() {
+        let (ca, a) = ModelPricing::resolve_api_cost(Some(0.0), 0.01);
+        let (cb, b) = ModelPricing::resolve_api_cost(None, 0.01);
+        assert_eq!((ca, a), (cb, b));
+        assert_eq!(a, "snapshot");
     }
 
     #[test]
@@ -531,22 +495,23 @@ mod tests {
     #[test]
     fn test_pricing_for_known_models() {
         let gemini = ModelPricing::for_model("google/gemini-2.5-flash");
-        assert_eq!(gemini.prompt_per_million, 0.15);
-        assert_eq!(gemini.completion_per_million, 0.60);
-        assert_eq!(gemini.cache_read_per_million, 0.0375);
+        assert_eq!(gemini.prompt_per_million, 0.30);
+        assert_eq!(gemini.completion_per_million, 2.50);
+        assert_eq!(gemini.cache_read_per_million, 0.03);
 
         let deepseek = ModelPricing::for_model("deepseek/deepseek-chat");
-        assert_eq!(deepseek.prompt_per_million, 0.14);
-        assert_eq!(deepseek.completion_per_million, 0.28);
-        assert_eq!(deepseek.cache_read_per_million, 0.014);
+        assert_eq!(deepseek.prompt_per_million, 0.2574);
+        assert_eq!(deepseek.completion_per_million, 1.0287);
+        assert_eq!(deepseek.cache_read_per_million, 0.06435);
 
         let qwen = ModelPricing::for_model("qwen/qwen-2.5-coder-32b-instruct");
-        assert_eq!(qwen.prompt_per_million, 0.06);
-        assert_eq!(qwen.completion_per_million, 0.15);
-        assert_eq!(qwen.cache_read_per_million, 0.015);
+        assert_eq!(qwen.prompt_per_million, 0.66);
+        assert_eq!(qwen.completion_per_million, 1.00);
+        assert_eq!(qwen.cache_read_per_million, 0.165);
 
         let llama = ModelPricing::for_model("meta-llama/llama-3.3-70b-instruct");
-        assert_eq!(llama.prompt_per_million, 0.12);
+        assert_eq!(llama.prompt_per_million, 0.10);
+        assert_eq!(llama.completion_per_million, 0.32);
 
         let gpt4o = ModelPricing::for_model("openai/gpt-4o-mini");
         assert_eq!(gpt4o.prompt_per_million, 0.15);
@@ -557,8 +522,8 @@ mod tests {
         assert_eq!(haiku.completion_per_million, 4.00);
 
         let mistral = ModelPricing::for_model("mistralai/mistral-small");
-        assert_eq!(mistral.prompt_per_million, 0.10);
-        assert_eq!(mistral.completion_per_million, 0.30);
+        assert_eq!(mistral.prompt_per_million, 0.15);
+        assert_eq!(mistral.completion_per_million, 0.60);
 
         let custom = ModelPricing::from_rates(0.50, 1.50);
         assert_eq!(custom.prompt_per_million, 0.50);
@@ -568,6 +533,18 @@ mod tests {
         let unknown = ModelPricing::for_model("some-random-unknown-model");
         assert_eq!(unknown.prompt_per_million, 0.20);
         assert_eq!(unknown.completion_per_million, 0.60);
+    }
+
+    #[test]
+    fn r24_r2_cost_reads_the_committed_snapshot() {
+        let haiku = ModelPricing::for_model("openrouter/anthropic/claude-haiku-5.5");
+        assert_eq!(haiku.prompt_per_million, 0.10);
+        assert_eq!(haiku.completion_per_million, 0.50);
+        assert_eq!(haiku.cache_read_per_million, 0.01);
+        assert!(
+            ModelPricing::list_price_for_model("openrouter/anthropic/claude-haiku-5.5").is_some()
+        );
+        assert!(ModelPricing::list_price_for_model("not/a-real-model").is_none());
     }
 
     #[test]
@@ -584,8 +561,8 @@ mod tests {
     fn test_cost_calculation_no_cache() {
         let p = ModelPricing::for_model("google/gemini-2.5-flash");
         let b = p.compute_cost_with_cache(1_000_000, 0, 1_000_000);
-        let diff = (b.total_cost_usd - 0.75).abs();
-        assert!(diff < 1e-6, "Expected 0.75, got {}", b.total_cost_usd);
+        let diff = (b.total_cost_usd - 2.80).abs();
+        assert!(diff < 1e-6, "Expected 2.80, got {}", b.total_cost_usd);
         assert_eq!(b.savings_usd, 0.0);
         assert_eq!(b.savings_percent, 0.0);
     }
@@ -594,15 +571,11 @@ mod tests {
     fn test_cost_calculation_full_prompt_cache() {
         let p = ModelPricing::for_model("google/gemini-2.5-flash");
         let b = p.compute_cost_with_cache(0, 1_000_000, 0);
-        let diff = (b.total_cost_usd - 0.0375).abs();
-        assert!(diff < 1e-6, "Expected 0.0375, got {}", b.total_cost_usd);
-        let diff_savings = (b.savings_usd - 0.1125).abs();
-        assert!(
-            diff_savings < 1e-6,
-            "Expected 0.1125, got {}",
-            b.savings_usd
-        );
-        assert!((b.savings_percent - 75.0).abs() < 1e-4);
+        let diff = (b.total_cost_usd - 0.03).abs();
+        assert!(diff < 1e-6, "Expected 0.03, got {}", b.total_cost_usd);
+        let diff_savings = (b.savings_usd - 0.27).abs();
+        assert!(diff_savings < 1e-6, "Expected 0.27, got {}", b.savings_usd);
+        assert!((b.savings_percent - 90.0).abs() < 1e-4);
     }
 
     /// Cross-model attribution: the model in the row must be the model
@@ -614,13 +587,13 @@ mod tests {
         // prompt=1M fresh, cached=1M, completion=1M.
         // total = prompt + 1M*cache_frac + completion.
         let cases = [
-            ("google/gemini-2.5-flash", 0.15, 0.60, 0.0375),
-            ("deepseek/deepseek-chat", 0.14, 0.28, 0.014),
-            ("qwen/qwen-2.5-coder-32b-instruct", 0.06, 0.15, 0.015),
-            ("meta-llama/llama-3.3-70b-instruct", 0.12, 0.30, 0.030),
+            ("google/gemini-2.5-flash", 0.30, 2.50, 0.03),
+            ("deepseek/deepseek-chat", 0.2574, 1.0287, 0.06435),
+            ("qwen/qwen-2.5-coder-32b-instruct", 0.66, 1.00, 0.165),
+            ("meta-llama/llama-3.3-70b-instruct", 0.10, 0.32, 0.025),
             ("openai/gpt-4o-mini", 0.15, 0.60, 0.075),
             ("anthropic/claude-3-haiku", 0.80, 4.00, 0.08),
-            ("mistralai/mistral-small", 0.10, 0.30, 0.025),
+            ("mistralai/mistral-small", 0.15, 0.60, 0.015),
         ];
         for (model, pr, co, ca) in cases {
             let p = ModelPricing::for_model(model);
@@ -636,7 +609,7 @@ mod tests {
         // (e.g. muse-spark priced as deepseek) shows up as a mismatch here.
         let fb = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor");
         let b = fb.compute_cost_with_cache(1_000_000, 1_000_000, 1_000_000);
-        assert!((b.total_cost_usd - (0.20 + 0.050 + 0.60)).abs() < 1e-9);
+        assert!((b.total_cost_usd - (0.10 + 0.002 + 0.20)).abs() < 1e-9);
     }
 
     /// Completion tokens bill at completion rates, not prompt rates. Swapping
@@ -646,9 +619,9 @@ mod tests {
     fn test_attribution_completion_billed_at_completion_rate() {
         let p = ModelPricing::for_model("google/gemini-2.5-flash");
         let b = p.compute_cost_with_cache(0, 0, 1_000_000);
-        assert!((b.total_cost_usd - 0.60).abs() < 1e-9);
+        assert!((b.total_cost_usd - 2.50).abs() < 1e-9);
         let b2 = p.compute_cost_with_cache(1_000_000, 0, 0);
-        assert!((b2.total_cost_usd - 0.15).abs() < 1e-9);
+        assert!((b2.total_cost_usd - 0.30).abs() < 1e-9);
     }
 
     /// Cache math is a discount off the prompt rate, never free and never
@@ -680,28 +653,23 @@ mod tests {
     /// (muse-spark trial2: archived $0.035377 vs fallback $0.076029 vs
     /// catalog $0.014668) are live-spend rows — effective = live + floor.
     #[test]
-    fn test_live_spend_delta_overrides_formula_api_cost() {
+    fn test_live_spend_delta_is_audit_only() {
         // muse-spark-1.3-contributor trial2 tokens, duration 438.55s.
         let (prompt, cached, comp, total, dur) =
             (75_932u64, 900_407u64, 26_370u64, 1_002_709u64, 438.55f64);
-        let fallback = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor")
+        let snapshot = ModelPricing::for_model("openrouter/meta/muse-spark-1.3-contributor")
             .compute_cost_with_cache(prompt, cached, comp)
             .total_cost_usd;
         assert!(
-            (fallback - 0.076029).abs() < 1e-4,
-            "fallback moved: {fallback}"
+            (snapshot - 0.014668014).abs() < 1e-9,
+            "snapshot moved: {snapshot}"
         );
-        // Pipeline line: cost_usd = live_spend_delta.unwrap_or(breakdown).
-        // Both arms pinned: live delta wins when present, formula fallback
-        // holds the fixture regression when absent.
+        // R24 R2: the live delta is audit-only; the snapshot is scored.
         for live in [Some(0.035377375), None] {
-            let cost_usd = live.unwrap_or(fallback);
+            let (cost_usd, source) = ModelPricing::resolve_api_cost(live, snapshot);
+            assert_eq!(source, "snapshot");
+            assert!((cost_usd - snapshot).abs() < 1e-12);
             let eff = ModelPricing::calculate_effective_cost(cost_usd, dur, total, cached);
-            if live.is_some() {
-                assert!((cost_usd - 0.035377375).abs() < 1e-9);
-            } else {
-                assert!((cost_usd - fallback).abs() < 1e-12);
-            }
             assert!(
                 eff > cost_usd,
                 "compute floor must add, got {eff} <= {cost_usd}"
@@ -769,9 +737,9 @@ mod tests {
     fn test_cost_calculation_cached_exceeds_prompt() {
         let p = ModelPricing::for_model("google/gemini-2.5-flash");
         let b = p.compute_cost_with_cache(500_000, 1_000_000, 0);
-        let diff = (b.total_cost_usd - 0.1125).abs();
-        assert!(diff < 1e-6, "Expected 0.1125, got {}", b.total_cost_usd);
-        assert!((b.savings_percent - 50.0).abs() < 1e-4);
+        let diff = (b.total_cost_usd - 0.18).abs();
+        assert!(diff < 1e-6, "Expected 0.18, got {}", b.total_cost_usd);
+        assert!((b.savings_percent - 60.0).abs() < 1e-4);
     }
 
     #[tokio::test]
@@ -871,9 +839,8 @@ mod tests {
     #[tokio::test]
     async fn test_for_model_async_fallback() {
         // Fallback to hardcoded when model not in openrouter or request fails
-        let pricing =
-            ModelPricing::for_model_async("unknown-provider/dummy-gemini-2.5-flash-test").await;
-        assert_eq!(pricing.prompt_per_million, 0.15);
+        let pricing = ModelPricing::for_model_async("unknown-provider/dummy-test").await;
+        assert_eq!(pricing.prompt_per_million, 0.20);
         assert_eq!(pricing.completion_per_million, 0.60);
 
         let unknown = ModelPricing::for_model_async("completely-unknown-xyz").await;

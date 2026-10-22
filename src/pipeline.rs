@@ -5933,16 +5933,14 @@ impl BenchmarkPipeline {
             }
         }
 
-        // Cost accounting: the live key-usage delta is ground truth only when
-        // it moves; a zero delta is weekly-counter lag, not zero spend (see
-        // resolve_api_cost). Both measurements stay in the record so a
-        // disagreement is auditable after the fact.
+        // R24 R2: the committed snapshot is the scored cost. The live key
+        // delta is audit-only; a provider promo or lag cannot move a score.
         let (cost_usd, cost_source) =
             ModelPricing::resolve_api_cost(live_spend_delta, breakdown.total_cost_usd);
-        if cost_source == "formula_zero_delta" {
+        if let Some(live) = live_spend_delta {
             logger.log(&format!(
-                "[COST] Live key usage read $0.00 but tokens price at ${:.4} — recording the formula cost (counter lag).",
-                breakdown.total_cost_usd
+                "[COST] snapshot ${:.4}; live key delta ${:.4} recorded for audit only",
+                breakdown.total_cost_usd, live
             ));
         }
         let effective_cost_usd = ModelPricing::calculate_effective_cost(
@@ -6060,6 +6058,7 @@ impl BenchmarkPipeline {
             cost_usd,
             cost_source: Some(cost_source.to_string()),
             cost_formula_usd: Some(breakdown.total_cost_usd),
+            live_spend_delta_usd: live_spend_delta,
             effective_cost_usd: Some(effective_cost_usd),
             savings_percent: breakdown.savings_percent,
             efficiency_score,
@@ -8642,7 +8641,7 @@ main()
         assert!(m.baseline_source.is_none());
         assert_eq!(m.tokens.total_tokens, 0);
         assert_eq!(m.cost_usd, 0.0);
-        assert_eq!(m.cost_source.as_deref(), Some("formula"));
+        assert_eq!(m.cost_source.as_deref(), Some("snapshot"));
         assert_eq!(m.solved, Some(false));
         assert!(m.solved_at.is_none());
         assert_eq!(m.repaired, None);

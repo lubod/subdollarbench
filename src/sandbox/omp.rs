@@ -1204,50 +1204,47 @@ impl OmpRunner {
                                     }
                                 }
                             }
-                            // 2. Budget check: explicit per-event cost wins; when
-                            // `usage.cost.total` is absent, estimate from token counts x
-                            // per-model rates so max_budget_usd still trips mid-session.
+                            // 2. Budget check: every event is priced from
+                            // the committed snapshot. The provider's
+                            // usage.cost.total is ignored; it is an actual
+                            // charge, not the list price (R24 R2).
                             let mut cost_updated = false;
                             let usage_node =
                                 val.pointer("/message/usage").or_else(|| val.get("usage"));
-                            let delta_cost: Option<f64> = val
-                                .pointer("/message/usage/cost/total")
-                                .and_then(|c| c.as_f64())
-                                .or_else(|| {
-                                    let usage = usage_node?;
-                                    let tin = usage
-                                        .get("input")
-                                        .or_else(|| usage.get("prompt_tokens"))
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(0);
-                                    let tout = usage
-                                        .get("output")
-                                        .or_else(|| usage.get("completion_tokens"))
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(0);
-                                    let tcached = usage
-                                        .get("cacheRead")
-                                        .or_else(|| usage.get("cache_read_input_tokens"))
-                                        .and_then(|x| x.as_u64())
-                                        .or_else(|| {
-                                            usage
-                                                .get("prompt_tokens_details")
-                                                .and_then(|d| d.get("cached_tokens"))
-                                                .and_then(|x| x.as_u64())
-                                        })
-                                        .unwrap_or(0);
-                                    if tin + tout + tcached == 0 {
-                                        None
-                                    } else {
-                                        let pricing =
-                                            crate::cost::ModelPricing::for_model(&ctx.model);
-                                        Some(
-                                            pricing
-                                                .compute_cost_with_cache(tin, tcached, tout)
-                                                .total_cost_usd,
-                                        )
-                                    }
-                                });
+                            let delta_cost: Option<f64> = (|| {
+                                let usage = usage_node?;
+                                let tin = usage
+                                    .get("input")
+                                    .or_else(|| usage.get("prompt_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                let tout = usage
+                                    .get("output")
+                                    .or_else(|| usage.get("completion_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                let tcached = usage
+                                    .get("cacheRead")
+                                    .or_else(|| usage.get("cache_read_input_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .or_else(|| {
+                                        usage
+                                            .get("prompt_tokens_details")
+                                            .and_then(|d| d.get("cached_tokens"))
+                                            .and_then(|x| x.as_u64())
+                                    })
+                                    .unwrap_or(0);
+                                if tin + tout + tcached == 0 {
+                                    None
+                                } else {
+                                    let pricing = crate::cost::ModelPricing::for_model(&ctx.model);
+                                    Some(
+                                        pricing
+                                            .compute_cost_with_cache(tin, tcached, tout)
+                                            .total_cost_usd,
+                                    )
+                                }
+                            })();
                             if let Some(cost) = delta_cost {
                                 if let Ok(mut c_lock) = ctx.accumulated_cost.lock() {
                                     *c_lock += cost;
@@ -3790,7 +3787,7 @@ case "$1" in
       budget)
         if [ -n "$sessions" ]; then
           mkdir -p "$sessions"
-          printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.05}},"content":[{"type":"text","text":"over budget"}]}}' > "$sessions/session.jsonl"
+          printf '%s\n' '{"message":{"role":"assistant","usage":{"input":250000,"output":0},"content":[{"type":"text","text":"over budget"}]}}' > "$sessions/session.jsonl"
         fi
         wait_for_kill
         ;;
@@ -3798,9 +3795,9 @@ case "$1" in
         if [ -n "$sessions" ]; then
           mkdir -p "$sessions"
           {
-            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.01}},"content":[{"type":"text","text":"one"}]}}'
+            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":50000,"output":0},"content":[{"type":"text","text":"one"}]}}'
             sleep 0.15
-            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.03}},"content":[{"type":"text","text":"two"}]}}'
+            printf '%s\n' '{"message":{"role":"assistant","usage":{"input":150000,"output":0},"content":[{"type":"text","text":"two"}]}}'
           } > "$sessions/session.jsonl"
         fi
         wait_for_kill

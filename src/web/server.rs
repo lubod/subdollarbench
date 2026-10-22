@@ -5044,6 +5044,7 @@ mod tests {
             cost_usd: 0.05,
             cost_source: None,
             cost_formula_usd: None,
+            live_spend_delta_usd: None,
             effective_cost_usd: Some(0.055),
             savings_percent: 25.0,
             efficiency_score: 15.0,
@@ -5111,6 +5112,7 @@ mod tests {
             cost_usd: 0.08,
             cost_source: None,
             cost_formula_usd: None,
+            live_spend_delta_usd: None,
             effective_cost_usd: Some(0.085),
             savings_percent: 20.0,
             efficiency_score: 12.5,
@@ -5684,7 +5686,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.38',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.39',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
