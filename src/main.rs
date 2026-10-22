@@ -3203,6 +3203,7 @@ mod tests {
             infra_error: infra,
             harness_fault: None,
             max_call_usd: 0.0,
+            stop_reason: None,
         };
 
         assert_eq!(trial_accounting(&mk(100.0, false)), (false, true));

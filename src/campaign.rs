@@ -377,6 +377,27 @@ pub fn cap_allows(cap_usd: f64, spent_usd: f64, max_call_usd: f64) -> bool {
     cap_usd <= 0.0 || (cap_usd - spent_usd) >= cap_reserve(max_call_usd) + BUDGET_FLOOR_USD
 }
 
+/// R23 D2: split the remaining API dollars by tier across the phase's
+/// still-undecided tickets. This replaces the old fixed stage budget; the
+/// field stays in the schema for archived specs but is not an allocation.
+pub fn pool_budget(remaining_usd: f64, tier: u32, weight_sum: u32) -> f64 {
+    if remaining_usd <= 0.0 || tier == 0 || weight_sum == 0 {
+        0.0
+    } else {
+        remaining_usd * tier as f64 / weight_sum as f64
+    }
+}
+
+/// R23 D2: the tier weight of the phase's tickets that have no outcome yet
+/// (the current ticket and the later ones not skipped/passed/failed).
+pub fn runnable_tier_sum(stage_list: &[&StageSpec], outcomes: &HashMap<u32, LadderOutcome>) -> u32 {
+    stage_list
+        .iter()
+        .filter(|s| !outcomes.contains_key(&s.id))
+        .map(|s| s.tier)
+        .sum()
+}
+
 /// Budget and effective headroom for a repair round. The round gets only
 /// the attempt's remaining API budget and never starts below the floor of
 /// either the budget or the cap (round-17 P0).
@@ -2719,27 +2740,28 @@ where
             } else {
                 0.25
             };
-            let (variant, prompt_path, budget, max_turns, lite_profile) = match &stage.lite {
+            let (variant, prompt_path, max_turns, lite_profile) = match &stage.lite {
                 Some(lite) => (
                     StageVariant::Lite,
                     lc.root.join(&lite.prompt),
-                    lite.budget_usd,
                     lite.max_turns,
                     lite.profile.clone(),
                 ),
                 None => (
                     StageVariant::Full,
                     lc.prompt_path(stage),
-                    stage.budget_usd,
                     stage.max_turns,
                     Vec::new(),
                 ),
             };
+            // R23 D2: the catch-up draws from the phase pool. The target's
+            // tier joins the still-undecided phase tickets' weight.
+            let catch_up_weight = runnable_tier_sum(&stage_list, &outcomes) + stage.tier;
             let attempt = StageAttempt {
                 stage,
                 variant,
                 prompt_path,
-                budget_usd: budget.min(headroom * api_ratio),
+                budget_usd: pool_budget(headroom * api_ratio, stage.tier, catch_up_weight),
                 max_turns,
                 lite_profile: lite_profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -2856,6 +2878,9 @@ where
         } else {
             0.25
         };
+        // R23 D2: the phase pool is split by tier over the undecided
+        // tickets; a cheap pass leaves more for the next ticket.
+        let phase_weight = runnable_tier_sum(&stage_list, &outcomes);
         let outcomes_snapshot = |m: &HashMap<u32, LadderOutcome>| -> Vec<(u32, LadderOutcome)> {
             let mut v: Vec<(u32, LadderOutcome)> = m.iter().map(|(k, o)| (*k, *o)).collect();
             v.sort_by_key(|(id, _)| *id);
@@ -2920,7 +2945,7 @@ where
             prompt_path: lc.prompt_path(stage),
             // D3 + finding 1: the cap's effective headroom converts to the
             // API dollars OMP actually enforces.
-            budget_usd: stage.budget_usd.min(headroom * api_ratio),
+            budget_usd: pool_budget(headroom * api_ratio, stage.tier, phase_weight),
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -3013,12 +3038,17 @@ where
                 } else {
                     0.25
                 };
+                // R23 D2: the lite is the same ticket, so it draws the same
+                // pool share after the failed full attempt.
                 let attempt_lite = StageAttempt {
                     stage,
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
-                    // Round-11 finding 1: effective headroom -> API dollars.
-                    budget_usd: lite.budget_usd.min(headroom2 * api_ratio2),
+                    budget_usd: pool_budget(
+                        headroom2 * api_ratio2,
+                        stage.tier,
+                        runnable_tier_sum(&stage_list, &outcomes),
+                    ),
                     max_turns: lite.max_turns,
                     lite_profile: lite.profile.clone(),
                     passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -4343,6 +4373,155 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rollup.stages[0].stop_reason.as_deref(), Some("dollars"));
+    }
+
+    #[test]
+    fn r23_d2_pool_budget_splits_by_tier() {
+        assert!((pool_budget(0.9, 2, 6) - 0.3).abs() < 1e-9);
+        assert_eq!(pool_budget(0.0, 2, 6), 0.0);
+        assert_eq!(pool_budget(0.9, 0, 6), 0.0);
+        assert_eq!(pool_budget(0.9, 2, 0), 0.0);
+    }
+
+    async fn r23_d2_seen_budgets(
+        lc: &LoadedCampaign,
+        opts: &CampaignRunOptions,
+        spend0: f64,
+    ) -> Vec<(u32, StageVariant, f64)> {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let rollup = run_campaign(
+            lc,
+            opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.variant, attempt.budget_usd));
+                let spend = if attempt.stage.id == 0 { spend0 } else { 0.001 };
+                let mut out = outcome(true, &[(0, true), (1, true), (2, true)]);
+                out.api_cost_usd = spend;
+                out.effective_cost_usd = spend;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!rollup.stages.is_empty());
+        seen.into_inner()
+    }
+
+    /// R23 D2: an unspent ticket raises the next ticket's pool share.
+    #[tokio::test]
+    async fn r23_d2_a_cheap_ticket_raises_the_next_budget() {
+        let mut lc = fixture_campaign();
+        // A legacy fixed budget far below the pool share: the pool, not this
+        // field, is the allocation.
+        lc.spec.stages[0].budget_usd = 0.001;
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d2cheap".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let cheap = r23_d2_seen_budgets(&lc, &opts, 0.001).await;
+        let expensive = r23_d2_seen_budgets(&lc, &opts, 0.20).await;
+        let cheap1 = cheap.iter().find(|(id, _, _)| *id == 1).unwrap().2;
+        let exp1 = expensive.iter().find(|(id, _, _)| *id == 1).unwrap().2;
+        assert!(
+            cheap1 > exp1 + 0.05,
+            "cheap next {cheap1} should exceed expensive next {exp1}"
+        );
+        // The old fixed stage budget is not the allocation.
+        assert!(cheap[0].2 > lc.spec.stages[0].budget_usd);
+    }
+
+    /// R23 D2: the lite draws its budget from the same remaining pool.
+    #[tokio::test]
+    async fn r23_d2_a_lite_draws_from_the_same_pool() {
+        let lc = fixture_campaign_with_lite();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d2lite".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.variant, attempt.budget_usd));
+                let out = if attempt.stage.id == 1 && attempt.variant == StageVariant::Full {
+                    let mut o = outcome(false, &[(1, false)]);
+                    o.api_cost_usd = 0.001;
+                    o.effective_cost_usd = 0.001;
+                    o
+                } else {
+                    let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                    o.api_cost_usd = 0.001;
+                    o.effective_cost_usd = 0.001;
+                    o
+                };
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let lite = seen
+            .borrow()
+            .iter()
+            .find(|(id, variant, _)| *id == 1 && *variant == StageVariant::Lite)
+            .copied()
+            .expect("the lite attempt");
+        assert!(lite.2 > 0.0, "the lite gets a pool share: {lite:?}");
+        assert!(rollup
+            .stages
+            .iter()
+            .any(|r| r.id == 1 && r.variant == "lite"));
+    }
+
+    /// R23 D2: the pool plus reserve never lets the phase exceed $0.99.
+    #[tokio::test]
+    async fn r23_d2_the_pool_keeps_the_phase_under_the_cap() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d2cap".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let spend = attempt.budget_usd;
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.api_cost_usd = spend;
+                o.effective_cost_usd = spend;
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rollup.total_cost_usd <= CELL_BUDGET_USD + 1e-9,
+            "total {}",
+            rollup.total_cost_usd
+        );
+        assert!(
+            rollup.total_cost_usd > CELL_BUDGET_USD * 0.9,
+            "the pool should use the phase budget: {}",
+            rollup.total_cost_usd
+        );
+        assert!(!rollup.over_budget);
     }
 
     #[test]

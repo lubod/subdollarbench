@@ -334,22 +334,20 @@ pub fn dry_run(name: &str, model: &str) -> Result<()> {
     if !lc.spec.description.is_empty() {
         println!("{}", lc.spec.description);
     }
-    let mut total = 0.0;
     for s in &lc.spec.stages {
-        total += s.budget_usd;
         println!(
-            "  {} [{}] {} — acceptance {:?}, budget ${:.2}, max_turns {}, feedback {}",
+            "  {} [{}] {} — acceptance {:?}, tier {}, max_turns {}, feedback {}",
             format!("s{}", s.id).bold(),
             s.kind,
             s.title,
             s.acceptance.stages_for(&lc.spec.task),
-            s.budget_usd,
+            s.tier,
             s.max_turns,
             s.feedback_rounds
         );
         println!("      prompt: {}", lc.prompt_path(s).display());
     }
-    println!("sum of stage budgets: ${total:.2} (campaign cap is set at run time)");
+    println!("budget: tier-weighted pool from the campaign cap at run time (fixed stage budgets are legacy)");
     println!(
         "workspace: runs/<campaign_id>/workspace (continuity across tickets, git-committed per stage)"
     );
@@ -1002,7 +1000,7 @@ async fn run_one_stage(
             "turn": 0,
             "max_turns": job.max_turns,
             "ticket_spent": 0.0,
-            "ticket_budget": stage.budget_usd,
+            "ticket_budget": job.budget_usd,
             "last_activity_at": now,
         });
     });
@@ -1022,7 +1020,7 @@ async fn run_one_stage(
         stage.title,
         effective,
         stage.acceptance.stages_for(&lc.spec.task),
-        stage.budget_usd
+        job.budget_usd
     ));
 
     let baseline_rps = read_baseline_rps(cdir);
@@ -1324,6 +1322,7 @@ mod tests {
             turns: None,
             duration_seconds: None,
             status: status.to_string(),
+            stop_reason: None,
             variant: "full".to_string(),
             tier: 1,
             points: if passed { 1.0 } else { 0.0 },
