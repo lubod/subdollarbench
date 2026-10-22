@@ -45,8 +45,13 @@ change it here, in the same commit as the work that needs it.
    - The operator tells the reviewer, or the reviewer notices it, since
      the reviewer may watch `roundNN`.
 6. **Review.**
-   - The reviewer checks every acceptance box against the code and tests,
-     and writes **Review** in the round file.
+   - The reviewer checks every acceptance box against the code and tests.
+   - The reviewer never commits on the implementer's branch, because its
+     worktree has it checked out. The **Review** section goes on master:
+     - no blockers: right after the merge (step 7);
+     - blockers: committed to master without merging. The implementer
+       merges master into `roundNN` to read them, fixes them, and sets
+       `ready` again.
    - Every finding carries an ID (`RNN-1`, ...) and is either:
      - **blocker**: fixed in this round, by the implementer, on the same
        branch; or
