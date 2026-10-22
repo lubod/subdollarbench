@@ -60,6 +60,10 @@ change it here, in the same commit as the work that needs it.
    - The operator approves. The reviewer merges `roundNN` (no
      squash), sets `Status: merged <commit>` and tags `round-NN-merged`.
    - Deploy and paid cells happen only on a separate operator go-ahead.
+   - After a deploy, the reviewer checks each item against live data (the
+     API, the Board, a real cell), not only against the implementer's
+     tests. Anything that differs goes in the round file as a correction
+     and becomes a finding in the next round.
 
 **Round size:** one theme per round (grading, harness, GUI or rules),
 about 5 items at most. Split anything bigger into the next round.
