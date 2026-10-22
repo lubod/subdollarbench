@@ -593,7 +593,7 @@ No services were restarted, `target/release` was not rebuilt and no cell
 was launched; the `.36` shakedown career was untouched. The real career on
 `.37` (phases 1-4, chained) waits for review and operator go-ahead.
 
-### Round-22 work: findings from the Haiku career (opened 2026-10-22)
+### Round-22 work: findings from the Haiku career (opened 2026-10-22, F4 added the same day)
 
 Review: `REVIEW.md`, "Haiku 5.5 career on `.36`". The first full career
 ran on `.36` (`openrouter/anthropic/claude-haiku-5.5`, effort high, phases
@@ -668,9 +668,35 @@ career starts fresh on `.37`.
     decided. Only show `skipped` once the need has actually failed.
   - Add a status to `LADDER_STATUS` and the legend.
   - Add a smoke-fixture case and a Rust test in `phase_ladder`.
+- **F4 (rules): the fingerprint covers none of sdb-sql.** `GRADED_FILES`
+  (`src/report/rules.rs`) lists only the retired tasks.
+  - **Missing:**
+    - `tasks/*/prompt.md` for redis, http and the like are in it, but
+      `campaigns/sdb-sql/campaign.json` and the stage `prompt.md` files
+      are not;
+    - `src/verifier/sql/*` (the SQLite differential suites, crash,
+      replication, pgwire, wire);
+    - the scoring in `src/campaign.rs` (tier points, lite weight,
+      catch-up 0.4x, slots);
+    - the late checks in `src/pipeline.rs` (perf, security, disk full);
+    - the harness directives the candidate sees in
+      `src/sandbox/omp.rs`.
+  - So for the only active campaign the stamp moves only when someone
+    bumps `RULES_VERSION` by hand. This is the "Rules & gates" item
+    ("campaign spec + stage prompts + suites join GRADED_FILES"), never
+    done.
+  - **Fix:**
+    - Add the sdb-sql campaign spec, every stage prompt and lite prompt,
+      `src/verifier/sql/*.rs`, and the candidate-facing prompt text.
+    - The scoring constants and the late-check code should live in, or
+      move to, a file that can be listed. Don't hash all of
+      `campaign.rs`/`pipeline.rs`: GUI or logging edits would then churn
+      the stamp.
+    - Test: editing a stage prompt or an sql verifier changes
+      `fingerprint()`.
 - **Rules history:**
   - `.37`: F2 changes grading (lite attempts after a crashed session),
-    and F1 changes candidate feedback in a graded file.
+    and F1 changes the feedback the candidate sees.
   - The history entry names both and says the `.36` Haiku career is
     complete and not comparable with `.37` careers on tickets with a lite.
 - **Gates:**
