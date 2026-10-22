@@ -2277,16 +2277,6 @@
       });
       return { api, effective };
     }
-    function ticketCostText(recs) {
-      const c = ticketCosts(recs);
-      if (!c.api) return '';
-      let text = `$${fmtMoney(c.api)} API`;
-      if (c.effective && Math.abs(c.effective - c.api) > 0.00005) {
-        text += ` \u00b7 $${fmtMoney(c.effective)} effective`;
-      }
-      return text;
-    }
-
     /// One labelled ladder square: 16 px, the ticket number inside, the full
     /// story on hover (round-10 U2).
     function ladderSquare(entry, records) {
