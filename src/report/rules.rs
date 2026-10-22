@@ -10,6 +10,18 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.40`: round-26 R23-7 — inside one attempt the only turn
+///   bound is the 200-turn guard. The first session gets the whole guard
+///   (the retired 50-turn checkpoint is gone). A repair session runs only
+///   when the attempt's dollars leave it above `BUDGET_FLOOR_USD`, and
+///   gets the guard's remainder (the retired 25-turn cap is gone). The
+///   turn rules live in `src/scoring.rs`. Every session's stop reason
+///   (initial and
+///   each repair) is recorded in the round/stage record, not only the
+///   last one. The retired task caps were removed: no test needed them.
+///   Score impact: a cheap model's price can buy turns instead of stopping
+///   at 50/25; `.39` and earlier careers are not comparable on
+///   turn-limited tickets.
 /// - `2026-10-19.39`: round-24 freeze prerequisite — the rules stamp now
 ///   covers the sdb-sql campaign spec, every stage/lite prompt, all of
 ///   `src/verifier/sql`, `src/scoring.rs` (tier/lite/catch-up weights,
@@ -741,7 +753,7 @@ use std::path::{Path, PathBuf};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.39";
+pub const RULES_VERSION: &str = "2026-10-19.40";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into
@@ -963,6 +975,27 @@ mod tests {
         put(&root, "src/scoring.rs", "pub const TURN_GUARD: u32 = 201;");
         let b = fingerprint_files(&root, &[rel]);
         assert_ne!(a, b, "a scoring constant edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R26 R23-7 acceptance: the remaining turn rule is a graded input, so
+    /// editing how the guard is shared moves the stamp.
+    #[test]
+    fn r26_editing_the_turn_rule_changes_the_fingerprint() {
+        let root = temp_root("turnrule");
+        let rel = put(
+            &root,
+            "src/scoring.rs",
+            "pub fn initial_turn_limit(max_turns: u32) -> Option<u32> { (max_turns > 0).then_some(max_turns) }",
+        );
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
+        put(
+            &root,
+            "src/scoring.rs",
+            "pub fn initial_turn_limit(max_turns: u32) -> Option<u32> { (max_turns > 1).then_some(max_turns) }",
+        );
+        let b = fingerprint_files(&root, &[rel]);
+        assert_ne!(a, b, "a turn-rule edit must move the stamp");
         let _ = fs::remove_dir_all(&root);
     }
 

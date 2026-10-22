@@ -141,6 +141,35 @@ pub fn repair_round_spend(
 pub const CELL_BUDGET_USD: f64 = 0.99;
 /// R23 D1: turns are only a runaway guard; dollars are the session limit.
 pub const TURN_GUARD: u32 = 200;
+
+/// R26 R23-7: the first session gets the whole guard. The old 50-turn
+/// checkpoint is gone: a cheap model's dollars buy the work, not turns.
+pub fn initial_turn_limit(max_turns: u32) -> Option<u32> {
+    (max_turns > 0).then_some(max_turns)
+}
+
+/// R26 R23-7: a repair session gets whatever remains of the guard. The old
+/// per-repair 25-turn cap is gone; the guard is shared by the sessions.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TurnAllowance {
+    /// The guard is spent: no repair session can run.
+    Exhausted,
+    /// `max_turns == 0` means unlimited (the pre-guard behavior).
+    Uncapped,
+    Capped(u32),
+}
+
+pub fn repair_turn_allowance(guard: u32, steps_taken: u32) -> TurnAllowance {
+    if guard == 0 {
+        return TurnAllowance::Uncapped;
+    }
+    let left = guard.saturating_sub(steps_taken);
+    if left == 0 {
+        TurnAllowance::Exhausted
+    } else {
+        TurnAllowance::Capped(left)
+    }
+}
 /// R23 D4: wall time is a guard; the expected stop is dollars.
 pub const CELL_WALL_MIN: u64 = 480;
 /// R23 D4: one ticket's per-attempt wall guard.
@@ -189,5 +218,42 @@ pub fn score_ladder(stages: &[StageSpec], outcomes: &[(u32, LadderOutcome)]) -> 
         points: rows.iter().map(|r| r.3).sum(),
         max_points: max_points(stages),
         rows,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R26 R23-7 acceptance: with a dollar budget and the 200 guard, the
+    /// first session gets the full guard, not the retired 50-turn checkpoint.
+    #[test]
+    fn r26_first_session_gets_the_full_guard_not_50() {
+        assert_eq!(initial_turn_limit(TURN_GUARD), Some(200));
+        assert_eq!(initial_turn_limit(50), Some(50));
+        assert_eq!(initial_turn_limit(0), None);
+    }
+
+    /// R26 R23-7 acceptance: a repair's turn bound is the guard remainder,
+    /// not the retired 25-turn cap.
+    #[test]
+    fn r26_repair_gets_the_guard_remainder_not_25() {
+        assert_eq!(repair_turn_allowance(200, 50), TurnAllowance::Capped(150));
+        assert_eq!(repair_turn_allowance(200, 199), TurnAllowance::Capped(1));
+        assert_eq!(repair_turn_allowance(200, 200), TurnAllowance::Exhausted);
+        assert_eq!(repair_turn_allowance(200, 240), TurnAllowance::Exhausted);
+        assert_eq!(repair_turn_allowance(0, 50), TurnAllowance::Uncapped);
+    }
+
+    /// R26 R23-7 acceptance: dollars decide whether a repair runs. Above the
+    /// floor it runs with the money left; below it, it is skipped.
+    #[test]
+    fn r26_repair_runs_with_money_and_is_skipped_below_the_floor() {
+        let (budget, cap) = repair_round_spend(0.99, 0.455, None).expect("money left");
+        assert_eq!(budget, Some(0.99 - 0.455));
+        assert_eq!(cap, None);
+
+        let err = repair_round_spend(0.99, 0.98, None).expect_err("below the floor");
+        assert!(err.contains("budget floor"), "{err}");
     }
 }

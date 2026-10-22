@@ -1168,6 +1168,10 @@ pub struct RoundRecord {
     pub git_commit: Option<String>,
     #[serde(default)]
     pub failure: Option<FailureSummary>,
+    /// R26 R23-7: why this session ended (dollars | turns | wall | ready |
+    /// crash), recorded per session, not only for the attempt's last one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// True when the round was reconstructed on read (an old cell whose
     /// manifests predate recorded rounds), never recorded live.
     #[serde(default)]
@@ -1647,6 +1651,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
                     duration_seconds: r.duration_seconds,
                     git_commit: None,
                     failure,
+                    stop_reason: r.stop_reason.clone(),
                     derived: true,
                 });
             }
@@ -1714,6 +1719,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
                         duration_seconds: None,
                         git_commit: None,
                         failure: (n == last).then(|| final_failure.clone()).flatten(),
+                        stop_reason: None,
                         derived: true,
                     });
                 }
@@ -1735,6 +1741,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
                     duration_seconds: m["duration_seconds"].as_f64().or(rec.duration_seconds),
                     git_commit: None,
                     failure: final_failure,
+                    stop_reason: None,
                     derived: true,
                 });
             }
@@ -1751,6 +1758,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
                 duration_seconds: rec.duration_seconds,
                 git_commit: rec.git_commit.clone(),
                 failure: None,
+                stop_reason: rec.stop_reason.clone(),
                 derived: true,
             });
         }
@@ -3740,6 +3748,37 @@ mod tests {
         let f = rounds[1].failure.as_ref().expect("classified");
         assert_eq!(f.kind, "regression");
         assert!(f.line.starts_with("broke ticket 3"), "{}", f.line);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R26 R23-7 acceptance: every session's stop reason reaches the stage
+    /// record, not only the attempt's final one.
+    #[test]
+    fn r26_backfill_keeps_each_sessions_stop_reason() {
+        let dir = tmp_dir("r26stops");
+        let stage = dir.join("s8_full");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(
+            stage.join("manifest.json"),
+            serde_json::json!({
+                "status": "failed_tests",
+                "rounds": [
+                    {"round": 0, "passed_stages": 5, "total_stages": 6,
+                     "pass_rate": 83.3, "turns": 50, "stop_reason": "turns"},
+                    {"round": 1, "passed_stages": 6, "total_stages": 6,
+                     "pass_rate": 100.0, "turns": 20, "stop_reason": "ready"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut rollup = chain_rollup(1, true);
+        rollup.stages.push(failed_record(8, "Joins", "not yet", ""));
+        backfill_rounds(&mut rollup, &dir);
+        let rounds = &rollup.stages[0].rounds;
+        assert_eq!(rounds.len(), 2, "{rounds:?}");
+        assert_eq!(rounds[0].stop_reason.as_deref(), Some("turns"));
+        assert_eq!(rounds[1].stop_reason.as_deref(), Some("ready"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
