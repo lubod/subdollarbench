@@ -903,7 +903,7 @@ mod tests {
     fn r24_r2_editing_the_price_snapshot_changes_the_fingerprint() {
         let root = temp_root("prices");
         let rel = put(&root, "src/cost/model_prices.json", r#"{"models":[]}"#);
-        let a = fingerprint_files(&root, &[rel.clone()]);
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
         put(&root, "src/cost/model_prices.json", r#"{"models":[1]}"#);
         let b = fingerprint_files(&root, &[rel]);
         assert_ne!(a, b, "a price-snapshot edit must move the stamp");
@@ -918,7 +918,7 @@ mod tests {
             "campaigns/sdb-sql/stages/99_new/prompt.md",
             "first prompt",
         );
-        let a = fingerprint_files(&root, &[rel.clone()]);
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
         put(
             &root,
             "campaigns/sdb-sql/stages/99_new/prompt.md",
@@ -933,7 +933,7 @@ mod tests {
     fn r24_r1_editing_an_sql_verifier_changes_the_fingerprint() {
         let root = temp_root("sql");
         let rel = put(&root, "src/verifier/sql/wire.rs", "one verifier");
-        let a = fingerprint_files(&root, &[rel.clone()]);
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
         put(&root, "src/verifier/sql/wire.rs", "two verifier");
         let b = fingerprint_files(&root, &[rel]);
         assert_ne!(a, b, "an SQL verifier edit must move the stamp");
@@ -944,7 +944,7 @@ mod tests {
     fn r24_r1_editing_a_scoring_constant_changes_the_fingerprint() {
         let root = temp_root("scoring");
         let rel = put(&root, "src/scoring.rs", "pub const TURN_GUARD: u32 = 200;");
-        let a = fingerprint_files(&root, &[rel.clone()]);
+        let a = fingerprint_files(&root, std::slice::from_ref(&rel));
         put(&root, "src/scoring.rs", "pub const TURN_GUARD: u32 = 201;");
         let b = fingerprint_files(&root, &[rel]);
         assert_ne!(a, b, "a scoring constant edit must move the stamp");
