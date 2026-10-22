@@ -377,24 +377,47 @@ pub fn cap_allows(cap_usd: f64, spent_usd: f64, max_call_usd: f64) -> bool {
     cap_usd <= 0.0 || (cap_usd - spent_usd) >= cap_reserve(max_call_usd) + BUDGET_FLOOR_USD
 }
 
-/// R23 D2: split the remaining API dollars by tier across the phase's
+/// R23 D2: split the remaining API dollars by weight across the phase's
 /// still-undecided tickets. This replaces the old fixed stage budget; the
 /// field stays in the schema for archived specs but is not an allocation.
-pub fn pool_budget(remaining_usd: f64, tier: u32, weight_sum: u32) -> f64 {
-    if remaining_usd <= 0.0 || tier == 0 || weight_sum == 0 {
+pub fn pool_budget(remaining_usd: f64, weight: f64, weight_sum: f64) -> f64 {
+    if remaining_usd <= 0.0 || weight <= 0.0 || weight_sum <= 0.0 {
         0.0
     } else {
-        remaining_usd * tier as f64 / weight_sum as f64
+        remaining_usd * weight / weight_sum
     }
 }
 
-/// R23 D2: the tier weight of the phase's tickets that have no outcome yet
-/// (the current ticket and the later ones not skipped/passed/failed).
-pub fn runnable_tier_sum(stage_list: &[&StageSpec], outcomes: &HashMap<u32, LadderOutcome>) -> u32 {
+/// R23-1: a ticket whose lite has not run yet weighs the full share plus
+/// the lite share, so the full attempt cannot consume the lite's part.
+pub fn stage_weight(stage: &StageSpec) -> f64 {
+    stage.tier as f64 * (1.0 + stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.0))
+}
+
+/// R23-1: the remaining lite share of a ticket after its full attempt.
+pub fn stage_lite_weight(stage: &StageSpec) -> f64 {
+    stage.tier as f64 * stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.0)
+}
+
+/// R23 D2: the weight of the phase's tickets that have no outcome yet and
+/// whose needs are not already failed/skipped. R23-1 also excludes a
+/// blocked ticket here, so a failed need does not dilute the runnable ones.
+pub fn runnable_weight_sum(
+    stage_list: &[&StageSpec],
+    outcomes: &HashMap<u32, LadderOutcome>,
+) -> f64 {
     stage_list
         .iter()
         .filter(|s| !outcomes.contains_key(&s.id))
-        .map(|s| s.tier)
+        .filter(|s| {
+            !s.needs.iter().any(|n| {
+                matches!(
+                    outcomes.get(n),
+                    Some(LadderOutcome::Failed) | Some(LadderOutcome::Skipped)
+                )
+            })
+        })
+        .map(|s| stage_weight(s))
         .sum()
 }
 
@@ -2783,14 +2806,19 @@ where
                     Vec::new(),
                 ),
             };
-            // R23 D2: the catch-up draws from the phase pool. The target's
-            // tier joins the still-undecided phase tickets' weight.
-            let catch_up_weight = runnable_tier_sum(&stage_list, &outcomes) + stage.tier;
+            // R23 D2/R23-1: the catch-up draws from the phase pool; a lite
+            // catch-up carries the lite's share, not the whole ticket.
+            let target_weight = if variant == StageVariant::Lite {
+                stage_lite_weight(stage)
+            } else {
+                stage.tier as f64
+            };
+            let catch_up_weight = runnable_weight_sum(&stage_list, &outcomes) + target_weight;
             let attempt = StageAttempt {
                 stage,
                 variant,
                 prompt_path,
-                budget_usd: pool_budget(headroom, stage.tier, catch_up_weight),
+                budget_usd: pool_budget(headroom, target_weight, catch_up_weight),
                 max_turns,
                 lite_profile: lite_profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -2899,7 +2927,7 @@ where
             cap_headroom(opts.budget_usd, total_cost, largest_call_usd).unwrap_or(f64::INFINITY);
         // R23 D2: the phase pool is split by tier over the undecided
         // tickets; a cheap pass leaves more for the next ticket.
-        let phase_weight = runnable_tier_sum(&stage_list, &outcomes);
+        let phase_weight = runnable_weight_sum(&stage_list, &outcomes);
         let outcomes_snapshot = |m: &HashMap<u32, LadderOutcome>| -> Vec<(u32, LadderOutcome)> {
             let mut v: Vec<(u32, LadderOutcome)> = m.iter().map(|(k, o)| (*k, *o)).collect();
             v.sort_by_key(|(id, _)| *id);
@@ -2964,7 +2992,7 @@ where
             prompt_path: lc.prompt_path(stage),
             // D3 + finding 1: the cap's effective headroom converts to the
             // API dollars OMP actually enforces.
-            budget_usd: pool_budget(headroom, stage.tier, phase_weight),
+            budget_usd: pool_budget(headroom, stage.tier as f64, phase_weight),
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -3058,8 +3086,8 @@ where
                     prompt_path: lc.root.join(&lite.prompt),
                     budget_usd: pool_budget(
                         headroom2,
-                        stage.tier,
-                        runnable_tier_sum(&stage_list, &outcomes),
+                        stage_lite_weight(stage),
+                        runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
                     ),
                     max_turns: lite.max_turns,
                     lite_profile: lite.profile.clone(),
@@ -4257,6 +4285,21 @@ mod tests {
         LoadedCampaign { spec, root: dir }
     }
 
+    /// The three-ticket fixture with a lite on the *last* ticket: the R23-1
+    /// pool must still leave room for it.
+    fn fixture_campaign_last_lite() -> LoadedCampaign {
+        let mut lc = fixture_campaign();
+        lc.spec.stages[2].lite = Some(LiteSpec {
+            prompt: "stages/2-lite.md".into(),
+            profile: Vec::new(),
+            budget_usd: 0.1,
+            max_turns: 10,
+            weight: 0.4,
+        });
+        std::fs::write(lc.root.join("stages/2-lite.md"), "# last lite").unwrap();
+        lc
+    }
+
     /// The same three-ticket fixture, with a lite variant on ticket 1 so the
     /// F2 crash path can prove that the lite still runs.
     fn fixture_campaign_with_lite() -> LoadedCampaign {
@@ -4388,10 +4431,10 @@ mod tests {
 
     #[test]
     fn r23_d2_pool_budget_splits_by_tier() {
-        assert!((pool_budget(0.9, 2, 6) - 0.3).abs() < 1e-9);
-        assert_eq!(pool_budget(0.0, 2, 6), 0.0);
-        assert_eq!(pool_budget(0.9, 0, 6), 0.0);
-        assert_eq!(pool_budget(0.9, 2, 0), 0.0);
+        assert!((pool_budget(0.9, 2.0, 6.0) - 0.3).abs() < 1e-9);
+        assert_eq!(pool_budget(0.0, 2.0, 6.0), 0.0);
+        assert_eq!(pool_budget(0.9, 0.0, 6.0), 0.0);
+        assert_eq!(pool_budget(0.9, 2.0, 0.0), 0.0);
     }
 
     async fn r23_d2_seen_budgets(
@@ -4607,6 +4650,94 @@ mod tests {
         let e0 = e.iter().find(|x| x.id == 0).expect("ticket 0");
         assert_eq!(e0.status, "fail");
         assert_eq!(e0.stop_reason.as_deref(), Some("dollars"));
+    }
+
+    /// R23-1: the last ticket's full share leaves its lite a part; the lite
+    /// still runs after the full spends its whole share.
+    #[tokio::test]
+    async fn r23_1_last_ticket_keeps_its_lite() {
+        let lc = fixture_campaign_last_lite();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23_1lite".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 0.20,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::<(u32, StageVariant, f64)>::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.variant, attempt.budget_usd));
+                let mut out = if attempt.stage.id == 2 && attempt.variant == StageVariant::Full {
+                    outcome(false, &[(2, false)])
+                } else {
+                    outcome(true, &[(0, true), (1, true), (2, true)])
+                };
+                out.api_cost_usd = if attempt.stage.id == 2 && attempt.variant == StageVariant::Full
+                {
+                    attempt.budget_usd
+                } else {
+                    0.0
+                };
+                out.effective_cost_usd = out.api_cost_usd;
+                out.max_call_usd = 0.001;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        let full = seen
+            .iter()
+            .find(|(id, v, _)| *id == 2 && *v == StageVariant::Full)
+            .map(|(_, _, b)| *b)
+            .expect("last full attempt");
+        // Headroom before ticket 2 is 0.20 - 0.02 = 0.18; the full share is
+        // 0.18 / (1 + 0.4), not the whole headroom.
+        assert!(full < 0.18 - 1e-9, "full share {full} ate the lite part");
+        let lite = seen
+            .iter()
+            .find(|(id, v, _)| *id == 2 && *v == StageVariant::Lite)
+            .copied()
+            .expect("the last ticket's lite must run");
+        assert!(lite.2 > 0.0, "lite budget {}", lite.2);
+        assert!(rollup
+            .stages
+            .iter()
+            .any(|r| r.id == 2 && r.variant == "lite"));
+    }
+
+    /// R23-1: a failed need removes the blocked ticket from the pool weight,
+    /// so it does not dilute the runnable tickets before it.
+    #[test]
+    fn r23_1_a_failed_need_does_not_dilute_the_pool() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+        let stage_list: Vec<&StageSpec> = lc
+            .spec
+            .stages
+            .iter()
+            .filter(|s| phase.stages.contains(&s.id))
+            .collect();
+        let mut outcomes = HashMap::new();
+        outcomes.insert(11u32, LadderOutcome::Failed);
+        let got = runnable_weight_sum(&stage_list, &outcomes);
+        // 11 is decided; 14 needs 11 and is blocked; 12, 13 and 15 remain.
+        let expected: f64 = stage_list
+            .iter()
+            .filter(|s| s.id != 11 && s.id != 14)
+            .map(|s| stage_weight(s))
+            .sum();
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} expected {expected}"
+        );
+        assert!(expected > 0.0);
     }
 
     #[test]
