@@ -1921,9 +1921,12 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
 pub const CELL_BUDGET_USD: f64 = 0.99;
 /// R23 D1: turns are only a runaway guard; dollars are the session limit.
 pub const TURN_GUARD: u32 = 200;
-/// The wall that goes with [`CELL_BUDGET_USD`], with room for the late
-/// checks that rerun in every later verification.
-pub const CELL_WALL_MIN: u64 = 150;
+/// R23 D4: wall time is a guard, not the budget. Eight hours per phase;
+/// the expected stop is dollars. The late checks in later stages still fit.
+pub const CELL_WALL_MIN: u64 = 480;
+/// R23 D4: one ticket's per-attempt wall guard. It must never bind before
+/// the ticket's dollar budget in normal use.
+pub const TICKET_WALL_GUARD_MIN: u64 = 120;
 
 /// R23 D3: a paid campaign launch must have a real list price. The live
 /// OpenRouter catalog is tried first, then the offline table; eval-only
@@ -1983,7 +1986,7 @@ pub fn launcher_args_with_phase(
         "--wall-min",
         &format!("{wall_min}"),
         "--timeout-min",
-        "20",
+        &TICKET_WALL_GUARD_MIN.to_string(),
     ]
     .iter()
     .map(|s| s.to_string())
@@ -5529,12 +5532,41 @@ mod tests {
     /// P1: the launcher argv carries the phase and chain.
     #[test]
     fn launcher_args_carry_the_phase_and_chain() {
-        let a = launcher_args_with_phase("m", "high", 0.99, 150, Some(2), Some("prev"), None);
+        let a = launcher_args_with_phase(
+            "m",
+            "high",
+            0.99,
+            CELL_WALL_MIN,
+            Some(2),
+            Some("prev"),
+            None,
+        );
         assert!(a.windows(2).any(|w| w[0] == "--phase" && w[1] == "2"));
         assert!(a.windows(2).any(|w| w[0] == "--chain" && w[1] == "prev"));
-        let b = launcher_args("m", "high", 0.99, 150);
+        let b = launcher_args("m", "high", 0.99, CELL_WALL_MIN);
         assert!(!b.iter().any(|s| s == "--phase"));
         assert!(!b.iter().any(|s| s == "--chain"));
+    }
+
+    /// R23 D4: the wall is an eight-hour guard everywhere; the per-ticket
+    /// timeout guard is 120 minutes, and the cell script ships both.
+    #[test]
+    fn r23_d4_defaults_are_eight_hours() {
+        assert_eq!(CELL_WALL_MIN, 480);
+        assert_eq!(TICKET_WALL_GUARD_MIN, 120);
+        let args = launcher_args("m", "high", CELL_BUDGET_USD, CELL_WALL_MIN);
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--wall-min" && w[1] == "480"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--timeout-min" && w[1] == "120"));
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/sql-cell.sh"),
+        )
+        .expect("the cell script");
+        assert!(script.contains("WALL=\"${1:-480}\""), "{script}");
+        assert!(script.contains("--timeout-min 120"), "{script}");
     }
 
     #[test]

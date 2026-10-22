@@ -8,7 +8,7 @@
 #
 # Usage: scripts/sql-cell.sh <model> [budget_usd] [wall_min] [extra args...]
 #   e.g. scripts/sql-cell.sh openrouter/thinkingmachines/inkling-small:free
-# The defaults are the official cell cap (M5, 2026-10-20): $0.99 / 150 min,
+# The defaults are the official cell cap (R23 D4, 2026-10-22): $0.99 / 480 min,
 # the same as the console launcher. Pass smaller values for a smoke cell.
 # Career phases: SDB_CELL_PHASE=2 SDB_CELL_CHAIN=<phase-1 cell id> (P1);
 # phase 1 needs no chain, phases after 1 require one. Extra argv still
@@ -21,7 +21,7 @@ MODEL="${1:?usage: sql-cell.sh <model> [budget_usd] [wall_min] [extra...]}"
 shift || true
 BUDGET="${1:-0.99}"
 shift || true
-WALL="${1:-150}"
+WALL="${1:-480}"
 shift || true
 # Harness/effort are cell configuration like the caps: env, not extra argv,
 # so the flags can never clash with the ones this script sets.
@@ -88,10 +88,10 @@ if [[ -n "$PHASE" ]]; then PHASE_ARGS+=(--phase "$PHASE"); fi
 if [[ -n "$CHAIN" ]]; then PHASE_ARGS+=(--chain "$CHAIN"); fi
 if [[ "${CELL_DRY_RUN:-0}" == "1" ]]; then
     echo "[cell] dry run: would exec: campaign run --name sdb-sql --model $MODEL" \
-        "--effort $EFFORT --harness $HARNESS --budget-usd $BUDGET --wall-min $WALL --timeout-min 20 ${PHASE_ARGS[*]} $*"
+        "--effort $EFFORT --harness $HARNESS --budget-usd $BUDGET --wall-min $WALL --timeout-min 120 ${PHASE_ARGS[*]} $*"
     exit 0
 fi
 
 exec env SDB_HOME="$ROOT" "$BIN" campaign run \
     --name sdb-sql --model "$MODEL" --effort "$EFFORT" --harness "$HARNESS" \
-    --budget-usd "$BUDGET" --wall-min "$WALL" --timeout-min 20 "${PHASE_ARGS[@]}" "$@"
+    --budget-usd "$BUDGET" --wall-min "$WALL" --timeout-min 120 "${PHASE_ARGS[@]}" "$@"

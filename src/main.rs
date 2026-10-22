@@ -2894,7 +2894,7 @@ mod tests {
             "openrouter/meta/muse-spark-1.3-contributor",
             "high",
             0.99,
-            150,
+            subdollarbench::campaign::CELL_WALL_MIN,
             Some(2),
             Some("campaign_prev"),
             None,
