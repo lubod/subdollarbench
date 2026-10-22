@@ -5730,6 +5730,10 @@ global.fetch = async (url) => {
   if (!String(cv.summaries[2]).startsWith('running')) fail.push('career-running-summary:' + cv.summaries[2]);
   if (!cv.running || cv.running.id !== 'campaign_ph_p2') fail.push('career-running-cell');
   if (cv.summaries[3] !== '\u2014/22') fail.push('career-unrun-summary:' + cv.summaries[3]);
+  // F3: a waiting ladder ticket renders with the waiting legend and cause.
+  if (!ladderLegend().includes('waiting')) fail.push('waiting-legend');
+  const ws = ladderSquare({id:14, title:'Waiting', status:'waiting', variant:'', points:0, cause:'needs 11'}, []);
+  if (!ws.includes('waiting') || !ws.includes('needs 11')) fail.push('waiting-square:' + ws);
   const pg = groupCells([ph1, ph2]).find(g => g.career && g.cells.some(c => c.id === 'campaign_ph_p2'));
   if (!pg || !pg.cells.some(c => c.id === 'campaign_ph_p1')) fail.push('running-phase-2-not-in-career');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }

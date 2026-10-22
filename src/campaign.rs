@@ -1825,7 +1825,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
 pub struct LadderEntry {
     pub id: u32,
     pub title: String,
-    /// pass | lite | fail | fault | skipped | not_reached
+    /// pass | lite | fail | fault | skipped | waiting | not_reached
     pub status: String,
     /// full | lite: the variant of the record that decided the status.
     #[serde(default)]
@@ -2131,7 +2131,18 @@ fn ladder_inner(
                     .map(u32::to_string)
                     .collect::<Vec<_>>()
                     .join(",");
-                ("skipped", format!("skipped: needs {list}"))
+                // F3: while this cell is live, an unmet need that has no
+                // deciding negative record is still pending. Show waiting
+                // (cause "needs N"), not skipped; once the need fails or
+                // the cell is over, the ordinary skipped label applies.
+                let decided = unmet
+                    .iter()
+                    .any(|n| rollup.stages.iter().any(|r| r.id == *n && !r.passed));
+                if decided || !rollup.finished_at.is_empty() {
+                    ("skipped", format!("skipped: needs {list}"))
+                } else {
+                    ("waiting", format!("needs {list}"))
+                }
             } else if rollup.harness_fault.is_some() {
                 ("not_reached", "not reached: harness fault".to_string())
             } else if rollup.over_budget || rollup.cap_reached {
@@ -5321,11 +5332,38 @@ mod tests {
         // 10 needs 7, which failed here.
         assert_eq!(e[10].status, "skipped");
         assert!(e[11..].iter().all(|x| x.status == "later_phase"));
-        // A full-ladder cell keeps the plain ladder.
+        // A full-ladder cell keeps the plain ladder; 9 needs 3, which was
+        // not attempted in this live cell, so it is waiting (F3), not
+        // skipped. 10 keeps `skipped` because 7 actually failed.
         rollup.phase = None;
         let plain = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
-        assert_eq!(plain[9].status, "skipped");
+        assert_eq!(plain[9].status, "waiting");
+        assert_eq!(plain[9].cause.as_deref(), Some("needs 3"));
+        assert_eq!(plain[10].status, "skipped");
         assert!(plain.iter().all(|x| x.status != "later_phase"));
+    }
+
+    /// F3: an unmet need that is still pending shows `waiting` while the
+    /// cell runs, and only becomes `skipped` when the need actually fails.
+    #[test]
+    fn f3_phase_ladder_waits_for_a_pending_need() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut rollup = chain_rollup(3, false);
+        rollup.career = None;
+        let carried = phase1_state();
+        // Ticket 14 needs 11; 11 is the running ticket and has no record.
+        let e = phase_ladder(&lc.spec, &rollup, Some(11), Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "waiting", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("needs 11"));
+        // Once 11 has failed, 14 is decided: skipped (not waiting).
+        rollup
+            .stages
+            .push(failed_record(11, "Indexes", "own stage: boom", ""));
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "skipped", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("skipped: needs 11"));
     }
 
     fn phase1_state() -> LadderState {
