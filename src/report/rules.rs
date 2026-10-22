@@ -840,7 +840,19 @@ pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> String {
 }
 
 pub fn fingerprint_root(root: &Path) -> String {
-    fingerprint_files(root, &graded_files(root))
+    // The production path tolerates a minimal SDB_HOME (the CLI tests point
+    // it at a temp tree): a missing path drops its path+content from the
+    // hash, which still changes the stamp; the test helper below is strict.
+    let mut h = DefaultHasher::new();
+    RULES_VERSION.hash(&mut h);
+    for f in graded_files(root) {
+        let Ok(content) = fs::read_to_string(root.join(&f)) else {
+            continue;
+        };
+        f.to_string_lossy().hash(&mut h);
+        content.hash(&mut h);
+    }
+    format!("{RULES_VERSION}+{:08x}", h.finish() as u32)
 }
 
 #[cfg(test)]
