@@ -1422,16 +1422,79 @@ pub fn classify_failure(
 
 /// F2: annotate a classified agent failure with the max-output truncation
 /// when the host console shows it. Returns whether the record changed.
-pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
-    let truncation = console.contains("output: 65536")
-        || console.contains("output limit")
-        || console.contains("not valid JSON");
-    if !truncation {
-        return false;
+/// R22-1: one `[TOKENS]` line's output count. The old detector matched
+/// loose text (`not valid JSON`, `output limit`) anywhere in the console,
+/// so a recovered tool-call error could mislabel a later crash.
+fn token_output(line: &str) -> Option<u64> {
+    if !line.contains("[TOKENS]") {
+        return None;
     }
-    failure.kind = "agent_crash".to_string();
-    failure.line = "agent hit the 65,536-token output limit and crashed".to_string();
-    true
+    line.split("output:")
+        .nth(1)?
+        .split(',')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn is_provider_400(line: &str) -> bool {
+    line.contains("400 Provider returned error")
+        || line.contains("[STDERR] 400")
+        || line.contains("HTTP 400")
+}
+
+fn format_token_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// R22-1: label a crash only when a session's largest `[TOKENS]` output
+/// turn is followed by the provider `400` in that same session. The
+/// number in the line is the measured output, not a hard-coded 65,536.
+pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
+    // A console can hold more than one agent session (the initial attempt
+    // and a repair); a later recovered error must not pair with an earlier
+    // session's truncation.
+    let mut sessions: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in console.lines() {
+        if line.contains("[LIVE] Agent initialized") && !current.is_empty() {
+            sessions.push(std::mem::take(&mut current));
+        }
+        current.push(line);
+    }
+    if !current.is_empty() {
+        sessions.push(current);
+    }
+    for lines in sessions {
+        let mut max_output = 0u64;
+        let mut max_at = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            if let Some(output) = token_output(line) {
+                if output > max_output {
+                    max_output = output;
+                    max_at = i;
+                }
+            }
+        }
+        if max_output > 0 && lines[max_at + 1..].iter().any(|line| is_provider_400(line)) {
+            failure.kind = "agent_crash".to_string();
+            failure.line = format!(
+                "agent hit the {}-token output limit and crashed",
+                format_token_count(max_output)
+            );
+            return true;
+        }
+    }
+    false
 }
 
 /// The campaign lock (round-7 finding 1): one campaign at a time, whether
@@ -6202,10 +6265,60 @@ mod tests {
         assert_eq!(failure.kind, "agent");
         assert!(mark_agent_crash(
             &mut failure,
-            "[TOKENS] Turn usage - input: 1, output: 65536, cached: 0"
+            "[TOKENS] Turn usage - input: 1, output: 65536, cached: 0\n\
+             [STDERR] 400 Provider returned error"
         ));
         assert_eq!(failure.kind, "agent_crash");
         assert!(failure.line.contains("65,536"), "{}", failure.line);
+    }
+
+    /// R22-1 acceptance: a recovered JSON error plus a later unrelated
+    /// crash is not an output-limit crash.
+    #[test]
+    fn r22_1_a_recovered_json_error_is_not_an_agent_crash() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        let console = "\
+[LIVE] Agent initialized. Max turns: 24, Budget: $0.15
+[TOKENS] Turn usage - input: 2, output: 128, cached: 0
+[RESULT] edit (OK)
+  > Validation failed for tool \"edit\": Tool call arguments are not valid JSON.
+  > Parse Error: Unterminated string
+[TOKENS] Turn usage - input: 2, output: 256, cached: 0
+[STDERR] 500 Provider returned error
+[OMP ERROR] Agent execution failed
+";
+        assert!(!mark_agent_crash(&mut failure, console));
+        assert_eq!(failure.kind, "agent");
+        assert_eq!(failure.line, "agent stopped without READY");
+    }
+
+    /// R22-1 acceptance: a 32,768-token truncation with its provider 400
+    /// reports 32,768, not the old hard-coded 65,536.
+    #[test]
+    fn r22_1_a_32_768_token_truncation_reports_the_real_number() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        let console = "\
+[LIVE] Agent initialized. Max turns: 24, Budget: $0.15
+[TOKENS] Turn usage - input: 2, output: 32768, cached: 0
+[STDERR] 400 Provider returned error
+[OMP ERROR] Agent execution failed
+";
+        assert!(mark_agent_crash(&mut failure, console));
+        assert_eq!(failure.kind, "agent_crash");
+        assert!(failure.line.contains("32,768"), "{}", failure.line);
+        assert!(!failure.line.contains("65,536"), "{}", failure.line);
     }
 
     #[test]
