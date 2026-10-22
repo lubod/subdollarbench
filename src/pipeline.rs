@@ -389,41 +389,6 @@ use crate::verifier::queue::QueueVerifier;
 use crate::verifier::redis::RedisVerifier;
 use crate::verifier::wal::WalVerifier;
 
-/// Initial-attempt turn cap when feedback repair is enabled: looping models
-/// get verification feedback early instead of burning the full budget here.
-const INITIAL_TURN_CAP_WITH_FEEDBACK: u32 = 50;
-/// Per-round turn cap for surgical repair rounds (bounded by pool remainder).
-const REPAIR_ROUND_TURN_CAP: u32 = 25;
-
-/// Shared-pool allowance for one repair round. `Uncapped` (max_turns == 0)
-/// preserves the old unlimited behavior — it must not become a silent cap.
-#[derive(Debug, PartialEq, Eq)]
-enum RepairAllowance {
-    /// Pool remainder is zero (including over budget via saturating math):
-    /// break without stopping containers, writing reports, or recording
-    /// a round that never ran.
-    Exhausted,
-    Uncapped,
-    Capped(u32),
-}
-
-/// Pure pool math for a repair round, so the exhausted path is unit-tested
-/// instead of only live-observed: a session whose stats extraction fails
-/// reports 0 steps, and the pool must still account honestly.
-fn repair_round_allowance(global_max: u32, steps_taken: u32) -> RepairAllowance {
-    if global_max == 0 {
-        return RepairAllowance::Uncapped;
-    }
-    let left = global_max.saturating_sub(steps_taken);
-    if left == 0 {
-        RepairAllowance::Exhausted
-    } else {
-        RepairAllowance::Capped(left.min(REPAIR_ROUND_TURN_CAP))
-    }
-}
-
-/// Initial-attempt cap: checkpoint at 50 (or max_turns) when feedback repair
-/// is on, full budget otherwise, unlimited when max_turns == 0.
 /// Campaign perf-gate ratio: the perf ticket requires >= 1.3x the
 /// candidate's own genesis-stage GET throughput, measured with the same
 /// bench method (median of the reps) on both sides.
@@ -463,40 +428,6 @@ fn tail_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
-}
-
-fn initial_turn_cap(max_turns: u32, feedback_rounds: u32, reserve_repair: bool) -> Option<u32> {
-    if max_turns == 0 {
-        None
-    } else if feedback_rounds > 0 {
-        let mut cap = std::cmp::min(max_turns, INITIAL_TURN_CAP_WITH_FEEDBACK);
-        if reserve_repair {
-            // Campaign tickets must leave room for at least one repair
-            // attempt: the shared pool IS max_turns, and the live canary
-            // showed a 25-turn ticket consuming 25/25 on the initial
-            // attempt — the repair round never fired and a compile error
-            // went unfixed. Reserve a quarter of the pool, but at least 12
-            // turns and never more than half the pool.
-            //
-            // D6(b) amendment 2026-10-14 (floor 8 -> 12): three cells
-            // showed an 8-turn repair cannot recover an interrupted
-            // refactor. ling run 4 fixed two compile errors and hit the
-            // limit right after (2-4 more turns would have reached a
-            // build); ling run 5 spent 7 turns surveying and its single
-            // edit landed at the limit; the inkling probe never reached an
-            // edit at all. The marginal value of initial turns for models
-            // that leave uncompilable code is low — they do not finish at
-            // 17-30 either — while repair turns start from a precise
-            // failure report on a near-complete file. Shifting up to 4
-            // turns from initial to repair is therefore net-positive for
-            // the observed failure class (see TODO_CAMPAIGNS grid log).
-            let reserve = (max_turns / 4).max(12).min(max_turns / 2).max(1);
-            cap = cap.min(max_turns.saturating_sub(reserve)).max(1);
-        }
-        Some(cap)
-    } else {
-        Some(max_turns)
-    }
 }
 
 pub trait PipelineLogger: Send + Sync {
@@ -5101,14 +5032,12 @@ impl BenchmarkPipeline {
                 config.model, config.effort
             ));
 
-                let initial_turn_cap = initial_turn_cap(
-                    config.max_turns,
-                    config.feedback_rounds,
-                    config.campaign_stage.is_some(),
-                );
+                // R26 R23-7: the first session gets the whole turn guard;
+                // dollars, not a 50-turn checkpoint, decide when it stops.
+                let initial_turn_limit = crate::scoring::initial_turn_limit(config.max_turns);
 
                 let limits = AgentExecutionLimits {
-                    max_turns: initial_turn_cap,
+                    max_turns: initial_turn_limit,
                     max_budget_usd: if config.budget_usd > 0.0 {
                         Some(config.budget_usd)
                     } else {
@@ -5303,6 +5232,7 @@ impl BenchmarkPipeline {
             duration_seconds: Some(round_started.elapsed().as_secs_f64()),
             stage_results: v_outcome.stage_results.clone(),
             candidate_logs_tail: Some(tail_lines(&v_outcome.candidate_logs, 20)),
+            stop_reason: omp_stats.stop_reason.clone(),
         });
         // The repair agent needs the references again (it probes exact
         // output formats while fixing); the next verification detaches.
@@ -5373,24 +5303,26 @@ impl BenchmarkPipeline {
                     // recording a round that never runs. (Previously all three
                     // happened first, so the manifest recorded a phantom round.)
                     let global_max = config.max_turns;
-                    let turns_remaining = match repair_round_allowance(
+                    let turns_remaining = match crate::scoring::repair_turn_allowance(
                         global_max,
                         omp_stats.steps_taken,
                     ) {
-                        RepairAllowance::Exhausted => {
+                        crate::scoring::TurnAllowance::Exhausted => {
                             logger.log(&format!(
                             "[LIMIT] Global turn budget ({} turns) reached across attempts. Concluding run.",
                             global_max
                         ));
                             break;
                         }
-                        RepairAllowance::Uncapped => None,
-                        RepairAllowance::Capped(n) => Some(n),
+                        crate::scoring::TurnAllowance::Uncapped => None,
+                        crate::scoring::TurnAllowance::Capped(n) => Some(n),
                     };
                     feedback_rounds_used = round;
                     round_started = std::time::Instant::now();
                     let round_tokens_before = (prompt_tokens, cached_tokens, completion_tokens);
                     let mut round_steps: Option<u32> = None;
+                    // R26 R23-7: this repair session's own stop reason.
+                    let mut round_stop_reason: Option<String>;
 
                     // 1. Stop candidate container to release ports and candidate name
                     let _ = sandbox.stop_candidate();
@@ -5454,7 +5386,9 @@ impl BenchmarkPipeline {
                                 omp_stats.cost_usd += r_stats.cost_usd;
                                 omp_stats.max_call_usd =
                                     omp_stats.max_call_usd.max(r_stats.max_call_usd);
+                                omp_stats.stop_reason = r_stats.stop_reason.clone();
                                 round_steps = Some(r_stats.steps_taken);
+                                round_stop_reason = r_stats.stop_reason.clone();
                                 logger.log(&format!(
                                     "[FEEDBACK] Round {} agent completed! Steps: {}, Round tokens: prompt={}, completion={}",
                                     round, r_stats.steps_taken, r_stats.prompt_tokens, r_stats.completion_tokens
@@ -5478,6 +5412,8 @@ impl BenchmarkPipeline {
                                 omp_stats.cost_usd += end.partial.cost_usd;
                                 omp_stats.max_call_usd =
                                     omp_stats.max_call_usd.max(end.partial.max_call_usd);
+                                omp_stats.stop_reason = end.partial.stop_reason.clone();
+                                round_stop_reason = end.partial.stop_reason.clone();
                                 if let Some(ref cf) = cancel_flag {
                                     if cf.load(Ordering::SeqCst) {
                                         break;
@@ -5592,6 +5528,7 @@ impl BenchmarkPipeline {
                         duration_seconds: Some(round_started.elapsed().as_secs_f64()),
                         stage_results: next_outcome.stage_results.clone(),
                         candidate_logs_tail: Some(tail_lines(&next_outcome.candidate_logs, 20)),
+                        stop_reason: round_stop_reason.clone(),
                     });
 
                     if next_outcome.pass_rate > best_pass_rate {
@@ -8259,46 +8196,6 @@ main()
         assert!(line.contains("Turns are not the limit"), "{line}");
         let uncapped = session_budget_line(0.0);
         assert!(uncapped.contains("Turns are not the limit"), "{uncapped}");
-    }
-
-    #[test]
-    fn test_initial_turn_cap_checkpoints_only_with_feedback() {
-        // No cap configured: unlimited either way.
-        assert_eq!(initial_turn_cap(0, 0, false), None);
-        assert_eq!(initial_turn_cap(0, 2, false), None);
-        assert_eq!(initial_turn_cap(0, 2, true), None);
-        // Feedback on, single-shot: checkpoint at 50 (or the smaller max).
-        assert_eq!(initial_turn_cap(100, 2, false), Some(50));
-        assert_eq!(initial_turn_cap(30, 1, false), Some(30));
-        // Feedback off: full budget up front.
-        assert_eq!(initial_turn_cap(100, 0, false), Some(100));
-        // Campaign reserve (D6 option b, amended floor 12): a quarter of the
-        // pool is kept for the repair round, at least 12 turns and at most
-        // half the pool; big pools are unchanged (the 50-cap binds first).
-        assert_eq!(initial_turn_cap(100, 2, true), Some(50));
-        assert_eq!(initial_turn_cap(40, 2, true), Some(28));
-        assert_eq!(initial_turn_cap(30, 1, true), Some(18));
-        assert_eq!(initial_turn_cap(25, 1, true), Some(13));
-        assert_eq!(initial_turn_cap(10, 1, true), Some(5));
-        assert_eq!(initial_turn_cap(4, 1, true), Some(2));
-        assert_eq!(initial_turn_cap(1, 1, true), Some(1));
-        // No repair rounds means no reserve.
-        assert_eq!(initial_turn_cap(25, 0, true), Some(25));
-    }
-
-    #[test]
-    fn test_repair_round_allowance_exhaustion_math() {
-        // Uncapped stays uncapped (must never become a silent 25-cap).
-        assert_eq!(repair_round_allowance(0, 0), RepairAllowance::Uncapped);
-        assert_eq!(repair_round_allowance(0, 999), RepairAllowance::Uncapped);
-        // Remainder bounded by the round cap.
-        assert_eq!(repair_round_allowance(100, 0), RepairAllowance::Capped(25));
-        assert_eq!(repair_round_allowance(100, 90), RepairAllowance::Capped(10));
-        // Exact exhaustion and over-budget (saturating math can report
-        // used > max when stats extraction failed mid-round: still
-        // exhausted, never negative).
-        assert_eq!(repair_round_allowance(100, 100), RepairAllowance::Exhausted);
-        assert_eq!(repair_round_allowance(100, 140), RepairAllowance::Exhausted);
     }
 
     /// Zero model output + empty workspace is a provider/harness fault, not

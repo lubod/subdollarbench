@@ -1151,6 +1151,7 @@ async fn run_one_stage(
             duration_seconds: Some(output.manifest.duration_seconds),
             git_commit: git_commit.clone(),
             failure: None,
+            stop_reason: output.stop_reason.clone(),
             derived: true,
         }]
     } else {
@@ -1168,6 +1169,7 @@ async fn run_one_stage(
                 duration_seconds: r.duration_seconds,
                 git_commit: (r.round == last).then(|| git_commit.clone()).flatten(),
                 failure: None,
+                stop_reason: r.stop_reason.clone(),
                 derived: false,
             })
             .collect()

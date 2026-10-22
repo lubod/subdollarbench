@@ -50,6 +50,11 @@ pub struct CampaignRound {
     /// classifier's evidence).
     #[serde(default)]
     pub candidate_logs_tail: Option<String>,
+    /// R26 R23-7: why this session ended (dollars | turns | wall | ready |
+    /// crash), recorded per session — initial and every repair — not only
+    /// for the attempt's last session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
