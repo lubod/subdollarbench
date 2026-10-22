@@ -593,7 +593,7 @@ No services were restarted, `target/release` was not rebuilt and no cell
 was launched; the `.36` shakedown career was untouched. The real career on
 `.37` (phases 1-4, chained) waits for review and operator go-ahead.
 
-### Round-22 work: findings from the Haiku career (opened 2026-10-22, F4 added the same day)
+### Round-22 work: findings from the Haiku career (opened 2026-10-22, F4 and F5 added the same day)
 
 Review: `REVIEW.md`, "Haiku 5.5 career on `.36`". The first full career
 ran on `.36` (`openrouter/anthropic/claude-haiku-5.5`, effort high, phases
@@ -694,9 +694,77 @@ career starts fresh on `.37`.
       the stamp.
     - Test: editing a stage prompt or an sql verifier changes
       `fingerprint()`.
+- **F5 (design, operator decision 2026-10-22): "what does a dollar
+  buy".** Today the turn limits decide, not the money.
+  - **Evidence:**
+    - Haiku's career: about 20 sessions ended at the turn limit and 2
+      at the dollar limit (both $0.04-0.06 remainders). The rest ended on
+      their own.
+    - No phase came near $0.99: $0.49, $0.71, $0.71, $0.76.
+    - So a model 10x cheaper gets the same turns, and its low price buys
+      it no extra work.
+  - **Operator decisions:**
+    - (a) The budget counts the **API bill only**, at list price.
+    - (b) Wall time is a **guard only**, about 8 h per phase.
+    - The $0.99 per-phase cell cap stays (see `m5-cap-decision`, the
+      "Under-$1" identity).
+  - **Work:**
+    - **Dollars bind:**
+      - Raise every stage's `max_turns` (full, lite, catch-up) to a
+        runaway guard, about 200.
+      - The per-ticket dollar budget is the real limit: OMP
+        `max_budget_usd` already trips mid-session on metered spend.
+    - **Unspent money carries forward:**
+      - A ticket's budget is a tier-weighted share of what is left in
+        the phase: `remaining x tier / sum(tier of the phase's
+        still-runnable tickets)`, minus the existing largest-call
+        reserve.
+      - Lite and catch-up attempts draw from the same pool.
+      - So a ticket solved cheaply leaves more for the next one.
+      - The fixed `budget_usd` per stage becomes a floor, or goes away.
+        Pick one and say why.
+    - **The cell cap counts API spend:**
+      - `total_cost += out.effective_cost_usd` (campaign.rs ~:2714,
+        ~:2892, ~:2987) feeds `cap_allows`. Switch the cap and the
+        headroom math to the API bill (`api_cost_usd`).
+      - The compute floor (`COMPUTE_COST_PER_SECOND` / `_PER_TOKEN`)
+        stays a reported number, not part of the budget.
+    - **List price, never $0:**
+      - Cost is computed from the model's list price, even on a free
+        tier or promotion.
+      - A model with no list price is refused, because an unpriced model
+        would get unlimited turns.
+      - At freeze, the price table is snapshotted and fingerprinted
+        (it goes with F4).
+    - **Wall time:**
+      - `CELL_WALL_MIN` 150 -> 480, with the defaults in
+        `scripts/sql-cell.sh` and the engine/console launchers to match.
+      - It stops only hung cells. Time is reported, not scored.
+      - Per ticket: a matching runaway guard, not today's tight value.
+    - **The model sees its budget:** the ticket prompt states the
+      dollars this session may spend and that turns are not the limit,
+      and the live status shows remaining dollars.
+    - **Drop the "<150 words" directive** (`src/sandbox/omp.rs:681` and
+      the other copies at :2029 and `opencode.rs:365`, :453).
+      - The model chooses how to spend its money.
+      - While there, remove the leftover redis wording ("sdb-redis",
+        "redis-server") from the SQL directive block.
+    - **Log why each session stopped** (`dollars` / `turns` / `wall` /
+      `ready` / `crash`) in the stage record and on the Board. That is
+      how we check that dollars now bind.
+  - **Tests:**
+    - Carry-forward: a cheap ticket raises the next ticket's budget.
+    - A lite run draws from the same pool.
+    - The cap uses API spend, not effective cost.
+    - An unpriced model is refused.
+    - A session stopped by its dollar budget records `dollars`.
+  - **Calibration after merge (operator go-ahead):** one P1 cell for
+    Haiku and one for a much cheaper model. Check that the stop reasons
+    are mostly `dollars` and that P1 wall time stays well under 8 h.
 - **Rules history:**
   - `.37`: F2 changes grading (lite attempts after a crashed session),
-    and F1 changes the feedback the candidate sees.
+    F1 changes the feedback the candidate sees, and F5 changes what
+    limits a session (dollars, not turns) and the candidate prompt.
   - The history entry names both and says the `.36` Haiku career is
     complete and not comparable with `.37` careers on tickets with a lite.
 - **Gates:**
