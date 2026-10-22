@@ -1315,14 +1315,10 @@ async fn run_ha_stage(
 /// the session should stop on completion or when this API budget is spent.
 pub fn session_budget_line(budget_usd: f64) -> String {
     if budget_usd.is_finite() && budget_usd > 0.0 {
-        format!(
-            "## Session budget
-This session may spend at most ${budget_usd:.2} in provider API dollars at list price. Turns are not the limit; stop when the work is complete or the budget is exhausted."
-        )
+        include_str!("prompts/session_budget.txt")
+            .replace("{{BUDGET}}", &format!("{budget_usd:.2}"))
     } else {
-        "## Session budget
-Turns are not the limit; stop when the work is complete."
-            .to_string()
+        "## Session budget\nTurns are not the limit; stop when the work is complete.".to_string()
     }
 }
 

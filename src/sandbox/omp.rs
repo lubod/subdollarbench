@@ -671,18 +671,11 @@ impl OmpRunner {
         let test_cmd = crate::config::template_ports_for_worker(base_cmd, base_port, worker);
         let guidance_snippet =
             crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
-        let effective_prompt = format!(
-            "{}
-
-==================================================
-CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
-1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.
-2. RAW TCP SOCKETS ONLY (MANDATORY):
-{}
-3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
-==================================================",
-            prompt, guidance_snippet, target_port, test_cmd
-        );
+        let effective_prompt = include_str!("../prompts/omp_effective.md")
+            .replace("{{PROMPT}}", prompt)
+            .replace("{{GUIDANCE}}", &guidance_snippet)
+            .replace("{{PORT}}", &target_port.to_string())
+            .replace("{{TEST}}", &test_cmd);
 
         // Write AGENTS.md into workspace so omp auto-loads instructions across all turns
         let agents_md_path = canonical_workdir.join("AGENTS.md");
@@ -2050,15 +2043,10 @@ impl OmpRunner {
     /// AGENTS.md body (pure composer: byte-identical content, templated
     /// by the caller per worker). Split for unit tests.
     fn compose_omp_agents_md(snippet: &str, port: u16, test: &str) -> String {
-        format!(
-            r#"# Instructions for Autonomous Coding Agent
-1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
-2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
-{}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
-"#,
-            snippet, port, test
-        )
+        include_str!("../prompts/omp_agents.md")
+            .replace("{{GUIDANCE}}", snippet)
+            .replace("{{PORT}}", &port.to_string())
+            .replace("{{TEST}}", test)
     }
 
     pub fn task_guidance(

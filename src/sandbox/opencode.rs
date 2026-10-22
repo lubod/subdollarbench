@@ -356,19 +356,11 @@ impl OpenCodeRunner {
         effort: &str,
         worker: u8,
     ) {
-        let content = format!(
-            r#"# Instructions for Autonomous Coding Agent
-1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
-2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
-{}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
-4. **REASONING EFFORT REQUESTED**: {} (best-effort: honored by some models, ignored by others).
-"#,
-            snippet, port, test, effort
-        );
-        // Worker-templated like the prompt: a canonical port here contradicts
-        // the templated brief (measured: proxy AGENTS.md said 8091 while the
-        // prompt said 8391; the model hedged on both). Alias-shielded.
+        let content = include_str!("../prompts/opencode_agents.md")
+            .replace("{{GUIDANCE}}", snippet)
+            .replace("{{PORT}}", &port.to_string())
+            .replace("{{TEST}}", test)
+            .replace("{{EFFORT}}", effort);
         let content = crate::config::template_ports_for_worker(&content, port, worker);
         let _ = std::fs::write(workdir.join("AGENTS.md"), content);
     }
@@ -447,10 +439,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         let guidance_snippet =
             crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
         let effort_note = format!("reasoning effort requested: {}", effort_level);
-        let effective_prompt = format!(
-            "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.\n4. {}.\n==================================================",
-            prompt, guidance_snippet, target_port, test_cmd, effort_note
-        );
+        let effective_prompt = include_str!("../prompts/opencode_effective.md")
+            .replace("{{PROMPT}}", prompt)
+            .replace("{{GUIDANCE}}", &guidance_snippet)
+            .replace("{{PORT}}", &target_port.to_string())
+            .replace("{{TEST}}", &test_cmd)
+            .replace("{{EFFORT_NOTE}}", &effort_note);
         Self::write_agents_md(
             &canonical_workdir,
             &guidance_snippet,

@@ -1,0 +1,2 @@
+## Session budget
+This session may spend at most ${{BUDGET}} in provider API dollars at list price. Turns are not the limit; stop when the work is complete or the budget is exhausted.
