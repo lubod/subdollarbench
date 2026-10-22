@@ -68,6 +68,21 @@ change it here, in the same commit as the work that needs it.
 **Round size:** one theme per round (grading, harness, GUI or rules),
 about 5 items at most. Split anything bigger into the next round.
 
+## Operator shortcuts
+
+The operator often can't copy text between terminals. All instructions
+therefore live in the repo, and a short phrase is enough:
+
+| The operator says | To | Meaning |
+|---|---|---|
+| `next round` | Implementer | Read `docs/rounds/README.md` on master. Take the one round whose status is `open`; if there is none, say so and stop. Follow its file and this file, from step 2 of the workflow. Start a new worktree and branch `roundNN` from the tag `round-NN-open`. |
+| `blockers` | Implementer | Merge master into `roundNN`, read the round's **Review**, fix every blocker, gate, and set `ready` again. |
+| `review` | Reviewer | Review the round whose status is `ready`. |
+| `merge` | Reviewer | Merge the reviewed round, record it, and draft or open the next one. |
+
+Anything round-specific (a choice to make, something not to do) goes in
+the round file, never only in chat.
+
 ## File ownership
 
 | File | Owner | Others |
