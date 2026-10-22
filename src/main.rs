@@ -2884,7 +2884,7 @@ mod tests {
                 assert_eq!(effort, "high");
                 assert_eq!(budget_usd, 0.75);
                 assert_eq!(wall_min, Some(120));
-                assert_eq!(timeout_min, 20);
+                assert_eq!(timeout_min, 120);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2894,7 +2894,7 @@ mod tests {
             "openrouter/meta/muse-spark-1.3-contributor",
             "high",
             0.99,
-            150,
+            subdollarbench::campaign::CELL_WALL_MIN,
             Some(2),
             Some("campaign_prev"),
             None,
@@ -3203,6 +3203,7 @@ mod tests {
             infra_error: infra,
             harness_fault: None,
             max_call_usd: 0.0,
+            stop_reason: None,
         };
 
         assert_eq!(trial_accounting(&mk(100.0, false)), (false, true));

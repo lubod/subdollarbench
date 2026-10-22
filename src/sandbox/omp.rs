@@ -77,6 +77,9 @@ pub struct OmpSessionStats {
     /// lives on the manifest/row `effort` field; this one says what ran.
     /// None = unknown (no session file, pre-field row).
     pub effort_effective: Option<String>,
+    /// R23 D1/D5: why the session ended: dollars | turns | wall | ready |
+    /// crash. None when the runner could not classify the end.
+    pub stop_reason: Option<String>,
 }
 
 /// The `omp` argv after its runner flags: every option, then `--`, then the
@@ -677,8 +680,6 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
 2. RAW TCP SOCKETS ONLY (MANDATORY):
 {}
 3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
-   Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
-4. CONCISE REASONING: Keep internal thinking brief (< 150 words). Do not spend output tokens on exhaustive planning in thought blocks. Immediately invoke tools (`write`, `bash`, `read`) on turn 1 to start creating the server and verifying it.
 ==================================================",
             prompt, guidance_snippet, target_port, test_cmd
         );
@@ -857,6 +858,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
         };
 
         let start_instant = std::time::Instant::now();
+        let mut ready_seen = false;
         let status = loop {
             // Check cancellation request immediately
             if let Some(ref cf) = cancel_flag {
@@ -909,6 +911,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             // Check if model signaled completion early via /workspace/READY
             if take_ready_signal(&canonical_workdir) {
                 log_fn("[LIVE] Model signaled completion via /workspace/READY! Triggering verification...".to_string());
+                ready_seen = true;
                 kill_agent();
                 let _ = child.kill();
                 break None;
@@ -966,6 +969,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                 .unwrap_or_default();
             stats.cost_usd = accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
             stats.max_call_usd = max_call_usd.lock().map(|l| *l).unwrap_or(0.0);
+            stats.stop_reason = Some("crash".to_string());
             let _ = std::fs::remove_file(canonical_workdir.join("AGENTS.md"));
             return Err(anyhow::Error::new(OmpBillingError {
                 reason: "provider billing/auth/throttle tripped mid-session (see [BILLING] log)"
@@ -999,6 +1003,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
                         || turn_counter.load(Ordering::SeqCst) > 0
                         || stats.steps_taken > 0
                         || stats.total_tokens > 0;
+                    stats.stop_reason = Some("crash".to_string());
                     return Err(anyhow::Error::new(OmpExecutionError {
                         message: format!("OMP agent exited with non-zero status: {:?}", s.code()),
                         partial_stats: stats,
@@ -1008,6 +1013,30 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             }
         }
 
+        // R23 D1/D5: record why the session ended. A budget/turn/watchdog
+        // stop is a normal conclusion; a READY signal or a clean exit is
+        // `ready`; a non-zero exit already returned `crash` above.
+        let stop = if ready_seen {
+            "ready"
+        } else if stopped_by_limit {
+            let reason = limit_reason
+                .lock()
+                .ok()
+                .and_then(|r| r.clone())
+                .unwrap_or_default();
+            if reason.contains("turn limit") {
+                "turns"
+            } else if reason.contains("budget cap") || reason.contains("campaign cap's headroom") {
+                "dollars"
+            } else if reason.contains("Watchdog") {
+                "wall"
+            } else {
+                "crash"
+            }
+        } else {
+            "ready"
+        };
+        stats.stop_reason = Some(stop.to_string());
         Ok(stats)
     }
 
@@ -1953,6 +1982,7 @@ CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:
             cost_usd,
             max_call_usd,
             effort_effective: thinking_effective,
+            stop_reason: None,
         })
     }
     pub fn fallback_extract_files_from_session(session_path: &Path, workdir: &Path) {
@@ -2025,8 +2055,7 @@ impl OmpRunner {
 1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
 2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
 {}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing. Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
-4. **CONCISE REASONING**: Keep internal thoughts brief (< 150 words). Do not exhaust output tokens on lengthy mental planning loops. Immediately invoke tools to write code and test it.
+3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
 "#,
             snippet, port, test
         )
@@ -2309,6 +2338,12 @@ mod tests {
                     "worker port {off} missing (task {task}, worker {worker})"
                 );
                 assert_agents_ports_clean(&content, base, &task.to_string(), worker);
+                for banned in ["150 words", "sdb-redis", "redis-server"] {
+                    assert!(
+                        !content.contains(banned),
+                        "prompt still contains {banned:?} (task {task})"
+                    );
+                }
             }
         }
     }
@@ -3764,6 +3799,13 @@ case "$1" in
         seed_turn_session
         wait_for_kill
         ;;
+      budget)
+        if [ -n "$sessions" ]; then
+          mkdir -p "$sessions"
+          printf '%s\n' '{"message":{"role":"assistant","usage":{"input":0,"output":0,"cost":{"total":0.05}},"content":[{"type":"text","text":"over budget"}]}}' > "$sessions/session.jsonl"
+        fi
+        wait_for_kill
+        ;;
       cap)
         if [ -n "$sessions" ]; then
           mkdir -p "$sessions"
@@ -3877,6 +3919,7 @@ exit 1
             let (res, _logs, workdir, session_dir) =
                 run_omp_scenario("success", &root, covtest_limits(10, 1.0, 10), None);
             let st = res.expect("clean exit 0 must be Ok");
+            assert_eq!(st.stop_reason.as_deref(), Some("ready"));
             assert_eq!(st.steps_taken, 1, "assistant session line counts as a step");
             assert_eq!(st.prompt_tokens, 11);
             assert_eq!(st.completion_tokens, 3);
@@ -3903,6 +3946,7 @@ exit 1
             // Round-14 N3: stderr only, no session, no stdout - the R1 shape
             // (an argv rejection). The agent never started.
             assert!(!exec.started, "a stderr-only exit never started");
+            assert_eq!(exec.partial_stats.stop_reason.as_deref(), Some("crash"));
             passed += 1;
         }
 
@@ -3916,6 +3960,7 @@ exit 1
                 .downcast_ref::<OmpExecutionError>()
                 .expect("OmpExecutionError");
             assert!(exec.started, "stdout is a sign of life");
+            assert_eq!(exec.partial_stats.stop_reason.as_deref(), Some("crash"));
             passed += 1;
         }
 
@@ -3923,7 +3968,8 @@ exit 1
         {
             let (res, logs, _, _) =
                 run_omp_scenario("ready", &root, covtest_limits(10, 1.0, 10), None);
-            res.expect("READY conclusion must be Ok");
+            let st = res.expect("READY conclusion must be Ok");
+            assert_eq!(st.stop_reason.as_deref(), Some("ready"));
             assert!(logs
                 .iter()
                 .any(|l| l.contains("signaled completion via /workspace/READY")));
@@ -3934,7 +3980,8 @@ exit 1
         {
             let (res, logs, _, _) =
                 run_omp_scenario("timeout", &root, covtest_limits(10, 1.0, 1), None);
-            res.expect("watchdog stop is a normal conclusion");
+            let st = res.expect("watchdog stop is a normal conclusion");
+            assert_eq!(st.stop_reason.as_deref(), Some("wall"));
             assert!(logs.iter().any(|l| l.contains("Watchdog")));
             passed += 1;
         }
@@ -3944,7 +3991,8 @@ exit 1
             let cancel = Arc::new(AtomicBool::new(true));
             let (res, logs, _, _) =
                 run_omp_scenario("cancel", &root, covtest_limits(10, 1.0, 10), Some(cancel));
-            res.expect("cancel conclusion is a normal stop");
+            let st = res.expect("cancel conclusion is a normal stop");
+            assert_eq!(st.stop_reason.as_deref(), Some("crash"));
             assert!(logs.iter().any(|l| l.contains("Cancellation requested")));
             passed += 1;
         }
@@ -3953,8 +4001,19 @@ exit 1
         {
             let (res, logs, _, _) =
                 run_omp_scenario("max_turns", &root, covtest_limits(1, 1.0, 10), None);
-            res.expect("turn limit stop is a normal conclusion");
+            let st = res.expect("turn limit stop is a normal conclusion");
+            assert_eq!(st.stop_reason.as_deref(), Some("turns"));
             assert!(logs.iter().any(|l| l.contains("Reached turn limit")));
+            passed += 1;
+        }
+
+        // 7a. API budget cap: a normal stop, recorded as dollars.
+        {
+            let (res, logs, _, _) =
+                run_omp_scenario("budget", &root, covtest_limits(10, 0.01, 10), None);
+            let st = res.expect("budget stop is a normal conclusion");
+            assert_eq!(st.stop_reason.as_deref(), Some("dollars"));
+            assert!(logs.iter().any(|l| l.contains("Reached budget cap")));
             passed += 1;
         }
 
@@ -3966,6 +4025,7 @@ exit 1
             limits.max_effective_usd = Some(0.02);
             let (res, logs, _, _) = run_omp_scenario("cap", &root, limits, None);
             let st = res.expect("cap trip is a normal conclusion");
+            assert_eq!(st.stop_reason.as_deref(), Some("dollars"));
             assert!(logs
                 .iter()
                 .any(|l| l.contains("Reached the campaign cap's headroom")));

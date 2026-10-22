@@ -1311,6 +1311,21 @@ async fn run_ha_stage(
     pass()
 }
 
+/// R23 D5: the ticket prompt's dollar line. Turns are never the limit;
+/// the session should stop on completion or when this API budget is spent.
+pub fn session_budget_line(budget_usd: f64) -> String {
+    if budget_usd.is_finite() && budget_usd > 0.0 {
+        format!(
+            "## Session budget
+This session may spend at most ${budget_usd:.2} in provider API dollars at list price. Turns are not the limit; stop when the work is complete or the budget is exhausted."
+        )
+    } else {
+        "## Session budget
+Turns are not the limit; stop when the work is complete."
+            .to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct BenchmarkConfig {
     pub model: String,
@@ -1368,6 +1383,9 @@ pub struct PipelineOutput {
     /// The largest single provider call this attempt made (the campaign
     /// cap's reserve, round-17 P0).
     pub max_call_usd: f64,
+    /// R23 D1/D5: why the final agent session ended: dollars | turns | wall |
+    /// ready | crash. None for eval-only runs.
+    pub stop_reason: Option<String>,
 }
 
 /// How an agent session that returned `Err` ended (round-14 N3): its partial
@@ -5047,9 +5065,10 @@ impl BenchmarkPipeline {
             Some(note) => format!("{note}\n\n{prompt_content}"),
             None => prompt_content,
         };
+        let budget_note = session_budget_line(config.budget_usd);
         let prompt_content = format!(
-            "{}\n\n### READY FOR VERIFICATION SIGNAL\nWhen you believe your implementation is complete and properly running on the requested port, signal that you are ready for evaluation by creating `/workspace/READY` (for example, run `touch READY` or `touch /workspace/READY`), or simply conclude your session. The benchmark framework will immediately detect this and run the automated verification suite!\n",
-            prompt_content
+            "{}\n\n{}\n\n### READY FOR VERIFICATION SIGNAL\nWhen you believe your implementation is complete and properly running on the requested port, signal that you are ready for evaluation by creating `/workspace/READY` (for example, run `touch READY` or `touch /workspace/READY`), or simply conclude your session. The benchmark framework will immediately detect this and run the automated verification suite!\n",
+            prompt_content, budget_note
         );
 
         // Clean any stale signal file from previous runs
@@ -5071,19 +5090,14 @@ impl BenchmarkPipeline {
         // Campaign rounds (§5.1 of gui-spec.md): one record per
         // verification, the initial try and every repair round.
         let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
-        let attempt_started = std::time::Instant::now();
         let mut round_started = std::time::Instant::now();
-        // Effective cap headroom for this attempt, after the cell's spend and
-        // largest-call reserve. None outside capped campaigns (round-17 P0).
+        // R23 D3: the attempt's remaining provider API dollars after the
+        // cell's spend and largest-call reserve. None outside capped
+        // campaigns. The compute floor is reported only, never enforced.
         let cap_headroom = config
             .campaign_stage
             .as_ref()
             .and_then(|c| c.cap_headroom_usd);
-        // Q8: the in-session stop leaves room for the final verification's
-        // compute floor (the Haiku tickets 8-10 measured ~$0.0006; $0.002
-        // is a conservative reserve under the $0.01 margin).
-        const FINAL_VERIFY_RESERVE_USD: f64 = 0.002;
-        let cap_effective = cap_headroom.map(|c| (c - FINAL_VERIFY_RESERVE_USD).max(0.0));
         let (mut omp_stats, mut prompt_tokens, mut cached_tokens, mut completion_tokens) =
             if !config.eval_only {
                 logger.log(&format!(
@@ -5104,7 +5118,7 @@ impl BenchmarkPipeline {
                     } else {
                         None
                     },
-                    max_effective_usd: cap_effective,
+                    max_effective_usd: None,
                     timeout_seconds: if config.timeout_min > 0 {
                         Some(config.timeout_min * 60)
                     } else {
@@ -5147,6 +5161,7 @@ impl BenchmarkPipeline {
                             acc.cost_usd += stats.cost_usd;
                             acc.max_call_usd = acc.max_call_usd.max(stats.max_call_usd);
                             acc.effort_effective = stats.effort_effective.clone();
+                            acc.stop_reason = stats.stop_reason.clone();
                             ran = true;
                             break;
                         }
@@ -5165,6 +5180,7 @@ impl BenchmarkPipeline {
                             acc.steps_taken += end.partial.steps_taken;
                             acc.cost_usd += end.partial.cost_usd;
                             acc.max_call_usd = acc.max_call_usd.max(end.partial.max_call_usd);
+                            acc.stop_reason = end.partial.stop_reason.clone();
                             logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
                             if let Some(reason) = end.billing {
                                 // Round-14 N3: a dead key or exhausted
@@ -5335,21 +5351,15 @@ impl BenchmarkPipeline {
                     // must not start when either floor is gone. Break before
                     // stopping the candidate or writing FEEDBACK_REPORT.md.
                     let spent_api = omp_stats.cost_usd;
-                    let total_tokens_so_far = prompt_tokens + cached_tokens + completion_tokens;
-                    let floor_so_far = crate::cost::calculator::ModelPricing::compute_cost(
-                        attempt_started.elapsed().as_secs_f64(),
-                        total_tokens_so_far,
-                        cached_tokens,
-                    );
                     let attempt_budget = if config.budget_usd > 0.0 {
                         config.budget_usd
                     } else {
                         f64::INFINITY
                     };
-                    let (repair_budget, repair_cap) = match crate::campaign::repair_round_spend(
+                    let (repair_budget, _repair_cap) = match crate::campaign::repair_round_spend(
                         attempt_budget,
                         spent_api,
-                        cap_effective,
+                        cap_headroom,
                     ) {
                         Ok(v) => v,
                         Err(reason) => {
@@ -5359,15 +5369,6 @@ impl BenchmarkPipeline {
                             break;
                         }
                     };
-                    let repair_effective = repair_cap.map(|cap| cap - (spent_api + floor_so_far));
-                    if let Some(eff) = repair_effective {
-                        if eff < crate::campaign::BUDGET_FLOOR_USD {
-                            logger.log(&format!(
-                                "[LIMIT] Repair round {round} not started: effective headroom ${eff:.4} below the floor"
-                            ));
-                            break;
-                        }
-                    }
 
                     // Pool check FIRST: an exhausted pool must break before
                     // stopping the candidate, writing FEEDBACK_REPORT.md, or
@@ -5418,7 +5419,7 @@ impl BenchmarkPipeline {
                     let round_limits = AgentExecutionLimits {
                         max_turns: turns_remaining,
                         max_budget_usd: repair_budget,
-                        max_effective_usd: repair_effective,
+                        max_effective_usd: None,
                         timeout_seconds: if config.timeout_min > 0 {
                             Some(config.timeout_min * 60)
                         } else {
@@ -6331,6 +6332,11 @@ impl BenchmarkPipeline {
                 )),
             }
         }
+        let stop_reason = omp_stats.stop_reason.clone().or_else(|| {
+            // A non-zero exit / billing trip can end before the runner
+            // classifies its stats; the pipeline still knows it crashed.
+            (agent_failed || harness_fault.is_some()).then(|| "crash".to_string())
+        });
         Ok(PipelineOutput {
             manifest,
             benchmark_result,
@@ -6339,6 +6345,7 @@ impl BenchmarkPipeline {
             infra_error,
             harness_fault,
             max_call_usd: omp_stats.max_call_usd,
+            stop_reason,
         })
     }
 }
@@ -8240,6 +8247,17 @@ main()
         assert!(perf_gate_verdict(None, None).0);
         // Degenerate baseline: skipped, never a division by zero.
         assert!(perf_gate_verdict(Some(0.0), Some(1.0)).0);
+    }
+
+    /// R23 D5: the ticket prompt carries the dollars and says turns are
+    /// not the limit.
+    #[test]
+    fn r23_d5_session_budget_line_has_the_dollars_and_no_turn_limit() {
+        let line = session_budget_line(0.25);
+        assert!(line.contains("$0.25"), "{line}");
+        assert!(line.contains("Turns are not the limit"), "{line}");
+        let uncapped = session_budget_line(0.0);
+        assert!(uncapped.contains("Turns are not the limit"), "{uncapped}");
     }
 
     #[test]

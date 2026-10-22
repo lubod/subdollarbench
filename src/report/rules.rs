@@ -8,6 +8,21 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.38`: round-23 "what does a dollar buy" — D1: dollars are
+///   the session limit; every sdb-sql stage and lite uses a 200-turn
+///   runaway guard. D2: a ticket's API budget is the remaining phase
+///   headroom after the largest-call reserve, split by tier over the
+///   still-undecided tickets; lite and catch-up attempts draw the same
+///   pool; the fixed stage/lite budgets are legacy. D3: the cell cap and
+///   the pool count the provider API bill at list price (the compute floor
+///   is reported only); a paid launch refuses a model with no list price.
+///   D4: wall time is a guard (480 min/phase, 120 min/ticket). D5: the
+///   ticket prompt states its dollars and drops the word-limit/redis
+///   wording; the stop reason (dollars/turns/wall/ready/crash) is recorded
+///   in the stage record and shown on the Board. Score impact: turn-capped
+///   sessions stop being the norm, a cheaper model's price now buys more
+///   tickets, and `.36`/`.37` careers are not comparable on turn-limited
+///   tickets. The ladder is unchanged (21 tickets, max_points 76).
 /// - `2026-10-19.37`: round-22 review fixes — F2: a round that was graded
 ///   before the agent exited non-zero (including the 65,536-token output
 ///   truncation) is a candidate failure, not a harness fault: it records
@@ -704,7 +719,7 @@ use std::hash::{Hash, Hasher};
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.37";
+pub const RULES_VERSION: &str = "2026-10-19.38";
 
 /// Files whose content defines the published numbers: the prompts the model
 /// saw, the verifiers that judged it, *and* the code that turns a result into

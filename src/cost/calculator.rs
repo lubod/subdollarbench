@@ -422,12 +422,40 @@ impl ModelPricing {
     }
 
     /// Asynchronously resolve pricing, querying OpenRouter live catalog first with fallback to hardcoded rates
+    /// R23 D3: the offline list price, or None when the model only has the
+    /// anonymous fallback. The fallback is never a list price; a paid launch
+    /// must resolve a real catalog/table rate.
+    pub fn list_price_for_model(model_name: &str) -> Option<Self> {
+        let p = Self::for_model(model_name);
+        let fallback = Self {
+            prompt_per_million: 0.20,
+            completion_per_million: 0.60,
+            cache_read_per_million: 0.050,
+        };
+        let same = (p.prompt_per_million - fallback.prompt_per_million).abs() < 1e-12
+            && (p.completion_per_million - fallback.completion_per_million).abs() < 1e-12
+            && (p.cache_read_per_million - fallback.cache_read_per_million).abs() < 1e-12;
+        (!same).then_some(p)
+    }
+
+    /// R23 D3: live catalog list price, then the offline table; None when
+    /// neither knows the model. `_at` keeps the gate offline-testable.
+    pub async fn list_price_for_model_async_at(model_name: &str, url: &str) -> Option<Self> {
+        Self::fetch_openrouter_model_pricing_at(model_name, url)
+            .await
+            .or_else(|| Self::list_price_for_model(model_name))
+    }
+
+    pub async fn list_price_for_model_async(model_name: &str) -> Option<Self> {
+        Self::fetch_openrouter_model_pricing(model_name)
+            .await
+            .or_else(|| Self::list_price_for_model(model_name))
+    }
+
     pub async fn for_model_async(model_name: &str) -> Self {
-        if let Some(pricing) = Self::fetch_openrouter_model_pricing(model_name).await {
-            pricing
-        } else {
-            Self::for_model(model_name)
-        }
+        Self::list_price_for_model_async(model_name)
+            .await
+            .unwrap_or_else(|| Self::for_model(model_name))
     }
 }
 
@@ -494,6 +522,12 @@ mod tests {
             "a priced model must not compute to zero"
         );
     }
+    #[test]
+    fn r23_d3_list_price_distinguishes_unknown_from_known() {
+        assert!(ModelPricing::list_price_for_model("google/gemini-2.5-flash").is_some());
+        assert!(ModelPricing::list_price_for_model("some-random-unknown-model").is_none());
+    }
+
     #[test]
     fn test_pricing_for_known_models() {
         let gemini = ModelPricing::for_model("google/gemini-2.5-flash");

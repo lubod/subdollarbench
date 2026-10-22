@@ -377,9 +377,53 @@ pub fn cap_allows(cap_usd: f64, spent_usd: f64, max_call_usd: f64) -> bool {
     cap_usd <= 0.0 || (cap_usd - spent_usd) >= cap_reserve(max_call_usd) + BUDGET_FLOOR_USD
 }
 
-/// Budget and effective headroom for a repair round. The round gets only
-/// the attempt's remaining API budget and never starts below the floor of
-/// either the budget or the cap (round-17 P0).
+/// R23 D2: split the remaining API dollars by weight across the phase's
+/// still-undecided tickets. This replaces the old fixed stage budget; the
+/// field stays in the schema for archived specs but is not an allocation.
+pub fn pool_budget(remaining_usd: f64, weight: f64, weight_sum: f64) -> f64 {
+    if remaining_usd <= 0.0 || weight <= 0.0 || weight_sum <= 0.0 {
+        0.0
+    } else {
+        remaining_usd * weight / weight_sum
+    }
+}
+
+/// R23-1: a ticket whose lite has not run yet weighs the full share plus
+/// the lite share, so the full attempt cannot consume the lite's part.
+pub fn stage_weight(stage: &StageSpec) -> f64 {
+    stage.tier as f64 * (1.0 + stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.0))
+}
+
+/// R23-1: the remaining lite share of a ticket after its full attempt.
+pub fn stage_lite_weight(stage: &StageSpec) -> f64 {
+    stage.tier as f64 * stage.lite.as_ref().map(|l| l.weight).unwrap_or(0.0)
+}
+
+/// R23 D2: the weight of the phase's tickets that have no outcome yet and
+/// whose needs are not already failed/skipped. R23-1 also excludes a
+/// blocked ticket here, so a failed need does not dilute the runnable ones.
+pub fn runnable_weight_sum(
+    stage_list: &[&StageSpec],
+    outcomes: &HashMap<u32, LadderOutcome>,
+) -> f64 {
+    stage_list
+        .iter()
+        .filter(|s| !outcomes.contains_key(&s.id))
+        .filter(|s| {
+            !s.needs.iter().any(|n| {
+                matches!(
+                    outcomes.get(n),
+                    Some(LadderOutcome::Failed) | Some(LadderOutcome::Skipped)
+                )
+            })
+        })
+        .map(|s| stage_weight(s))
+        .sum()
+}
+
+/// Budget and API headroom for a repair round. The round gets only the
+/// attempt's remaining API budget and never starts below the floor of
+/// either the budget or the cap (round-17 P0; R23 D3 counts API only).
 pub fn repair_round_spend(
     budget: f64,
     api_spent: f64,
@@ -1116,8 +1160,8 @@ pub struct StageAttempt<'a> {
     pub outcomes: Vec<(u32, LadderOutcome)>,
     /// Score weight of a pass (1.0 full, the lite spec's weight otherwise).
     pub weight: f64,
-    /// Effective cap headroom after the reserve, for the pipeline's per-round
-    /// `max_effective_usd`. None when uncapped.
+    /// R23 D3: API-bill headroom after the reserve. None when uncapped.
+    /// The compute floor is reported only, never a stopping condition.
     pub cap_headroom_usd: Option<f64>,
     /// P2: the harness hint block for the phase's attempts (recorded
     /// failures and blocked tickets); None outside a chained phase.
@@ -1141,10 +1185,8 @@ pub struct StageOutcome {
     pub total_stages: u32,
     pub stage_results: Vec<crate::verifier::StageResult>,
     pub effective_cost_usd: f64,
-    /// Provider-billed API spend. The campaign cap bounds *effective* cost,
-    /// but OMP enforces an attempt's budget on API spend only, so the cap's
-    /// remaining headroom is converted into this unit before it is handed
-    /// to an attempt (round-11 finding 1).
+    /// Provider-billed API spend at list price. R23 D3: the campaign cap
+    /// and the ticket pool count this number only.
     pub api_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
@@ -1152,6 +1194,10 @@ pub struct StageOutcome {
     /// reserves it before the next ticket (round-17 P0).
     #[serde(default)]
     pub max_call_usd: f64,
+    /// R23 D1/D5: why the agent session ended: dollars | turns | wall |
+    /// ready | crash. None on eval-only/short paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     pub agent_failed: bool,
     pub infra_error: bool,
     pub disqualified: bool,
@@ -1187,6 +1233,10 @@ pub struct StageRecord {
     /// passed | failed | fault (harness/provider fault, not a model verdict)
     /// | skipped (a `needs` prerequisite failed)
     pub status: String,
+    /// R23 D1/D5: why the agent session ended: dollars | turns | wall |
+    /// ready | crash. None on eval-only/short paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// full | lite (which variant produced this record).
     #[serde(default)]
     pub variant: String,
@@ -1832,6 +1882,9 @@ pub struct LadderEntry {
     pub variant: String,
     #[serde(default)]
     pub points: f64,
+    /// R23 D5: why the agent ended (dollars/turns/wall/ready/crash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// One-line cause for the Run view; None when the ticket passed.
     #[serde(default)]
     pub cause: Option<String>,
@@ -1892,9 +1945,41 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
 /// the old $0.75 cap at ticket 19 after 71 of 120 min; a full ladder costs
 /// about $1.03 at its rate, so reaching the top stays part of the score.
 pub const CELL_BUDGET_USD: f64 = 0.99;
-/// The wall that goes with [`CELL_BUDGET_USD`], with room for the late
-/// checks that rerun in every later verification.
-pub const CELL_WALL_MIN: u64 = 150;
+/// R23 D1: turns are only a runaway guard; dollars are the session limit.
+pub const TURN_GUARD: u32 = 200;
+/// R23 D4: wall time is a guard, not the budget. Eight hours per phase;
+/// the expected stop is dollars. The late checks in later stages still fit.
+pub const CELL_WALL_MIN: u64 = 480;
+/// R23 D4: one ticket's per-attempt wall guard. It must never bind before
+/// the ticket's dollar budget in normal use.
+pub const TICKET_WALL_GUARD_MIN: u64 = 120;
+
+/// R23 D3: a paid campaign launch must have a real list price. The live
+/// OpenRouter catalog is tried first, then the offline table; eval-only
+/// runs do not spend and are exempt. `_at` is the offline-testable form.
+pub async fn require_model_list_price_at(
+    model: &str,
+    url: &str,
+    eval_only: bool,
+) -> Result<(), String> {
+    if eval_only {
+        return Ok(());
+    }
+    if crate::cost::calculator::ModelPricing::list_price_for_model_async_at(model, url)
+        .await
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "model {model} has no list price in the OpenRouter catalog or offline table; refusing a paid campaign launch"
+        ))
+    }
+}
+
+pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<(), String> {
+    require_model_list_price_at(model, "https://openrouter.ai/api/v1/models", eval_only).await
+}
 
 /// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
 /// test pins that the real clap definition accepts it (round-8 finding 2).
@@ -1927,7 +2012,7 @@ pub fn launcher_args_with_phase(
         "--wall-min",
         &format!("{wall_min}"),
         "--timeout-min",
-        "20",
+        &TICKET_WALL_GUARD_MIN.to_string(),
     ]
     .iter()
     .map(|s| s.to_string())
@@ -2087,6 +2172,7 @@ fn ladder_inner(
                 .to_string(),
                 variant: rec.variant.clone(),
                 points: passed_full.map(|r| r.points).unwrap_or(rec.points),
+                stop_reason: rec.stop_reason.clone(),
                 cause: None,
             }
         } else if let Some(rec) = records.last() {
@@ -2101,6 +2187,7 @@ fn ladder_inner(
                 status: status.to_string(),
                 variant: rec.variant.clone(),
                 points: 0.0,
+                stop_reason: rec.stop_reason.clone(),
                 cause: rec
                     .failure
                     .as_ref()
@@ -2116,6 +2203,7 @@ fn ladder_inner(
                 status: "running".to_string(),
                 variant: String::new(),
                 points: 0.0,
+                stop_reason: None,
                 cause: None,
             }
         } else {
@@ -2158,6 +2246,7 @@ fn ladder_inner(
                 status: status.to_string(),
                 variant: String::new(),
                 points: 0.0,
+                stop_reason: None,
                 cause: Some(cause),
             }
         };
@@ -2394,8 +2483,8 @@ pub struct CampaignRunOptions {
     pub model: String,
     pub harness: String,
     pub effort: String,
-    /// Campaign-wide cap: the ladder stops (over_budget) once cumulative
-    /// effective cost reaches it.
+    /// R23 D3: campaign-wide cap in provider API dollars at list price.
+    /// The ladder stops when cumulative API spend reaches it.
     pub budget_usd: f64,
     /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour);
     /// the ladder stops with `over_wall` when reached.
@@ -2617,11 +2706,10 @@ where
         .map(|c| c.best.iter().map(|(k, v)| (*k, *v)).collect())
         .unwrap_or_default();
     let mut reached: Option<u32> = chain.and_then(|c| c.passed.iter().copied().max());
+    // R23 D3: the cap counts the provider API bill at list price. The
+    // compute floor remains a reported number in each StageRecord, never a
+    // stopping condition.
     let mut total_cost = 0.0f64;
-    // API spend of the same attempts: OMP enforces budgets on API dollars,
-    // the cap bounds effective dollars, so the clamp converts (round-11
-    // finding 1).
-    let mut api_cost = 0.0f64;
     // Ladder bookkeeping (continue mode): per-stage outcome + whether the
     // last attempt left the workspace dirty (needs a rollback first).
     let mut outcomes: HashMap<u32, LadderOutcome> = chain
@@ -2704,32 +2792,33 @@ where
             };
             let headroom = cap_headroom(opts.budget_usd, total_cost, largest_call_usd)
                 .unwrap_or(f64::INFINITY);
-            let api_ratio = if total_cost > 0.0 && api_cost > 0.0 {
-                (api_cost / total_cost).clamp(0.01, 1.0)
-            } else {
-                0.25
-            };
-            let (variant, prompt_path, budget, max_turns, lite_profile) = match &stage.lite {
+            let (variant, prompt_path, max_turns, lite_profile) = match &stage.lite {
                 Some(lite) => (
                     StageVariant::Lite,
                     lc.root.join(&lite.prompt),
-                    lite.budget_usd,
                     lite.max_turns,
                     lite.profile.clone(),
                 ),
                 None => (
                     StageVariant::Full,
                     lc.prompt_path(stage),
-                    stage.budget_usd,
                     stage.max_turns,
                     Vec::new(),
                 ),
             };
+            // R23 D2/R23-1: the catch-up draws from the phase pool; a lite
+            // catch-up carries the lite's share, not the whole ticket.
+            let target_weight = if variant == StageVariant::Lite {
+                stage_lite_weight(stage)
+            } else {
+                stage.tier as f64
+            };
+            let catch_up_weight = runnable_weight_sum(&stage_list, &outcomes) + target_weight;
             let attempt = StageAttempt {
                 stage,
                 variant,
                 prompt_path,
-                budget_usd: budget.min(headroom * api_ratio),
+                budget_usd: pool_budget(headroom, target_weight, catch_up_weight),
                 max_turns,
                 lite_profile: lite_profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -2747,14 +2836,13 @@ where
             let out = exec(&attempt)
                 .await
                 .with_context(|| format!("catch-up stage {} ({})", target, stage.title))?;
-            api_cost += out.api_cost_usd;
             largest_call_usd = largest_call_usd.max(out.max_call_usd);
             let (regressed, severity) = detect_regressions(&best, &out.stage_results);
             for r in &out.stage_results {
                 let e = best.entry(r.stage).or_insert(false);
                 *e = *e || r.passed;
             }
-            total_cost += out.effective_cost_usd;
+            total_cost += out.api_cost_usd;
             push_attempt_record(
                 &mut rollup,
                 stage,
@@ -2837,15 +2925,9 @@ where
         let floor_now = !cap_allows(opts.budget_usd, total_cost, largest_call_usd);
         let headroom =
             cap_headroom(opts.budget_usd, total_cost, largest_call_usd).unwrap_or(f64::INFINITY);
-        // Effective dollars -> API dollars (round-11 finding 1). Before the
-        // first attempt the observed ratio is unknown: 0.25 is conservative
-        // (the DeepSeek cell's was ~0.29; a smaller share gives a smaller
-        // API budget). An uncapped campaign passes INFINITY through.
-        let api_ratio = if total_cost > 0.0 && api_cost > 0.0 {
-            (api_cost / total_cost).clamp(0.01, 1.0)
-        } else {
-            0.25
-        };
+        // R23 D2: the phase pool is split by tier over the undecided
+        // tickets; a cheap pass leaves more for the next ticket.
+        let phase_weight = runnable_weight_sum(&stage_list, &outcomes);
         let outcomes_snapshot = |m: &HashMap<u32, LadderOutcome>| -> Vec<(u32, LadderOutcome)> {
             let mut v: Vec<(u32, LadderOutcome)> = m.iter().map(|(k, o)| (*k, *o)).collect();
             v.sort_by_key(|(id, _)| *id);
@@ -2910,7 +2992,7 @@ where
             prompt_path: lc.prompt_path(stage),
             // D3 + finding 1: the cap's effective headroom converts to the
             // API dollars OMP actually enforces.
-            budget_usd: stage.budget_usd.min(headroom * api_ratio),
+            budget_usd: pool_budget(headroom, stage.tier as f64, phase_weight),
             max_turns: stage.max_turns,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -2925,14 +3007,13 @@ where
         let out = exec(&attempt_full)
             .await
             .with_context(|| format!("stage {} ({})", stage.id, stage.title))?;
-        api_cost += out.api_cost_usd;
         largest_call_usd = largest_call_usd.max(out.max_call_usd);
         let (regressed, regression_severity) = detect_regressions(&best, &out.stage_results);
         for r in &out.stage_results {
             let e = best.entry(r.stage).or_insert(false);
             *e = *e || r.passed;
         }
-        total_cost += out.effective_cost_usd;
+        total_cost += out.api_cost_usd;
         // F2: a non-zero agent exit after the round was graded is a
         // candidate failure; only a real harness fault (or an infra fault)
         // measured nothing and keeps the `fault` label.
@@ -2997,18 +3078,17 @@ where
                 outcomes.insert(stage.id, LadderOutcome::Failed);
                 dirty = true;
             } else {
-                // The full attempt just moved the ratio; recompute for it.
-                let api_ratio2 = if total_cost > 0.0 && api_cost > 0.0 {
-                    (api_cost / total_cost).clamp(0.01, 1.0)
-                } else {
-                    0.25
-                };
+                // R23 D2: the lite is the same ticket, so it draws the same
+                // pool share after the failed full attempt.
                 let attempt_lite = StageAttempt {
                     stage,
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
-                    // Round-11 finding 1: effective headroom -> API dollars.
-                    budget_usd: lite.budget_usd.min(headroom2 * api_ratio2),
+                    budget_usd: pool_budget(
+                        headroom2,
+                        stage_lite_weight(stage),
+                        runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
+                    ),
                     max_turns: lite.max_turns,
                     lite_profile: lite.profile.clone(),
                     passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -3023,14 +3103,13 @@ where
                 let out2 = exec(&attempt_lite)
                     .await
                     .with_context(|| format!("stage {} lite", stage.id))?;
-                api_cost += out2.api_cost_usd;
                 largest_call_usd = largest_call_usd.max(out2.max_call_usd);
                 let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
                 for r in &out2.stage_results {
                     let e = best.entry(r.stage).or_insert(false);
                     *e = *e || r.passed;
                 }
-                total_cost += out2.effective_cost_usd;
+                total_cost += out2.api_cost_usd;
                 let fault2 = out2.infra_error || out2.harness_fault.is_some();
                 let status2 = if out2.passed {
                     "passed"
@@ -3174,6 +3253,7 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         turns: None,
         duration_seconds: None,
         status: "skipped".to_string(),
+        stop_reason: None,
         variant: match stage.lite {
             Some(_) => "full".to_string(),
             None => "full".to_string(),
@@ -3226,6 +3306,7 @@ fn push_attempt_record(
         turns: out.turns,
         duration_seconds: out.duration_seconds,
         status: status.to_string(),
+        stop_reason: out.stop_reason.clone(),
         variant: match variant {
             StageVariant::Full => "full".to_string(),
             StageVariant::Lite => "lite".to_string(),
@@ -3769,6 +3850,7 @@ mod tests {
             turns: Some(12),
             duration_seconds: Some(200.0),
             status: "passed".into(),
+            stop_reason: None,
             variant: "full".into(),
             tier: 1,
             points: 1.0,
@@ -3792,6 +3874,7 @@ mod tests {
             turns: Some(30),
             duration_seconds: Some(900.0),
             status: "failed".into(),
+            stop_reason: None,
             variant: "full".into(),
             tier: 3,
             points: 0.0,
@@ -4013,6 +4096,7 @@ mod tests {
             turns: Some(3),
             duration_seconds: Some(10.0),
             status: status.to_string(),
+            stop_reason: None,
             variant: variant.to_string(),
             tier: 1,
             points: if passed && variant == "lite" {
@@ -4106,6 +4190,7 @@ mod tests {
             turns: Some(10),
             duration_seconds: Some(60.0),
             max_call_usd: 0.0,
+            stop_reason: None,
             agent_failed: false,
             infra_error: false,
             rounds: Vec::new(),
@@ -4200,6 +4285,21 @@ mod tests {
         LoadedCampaign { spec, root: dir }
     }
 
+    /// The three-ticket fixture with a lite on the *last* ticket: the R23-1
+    /// pool must still leave room for it.
+    fn fixture_campaign_last_lite() -> LoadedCampaign {
+        let mut lc = fixture_campaign();
+        lc.spec.stages[2].lite = Some(LiteSpec {
+            prompt: "stages/2-lite.md".into(),
+            profile: Vec::new(),
+            budget_usd: 0.1,
+            max_turns: 10,
+            weight: 0.4,
+        });
+        std::fs::write(lc.root.join("stages/2-lite.md"), "# last lite").unwrap();
+        lc
+    }
+
     /// The same three-ticket fixture, with a lite variant on ticket 1 so the
     /// F2 crash path can prove that the lite still runs.
     fn fixture_campaign_with_lite() -> LoadedCampaign {
@@ -4288,6 +4388,358 @@ mod tests {
     /// schema change (differential), observability (scenario-only) and the
     /// tests/CI gate (scenario-only, lite). Pins each stage's spec and the
     /// ladder's max points.
+    /// R23 D1: dollars are the limit; every sdb-sql stage and lite uses the
+    /// 200-turn runaway guard.
+    #[test]
+    fn r23_d1_sql_turn_limits_are_the_guard() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        assert_eq!(TURN_GUARD, 200);
+        for s in &lc.spec.stages {
+            assert_eq!(s.max_turns, TURN_GUARD, "stage {}", s.id);
+            if let Some(lite) = &s.lite {
+                assert_eq!(lite.max_turns, TURN_GUARD, "stage {} lite", s.id);
+            }
+        }
+    }
+
+    /// R23 D1: the stop reason reaches the campaign stage record.
+    #[tokio::test]
+    async fn r23_d1_stage_record_carries_the_dollar_stop() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d1".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 10.0,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |_| {
+                let mut out = outcome(false, &[(0, false)]);
+                out.stop_reason = Some("dollars".into());
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rollup.stages[0].stop_reason.as_deref(), Some("dollars"));
+    }
+
+    #[test]
+    fn r23_d2_pool_budget_splits_by_tier() {
+        assert!((pool_budget(0.9, 2.0, 6.0) - 0.3).abs() < 1e-9);
+        assert_eq!(pool_budget(0.0, 2.0, 6.0), 0.0);
+        assert_eq!(pool_budget(0.9, 0.0, 6.0), 0.0);
+        assert_eq!(pool_budget(0.9, 2.0, 0.0), 0.0);
+    }
+
+    async fn r23_d2_seen_budgets(
+        lc: &LoadedCampaign,
+        opts: &CampaignRunOptions,
+        spend0: f64,
+    ) -> Vec<(u32, StageVariant, f64)> {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let rollup = run_campaign(
+            lc,
+            opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.variant, attempt.budget_usd));
+                let spend = if attempt.stage.id == 0 { spend0 } else { 0.001 };
+                let mut out = outcome(true, &[(0, true), (1, true), (2, true)]);
+                out.api_cost_usd = spend;
+                out.effective_cost_usd = spend;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!rollup.stages.is_empty());
+        seen.into_inner()
+    }
+
+    /// R23 D2: an unspent ticket raises the next ticket's pool share.
+    #[tokio::test]
+    async fn r23_d2_a_cheap_ticket_raises_the_next_budget() {
+        let mut lc = fixture_campaign();
+        // A legacy fixed budget far below the pool share: the pool, not this
+        // field, is the allocation.
+        lc.spec.stages[0].budget_usd = 0.001;
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d2cheap".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let cheap = r23_d2_seen_budgets(&lc, &opts, 0.001).await;
+        let expensive = r23_d2_seen_budgets(&lc, &opts, 0.20).await;
+        let cheap1 = cheap.iter().find(|(id, _, _)| *id == 1).unwrap().2;
+        let exp1 = expensive.iter().find(|(id, _, _)| *id == 1).unwrap().2;
+        assert!(
+            cheap1 > exp1 + 0.05,
+            "cheap next {cheap1} should exceed expensive next {exp1}"
+        );
+        // The old fixed stage budget is not the allocation.
+        assert!(cheap[0].2 > lc.spec.stages[0].budget_usd);
+    }
+
+    /// R23 D2: the lite draws its budget from the same remaining pool.
+    #[tokio::test]
+    async fn r23_d2_a_lite_draws_from_the_same_pool() {
+        let lc = fixture_campaign_with_lite();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d2lite".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 1.0,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.variant, attempt.budget_usd));
+                let out = if attempt.stage.id == 1 && attempt.variant == StageVariant::Full {
+                    let mut o = outcome(false, &[(1, false)]);
+                    o.api_cost_usd = 0.001;
+                    o.effective_cost_usd = 0.001;
+                    o
+                } else {
+                    let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                    o.api_cost_usd = 0.001;
+                    o.effective_cost_usd = 0.001;
+                    o
+                };
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let lite = seen
+            .borrow()
+            .iter()
+            .find(|(id, variant, _)| *id == 1 && *variant == StageVariant::Lite)
+            .copied()
+            .expect("the lite attempt");
+        assert!(lite.2 > 0.0, "the lite gets a pool share: {lite:?}");
+        assert!(rollup
+            .stages
+            .iter()
+            .any(|r| r.id == 1 && r.variant == "lite"));
+    }
+
+    /// R23 D2: the pool plus reserve never lets the phase exceed $0.99.
+    #[tokio::test]
+    async fn r23_d2_the_pool_keeps_the_phase_under_the_cap() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d2cap".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let spend = attempt.budget_usd;
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.api_cost_usd = spend;
+                o.effective_cost_usd = spend;
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rollup.total_cost_usd <= CELL_BUDGET_USD + 1e-9,
+            "total {}",
+            rollup.total_cost_usd
+        );
+        assert!(
+            rollup.total_cost_usd > CELL_BUDGET_USD * 0.9,
+            "the pool should use the phase budget: {}",
+            rollup.total_cost_usd
+        );
+        assert!(!rollup.over_budget);
+    }
+
+    /// R23 D3: the cap counts the API bill, not the compute-inclusive
+    /// effective cost.
+    #[tokio::test]
+    async fn r23_d3_the_cap_uses_api_spend_not_effective() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d3api".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |_| {
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.api_cost_usd = 0.01;
+                o.effective_cost_usd = 0.99;
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rollup.stages.len(),
+            3,
+            "the effective cost must not stop the ladder"
+        );
+        assert!((rollup.total_cost_usd - 0.03).abs() < 1e-9);
+        assert!(!rollup.over_budget);
+        assert!((rollup.stages[0].effective_cost_usd - 0.99).abs() < 1e-9);
+    }
+
+    /// R23 D3: a paid launch refuses a model with no list price; eval-only
+    /// runs are exempt because they do not spend.
+    #[tokio::test]
+    async fn r23_d3_a_model_without_a_list_price_is_refused() {
+        let dead = "http://127.0.0.1:9/models";
+        assert!(
+            require_model_list_price_at("google/gemini-2.5-flash", dead, false)
+                .await
+                .is_ok()
+        );
+        assert!(
+            require_model_list_price_at("made-up/unknown-model", dead, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            require_model_list_price_at("made-up/unknown-model", dead, true)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// R23 D5: the Board ladder entry carries the stop reason from the
+    /// stage record.
+    #[test]
+    fn r23_d5_ladder_carries_the_stop_reason() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut rollup = chain_rollup(1, false);
+        rollup.career = None;
+        let mut rec = failed_record(0, "Genesis", "own stage: boom", "");
+        rec.stop_reason = Some("dollars".to_string());
+        rollup.stages = vec![rec];
+        let e = ladder(&lc.spec, &rollup, None);
+        let e0 = e.iter().find(|x| x.id == 0).expect("ticket 0");
+        assert_eq!(e0.status, "fail");
+        assert_eq!(e0.stop_reason.as_deref(), Some("dollars"));
+    }
+
+    /// R23-1: the last ticket's full share leaves its lite a part; the lite
+    /// still runs after the full spends its whole share.
+    #[tokio::test]
+    async fn r23_1_last_ticket_keeps_its_lite() {
+        let lc = fixture_campaign_last_lite();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23_1lite".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: 0.20,
+            wall_min: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::<(u32, StageVariant, f64)>::new());
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                seen.borrow_mut()
+                    .push((attempt.stage.id, attempt.variant, attempt.budget_usd));
+                let mut out = if attempt.stage.id == 2 && attempt.variant == StageVariant::Full {
+                    outcome(false, &[(2, false)])
+                } else {
+                    outcome(true, &[(0, true), (1, true), (2, true)])
+                };
+                out.api_cost_usd = if attempt.stage.id == 2 && attempt.variant == StageVariant::Full
+                {
+                    attempt.budget_usd
+                } else {
+                    0.0
+                };
+                out.effective_cost_usd = out.api_cost_usd;
+                out.max_call_usd = 0.001;
+                async move { Ok(out) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = seen.into_inner();
+        let full = seen
+            .iter()
+            .find(|(id, v, _)| *id == 2 && *v == StageVariant::Full)
+            .map(|(_, _, b)| *b)
+            .expect("last full attempt");
+        // Headroom before ticket 2 is 0.20 - 0.02 = 0.18; the full share is
+        // 0.18 / (1 + 0.4), not the whole headroom.
+        assert!(full < 0.18 - 1e-9, "full share {full} ate the lite part");
+        let lite = seen
+            .iter()
+            .find(|(id, v, _)| *id == 2 && *v == StageVariant::Lite)
+            .copied()
+            .expect("the last ticket's lite must run");
+        assert!(lite.2 > 0.0, "lite budget {}", lite.2);
+        assert!(rollup
+            .stages
+            .iter()
+            .any(|r| r.id == 2 && r.variant == "lite"));
+    }
+
+    /// R23-1: a failed need removes the blocked ticket from the pool weight,
+    /// so it does not dilute the runnable tickets before it.
+    #[test]
+    fn r23_1_a_failed_need_does_not_dilute_the_pool() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+        let stage_list: Vec<&StageSpec> = lc
+            .spec
+            .stages
+            .iter()
+            .filter(|s| phase.stages.contains(&s.id))
+            .collect();
+        let mut outcomes = HashMap::new();
+        outcomes.insert(11u32, LadderOutcome::Failed);
+        let got = runnable_weight_sum(&stage_list, &outcomes);
+        // 11 is decided; 14 needs 11 and is blocked; 12, 13 and 15 remain.
+        let expected: f64 = stage_list
+            .iter()
+            .filter(|s| s.id != 11 && s.id != 14)
+            .map(|s| stage_weight(s))
+            .sum();
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} expected {expected}"
+        );
+        assert!(expected > 0.0);
+    }
+
     #[test]
     fn test_real_sdb_sql_spec_has_ticket_12() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
@@ -4300,7 +4752,7 @@ mod tests {
         assert_eq!(s.tier, 4);
         assert_eq!(s.needs, vec![1, 2, 3, 6]);
         assert_eq!(s.budget_usd, 0.20);
-        assert_eq!(s.max_turns, 40);
+        assert_eq!(s.max_turns, TURN_GUARD);
         assert_eq!(s.acceptance.sql_stages, (0..=12u32).collect::<Vec<u32>>());
         let lite = s.lite.as_ref().expect("ticket 12 has a lite variant");
         assert_eq!(lite.profile, vec!["concurrency-global-lock".to_string()]);
@@ -4326,7 +4778,7 @@ mod tests {
         assert_eq!(s13.tier, 4);
         assert_eq!(s13.needs, vec![4]);
         assert_eq!(s13.budget_usd, 0.12);
-        assert_eq!(s13.max_turns, 30);
+        assert_eq!(s13.max_turns, TURN_GUARD);
         assert!(s13.lite.is_none(), "ticket 13 has no lite variant");
         assert_eq!(s13.acceptance.sql_stages, (0..=13u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::differential_supported(13));
@@ -4338,7 +4790,7 @@ mod tests {
         assert_eq!(s14.tier, 5);
         assert_eq!(s14.needs, vec![6, 11]);
         assert_eq!(s14.budget_usd, 0.12);
-        assert_eq!(s14.max_turns, 24);
+        assert_eq!(s14.max_turns, TURN_GUARD);
         assert!(s14.lite.is_none(), "ticket 14 has no lite variant");
         assert_eq!(s14.acceptance.sql_stages, (0..=14u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(14));
@@ -4352,12 +4804,12 @@ mod tests {
         assert_eq!(s15.tier, 5);
         assert_eq!(s15.needs, vec![7, 8]);
         assert_eq!(s15.budget_usd, 0.20);
-        assert_eq!(s15.max_turns, 36);
+        assert_eq!(s15.max_turns, TURN_GUARD);
         assert_eq!(s15.acceptance.sql_stages, (0..=15u32).collect::<Vec<u32>>());
         let lite15 = s15.lite.as_ref().expect("ticket 15 has a lite variant");
         assert_eq!(lite15.profile, vec!["coverage-60".to_string()]);
         assert_eq!(lite15.budget_usd, 0.12);
-        assert!(lite15.max_turns < s15.max_turns);
+        assert_eq!(lite15.max_turns, TURN_GUARD);
         assert!(crate::verifier::sql::driver::scenario_only(15));
         assert!(!crate::verifier::sql::driver::differential_supported(15));
         assert!(crate::verifier::sql::driver::stage_supported(15));
@@ -4370,7 +4822,7 @@ mod tests {
         assert_eq!(s16.tier, 6);
         assert_eq!(s16.needs, vec![2, 4, 6, 7, 8, 11]);
         assert_eq!(s16.budget_usd, 0.20);
-        assert_eq!(s16.max_turns, 40);
+        assert_eq!(s16.max_turns, TURN_GUARD);
         assert!(s16.lite.is_none(), "ticket 16 has no lite variant");
         assert_eq!(s16.acceptance.sql_stages, (0..=16u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(16));
@@ -4384,7 +4836,7 @@ mod tests {
         assert_eq!(s17.tier, 6);
         assert_eq!(s17.needs, vec![5]);
         assert_eq!(s17.budget_usd, 0.15);
-        assert_eq!(s17.max_turns, 30);
+        assert_eq!(s17.max_turns, TURN_GUARD);
         assert!(s17.lite.is_none(), "ticket 17 has no lite variant");
         assert_eq!(s17.acceptance.sql_stages, (0..=17u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(17));
@@ -4398,7 +4850,7 @@ mod tests {
         assert_eq!(s18.tier, 6);
         assert_eq!(s18.needs, vec![1, 6, 7, 8]);
         assert_eq!(s18.budget_usd, 0.15);
-        assert_eq!(s18.max_turns, 30);
+        assert_eq!(s18.max_turns, TURN_GUARD);
         assert!(s18.lite.is_none(), "ticket 18 has no lite variant");
         assert_eq!(s18.acceptance.sql_stages, (0..=18u32).collect::<Vec<u32>>());
         assert!(crate::verifier::sql::driver::scenario_only(18));
@@ -4412,12 +4864,12 @@ mod tests {
         assert_eq!(s19.tier, 7);
         assert_eq!(s19.needs, vec![6]);
         assert_eq!(s19.budget_usd, 0.20);
-        assert_eq!(s19.max_turns, 40);
+        assert_eq!(s19.max_turns, TURN_GUARD);
         assert_eq!(s19.acceptance.sql_stages, (0..=19u32).collect::<Vec<u32>>());
         let lite19 = s19.lite.as_ref().expect("ticket 19 has a lite variant");
         assert_eq!(lite19.profile, vec!["two-nodes-promote".to_string()]);
         assert_eq!(lite19.budget_usd, 0.12);
-        assert!(lite19.max_turns < s19.max_turns);
+        assert_eq!(lite19.max_turns, TURN_GUARD);
         assert!(crate::verifier::sql::driver::scenario_only(19));
         assert!(!crate::verifier::sql::driver::differential_supported(19));
         assert!(crate::verifier::sql::driver::stage_supported(19));
@@ -4429,12 +4881,12 @@ mod tests {
         assert_eq!(s20.tier, 7);
         assert_eq!(s20.needs, vec![1, 6, 7]);
         assert_eq!(s20.budget_usd, 0.20);
-        assert_eq!(s20.max_turns, 40);
+        assert_eq!(s20.max_turns, TURN_GUARD);
         assert_eq!(s20.acceptance.sql_stages, (0..=20u32).collect::<Vec<u32>>());
         let lite20 = s20.lite.as_ref().expect("ticket 20 has a lite variant");
         assert_eq!(lite20.profile, vec!["pg-simple".to_string()]);
         assert_eq!(lite20.budget_usd, 0.12);
-        assert!(lite20.max_turns < s20.max_turns);
+        assert_eq!(lite20.max_turns, TURN_GUARD);
         assert!(crate::verifier::sql::driver::scenario_only(20));
         assert!(!crate::verifier::sql::driver::differential_supported(20));
         assert!(crate::verifier::sql::driver::stage_supported(20));
@@ -4684,11 +5136,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ladder_cap_converts_headroom_to_api_dollars() {
-        // Round-11 finding 1: OMP enforces attempt budgets on API spend
-        // while the cap bounds effective cost. A naive effective-dollar
-        // budget lets an attempt spend 0.10 API — 0.34 effective at the
-        // DeepSeek cell's ~3.4x ratio — against a 0.20 cap.
+    async fn test_ladder_cap_counts_api_dollars_not_the_effective_ratio() {
+        // R23 D3: the cap counts API spend. The old effective->API ratio is
+        // gone, so an attempt whose effective cost is 10x its API spend
+        // still does not stop the ladder at the first ticket.
         let lc = ladder_fixture();
         let opts = CampaignRunOptions {
             campaign_id: "budget1".into(),
@@ -4705,13 +5156,9 @@ mod tests {
             |attempt| {
                 let id = attempt.stage.id;
                 seen.borrow_mut().push((id, attempt.budget_usd));
-                // The attempt spends its whole API budget; the floor adds
-                // the rest (the observed 3.4x relationship).
-                let api = attempt.budget_usd;
-                let eff = api * 3.4;
                 let mut out = outcome(true, &[(id, true)]);
-                out.api_cost_usd = api;
-                out.effective_cost_usd = eff;
+                out.api_cost_usd = 0.05;
+                out.effective_cost_usd = 0.50;
                 async move { Ok(out) }
             },
             None,
@@ -4719,66 +5166,16 @@ mod tests {
         .await
         .unwrap();
         let seen = seen.into_inner();
-        assert_eq!(seen.len(), 2, "the cap stops the ladder: {seen:?}");
-        // Round-17 P0: the cap keeps a $0.02 largest-call reserve, so the
-        // first API budget is (0.20 - 0.02) * 0.25 = 0.045.
-        assert!((seen[0].1 - 0.045).abs() < 1e-9, "first: {}", seen[0].1);
-        // Then the cell's own ratio converts the remaining effective
-        // headroom after the reserve.
-        let first_effective = seen[0].1 * 3.4;
-        let expect = (0.20 - first_effective - 0.02) * (seen[0].1 / first_effective);
         assert!(
-            (seen[1].1 - expect).abs() < 1e-9,
-            "second: {} vs {expect}",
-            seen[1].1
+            seen.len() >= 3,
+            "the API cap must allow more than the old effective cap: {seen:?}"
         );
         assert!(
-            rollup.total_cost_usd <= 0.20 + 1e-6,
-            "the cap is respected: {}",
+            rollup.total_cost_usd <= 0.20 + 1e-9,
+            "API cap respected: {}",
             rollup.total_cost_usd
         );
-        // The reserve makes the next start impossible before the cap is
-        // crossed, so the stop is "cap reached", not an overshoot.
-        assert!(rollup.cap_reached && !rollup.over_budget);
-    }
-
-    #[test]
-    fn repair_round_spend_respects_the_budget_and_cap_floors() {
-        // Ticket 9 metered $0.1307 of a $0.12 API budget.
-        let e = repair_round_spend(0.12, 0.1307, Some(0.50)).unwrap_err();
-        assert!(e.contains("budget floor"), "{e}");
-        // $0.0364 budget with $0.02 spent leaves $0.0164, below the floor.
-        let e = repair_round_spend(0.0364, 0.02, Some(0.50)).unwrap_err();
-        assert!(e.contains("budget floor"), "{e}");
-        let (budget, cap) = repair_round_spend(0.05, 0.02, Some(0.03)).unwrap();
-        assert!((budget.unwrap() - 0.03).abs() < 1e-9);
-        assert!((cap.unwrap() - 0.03).abs() < 1e-9);
-        // The cap floor is checked too.
-        let e = repair_round_spend(0.05, 0.02, Some(0.01)).unwrap_err();
-        assert!(e.contains("cap floor"), "{e}");
-        // An uncapped campaign passes the budget through and returns no cap.
-        let (budget, cap) = repair_round_spend(0.05, 0.02, None).unwrap();
-        assert!((budget.unwrap() - 0.03).abs() < 1e-9);
-        assert!(cap.is_none());
-    }
-
-    #[test]
-    fn cap_reserve_replays_the_haiku_ending_and_a_lite_skip() {
-        // Haiku 5.5 `.31`: $0.9553 spent, largest call $0.0333, cap $0.99.
-        // Only $0.0014 is left after the reserve, below the $0.02 floor, so
-        // the next ticket is not started.
-        assert!(!cap_allows(0.99, 0.9553, 0.0333));
-        let headroom = cap_headroom(0.99, 0.9553, 0.0333).unwrap();
-        assert!(headroom < BUDGET_FLOOR_USD, "{headroom}");
-        // At $0.94 the floor-only rule would start the ticket, but the
-        // observed $0.0333 largest call raises the reserve past the $0.05
-        // left and the ticket is skipped.
-        assert!(cap_allows(0.99, 0.94, 0.0));
-        assert!(!cap_allows(0.99, 0.94, 0.0333));
-        // A full attempt whose largest call is $0.035 raises the reserve for
-        // its lite: $0.04 left < $0.035 + $0.02, so the lite is skipped.
-        assert!(!cap_allows(0.10, 0.06, 0.035));
-        assert!(cap_allows(0.10, 0.06, 0.015));
+        assert!(rollup.over_budget, "the API cap is the stop");
     }
 
     #[tokio::test]
@@ -4806,9 +5203,13 @@ mod tests {
                     outcome(false, &[(1, false)])
                 };
                 if id == 0 {
+                    out.api_cost_usd = 0.01;
                     out.effective_cost_usd = 0.01;
                     out.max_call_usd = 0.001;
                 } else if id == 1 {
+                    // R23 D3: the cap counts API spend, so this fixture must
+                    // set the API bill as well as the largest call.
+                    out.api_cost_usd = 0.10;
                     out.effective_cost_usd = 0.10;
                     // The full attempt's largest call raises the reserve past
                     // the remaining headroom.
@@ -5234,12 +5635,41 @@ mod tests {
     /// P1: the launcher argv carries the phase and chain.
     #[test]
     fn launcher_args_carry_the_phase_and_chain() {
-        let a = launcher_args_with_phase("m", "high", 0.99, 150, Some(2), Some("prev"), None);
+        let a = launcher_args_with_phase(
+            "m",
+            "high",
+            0.99,
+            CELL_WALL_MIN,
+            Some(2),
+            Some("prev"),
+            None,
+        );
         assert!(a.windows(2).any(|w| w[0] == "--phase" && w[1] == "2"));
         assert!(a.windows(2).any(|w| w[0] == "--chain" && w[1] == "prev"));
-        let b = launcher_args("m", "high", 0.99, 150);
+        let b = launcher_args("m", "high", 0.99, CELL_WALL_MIN);
         assert!(!b.iter().any(|s| s == "--phase"));
         assert!(!b.iter().any(|s| s == "--chain"));
+    }
+
+    /// R23 D4: the wall is an eight-hour guard everywhere; the per-ticket
+    /// timeout guard is 120 minutes, and the cell script ships both.
+    #[test]
+    fn r23_d4_defaults_are_eight_hours() {
+        assert_eq!(CELL_WALL_MIN, 480);
+        assert_eq!(TICKET_WALL_GUARD_MIN, 120);
+        let args = launcher_args("m", "high", CELL_BUDGET_USD, CELL_WALL_MIN);
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--wall-min" && w[1] == "480"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--timeout-min" && w[1] == "120"));
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/sql-cell.sh"),
+        )
+        .expect("the cell script");
+        assert!(script.contains("WALL=\"${1:-480}\""), "{script}");
+        assert!(script.contains("--timeout-min 120"), "{script}");
     }
 
     #[test]
@@ -5533,6 +5963,7 @@ mod tests {
             turns: Some(10),
             duration_seconds: Some(60.0),
             status: "failed".into(),
+            stop_reason: None,
             variant: "full".into(),
             tier: 3,
             points: 0.0,

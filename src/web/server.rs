@@ -5631,6 +5631,15 @@ global.fetch = async (url) => {
   const live = el('liveBody').innerHTML;
   const board = el('boardBody').innerHTML;
   const fail = [];
+  // R23-2: the Board launcher defaults the wall to 480 and its resolved
+  // command prints the 120-minute per-ticket guard.
+  const indexPage = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+  if (!indexPage.includes('id="campaignWall" value="480"')) fail.push('campaign-wall-default');
+  if (typeof campaignCommand !== 'function') fail.push('campaign-command-missing');
+  else {
+    const c = campaignCommand('m', 'high', 0.99, 480, null, null, '');
+    if (!c.includes('--wall-min 480') || !c.includes('--timeout-min 120')) fail.push('campaign-command:' + c);
+  }
   if (!run.includes('interrupted')) fail.push('run-interrupted');
   if (!run.includes('class="causeCell"')) fail.push('cause-inner-div');
   if (/td class="hint causeCell"/.test(run)) fail.push('cause-td-clamped');
@@ -5675,7 +5684,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.37',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.38',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
@@ -5734,6 +5743,9 @@ global.fetch = async (url) => {
   if (!ladderLegend().includes('waiting')) fail.push('waiting-legend');
   const ws = ladderSquare({id:14, title:'Waiting', status:'waiting', variant:'', points:0, cause:'needs 11'}, []);
   if (!ws.includes('waiting') || !ws.includes('needs 11')) fail.push('waiting-square:' + ws);
+  // R23 D5: the Board square shows why the agent stopped.
+  const ss = ladderSquare({id:10, title:'Sold', status:'fail', variant:'full', points:0, stop_reason:'dollars', cause:'own stage'}, []);
+  if (!ss.includes('stopped: dollars')) fail.push('stop-reason-square:' + ss);
   const pg = groupCells([ph1, ph2]).find(g => g.career && g.cells.some(c => c.id === 'campaign_ph_p2'));
   if (!pg || !pg.cells.some(c => c.id === 'campaign_ph_p1')) fail.push('running-phase-2-not-in-career');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
@@ -6125,6 +6137,7 @@ global.fetch = async (url) => {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shared.js"), include_str!("shared.js")).unwrap();
         std::fs::write(dir.join("app.js"), scripts[0]).unwrap();
+        std::fs::write(dir.join("index.html"), html).unwrap();
         std::fs::write(dir.join("harness.js"), GUI_SMOKE_HARNESS).unwrap();
         let out = std::process::Command::new("node")
             .arg(dir.join("harness.js"))
