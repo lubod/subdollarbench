@@ -2033,7 +2033,7 @@
           ${liveBar('turns', live.max_turns ? (live.turn || 0) / live.max_turns : null, `${live.turn ?? 0}/${live.max_turns ?? '?'}`, stale || 'var(--primary)')}
           ${liveBar('ticket API $', live.ticket_budget ? (live.ticket_spent || 0) / live.ticket_budget : null, `${fmtMoney(live.ticket_spent || 0)} / ${live.ticket_budget ? fmtMoney(live.ticket_budget) : '\u2014'}`, stale || 'var(--accent)')}
           ${liveBar('wall', wall && wallSecs != null ? wallSecs / (wall * 60) : null, wallSecs != null ? `${fmtDurSec(wallSecs)} / ${wall}m` : '\u2014', stale || 'var(--primary)')}
-          ${liveBar('campaign $', cap ? (spent || 0) / cap : null, `${fmtMoney(spent || 0)} / ${cap ? fmtMoney(cap) : '\u2014'}`, stale || 'var(--success)')}
+          ${liveBar('campaign API $', cap ? (spent || 0) / cap : null, `${fmtMoney(spent || 0)} / ${cap ? fmtMoney(cap) : '\u2014'}`, stale || 'var(--success)')}
         </div>
         <div class="hint">${escapeHtml(liveSummary(false))}</div>
         ${(() => {
@@ -2239,7 +2239,8 @@
         parts.push(`ticket API $${fmtMoney(live.ticket_spent)}${live.ticket_budget ? ' / $' + fmtMoney(live.ticket_budget) + ' budget' : ''}`);
       }
       const spent = live.campaign_spent != null ? live.campaign_spent : roll.total_cost_usd;
-      if (spent != null) parts.push(`campaign $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) + ' cap (effective)' : ' (effective)'}`);
+      if (live.dollars_left != null) parts.push(`dollars left $${fmtMoney(live.dollars_left)}`);
+      if (spent != null) parts.push(`campaign API $${fmtMoney(spent)}${cap ? ' / $' + fmtMoney(cap) + ' cap' : ''}`);
       const frac = live.summary || (live.check_total ? `${live.check_pass || 0}/${live.check_total}` : '');
       if (frac || live.first_fail) {
         const tail = live.first_fail || 'all checks passed';
@@ -2285,6 +2286,7 @@
       const parts = [`${entry.id} ${entry.title}`, st.label];
       if (tries) parts.push(tries);
       if (cost) parts.push(`$${fmtMoney(cost)}`);
+      if (entry.stop_reason) parts.push(`stopped: ${entry.stop_reason}`);
       if (entry.cause) parts.push(entry.cause);
       const pulse = entry.status === 'running' ? ' ladderRun' : '';
       return `<span class="ladderSq${pulse}" title="${escapeHtml(parts.join(' \u00b7 '))}" style="background:${bg};${look}">${entry.id}</span>`;

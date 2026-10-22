@@ -361,9 +361,8 @@ impl OpenCodeRunner {
 1. **TOOL CALL REQUIREMENT**: You have tools (`write`, `bash`, `edit`, `read`). You MUST use the `write` tool to create every file directly in /workspace. NEVER output code in conversational text without calling `write`.
 2. **RAW TCP SOCKETS ONLY (CRITICAL)**:
 {}
-3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing. Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.
-4. **CONCISE REASONING**: Keep internal thoughts brief (< 150 words). Immediately invoke tools to write code and test it.
-5. **REASONING EFFORT REQUESTED**: {} (best-effort: honored by some models, ignored by others).
+3. **ENTRYPOINT REQUIRED**: You must create a working `Dockerfile` or executable `./start.sh` listening on port {}. Test your server with `{}` using the `bash` tool before finishing.
+4. **REASONING EFFORT REQUESTED**: {} (best-effort: honored by some models, ignored by others).
 "#,
             snippet, port, test, effort
         );
@@ -449,8 +448,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             crate::config::template_ports_for_worker(raw_guidance, base_port, worker);
         let effort_note = format!("reasoning effort requested: {}", effort_level);
         let effective_prompt = format!(
-            "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.
-   Name your binary neutrally (`server`, `sdb-redis`): NEVER `redis-server`, `nginx`, `valkey`, etc. — the anti-cheat scanner disqualifies those names even for binaries you compiled yourself.\n4. CONCISE REASONING: Keep internal thinking brief (< 150 words). Do not spend output tokens on exhaustive planning in thought blocks. Immediately invoke tools (`write`, `bash`, `read`) on turn 1 to start creating the server and verifying it.\n5. {}.\n==================================================",
+            "{}\n\n==================================================\nCRITICAL DIRECTIVES FOR AUTONOMOUS AGENT EXECUTION:\n1. TOOL CALL REQUIREMENT: You are an autonomous AI coding agent with filesystem tools (`write`, `bash`, `read`, `edit`). You MUST execute your tools immediately to create your implementation files directly in /workspace. DO NOT merely explain the plan in conversational text without calling `write`.\n2. RAW TCP SOCKETS ONLY (MANDATORY):\n{}\n3. ENTRYPOINT: Create a working executable `./start.sh` or `Dockerfile` listening on port {}. Test your server with `{}` using `bash` before finishing.\n4. {}.\n==================================================",
             prompt, guidance_snippet, target_port, test_cmd, effort_note
         );
         Self::write_agents_md(
@@ -1238,6 +1236,12 @@ mod tests {
                     "worker port {off} missing (task {task}, worker {worker})"
                 );
                 assert_agents_ports_clean(&content, base, &task.to_string(), worker);
+                for banned in ["150 words", "sdb-redis", "redis-server"] {
+                    assert!(
+                        !content.contains(banned),
+                        "prompt still contains {banned:?} (task {task})"
+                    );
+                }
                 let _ = std::fs::remove_dir_all(&dir);
             }
         }
@@ -2007,6 +2011,7 @@ exit 1
                 .downcast_ref::<OmpExecutionError>()
                 .expect("OmpExecutionError");
             assert!(exec.message.contains("timeout reached"), "{}", exec.message);
+            assert_eq!(exec.partial_stats.stop_reason.as_deref(), Some("wall"));
             passed += 1;
         }
 
@@ -2034,6 +2039,7 @@ exit 1
             // Round-14 N4: the turn killed at the cap is not counted, so an
             // agent stopped at its cap records exactly the cap.
             assert_eq!(st.steps_taken, 1);
+            assert_eq!(st.stop_reason.as_deref(), Some("turns"));
             passed += 1;
         }
 
@@ -2043,6 +2049,7 @@ exit 1
                 run_oc_scenario("budget_limit", &root, covtest_limits(10, 0.001, 10), None);
             let st = res.expect("budget stop is a normal conclusion");
             assert_eq!(st.total_tokens, 20);
+            assert_eq!(st.stop_reason.as_deref(), Some("dollars"));
             passed += 1;
         }
 

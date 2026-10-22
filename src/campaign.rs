@@ -1859,6 +1859,9 @@ pub struct LadderEntry {
     pub variant: String,
     #[serde(default)]
     pub points: f64,
+    /// R23 D5: why the agent ended (dollars/turns/wall/ready/crash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// One-line cause for the Run view; None when the ticket passed.
     #[serde(default)]
     pub cause: Option<String>,
@@ -2146,6 +2149,7 @@ fn ladder_inner(
                 .to_string(),
                 variant: rec.variant.clone(),
                 points: passed_full.map(|r| r.points).unwrap_or(rec.points),
+                stop_reason: rec.stop_reason.clone(),
                 cause: None,
             }
         } else if let Some(rec) = records.last() {
@@ -2160,6 +2164,7 @@ fn ladder_inner(
                 status: status.to_string(),
                 variant: rec.variant.clone(),
                 points: 0.0,
+                stop_reason: rec.stop_reason.clone(),
                 cause: rec
                     .failure
                     .as_ref()
@@ -2175,6 +2180,7 @@ fn ladder_inner(
                 status: "running".to_string(),
                 variant: String::new(),
                 points: 0.0,
+                stop_reason: None,
                 cause: None,
             }
         } else {
@@ -2217,6 +2223,7 @@ fn ladder_inner(
                 status: status.to_string(),
                 variant: String::new(),
                 points: 0.0,
+                stop_reason: None,
                 cause: Some(cause),
             }
         };
@@ -4584,6 +4591,22 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// R23 D5: the Board ladder entry carries the stop reason from the
+    /// stage record.
+    #[test]
+    fn r23_d5_ladder_carries_the_stop_reason() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut rollup = chain_rollup(1, false);
+        rollup.career = None;
+        let mut rec = failed_record(0, "Genesis", "own stage: boom", "");
+        rec.stop_reason = Some("dollars".to_string());
+        rollup.stages = vec![rec];
+        let e = ladder(&lc.spec, &rollup, None);
+        let e0 = e.iter().find(|x| x.id == 0).expect("ticket 0");
+        assert_eq!(e0.status, "fail");
+        assert_eq!(e0.stop_reason.as_deref(), Some("dollars"));
     }
 
     #[test]

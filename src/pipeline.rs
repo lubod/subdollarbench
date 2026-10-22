@@ -1311,6 +1311,21 @@ async fn run_ha_stage(
     pass()
 }
 
+/// R23 D5: the ticket prompt's dollar line. Turns are never the limit;
+/// the session should stop on completion or when this API budget is spent.
+pub fn session_budget_line(budget_usd: f64) -> String {
+    if budget_usd.is_finite() && budget_usd > 0.0 {
+        format!(
+            "## Session budget
+This session may spend at most ${budget_usd:.2} in provider API dollars at list price. Turns are not the limit; stop when the work is complete or the budget is exhausted."
+        )
+    } else {
+        "## Session budget
+Turns are not the limit; stop when the work is complete."
+            .to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct BenchmarkConfig {
     pub model: String,
@@ -5050,9 +5065,10 @@ impl BenchmarkPipeline {
             Some(note) => format!("{note}\n\n{prompt_content}"),
             None => prompt_content,
         };
+        let budget_note = session_budget_line(config.budget_usd);
         let prompt_content = format!(
-            "{}\n\n### READY FOR VERIFICATION SIGNAL\nWhen you believe your implementation is complete and properly running on the requested port, signal that you are ready for evaluation by creating `/workspace/READY` (for example, run `touch READY` or `touch /workspace/READY`), or simply conclude your session. The benchmark framework will immediately detect this and run the automated verification suite!\n",
-            prompt_content
+            "{}\n\n{}\n\n### READY FOR VERIFICATION SIGNAL\nWhen you believe your implementation is complete and properly running on the requested port, signal that you are ready for evaluation by creating `/workspace/READY` (for example, run `touch READY` or `touch /workspace/READY`), or simply conclude your session. The benchmark framework will immediately detect this and run the automated verification suite!\n",
+            prompt_content, budget_note
         );
 
         // Clean any stale signal file from previous runs
@@ -8231,6 +8247,17 @@ main()
         assert!(perf_gate_verdict(None, None).0);
         // Degenerate baseline: skipped, never a division by zero.
         assert!(perf_gate_verdict(Some(0.0), Some(1.0)).0);
+    }
+
+    /// R23 D5: the ticket prompt carries the dollars and says turns are
+    /// not the limit.
+    #[test]
+    fn r23_d5_session_budget_line_has_the_dollars_and_no_turn_limit() {
+        let line = session_budget_line(0.25);
+        assert!(line.contains("$0.25"), "{line}");
+        assert!(line.contains("Turns are not the limit"), "{line}");
+        let uncapped = session_budget_line(0.0);
+        assert!(uncapped.contains("Turns are not the limit"), "{uncapped}");
     }
 
     #[test]

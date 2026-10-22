@@ -124,6 +124,9 @@ fn write_status(
                 v["live"] = serde_json::json!({});
             }
             v["live"]["campaign_spent"] = serde_json::json!(r.total_cost_usd);
+            // R23 D5: the live status shows the remaining dollars.
+            let cap = v["live"]["campaign_budget"].as_f64().unwrap_or(0.0);
+            v["live"]["dollars_left"] = serde_json::json!((cap - r.total_cost_usd).max(0.0));
         }
     });
 }
@@ -522,6 +525,7 @@ pub async fn run(
             "effort": effort,
             "campaign_budget": budget_usd,
             "campaign_spent": 0.0,
+            "dollars_left": budget_usd,
             "career_phase": phase,
             "chain_from": chain,
             "refork": refork_info,
@@ -988,6 +992,8 @@ async fn run_one_stage(
         let harness_l = v["live"]["harness"].clone();
         let effort_l = v["live"]["effort"].clone();
         let budget_l = v["live"]["campaign_budget"].clone();
+        let spent_l = v["live"]["campaign_spent"].as_f64().unwrap_or(0.0);
+        let dollars_left = (budget_l.as_f64().unwrap_or(0.0) - spent_l).max(0.0);
         v["live"] = serde_json::json!({
             "campaign": campaign,
             "model": model_l,
@@ -995,6 +1001,7 @@ async fn run_one_stage(
             "effort": effort_l,
             "campaign_budget": budget_l,
             "campaign_spent": v["live"]["campaign_spent"].clone(),
+            "dollars_left": dollars_left,
             "ticket": stage.id,
             "title": stage.title,
             "type": stage.kind,

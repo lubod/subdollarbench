@@ -5734,6 +5734,9 @@ global.fetch = async (url) => {
   if (!ladderLegend().includes('waiting')) fail.push('waiting-legend');
   const ws = ladderSquare({id:14, title:'Waiting', status:'waiting', variant:'', points:0, cause:'needs 11'}, []);
   if (!ws.includes('waiting') || !ws.includes('needs 11')) fail.push('waiting-square:' + ws);
+  // R23 D5: the Board square shows why the agent stopped.
+  const ss = ladderSquare({id:10, title:'Sold', status:'fail', variant:'full', points:0, stop_reason:'dollars', cause:'own stage'}, []);
+  if (!ss.includes('stopped: dollars')) fail.push('stop-reason-square:' + ss);
   const pg = groupCells([ph1, ph2]).find(g => g.career && g.cells.some(c => c.id === 'campaign_ph_p2'));
   if (!pg || !pg.cells.some(c => c.id === 'campaign_ph_p1')) fail.push('running-phase-2-not-in-career');
   if (fail.length) { console.log('RENDER CHECKS FAILED:', fail.join(',')); process.exit(1); }
