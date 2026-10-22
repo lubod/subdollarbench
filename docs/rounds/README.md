@@ -8,7 +8,7 @@ from `TEMPLATE.md`.
 | Round | Theme | Status |
 |---|---|---|
 | [22](22.md) | Findings from the Haiku career: crash grading, timeout feedback, `waiting` status | merged `91bcb24` |
-| [23](23.md) | "What does a dollar buy": dollars, not turns, limit a session | blocked (R23-1, R23-2) |
+| [23](23.md) | "What does a dollar buy": dollars, not turns, limit a session | merged `bd7477f` |
 | [24](24.md) | The rules fingerprint covers sdb-sql (freeze prerequisite) | draft |
 | [25](25.md) | Display follow-ups from round 22 (crash label, `waiting`) | draft |
 
