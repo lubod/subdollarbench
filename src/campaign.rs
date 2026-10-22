@@ -1926,9 +1926,9 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
     }
 }
 
-/// R23 D3: a paid campaign launch must have a real list price. The live
-/// OpenRouter catalog is tried first, then the offline table; eval-only
-/// runs do not spend and are exempt. `_at` is the offline-testable form.
+/// R23 D3/R24: a paid campaign launch must have a price in the committed
+/// snapshot (`src/cost/model_prices.json`); eval-only runs do not spend and
+/// are exempt. `_at` is the offline-testable form; the URL is ignored.
 pub async fn require_model_list_price_at(
     model: &str,
     url: &str,
@@ -1944,7 +1944,7 @@ pub async fn require_model_list_price_at(
         Ok(())
     } else {
         Err(format!(
-            "model {model} has no list price in the OpenRouter catalog or offline table; refusing a paid campaign launch"
+            "model {model} has no entry in the price snapshot src/cost/model_prices.json; add the model's catalog id there, then retry the paid campaign launch"
         ))
     }
 }
@@ -4686,6 +4686,23 @@ mod tests {
             require_model_list_price_at("made-up/unknown-model", dead, true)
                 .await
                 .is_ok()
+        );
+    }
+
+    /// R24-7 acceptance: the paid-launch refusal names the real source.
+    #[tokio::test]
+    async fn r24_7_refusal_names_the_price_snapshot() {
+        let dead = "http://127.0.0.1:9/models";
+        let err = require_model_list_price_at("made-up/unknown-model", dead, false)
+            .await
+            .expect_err("unknown model must be refused");
+        assert!(
+            err.contains("src/cost/model_prices.json"),
+            "refusal does not name the snapshot: {err}"
+        );
+        assert!(
+            !err.contains("OpenRouter catalog or offline table"),
+            "stale price source: {err}"
         );
     }
 
