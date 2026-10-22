@@ -63,6 +63,9 @@ pub struct OmpSessionStats {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
+    /// R24 R3: new context written into the prompt cache; billed at
+    /// cache_write_per_million, never at $0.
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub steps_taken: u32,
     /// Live-metered provider spend for this attempt (sum of every call).
@@ -1234,13 +1237,20 @@ impl OmpRunner {
                                             .and_then(|x| x.as_u64())
                                     })
                                     .unwrap_or(0);
-                                if tin + tout + tcached == 0 {
+                                let tcwrite = usage
+                                    .get("cacheWrite")
+                                    .or_else(|| usage.get("cache_write_input_tokens"))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                if tin + tout + tcached + tcwrite == 0 {
                                     None
                                 } else {
                                     let pricing = crate::cost::ModelPricing::for_model(&ctx.model);
                                     Some(
                                         pricing
-                                            .compute_cost_with_cache(tin, tcached, tout)
+                                            .compute_cost_with_cache_and_write(
+                                                tin, tcached, tout, tcwrite,
+                                            )
                                             .total_cost_usd,
                                     )
                                 }
@@ -1900,6 +1910,7 @@ impl OmpRunner {
         let mut prompt_tokens = 0u64;
         let mut completion_tokens = 0u64;
         let mut cached_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut steps = 0u32;
         let mut cost_usd = 0.0f64;
         let mut max_call_usd = 0.0f64;
@@ -1951,6 +1962,13 @@ impl OmpRunner {
                             cached_tokens += c;
                         }
                     }
+                    if let Some(cw) = usage
+                        .get("cacheWrite")
+                        .or_else(|| usage.get("cache_write_input_tokens"))
+                        .and_then(|x| x.as_u64())
+                    {
+                        cache_write_tokens += cw;
+                    }
                     if let Some(c) = usage
                         .get("cost")
                         .and_then(|c| c.get("total"))
@@ -1967,7 +1985,8 @@ impl OmpRunner {
             prompt_tokens,
             completion_tokens,
             cached_tokens,
-            total_tokens: prompt_tokens + cached_tokens + completion_tokens,
+            cache_write_tokens,
+            total_tokens: prompt_tokens + cached_tokens + cache_write_tokens + completion_tokens,
             steps_taken: steps,
             cost_usd,
             max_call_usd,

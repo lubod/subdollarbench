@@ -5152,6 +5152,7 @@ impl BenchmarkPipeline {
                             acc.prompt_tokens += stats.prompt_tokens;
                             acc.cached_tokens += stats.cached_tokens;
                             acc.completion_tokens += stats.completion_tokens;
+                            acc.cache_write_tokens += stats.cache_write_tokens;
                             acc.total_tokens += stats.total_tokens;
                             acc.steps_taken += stats.steps_taken;
                             acc.cost_usd += stats.cost_usd;
@@ -5172,6 +5173,7 @@ impl BenchmarkPipeline {
                             acc.prompt_tokens += end.partial.prompt_tokens;
                             acc.cached_tokens += end.partial.cached_tokens;
                             acc.completion_tokens += end.partial.completion_tokens;
+                            acc.cache_write_tokens += end.partial.cache_write_tokens;
                             acc.total_tokens += end.partial.total_tokens;
                             acc.steps_taken += end.partial.steps_taken;
                             acc.cost_usd += end.partial.cost_usd;
@@ -5917,11 +5919,15 @@ impl BenchmarkPipeline {
         let duration_seconds = start_time.elapsed().as_secs_f64();
         let total_run_tokens = omp_stats
             .total_tokens
-            .max(prompt_tokens + cached_tokens + completion_tokens);
+            .max(prompt_tokens + cached_tokens + completion_tokens + omp_stats.cache_write_tokens);
 
         let pricing = ModelPricing::for_model_async(&config.model).await;
-        let breakdown =
-            pricing.compute_cost_with_cache(prompt_tokens, cached_tokens, completion_tokens);
+        let breakdown = pricing.compute_cost_with_cache_and_write(
+            prompt_tokens,
+            cached_tokens,
+            completion_tokens,
+            omp_stats.cache_write_tokens,
+        );
 
         let mut live_spend_delta = None;
         if let (Some(key), Some(init)) = (&config.api_key, initial_spend) {

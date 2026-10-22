@@ -17,11 +17,14 @@ use std::path::{Path, PathBuf};
 ///   candidate budget/directive prompt files and the committed price
 ///   snapshot. The retired task inputs stay in the shared stamp: they
 ///   remain runnable through the generic single-shot path and their
-///   verifier/cost code is shared. Cost is priced from the snapshot at
-///   list price; the live key-usage delta is recorded for audit only.
-///   Score impact: none by construction, but `.38` and earlier costs used
-///   the live catalog/key delta and are not comparable with `.39` on
-///   cost-sensitive tickets.
+///   verifier/cost code is shared. The snapshot uses exact catalog ids
+///   after stripping `openrouter/`; a model variant needs its own entry,
+///   and cache-write tokens are billed at the catalog write rate (the
+///   prompt rate when the catalog has none). Cost is priced from the
+///   snapshot at list price; the live key-usage delta is recorded for
+///   audit only. Score impact: none by construction, but `.38` and earlier
+///   costs used the live catalog/key delta and are not comparable with
+///   `.39` on cost-sensitive tickets.
 /// - `2026-10-19.38`: round-23 "what does a dollar buy" — D1: dollars are
 ///   the session limit; every sdb-sql stage and lite uses a 200-turn
 ///   runaway guard. D2: a ticket's API budget is the remaining phase

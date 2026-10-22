@@ -14,6 +14,9 @@ pub struct ModelPricing {
     pub prompt_per_million: f64,
     pub completion_per_million: f64,
     pub cache_read_per_million: f64,
+    /// R24 R3: new context written into the prompt cache. Catalog
+    /// `input_cache_write`, or the prompt rate when the catalog has none.
+    pub cache_write_per_million: f64,
 }
 
 /// Equivalent compute runtime rate in USD per second ($0.00003/sec ~= $0.108/hour).
@@ -258,6 +261,7 @@ impl ModelPricing {
             prompt_per_million,
             completion_per_million,
             cache_read_per_million,
+            cache_write_per_million: prompt_per_million,
         }
     }
 
@@ -266,6 +270,7 @@ impl ModelPricing {
             prompt_per_million: prompt_per_m,
             completion_per_million: completion_per_m,
             cache_read_per_million: prompt_per_m * 0.25,
+            cache_write_per_million: prompt_per_m,
         }
     }
 
@@ -274,11 +279,13 @@ impl ModelPricing {
     /// this file is edited and the rules bump.
     pub fn snapshot_rates(model_name: &str) -> Option<Self> {
         let m = model_name.to_lowercase();
+        let m = m.strip_prefix("openrouter/").unwrap_or(&m);
         snapshot_entries().iter().find_map(|e| {
-            m.contains(&e.match_name.to_lowercase()).then_some(Self {
+            e.id.eq_ignore_ascii_case(m).then_some(Self {
                 prompt_per_million: e.prompt_per_million,
                 completion_per_million: e.completion_per_million,
                 cache_read_per_million: e.cache_read_per_million,
+                cache_write_per_million: e.cache_write_per_million,
             })
         })
     }
@@ -288,6 +295,7 @@ impl ModelPricing {
             prompt_per_million: 0.20,
             completion_per_million: 0.60,
             cache_read_per_million: 0.05,
+            cache_write_per_million: 0.20,
         }
     }
 
@@ -303,22 +311,33 @@ impl ModelPricing {
         cached_tokens: u64,
         completion_tokens: u64,
     ) -> CostBreakdown {
+        self.compute_cost_with_cache_and_write(prompt_tokens, cached_tokens, completion_tokens, 0)
+    }
+
+    /// R24 R3: cache-write tokens are new context and must be billed at the
+    /// cache-write rate, never at $0.
+    pub fn compute_cost_with_cache_and_write(
+        &self,
+        prompt_tokens: u64,
+        cached_tokens: u64,
+        completion_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> CostBreakdown {
         let fresh_cost = (prompt_tokens as f64 / 1_000_000.0) * self.prompt_per_million;
         let cached_cost = (cached_tokens as f64 / 1_000_000.0) * self.cache_read_per_million;
+        let write_cost = (cache_write_tokens as f64 / 1_000_000.0) * self.cache_write_per_million;
         let comp_cost = (completion_tokens as f64 / 1_000_000.0) * self.completion_per_million;
-
-        let total_cost_usd = fresh_cost + cached_cost + comp_cost;
-        let un_cached_cost_usd = ((prompt_tokens + cached_tokens) as f64 / 1_000_000.0)
+        let total_cost_usd = fresh_cost + cached_cost + write_cost + comp_cost;
+        let un_cached_cost_usd = ((prompt_tokens + cached_tokens + cache_write_tokens) as f64
+            / 1_000_000.0)
             * self.prompt_per_million
             + comp_cost;
-
         let savings_usd = (un_cached_cost_usd - total_cost_usd).max(0.0);
         let savings_percent = if un_cached_cost_usd > 0.0 {
             (savings_usd / un_cached_cost_usd) * 100.0
         } else {
             0.0
         };
-
         CostBreakdown {
             total_cost_usd,
             un_cached_cost_usd,
@@ -401,11 +420,11 @@ impl ModelPricing {
 
 #[derive(Debug, Deserialize)]
 struct PriceEntry {
-    #[serde(rename = "match")]
-    match_name: String,
+    id: String,
     prompt_per_million: f64,
     completion_per_million: f64,
     cache_read_per_million: f64,
+    cache_write_per_million: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -521,7 +540,7 @@ mod tests {
         assert_eq!(haiku.prompt_per_million, 0.80);
         assert_eq!(haiku.completion_per_million, 4.00);
 
-        let mistral = ModelPricing::for_model("mistralai/mistral-small");
+        let mistral = ModelPricing::for_model("mistralai/mistral-small-2603");
         assert_eq!(mistral.prompt_per_million, 0.15);
         assert_eq!(mistral.completion_per_million, 0.60);
 
@@ -533,6 +552,64 @@ mod tests {
         let unknown = ModelPricing::for_model("some-random-unknown-model");
         assert_eq!(unknown.prompt_per_million, 0.20);
         assert_eq!(unknown.completion_per_million, 0.60);
+    }
+
+    /// R24-1: the operator's test/calibration models must be launchable.
+    #[test]
+    fn r24_r1_every_test_or_calibration_model_has_a_snapshot_price() {
+        for model in [
+            "openrouter/deepseek/deepseek-v4.1-flash-1017",
+            "openrouter/anthropic/claude-haiku-5.5",
+        ] {
+            assert!(
+                ModelPricing::list_price_for_model(model).is_some(),
+                "missing snapshot price for {model}"
+            );
+        }
+    }
+
+    /// R24-1: the test model named in the roadmap must be launchable.
+    #[test]
+    fn r24_r1_the_todo_test_model_has_a_snapshot_price() {
+        let todo = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("TODO_CAMPAIGNS.md"),
+        )
+        .expect("TODO_CAMPAIGNS.md");
+        let model = todo
+            .split("the test model is")
+            .nth(1)
+            .and_then(|rest| rest.split('`').nth(1))
+            .expect("a backticked test model after 'the test model is'");
+        assert!(
+            ModelPricing::list_price_for_model(model).is_some(),
+            "the roadmap test model {model} has no snapshot price"
+        );
+    }
+
+    /// R24-2: catalog ids are exact after stripping the openrouter/ prefix;
+    /// variants do not inherit a base model's price.
+    #[test]
+    fn r24_r2_snapshot_ids_are_exact_not_substrings() {
+        assert!(ModelPricing::list_price_for_model("deepseek/deepseek-chat").is_some());
+        assert!(ModelPricing::list_price_for_model("openrouter/deepseek/deepseek-chat").is_some());
+        assert!(
+            ModelPricing::list_price_for_model("deepseek/deepseek-chat-v3.1").is_none(),
+            "a variant needs its own snapshot entry"
+        );
+        assert!(ModelPricing::list_price_for_model("deepseek/deepseek-chat:free").is_none());
+        assert!(
+            ModelPricing::list_price_for_model("mistralai/mistral-small-3.2-24b-instruct")
+                .is_none()
+        );
+    }
+
+    /// R24-3: cache-write tokens are new context and must cost something.
+    #[test]
+    fn r24_r3_cache_write_tokens_cost_more_than_zero() {
+        let p = ModelPricing::for_model("openrouter/anthropic/claude-haiku-5.5");
+        let b = p.compute_cost_with_cache_and_write(0, 0, 0, 1_000_000);
+        assert!(b.total_cost_usd > 0.0);
+        assert!((b.total_cost_usd - p.cache_write_per_million).abs() < 1e-12);
     }
 
     #[test]
@@ -593,7 +670,7 @@ mod tests {
             ("meta-llama/llama-3.3-70b-instruct", 0.10, 0.32, 0.025),
             ("openai/gpt-4o-mini", 0.15, 0.60, 0.075),
             ("anthropic/claude-3-haiku", 0.80, 4.00, 0.08),
-            ("mistralai/mistral-small", 0.15, 0.60, 0.015),
+            ("mistralai/mistral-small-2603", 0.15, 0.60, 0.015),
         ];
         for (model, pr, co, ca) in cases {
             let p = ModelPricing::for_model(model);

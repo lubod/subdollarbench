@@ -52,15 +52,21 @@ impl OpenCodeRunner {
             .and_then(|c| c.get("read"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0);
-        // R24 R2: price the event from the committed snapshot, never from
-        // the provider's own `part.cost` (that is an actual charge, not list).
+        let cache_write = tokens
+            .get("cache")
+            .and_then(|c| c.get("write"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        // R24 R2/R3: price the event from the committed snapshot, including
+        // cache-write context; never from the provider's own `part.cost`.
         let cost = crate::cost::ModelPricing::for_model(model)
-            .compute_cost_with_cache(input, cache_read, output + reasoning)
+            .compute_cost_with_cache_and_write(input, cache_read, output + reasoning, cache_write)
             .total_cost_usd;
         stats.prompt_tokens += input;
         stats.completion_tokens += output + reasoning;
         stats.cached_tokens += cache_read;
-        stats.total_tokens += input + output + reasoning;
+        stats.cache_write_tokens += cache_write;
+        stats.total_tokens += input + output + reasoning + cache_write;
         stats.cost_usd += cost;
         stats.max_call_usd = stats.max_call_usd.max(cost);
         cost
@@ -1501,6 +1507,16 @@ mod tests {
         // No rate-limit signal: a genuinely empty session is the
         // cutoff-recovery arm's case, not billing.
         assert!(!OpenCodeRunner::is_throttled_noop(false, 0, 0));
+    }
+
+    /// R24-3: an event with only cache-write tokens is priced, not free.
+    #[test]
+    fn r24_r3_a_cache_write_only_event_costs_more_than_zero() {
+        let mut st = OmpSessionStats::default();
+        let tokens = ev(r#"{"cache":{"write":1000}}"#);
+        let cost = OpenCodeRunner::add_step(&mut st, &tokens, "anthropic/claude-haiku-5.5");
+        assert!(cost > 0.0, "cache-write-only event cost {cost}");
+        assert_eq!(st.cache_write_tokens, 1000);
     }
 
     #[test]
