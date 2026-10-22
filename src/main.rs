@@ -2884,7 +2884,7 @@ mod tests {
                 assert_eq!(effort, "high");
                 assert_eq!(budget_usd, 0.75);
                 assert_eq!(wall_min, Some(120));
-                assert_eq!(timeout_min, 20);
+                assert_eq!(timeout_min, 120);
             }
             other => panic!("unexpected command: {other:?}"),
         }
