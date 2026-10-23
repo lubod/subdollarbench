@@ -166,10 +166,13 @@ inside `.git`, so it is shared by every worktree and never committed.
 
 - **In-between commits:** fast, or none.
 - **The `ready` commit:**
-  - **Full** when the round changes a graded path since master:
-    `src/verifier`, `src/pipeline.rs`, `src/sandbox`, `src/campaign.rs`,
-    `src/scoring.rs`, `src/cost`, `src/prompts`, `src/report/rules.rs`
-    or `campaigns/`. A rules bump always lands in one of these.
+  - **Full** when the round changes a graded path since master. The
+    graded paths are listed once, in `scripts/graded-paths.txt` (the
+    verifier, the pipeline, the sandbox, scoring, cost, prompts, the
+    rules stamp, `campaigns/`, `extensions/`, `build.rs`, `Cargo.lock`).
+    `gate.sh` uses the list for its `scope:` line and
+    `scripts/flake-bar.sh` for its record key. A rules bump always lands
+    in one of these paths.
   - **Fast** otherwise (GUI, docs, tooling, other report code).
   - The record's `scope:` line says which one applies, so the
     implementer doesn't have to work it out.
