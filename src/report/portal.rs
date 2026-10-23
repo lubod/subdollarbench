@@ -1438,8 +1438,13 @@ impl PortalExporter {
                 }
                 // Parse once for the shared key + ladder; a merge with the
                 // spec failures simply drops the strip.
-                let parsed: Option<crate::campaign::CampaignRollup> =
+                let mut parsed: Option<crate::campaign::CampaignRollup> =
                     serde_json::from_value(rollup.clone()).ok();
+                // R22-5: the portal export gets the same crash relabel as
+                // the API list and detail, independent of recorded rounds.
+                if let Some(r) = parsed.as_mut() {
+                    crate::campaign::relabel_graded_crashes(r, &e.path());
+                }
                 // Q5: phase cells stay off the public board until careers
                 // have their own ranked row; the console can show them.
                 if rollup.get("phase").and_then(|p| p.as_u64()).is_some() {

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use subdollarbench::campaign::{
     self, CampaignRollup, CampaignRunOptions, CampaignStageConfig, LoadedCampaign, RoundRecord,
-    StageOutcome, StageSpec,
+    StageOutcome, StageRecord, StageSpec,
 };
 use subdollarbench::config::{Harness, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
@@ -1243,17 +1243,34 @@ fn read_baseline_rps(cdir: &Path) -> Option<f64> {
     v.get("throughput_req_sec").and_then(|t| t.as_f64())
 }
 
+/// R23-8: the per-ticket summary prints API dollars first (the budget and
+/// cap unit); the compute-inclusive effective cost is the secondary figure.
+fn stage_summary_line(s: &StageRecord) -> String {
+    let mark = if s.passed {
+        "PASS".green().to_string()
+    } else {
+        match s.status.as_str() {
+            "fault" => "FAULT".yellow().to_string(),
+            _ => "FAIL".red().to_string(),
+        }
+    };
+    format!(
+        "s{:<2} [{}] {:32} {} {}/{} (${:.4} API, ${:.4} effective, {} turns)",
+        s.id,
+        s.kind,
+        s.title,
+        mark,
+        s.passed_stages,
+        s.total_stages,
+        s.api_cost_usd,
+        s.effective_cost_usd,
+        s.turns.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
+    )
+}
+
 fn print_rollup(r: &CampaignRollup) {
     println!("\n{}", "=== CAMPAIGN ROLLUP ===".bold());
     for s in &r.stages {
-        let mark = if s.passed {
-            "PASS".green().to_string()
-        } else {
-            match s.status.as_str() {
-                "fault" => "FAULT".yellow().to_string(),
-                _ => "FAIL".red().to_string(),
-            }
-        };
         let reg = if s.regressed.is_empty() {
             String::new()
         } else {
@@ -1265,15 +1282,8 @@ fn print_rollup(r: &CampaignRollup) {
             .to_string()
         };
         println!(
-            "  s{:<2} [{}] {:32} {} {}/{} (${:.4}, {} turns){}{}",
-            s.id,
-            s.kind,
-            s.title,
-            mark,
-            s.passed_stages,
-            s.total_stages,
-            s.effective_cost_usd,
-            s.turns.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
+            "  {}{}{}",
+            stage_summary_line(s),
             reg,
             s.git_commit
                 .as_ref()
@@ -1321,6 +1331,18 @@ mod tests {
         dir
     }
 
+    /// R25 R23-8 acceptance: the summary shows API dollars with effective
+    /// cost as the secondary figure.
+    #[test]
+    fn r23_8_summary_line_shows_api_dollars() {
+        let mut rec = stage_record(0, true, "passed");
+        rec.api_cost_usd = 0.1174;
+        rec.effective_cost_usd = 0.1374;
+        let line = stage_summary_line(&rec);
+        assert!(line.contains("$0.1174 API"), "{line}");
+        assert!(line.contains("$0.1374 effective"), "{line}");
+    }
+
     fn stage_record(id: u32, passed: bool, status: &str) -> StageRecord {
         StageRecord {
             id,
@@ -1332,6 +1354,7 @@ mod tests {
             total_stages: 1,
             regressed: Vec::new(),
             regression_severity: 0,
+            api_cost_usd: 0.01,
             effective_cost_usd: 0.01,
             turns: None,
             duration_seconds: None,

@@ -1592,8 +1592,10 @@ fn cell_ladder_state(campaign_id: &str) -> Option<crate::campaign::LadderState> 
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-/// The ladder, stop reason, sort key, live stub and phase table of one
-/// Board cell.
+/// The ladder, stop reason, sort key, rollup to write back and phase table
+/// of one Board cell. The rollup is written back when it was parsed (so
+/// display-only corrections reach the list) or for a live running cell's
+/// stub.
 type BoardView = (
     Vec<crate::campaign::LadderEntry>,
     String,
@@ -1611,8 +1613,15 @@ fn campaign_board_view(
         .get("rollup")
         .filter(|r| !r.is_null())
         .and_then(|r| serde_json::from_value(r.clone()).ok());
-    let live = parsed.is_none();
+    let had_rollup = parsed.is_some();
+    let live = !had_rollup;
     let mut rollup = parsed.unwrap_or_else(|| crate::campaign::live_rollup_stub(campaign_id, v));
+    // R22-5: the Board list applies the same crash relabel as the detail
+    // endpoint, including stages that already have recorded rounds.
+    crate::campaign::relabel_graded_crashes(
+        &mut rollup,
+        &RunArchiver::resolve_runs_dir().join(campaign_id),
+    );
     let spec = specs
         .entry(rollup.name.clone())
         .or_insert_with(|| {
@@ -1653,8 +1662,14 @@ fn campaign_board_view(
     // the ladder and the key were built from; without it the cell vanished
     // from the Board for the whole first ticket. A stalled or dead cell
     // without a rollup keeps none: the stub's current rules would misfile it.
-    let stub = (live && running).then_some(rollup);
-    Some((ladder, stop, key, stub, crate::campaign::phases_json(&spec)))
+    let rollup_out = (had_rollup || running).then_some(rollup);
+    Some((
+        ladder,
+        stop,
+        key,
+        rollup_out,
+        crate::campaign::phases_json(&spec),
+    ))
 }
 
 pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
@@ -1712,15 +1727,15 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 .unwrap_or(serde_json::Value::Null);
             // The full ladder (attempted and not) + the stop reason: one
             // derivation for the console and the board (gui-spec.md §5.3).
-            if let Some((ladder, stop, key, stub, phases)) =
+            if let Some((ladder, stop, key, rollup_out, phases)) =
                 campaign_board_view(&v, &mut specs, &name)
             {
                 v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
                 v["phases"] = phases;
                 v["stop_reason"] = serde_json::json!(stop);
                 v["board_key"] = serde_json::to_value(key).unwrap_or_default();
-                if let Some(stub) = stub {
-                    v["rollup"] = serde_json::to_value(stub).unwrap_or(serde_json::Value::Null);
+                if let Some(rollup) = rollup_out {
+                    v["rollup"] = serde_json::to_value(rollup).unwrap_or(serde_json::Value::Null);
                 }
             }
             out.push(v);
@@ -6529,6 +6544,91 @@ global.fetch = async (url) => {
             crate::report::rules::RULES_VERSION
         );
         assert_eq!(first["rollup"]["max_points"], 76.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R22-5 acceptance: the Board list and the detail endpoint agree on a
+    /// graded-crash relabel even when the stage already has recorded rounds.
+    #[tokio::test]
+    async fn r22_5_board_and_detail_agree_on_a_graded_crash_relabel() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let id = format!("campaign_sdb-sql_ut_relabel_{}", std::process::id());
+        let dir = crate::report::archive::RunArchiver::resolve_runs_dir().join(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("s8_full")).unwrap();
+        let round = serde_json::json!({
+            "round": 0, "passed_stages": 0, "total_stages": 1,
+            "pass_rate": 0.0, "turns": 30, "cost_usd": 0.02,
+            "duration_seconds": 900.0, "stop_reason": "crash",
+            "derived": false
+        });
+        let stage = serde_json::json!({
+            "id": 8, "title": "Joins", "type": "feature", "passed": false,
+            "pass_rate": 0.0, "passed_stages": 0, "total_stages": 1,
+            "regressed": [], "regression_severity": 0,
+            "effective_cost_usd": 0.10, "api_cost_usd": 0.02,
+            "turns": 30, "duration_seconds": 900.0, "status": "fault",
+            "variant": "full", "tier": 3, "points": 0.0,
+            "run_id": format!("{id}_s8_full"), "git_commit": null,
+            "git_stat": null, "rounds": [round], "failure": null
+        });
+        let rollup = serde_json::json!({
+            "campaign_id": id,
+            "name": "sdb-sql",
+            "model": "ut/model",
+            "harness": "omp",
+            "effort": "high",
+            "task": "sql",
+            "started_at": "2026-10-17T09:25:21Z",
+            "finished_at": "2026-10-17T10:26:00Z",
+            "stages": [stage],
+            "reached": 7,
+            "regression_free_tickets": 0,
+            "total_cost_usd": 0.02,
+            "over_budget": false,
+            "over_wall": false,
+            "rules_version": crate::report::rules::RULES_VERSION,
+            "budget_usd": 0.99,
+            "wall_min": 30,
+            "points": 0.0,
+            "max_points": 76.0
+        });
+        std::fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+        std::fs::write(
+            dir.join("s8_full").join("manifest.json"),
+            serde_json::json!({"status": "agent_failed"}).to_string(),
+        )
+        .unwrap();
+
+        let detail: serde_json::Value = client
+            .get(format!("{base}/api/campaigns/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            detail["rollup"]["stages"][0]["status"], "failed",
+            "detail: {detail}"
+        );
+        let list: Vec<serde_json::Value> = client
+            .get(format!("{base}/api/campaigns"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let cell = list
+            .iter()
+            .find(|c| c["id"] == serde_json::json!(id))
+            .expect("the relabel fixture in the list");
+        assert_eq!(
+            cell["rollup"]["stages"][0]["status"], "failed",
+            "list: {cell}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

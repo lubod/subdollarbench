@@ -1119,6 +1119,10 @@ pub struct StageRecord {
     /// Verifier stage ids that were green earlier and failed now.
     pub regressed: Vec<u32>,
     pub regression_severity: u32,
+    /// R25 R23-8: the provider API bill for this ticket. This is the unit
+    /// the budget and cap use; `effective_cost_usd` adds the compute floor.
+    #[serde(default)]
+    pub api_cost_usd: f64,
     pub effective_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
@@ -1422,16 +1426,93 @@ pub fn classify_failure(
 
 /// F2: annotate a classified agent failure with the max-output truncation
 /// when the host console shows it. Returns whether the record changed.
-pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
-    let truncation = console.contains("output: 65536")
-        || console.contains("output limit")
-        || console.contains("not valid JSON");
-    if !truncation {
-        return false;
+/// R22-1: one `[TOKENS]` line's output count. The old detector matched
+/// loose text (`not valid JSON`, `output limit`) anywhere in the console,
+/// so a recovered tool-call error could mislabel a later crash.
+fn token_output(line: &str) -> Option<u64> {
+    if !line.contains("[TOKENS]") {
+        return None;
     }
-    failure.kind = "agent_crash".to_string();
-    failure.line = "agent hit the 65,536-token output limit and crashed".to_string();
-    true
+    line.split("output:")
+        .nth(1)?
+        .split(',')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn is_provider_400(line: &str) -> bool {
+    line.contains("400 Provider returned error")
+        || line.contains("[STDERR] 400")
+        || line.contains("HTTP 400")
+}
+
+fn format_token_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// R22-1/R25-1: label a crash only when the **last** `[TOKENS]` turn before
+/// the provider `400` is the session's largest output. A truncation breaks
+/// the tool call in that turn, so the next provider response is the 400; if
+/// another turn sits between the largest output and the 400, the 400 is a
+/// different failure. The number in the line is the measured output, not a
+/// hard-coded 65,536.
+pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
+    // A console can hold more than one agent session (the initial attempt
+    // and a repair); a later recovered error must not pair with an earlier
+    // session's truncation.
+    let mut sessions: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in console.lines() {
+        if line.contains("[LIVE] Agent initialized") && !current.is_empty() {
+            sessions.push(std::mem::take(&mut current));
+        }
+        current.push(line);
+    }
+    if !current.is_empty() {
+        sessions.push(current);
+    }
+    for lines in sessions {
+        let max_output = lines
+            .iter()
+            .filter_map(|line| token_output(line))
+            .max()
+            .unwrap_or(0);
+        if max_output == 0 {
+            continue;
+        }
+        for (i, line) in lines.iter().enumerate() {
+            if !is_provider_400(line) {
+                continue;
+            }
+            // The 400 must directly follow the truncated turn: the last
+            // [TOKENS] line before it has to be the session's largest.
+            let last_tokens = lines[..i]
+                .iter()
+                .rposition(|line| token_output(line).is_some());
+            if last_tokens
+                .and_then(|j| token_output(lines[j]))
+                .is_some_and(|output| output == max_output)
+            {
+                failure.kind = "agent_crash".to_string();
+                failure.line = format!(
+                    "agent hit the {}-token output limit and crashed",
+                    format_token_count(max_output)
+                );
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The campaign lock (round-7 finding 1): one campaign at a time, whether
@@ -1585,10 +1666,36 @@ pub fn effective_state_with(state: &str, updated_at: Option<&str>, lock_live: bo
     }
 }
 
+/// R22-5: apply F2's `fault` -> `failed` relabel to every loaded rollup,
+/// independently of the rounds backfill. The rule is unchanged: the stage
+/// manifest says `agent_failed`, and the cell has no `harness_fault`.
+pub fn relabel_graded_crashes(rollup: &mut CampaignRollup, campaign_dir: &std::path::Path) {
+    if rollup.harness_fault.is_some() {
+        return;
+    }
+    for rec in &mut rollup.stages {
+        if rec.status != "fault" {
+            continue;
+        }
+        let manifest: Option<serde_json::Value> = std::fs::read_to_string(
+            campaign_dir
+                .join(format!("s{}_{}", rec.id, rec.variant))
+                .join("manifest.json"),
+        )
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+        if manifest.as_ref().and_then(|m| m["status"].as_str()) == Some("agent_failed") {
+            rec.status = "failed".to_string();
+        }
+    }
+}
+
 /// Fill `rounds`/`failure` on records written before they were recorded
 /// (gui-spec.md §6.1): read each attempt's manifest from the campaign dir
-/// and mark the derived rounds. Cells with live rounds are untouched.
+/// and mark the derived rounds. The crash relabel is applied first, because
+/// it also applies to cells with recorded rounds.
 pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Path) {
+    relabel_graded_crashes(rollup, campaign_dir);
     for i in 0..rollup.stages.len() {
         if !rollup.stages[i].rounds.is_empty() {
             continue;
@@ -1613,14 +1720,7 @@ pub fn backfill_rounds(rollup: &mut CampaignRollup, campaign_dir: &std::path::Pa
         let agent_failed = manifest
             .as_ref()
             .map(|m| m["status"].as_str() == Some("agent_failed"))
-            .unwrap_or(rollup.stages[i].status == "fault");
-        // F2: the F2-era campaign records `failed` for a graded agent crash.
-        // Old rows wrote `fault`; correct them on read when the cell has no
-        // real harness fault. A real fault (billing, never-started) keeps
-        // the cell-level harness_fault and the fault label.
-        if agent_failed && rollup.harness_fault.is_none() && rollup.stages[i].status == "fault" {
-            rollup.stages[i].status = "failed".to_string();
-        }
+            .unwrap_or(false);
         let stages_of = |m: &serde_json::Value| -> Vec<crate::verifier::StageResult> {
             m.get("stages")
                 .and_then(|s| serde_json::from_value(s.clone()).ok())
@@ -1840,9 +1940,9 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
     }
 }
 
-/// R23 D3: a paid campaign launch must have a real list price. The live
-/// OpenRouter catalog is tried first, then the offline table; eval-only
-/// runs do not spend and are exempt. `_at` is the offline-testable form.
+/// R23 D3/R24: a paid campaign launch must have a price in the committed
+/// snapshot (`src/cost/model_prices.json`); eval-only runs do not spend and
+/// are exempt. `_at` is the offline-testable form; the URL is ignored.
 pub async fn require_model_list_price_at(
     model: &str,
     url: &str,
@@ -1858,7 +1958,7 @@ pub async fn require_model_list_price_at(
         Ok(())
     } else {
         Err(format!(
-            "model {model} has no list price in the OpenRouter catalog or offline table; refusing a paid campaign launch"
+            "model {model} has no entry in the price snapshot src/cost/model_prices.json; add the model's catalog id there, then retry the paid campaign launch"
         ))
     }
 }
@@ -2109,9 +2209,18 @@ fn ladder_inner(
                 // deciding negative record is still pending. Show waiting
                 // (cause "needs N"), not skipped; once the need fails or
                 // the cell is over, the ordinary skipped label applies.
-                let decided = unmet
-                    .iter()
-                    .any(|n| rollup.stages.iter().any(|r| r.id == *n && !r.passed));
+                // R22-2: a failed full does not decide a need that still
+                // has its lite to run. The need is decided only once it has
+                // failed and either has no lite or already has a lite
+                // record (a passed lite would have removed it from `unmet`).
+                let decided = unmet.iter().any(|n| {
+                    let records: Vec<&StageRecord> =
+                        rollup.stages.iter().filter(|r| r.id == *n).collect();
+                    let failed = records.iter().any(|r| !r.passed);
+                    let has_lite = spec.stages.iter().any(|s| s.id == *n && s.lite.is_some());
+                    let has_lite_record = records.iter().any(|r| r.variant == "lite");
+                    failed && (!has_lite || has_lite_record)
+                });
                 if decided || !rollup.finished_at.is_empty() {
                     ("skipped", format!("skipped: needs {list}"))
                 } else {
@@ -3129,6 +3238,7 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         total_stages: 0,
         regressed: Vec::new(),
         regression_severity: 0,
+        api_cost_usd: 0.0,
         effective_cost_usd: 0.0,
         turns: None,
         duration_seconds: None,
@@ -3187,6 +3297,7 @@ fn push_attempt_record(
         total_stages: out.total_stages,
         regressed,
         regression_severity,
+        api_cost_usd: out.api_cost_usd,
         effective_cost_usd: out.effective_cost_usd,
         turns: out.turns,
         duration_seconds: out.duration_seconds,
@@ -3691,6 +3802,7 @@ mod tests {
             total_stages: 3,
             regressed: vec![],
             regression_severity: 0,
+            api_cost_usd: 0.02,
             effective_cost_usd: 0.02,
             turns: Some(12),
             duration_seconds: Some(200.0),
@@ -3715,6 +3827,7 @@ mod tests {
             total_stages: 6,
             regressed: vec![3, 4, 5],
             regression_severity: 3,
+            api_cost_usd: 0.1,
             effective_cost_usd: 0.1,
             turns: Some(30),
             duration_seconds: Some(900.0),
@@ -3809,6 +3922,40 @@ mod tests {
         rollup.harness_fault = Some("provider billing/auth: exhausted".into());
         backfill_rounds(&mut rollup, &dir);
         assert_eq!(rollup.stages[0].status, "fault");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R22-5 acceptance: the relabel is independent of the rounds backfill,
+    /// so a stage that already has recorded rounds still reads `failed`.
+    #[test]
+    fn r22_5_a_stage_with_recorded_rounds_still_relabels() {
+        let dir = tmp_dir("r22_5rounds");
+        let stage = dir.join("s8_full");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(
+            stage.join("manifest.json"),
+            serde_json::json!({"status": "agent_failed"}).to_string(),
+        )
+        .unwrap();
+        let mut rec = failed_record(8, "Joins", "agent stopped", "");
+        rec.status = "fault".into();
+        rec.rounds = vec![RoundRecord {
+            round: 0,
+            passed_stages: 1,
+            total_stages: 1,
+            turns: Some(12),
+            cost_usd: 0.01,
+            duration_seconds: Some(60.0),
+            git_commit: None,
+            failure: None,
+            stop_reason: Some("crash".into()),
+            derived: false,
+        }];
+        let mut rollup = chain_rollup(1, true);
+        rollup.stages = vec![rec];
+        rollup.harness_fault = None;
+        backfill_rounds(&mut rollup, &dir);
+        assert_eq!(rollup.stages[0].status, "failed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3968,6 +4115,7 @@ mod tests {
             total_stages: 1,
             regressed: vec![],
             regression_severity: 0,
+            api_cost_usd: 0.01,
             effective_cost_usd: 0.01,
             turns: Some(3),
             duration_seconds: Some(10.0),
@@ -4025,8 +4173,9 @@ mod tests {
         // 1's full attempt failed, its lite attempt passed.
         rollup.stages.push(record(1, false, "full", "failed"));
         rollup.stages.push(record(1, true, "lite", "passed"));
-        // Ticket 2 was attempted and failed.
+        // Ticket 2's full and lite both failed.
         rollup.stages.push(record(2, false, "full", "failed"));
+        rollup.stages.push(record(2, false, "lite", "failed"));
         let entries = ladder(&spec, &rollup, None);
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].status, "pass");
@@ -4061,8 +4210,8 @@ mod tests {
                 .iter()
                 .map(|(id, p)| stage_result(*id, *p))
                 .collect(),
-            effective_cost_usd: 0.01,
             api_cost_usd: 0.01,
+            effective_cost_usd: 0.01,
             turns: Some(10),
             duration_seconds: Some(60.0),
             max_call_usd: 0.0,
@@ -4490,6 +4639,49 @@ mod tests {
         assert!((rollup.stages[0].effective_cost_usd - 0.99).abs() < 1e-9);
     }
 
+    /// R25 R23-8 acceptance: the per-ticket API field is populated and its
+    /// sum over the stages equals the rollup's API total.
+    #[tokio::test]
+    async fn r23_8_stage_api_cost_sums_to_total() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r23d8api".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let rollup = run_campaign(
+            &lc,
+            &opts,
+            |attempt| {
+                let spend = 0.01 * (attempt.stage.id as f64 + 1.0);
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.api_cost_usd = spend;
+                o.effective_cost_usd = spend + 0.005;
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let sum: f64 = rollup.stages.iter().map(|s| s.api_cost_usd).sum();
+        assert!(
+            (sum - rollup.total_cost_usd).abs() < 1e-9,
+            "stage API {sum} vs total {}: {:?}",
+            rollup.total_cost_usd,
+            rollup.stages
+        );
+        assert!(
+            rollup
+                .stages
+                .iter()
+                .all(|s| s.api_cost_usd > 0.0 && s.effective_cost_usd > s.api_cost_usd),
+            "each stage carries its API bill and the secondary effective cost"
+        );
+    }
+
     /// R23 D3: a paid launch refuses a model with no list price; eval-only
     /// runs are exempt because they do not spend.
     #[tokio::test]
@@ -4509,6 +4701,23 @@ mod tests {
             require_model_list_price_at("made-up/unknown-model", dead, true)
                 .await
                 .is_ok()
+        );
+    }
+
+    /// R24-7 acceptance: the paid-launch refusal names the real source.
+    #[tokio::test]
+    async fn r24_7_refusal_names_the_price_snapshot() {
+        let dead = "http://127.0.0.1:9/models";
+        let err = require_model_list_price_at("made-up/unknown-model", dead, false)
+            .await
+            .expect_err("unknown model must be refused");
+        assert!(
+            err.contains("src/cost/model_prices.json"),
+            "refusal does not name the snapshot: {err}"
+        );
+        assert!(
+            !err.contains("OpenRouter catalog or offline table"),
+            "stale price source: {err}"
         );
     }
 
@@ -5662,10 +5871,45 @@ mod tests {
         let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
         assert_eq!(t14.status, "waiting", "{t14:?}");
         assert_eq!(t14.cause.as_deref(), Some("needs 11"));
-        // Once 11 has failed, 14 is decided: skipped (not waiting).
+        // R22-2: 11's full failed, but its lite is still pending, so 14
+        // stays waiting rather than reading skipped for the whole lite.
         rollup
             .stages
             .push(failed_record(11, "Indexes", "own stage: boom", ""));
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "waiting", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("needs 11"));
+        // Once the lite has also failed, 14 is decided: skipped.
+        let mut lite = failed_record(11, "Indexes", "own stage: boom", "");
+        lite.variant = "lite".to_string();
+        rollup.stages.push(lite);
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "skipped", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("skipped: needs 11"));
+    }
+
+    /// R22-2 acceptance: a failed full whose lite is still pending leaves
+    /// its dependent waiting; a failed lite decides it as skipped.
+    #[test]
+    fn r22_2_a_full_failure_waits_for_the_lite() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut rollup = chain_rollup(3, false);
+        rollup.career = None;
+        let carried = phase1_state();
+        // Ticket 14 needs 11; 11's full has failed and its lite is pending.
+        rollup
+            .stages
+            .push(failed_record(11, "Indexes", "own stage: boom", ""));
+        let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
+        let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
+        assert_eq!(t14.status, "waiting", "{t14:?}");
+        assert_eq!(t14.cause.as_deref(), Some("needs 11"));
+        // The lite record exists and failed: the need is decided.
+        let mut lite = failed_record(11, "Indexes", "own stage: boom", "");
+        lite.variant = "lite".to_string();
+        rollup.stages.push(lite);
         let e = phase_ladder(&lc.spec, &rollup, None, Some(&carried));
         let t14 = e.iter().find(|x| x.id == 14).expect("ticket 14");
         assert_eq!(t14.status, "skipped", "{t14:?}");
@@ -5835,6 +6079,7 @@ mod tests {
             total_stages: 1,
             regressed: Vec::new(),
             regression_severity: 0,
+            api_cost_usd: 0.1,
             effective_cost_usd: 0.1,
             turns: Some(10),
             duration_seconds: Some(60.0),
@@ -6202,10 +6447,84 @@ mod tests {
         assert_eq!(failure.kind, "agent");
         assert!(mark_agent_crash(
             &mut failure,
-            "[TOKENS] Turn usage - input: 1, output: 65536, cached: 0"
+            "[TOKENS] Turn usage - input: 1, output: 65536, cached: 0\n\
+             [STDERR] 400 Provider returned error"
         ));
         assert_eq!(failure.kind, "agent_crash");
         assert!(failure.line.contains("65,536"), "{}", failure.line);
+    }
+
+    /// R22-1 acceptance: a recovered JSON error plus a later unrelated
+    /// crash is not an output-limit crash.
+    #[test]
+    fn r22_1_a_recovered_json_error_is_not_an_agent_crash() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        let console = "\
+[LIVE] Agent initialized. Max turns: 24, Budget: $0.15
+[TOKENS] Turn usage - input: 2, output: 128, cached: 0
+[RESULT] edit (OK)
+  > Validation failed for tool \"edit\": Tool call arguments are not valid JSON.
+  > Parse Error: Unterminated string
+[TOKENS] Turn usage - input: 2, output: 256, cached: 0
+[STDERR] 500 Provider returned error
+[OMP ERROR] Agent execution failed
+";
+        assert!(!mark_agent_crash(&mut failure, console));
+        assert_eq!(failure.kind, "agent");
+        assert_eq!(failure.line, "agent stopped without READY");
+    }
+
+    /// R25-1 acceptance: a session whose largest turn is followed by more
+    /// turns and then a 400 is not an output-limit crash.
+    #[test]
+    fn r25_1_a_400_after_another_turn_is_not_an_output_limit_crash() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        let console = "\
+[LIVE] Agent initialized. Max turns: 24, Budget: $0.15
+[TOKENS] Turn usage - input: 2, output: 32768, cached: 0
+[LIVE] Turn 2/24 | Spent: $0.10 | Tokens: 40000
+[TOKENS] Turn usage - input: 2, output: 512, cached: 0
+[STDERR] 400 Provider returned error
+[OMP ERROR] Agent execution failed
+";
+        assert!(!mark_agent_crash(&mut failure, console));
+        assert_eq!(failure.kind, "agent");
+        assert_eq!(failure.line, "agent stopped without READY");
+    }
+
+    /// R22-1 acceptance: a 32,768-token truncation with its provider 400
+    /// reports 32,768, not the old hard-coded 65,536.
+    #[test]
+    fn r22_1_a_32_768_token_truncation_reports_the_real_number() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        let console = "\
+[LIVE] Agent initialized. Max turns: 24, Budget: $0.15
+[TOKENS] Turn usage - input: 2, output: 32768, cached: 0
+[STDERR] 400 Provider returned error
+[OMP ERROR] Agent execution failed
+";
+        assert!(mark_agent_crash(&mut failure, console));
+        assert_eq!(failure.kind, "agent_crash");
+        assert!(failure.line.contains("32,768"), "{}", failure.line);
+        assert!(!failure.line.contains("65,536"), "{}", failure.line);
     }
 
     #[test]
