@@ -35,12 +35,11 @@ fi
 
 # Paths whose change needs the full gate on a `ready` commit: grading,
 # scoring, cost, what the candidate sees, and the harness that runs it.
-GRADED_PATHS=(src/verifier src/pipeline.rs src/sandbox src/campaign.rs
-    src/scoring.rs src/cost src/prompts src/report/rules.rs campaigns)
+mapfile -t graded_paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.txt)
 base="$(git merge-base HEAD master 2>/dev/null || true)"
 touched=""
 if [[ -n "$base" ]]; then
-    touched="$(git diff --name-only "$base" HEAD -- "${GRADED_PATHS[@]}" | head -5 | tr '\n' ' ')"
+    touched="$(git diff --name-only "$base" HEAD -- "${graded_paths[@]}" | head -5 | tr '\n' ' ')"
 fi
 
 commit="$(git rev-parse --short=12 HEAD)"

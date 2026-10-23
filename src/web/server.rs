@@ -170,6 +170,11 @@ pub struct StatusResponse {
     /// path and skip EventSource entirely.
     #[serde(default)]
     pub proxy: bool,
+    /// R28 F1/F5: the oracle and cap basis next to the rules version.
+    #[serde(default)]
+    pub sqlite_version: String,
+    #[serde(default)]
+    pub cap_price_basis: String,
 }
 
 pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
@@ -208,6 +213,8 @@ pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
         proxy: !state.engine_url.is_empty(),
         campaign: crate::campaign::live_lock_holder()
             .map(|h| serde_json::json!({"pid": h.pid, "campaign_id": h.campaign_id})),
+        sqlite_version: crate::report::rules::sqlite_version().to_string(),
+        cap_price_basis: crate::report::rules::CAP_PRICE_BASIS.to_string(),
     })
     .into_response()
 }
@@ -734,8 +741,13 @@ pub(crate) async fn serve_index() -> Html<String> {
             .replace(
                 "<!--__RULES__-->",
                 &format!(
-                    "<script>window.__SDB_RULES__ = \"{}\";</script>",
-                    crate::report::rules::RULES_VERSION
+                    "<script>window.__SDB_RULES__ = {}; window.__SDB_SQLITE__ = {}; window.__SDB_CAP_BASIS__ = {};</script>",
+                    serde_json::to_string(crate::report::rules::RULES_VERSION)
+                        .unwrap_or_default(),
+                    serde_json::to_string(crate::report::rules::sqlite_version())
+                        .unwrap_or_default(),
+                    serde_json::to_string(crate::report::rules::CAP_PRICE_BASIS)
+                        .unwrap_or_default()
                 ),
             )
     });
@@ -3665,6 +3677,70 @@ mod tests {
         }
     }
 
+    /// R28 F1: the rules/status endpoint and a run's detail carry the
+    /// linked SQLite oracle version.
+    #[tokio::test]
+    async fn r28_f1_detail_names_the_oracle_version() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["sqlite_version"], rusqlite::version());
+        let mut recorded = test_manifest("r28_f1_oracle");
+        recorded.sqlite_version = Some("3.0.0".to_string());
+        recorded.cap_price_basis = Some("recorded cap basis".to_string());
+        recorded.rules_version = Some("2026-10-19.40".to_string());
+        let detail = manifest_with_portal_flag(&recorded);
+        assert_eq!(detail["sqlite_version"], "3.0.0");
+        assert_eq!(detail["cap_price_basis"], "recorded cap basis");
+        let mut old = test_manifest("r28_f1_old");
+        old.rules_version = Some("2026-10-19.38".to_string());
+        let old_detail = manifest_with_portal_flag(&old);
+        assert!(
+            old_detail.get("sqlite_version").is_none(),
+            "an old run must not borrow today's oracle"
+        );
+        assert!(crate::report::rules::recorded_cap_basis("2026-10-19.38", None).is_none());
+    }
+
+    /// R28 F5: the cap basis is served and reaches the Board shell.
+    #[tokio::test]
+    async fn r28_f5_cap_basis_is_rendered() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(status["cap_price_basis"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("list price"));
+        let page = client
+            .get(format!("{base}/"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("__SDB_CAP_BASIS__"), "Board misses the basis");
+        assert!(
+            page.contains("list price"),
+            "Board misses the list-price text"
+        );
+    }
+
     #[tokio::test]
     async fn status_response_reports_db_fallback_flag() {
         // get_status surfaces AppState::db_fallback so the GUI can show a
@@ -5085,6 +5161,8 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            sqlite_version: None,
+            cap_price_basis: None,
             protocol: None,
             solved: None,
             solved_at: None,
@@ -5153,6 +5231,8 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            sqlite_version: None,
+            cap_price_basis: None,
             protocol: None,
             solved: None,
             solved_at: None,

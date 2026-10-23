@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "graded_hash.rs"]
+mod graded_hash;
+
 /// Bump this whenever grading changes. History:
 /// - `2026-10-19.40`: round-26 R23-7 — inside one attempt the only turn
 ///   bound is the 200-turn guard. The first session gets the whole guard
@@ -761,9 +764,27 @@ pub const RULES_VERSION: &str = "2026-10-19.40";
 /// constant so the page, the proposal and the test cannot drift.
 pub const CAP_PRICE_BASIS: &str = "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.";
 
+/// R28 F1: the linked SQLite oracle that grades every answer. The crate
+/// versions are covered by `Cargo.lock` in the compiled digest.
+pub fn sqlite_version() -> &'static str {
+    rusqlite::version()
+}
+
+/// R28-1: a run shows its recorded oracle, never the current binary's.
+pub fn recorded_sqlite_version(recorded: Option<&str>) -> &str {
+    recorded.unwrap_or("\u{2014}")
+}
+
+/// R28-1: a run's recorded cap basis. Old rows that predate the list-price
+/// policy (`.39`) get none; `.39` and later can derive it from the rules
+/// version when the field was not recorded yet.
+pub fn recorded_cap_basis<'a>(rules: &str, recorded: Option<&'a str>) -> Option<&'a str> {
+    recorded.or_else(|| (rules >= "2026-10-19.39").then_some(CAP_PRICE_BASIS))
+}
+
 /// One shared list, also read by `build.rs`: `file`/`dir` entries are
-/// compiled in and hashed at build time; `runtime-dir` entries are hashed
-/// from SDB_HOME when the stamp is computed.
+/// compiled in and hashed at build time; `runtime-file`/`runtime-dir`
+/// entries are hashed from SDB_HOME when the stamp is computed.
 const GRADED_MANIFEST: &str = include_str!("graded-files.txt");
 
 /// The SHA-256 of the compiled-in graded inputs, emitted by `build.rs`.
@@ -773,18 +794,6 @@ pub const COMPILED_GRADED_DIGEST: &str = env!("SDB_COMPILED_RULES_DIGEST");
 /// for at least 64).
 const STAMP_BYTES: usize = 16;
 
-fn manifest_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    GRADED_MANIFEST.lines().filter_map(|line| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return None;
-        }
-        line.split_once(' ').filter(|(kind, rel)| {
-            !rel.is_empty() && matches!(*kind, "file" | "dir" | "runtime-file" | "runtime-dir")
-        })
-    })
-}
-
 /// Hash of the graded inputs, as `"{RULES_VERSION}+{hex32}"`.
 pub fn fingerprint() -> String {
     fingerprint_root(&crate::config::get_repo_root())
@@ -793,47 +802,11 @@ pub fn fingerprint() -> String {
 /// The static files plus every regular file under the manifest's
 /// directories, as paths relative to `root`, sorted and deduplicated.
 pub fn graded_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for (kind, rel) in manifest_entries() {
-        match kind {
-            "file" | "runtime-file" => files.push(PathBuf::from(rel)),
-            "dir" | "runtime-dir" => collect_dir(root, Path::new(rel), &mut files),
-            _ => unreachable!(),
-        }
-    }
-    files.sort();
-    files.dedup();
-    files
+    graded_hash::files(root, GRADED_MANIFEST, true)
 }
 
 fn runtime_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for (kind, rel) in manifest_entries() {
-        match kind {
-            "runtime-file" => files.push(PathBuf::from(rel)),
-            "runtime-dir" => collect_dir(root, Path::new(rel), &mut files),
-            _ => {}
-        }
-    }
-    files.sort();
-    files.dedup();
-    files
-}
-
-fn collect_dir(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
-    let dir = root.join(rel_dir);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let rel = rel_dir.join(entry.file_name());
-        let path = root.join(&rel);
-        if path.is_dir() {
-            collect_dir(root, &rel, out);
-        } else if path.is_file() {
-            out.push(rel);
-        }
-    }
+    graded_hash::runtime_files(root, GRADED_MANIFEST)
 }
 
 fn hash_entry(hasher: &mut Sha256, rel: &Path, content: &[u8]) {
@@ -872,14 +845,16 @@ pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> String {
     stamp(&hasher.finalize())
 }
 
-/// Hash the binary's compiled-in graded digest plus the runtime stage files
-/// under `root` (SDB_HOME). The runtime path tolerates a minimal SDB_HOME: a
-/// missing stage directory simply contributes no entries.
-pub fn fingerprint_root(root: &Path) -> String {
+/// The stamp over a compiled digest, an SQLite oracle version and the
+/// runtime files. Split from [`fingerprint_root`] so the oracle-version
+/// test can vary the two inputs without rebuilding the binary.
+fn stamp_with_oracle(root: &Path, compiled: &str, oracle: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(RULES_VERSION.as_bytes());
     hasher.update([0]);
-    hasher.update(COMPILED_GRADED_DIGEST.as_bytes());
+    hasher.update(compiled.as_bytes());
+    hasher.update([0]);
+    hasher.update(oracle.as_bytes());
     hasher.update([0]);
     for f in runtime_files(root) {
         let Ok(content) = fs::read(root.join(&f)) else {
@@ -888,6 +863,13 @@ pub fn fingerprint_root(root: &Path) -> String {
         hash_entry(&mut hasher, &f, &content);
     }
     stamp(&hasher.finalize())
+}
+
+/// Hash the binary's compiled-in graded digest, the linked SQLite oracle
+/// and the runtime files under `root` (SDB_HOME). The runtime path
+/// tolerates a minimal SDB_HOME: a missing directory contributes nothing.
+pub fn fingerprint_root(root: &Path) -> String {
+    stamp_with_oracle(root, COMPILED_GRADED_DIGEST, sqlite_version())
 }
 
 #[cfg(test)]
@@ -1023,7 +1005,7 @@ mod tests {
         let files = graded_files(&root);
         for dir in ["src/verifier/sql", "src/prompts", "src/cost"] {
             let mut inner = Vec::new();
-            collect_dir(&root, Path::new(dir), &mut inner);
+            graded_hash::collect_dir(&root, Path::new(dir), &mut inner);
             assert!(!inner.is_empty(), "no files under {dir}");
             for rel in inner {
                 assert!(
@@ -1034,7 +1016,7 @@ mod tests {
         }
         let mut sources = vec![PathBuf::from("src/pipeline.rs")];
         for dir in ["src/sandbox", "src/cost", "src/prompts"] {
-            collect_dir(&root, Path::new(dir), &mut sources);
+            graded_hash::collect_dir(&root, Path::new(dir), &mut sources);
         }
         for source in sources {
             let Ok(text) = fs::read_to_string(root.join(&source)) else {
@@ -1048,6 +1030,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// R28-1 acceptance: recorded run values win; a pre-`.39` row gets no
+    /// list-price label even though today's binary uses the snapshot.
+    #[test]
+    fn r28_r1_recorded_oracle_and_cap_basis() {
+        assert_eq!(recorded_sqlite_version(Some("3.0.0")), "3.0.0");
+        assert_eq!(recorded_sqlite_version(None), "—");
+        assert_eq!(
+            recorded_cap_basis("2026-10-19.40", None),
+            Some(CAP_PRICE_BASIS)
+        );
+        assert_eq!(recorded_cap_basis("2026-10-19.38", None), None);
+        assert_eq!(
+            recorded_cap_basis("2026-10-19.38", Some("recorded")),
+            Some("recorded")
+        );
+    }
+
+    /// R28 F1 acceptance: both the linked SQLite version and the compiled
+    /// crate digest move the stamp.
+    #[test]
+    fn r28_f1_oracle_version_moves_the_stamp() {
+        let root = temp_root("oracle");
+        let a = stamp_with_oracle(&root, "compiled-a", "3.45.0");
+        let b = stamp_with_oracle(&root, "compiled-a", "3.45.1");
+        let c = stamp_with_oracle(&root, "compiled-b", "3.45.0");
+        assert_ne!(a, b, "the SQLite version must move the stamp");
+        assert_ne!(a, c, "the crate digest must move the stamp");
+        assert!(!sqlite_version().is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R28 F4 acceptance: the test recomputes the build digest from the
+    /// same source tree, manifest and hashing module and compares it with
+    /// the compile-time constant.
+    #[test]
+    fn r28_f4_build_digest_matches_the_tree() {
+        let root = crate::config::get_repo_root();
+        assert_eq!(
+            graded_hash::compiled_digest(&root, GRADED_MANIFEST),
+            COMPILED_GRADED_DIGEST,
+            "build.rs and the test must hash the same compiled inputs"
+        );
+        let different_manifest = "file src/scoring.rs\n";
+        assert_ne!(
+            graded_hash::compiled_digest(&root, different_manifest),
+            COMPILED_GRADED_DIGEST,
+            "a manifest that disagrees with the build must produce a different digest"
+        );
     }
 
     /// R27-1 acceptance: the campaign spec is read from SDB_HOME at run

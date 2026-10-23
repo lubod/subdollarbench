@@ -1,0 +1,18 @@
+# One graded-path list for scripts/gate.sh (scope) and scripts/flake-bar.sh
+# (record key). A change under any of these needs the full gate and moves
+# the flake record.
+src/verifier
+src/pipeline.rs
+src/sandbox
+src/campaign.rs
+src/scoring.rs
+src/cost
+src/prompts
+src/report/rules.rs
+src/report/graded_hash.rs
+campaigns
+build.rs
+src/report/graded-files.txt
+scripts/graded-paths.txt
+extensions
+Cargo.lock

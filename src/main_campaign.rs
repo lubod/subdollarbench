@@ -1380,6 +1380,8 @@ mod tests {
         CampaignRollup {
             over_wall: false,
             rules_version: subdollarbench::report::rules::RULES_VERSION.to_string(),
+            sqlite_version: None,
+            cap_price_basis: None,
             points: 0.0,
             max_points: 0.0,
             phase: None,

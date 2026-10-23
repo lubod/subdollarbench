@@ -153,6 +153,12 @@ pub struct RunManifest {
     /// Rule-set fingerprint (see report::rules). Only comparable within one version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_version: Option<String>,
+    /// R28-1: the SQLite oracle and cap policy actually recorded when this
+    /// run was graded. None on old rows; readers show `—`/no label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap_price_basis: Option<String>,
     /// Trial count for consolidated parent manifests (None on single-trial records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_trials: Option<u32>,
@@ -620,6 +626,8 @@ mod tests {
             omp_version: None,
             harness_version: None,
             rules_version: None,
+            sqlite_version: None,
+            cap_price_basis: None,
             protocol: None,
             solved: None,
             solved_at: None,
@@ -797,6 +805,8 @@ mod tests {
             omp_version: None,
             harness_version: None,
             rules_version: None,
+            sqlite_version: None,
+            cap_price_basis: None,
             protocol: None,
             solved: None,
             solved_at: None,
