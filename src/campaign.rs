@@ -1460,9 +1460,12 @@ fn format_token_count(n: u64) -> String {
     out
 }
 
-/// R22-1: label a crash only when a session's largest `[TOKENS]` output
-/// turn is followed by the provider `400` in that same session. The
-/// number in the line is the measured output, not a hard-coded 65,536.
+/// R22-1/R25-1: label a crash only when the **last** `[TOKENS]` turn before
+/// the provider `400` is the session's largest output. A truncation breaks
+/// the tool call in that turn, so the next provider response is the 400; if
+/// another turn sits between the largest output and the 400, the 400 is a
+/// different failure. The number in the line is the measured output, not a
+/// hard-coded 65,536.
 pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
     // A console can hold more than one agent session (the initial attempt
     // and a repair); a later recovered error must not pair with an earlier
@@ -1479,23 +1482,34 @@ pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
         sessions.push(current);
     }
     for lines in sessions {
-        let mut max_output = 0u64;
-        let mut max_at = 0usize;
-        for (i, line) in lines.iter().enumerate() {
-            if let Some(output) = token_output(line) {
-                if output > max_output {
-                    max_output = output;
-                    max_at = i;
-                }
-            }
+        let max_output = lines
+            .iter()
+            .filter_map(|line| token_output(line))
+            .max()
+            .unwrap_or(0);
+        if max_output == 0 {
+            continue;
         }
-        if max_output > 0 && lines[max_at + 1..].iter().any(|line| is_provider_400(line)) {
-            failure.kind = "agent_crash".to_string();
-            failure.line = format!(
-                "agent hit the {}-token output limit and crashed",
-                format_token_count(max_output)
-            );
-            return true;
+        for (i, line) in lines.iter().enumerate() {
+            if !is_provider_400(line) {
+                continue;
+            }
+            // The 400 must directly follow the truncated turn: the last
+            // [TOKENS] line before it has to be the session's largest.
+            let last_tokens = lines[..i]
+                .iter()
+                .rposition(|line| token_output(line).is_some());
+            if last_tokens
+                .and_then(|j| token_output(lines[j]))
+                .is_some_and(|output| output == max_output)
+            {
+                failure.kind = "agent_crash".to_string();
+                failure.line = format!(
+                    "agent hit the {}-token output limit and crashed",
+                    format_token_count(max_output)
+                );
+                return true;
+            }
         }
     }
     false
@@ -6459,6 +6473,30 @@ mod tests {
   > Parse Error: Unterminated string
 [TOKENS] Turn usage - input: 2, output: 256, cached: 0
 [STDERR] 500 Provider returned error
+[OMP ERROR] Agent execution failed
+";
+        assert!(!mark_agent_crash(&mut failure, console));
+        assert_eq!(failure.kind, "agent");
+        assert_eq!(failure.line, "agent stopped without READY");
+    }
+
+    /// R25-1 acceptance: a session whose largest turn is followed by more
+    /// turns and then a 400 is not an output-limit crash.
+    #[test]
+    fn r25_1_a_400_after_another_turn_is_not_an_output_limit_crash() {
+        let mut failure = FailureSummary {
+            kind: "agent".into(),
+            stage: Some(10),
+            line: "agent stopped without READY".into(),
+            detail: String::new(),
+            stderr_tail: None,
+        };
+        let console = "\
+[LIVE] Agent initialized. Max turns: 24, Budget: $0.15
+[TOKENS] Turn usage - input: 2, output: 32768, cached: 0
+[LIVE] Turn 2/24 | Spent: $0.10 | Tokens: 40000
+[TOKENS] Turn usage - input: 2, output: 512, cached: 0
+[STDERR] 400 Provider returned error
 [OMP ERROR] Agent execution failed
 ";
         assert!(!mark_agent_crash(&mut failure, console));
