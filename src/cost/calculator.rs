@@ -536,9 +536,9 @@ mod tests {
         assert_eq!(gpt4o.prompt_per_million, 0.15);
         assert_eq!(gpt4o.cache_read_per_million, 0.075);
 
-        let haiku = ModelPricing::for_model("anthropic/claude-3-haiku");
-        assert_eq!(haiku.prompt_per_million, 0.80);
-        assert_eq!(haiku.completion_per_million, 4.00);
+        let haiku = ModelPricing::for_model("anthropic/claude-haiku-5.5");
+        assert_eq!(haiku.prompt_per_million, 0.10);
+        assert_eq!(haiku.completion_per_million, 0.50);
 
         let mistral = ModelPricing::for_model("mistralai/mistral-small-2603");
         assert_eq!(mistral.prompt_per_million, 0.15);
@@ -669,7 +669,7 @@ mod tests {
             ("qwen/qwen-2.5-coder-32b-instruct", 0.66, 1.00, 0.165),
             ("meta-llama/llama-3.3-70b-instruct", 0.10, 0.32, 0.025),
             ("openai/gpt-4o-mini", 0.15, 0.60, 0.075),
-            ("anthropic/claude-3-haiku", 0.80, 4.00, 0.08),
+            ("anthropic/claude-haiku-5.5", 0.10, 0.50, 0.01),
             ("mistralai/mistral-small-2603", 0.15, 0.60, 0.015),
         ];
         for (model, pr, co, ca) in cases {
