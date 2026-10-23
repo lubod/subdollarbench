@@ -12,7 +12,7 @@ from `TEMPLATE.md`.
 | [24](24.md) | The rules fingerprint covers sdb-sql (freeze prerequisite) | merged `fed6519` |
 | [25](25.md) | Display follow-ups (crash label, `waiting`, relabel, API cost, refusal text) | merged `b185773` |
 | [26](26.md) | Turns inside an attempt follow the dollar rule (R23-7) | merged `644931d` |
-| [27](27.md) | Freeze prerequisites: stable stamp, snapshot ids, list price vs bill, flake bar | blocked (R27-1..3) |
+| [27](27.md) | Freeze prerequisites: stable stamp, snapshot ids, list price vs bill, flake bar | merged `377b364` |
 
 **Status values:**
 
