@@ -437,6 +437,9 @@ calibration run. Stages 19-20 need their own reference work.
 
 ## Scoring
 
+- **Cap:** the $0.99 cell cap is at list price from
+  `src/cost/model_prices.json`; the provider bill is recorded for audit
+  only.
 - Stage points = tier number x (1.0 full | 0.4 lite | 0 failed or
   skipped). The maximum is 76 points: T1 4, T2 6, T3 12, T4 12, T5 10,
   T6 18, T7 14.
