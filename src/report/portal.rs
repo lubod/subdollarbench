@@ -1608,7 +1608,7 @@ impl PortalExporter {
             f
         };
         let rules_of = |c: &SqlBoardCell| {
-            if c.rules == crate::report::rules::RULES_VERSION {
+            let base = if c.rules == crate::report::rules::RULES_VERSION {
                 format!("<span class=\"mut\">{}</span>", Self::esc(&c.rules))
             } else if c.rules.is_empty() {
                 "<span class=\"b warn\">rules —</span>".to_string()
@@ -1617,7 +1617,11 @@ impl PortalExporter {
                     "<span class=\"b warn\" title=\"graded under a different rule set\">stale {}</span>",
                     Self::esc(&c.rules)
                 )
-            }
+            };
+            format!(
+                "{base} · SQLite {}",
+                Self::esc(crate::report::rules::sqlite_version())
+            )
         };
         // Repeat runs of one model collapse into one row with a `×N runs`
         // disclosure (round-12 P3), first-seen order preserved: the shared
@@ -1715,6 +1719,10 @@ impl PortalExporter {
         h.push_str(&format!(
             "<div class=\"mut\">Updated {}</div></div></header>",
             Self::esc(&now)
+        ));
+        h.push_str(&format!(
+            "<div class=\"sub\">SQLite {} · cap at list price (model_prices.json)</div>",
+            Self::esc(crate::report::rules::sqlite_version())
         ));
         h.push_str(&format!(
             "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Cells</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Best reached</div><div class=\"v\">{best}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{best_points:.1}</div></div><div class=\"card\"><div class=\"k\">Regression-free tickets</div><div class=\"v\">{rf}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
@@ -3104,6 +3112,22 @@ mod tests {
     /// a different RULES_VERSION grouped below the current ones, flagged
     /// (poisoned/hidden) cells and retired campaigns never published, and
     /// the live cell badged.
+    /// R28 F5/F1: the public board names the cap basis and the SQLite
+    /// oracle next to the rules stamp.
+    #[test]
+    fn r28_f5_portal_shows_cap_basis_and_oracle() {
+        let html = PortalExporter::render_sql_board(&[]);
+        assert!(html.contains("cap at list price"), "missing cap basis");
+        assert!(html.contains("model_prices.json"), "missing price source");
+        assert!(
+            html.contains(&format!(
+                "SQLite {}",
+                crate::report::rules::sqlite_version()
+            )),
+            "missing SQLite oracle version"
+        );
+    }
+
     #[test]
     fn test_sql_board_ranks_points_and_groups_rules() {
         use crate::report::rules::RULES_VERSION;
