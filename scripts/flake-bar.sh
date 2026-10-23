@@ -9,14 +9,13 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-# R27-3: the record is keyed by graded content, not by commit, so a
-# docs-only commit keeps the same resumable record.
-GRADED_PATHS=(src/verifier src/pipeline.rs src/sandbox src/campaign.rs
-    src/scoring.rs src/cost src/prompts src/report/rules.rs campaigns
-    extensions scripts/flake-bar.sh)
+# R27-3/R28 F2: the record is keyed by graded content, not by commit, so
+# a docs-only commit keeps the same resumable record. The paths are the
+# same list scripts/gate.sh reads.
+mapfile -t graded_paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.txt)
 flake_key() {
     local repo="$1" tree="$2"
-    ( cd "$repo" && git ls-tree -r "$tree" -- "${GRADED_PATHS[@]}" \
+    ( cd "$repo" && git ls-tree -r "$tree" -- "${graded_paths[@]}" \
         | sha256sum | cut -c1-12 )
 }
 
@@ -92,6 +91,35 @@ summary() {
     return 0
 }
 
+run_one() {
+    nice -n 10 cargo test --lib "pipeline::tests::$1" -- --exact --nocapture
+}
+
+# R28 F3: one failure is recorded and the chunk continues; the caller's
+# summary always covers the full test list.
+run_chunk() {
+    local record="$1" passes="$2"
+    shift 2
+    local tests=("$@")
+    for _ in $(seq 1 "$passes"); do
+        for t in "${tests[@]}"; do
+            if [[ "$(runs_for "$t" "$record")" -ge 20 ]]; then
+                continue
+            fi
+            local t0=$SECONDS
+            if run_one "$t" > "$log" 2>&1; then
+                echo "TEST $t PASS $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
+            else
+                echo "TEST $t FAIL $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
+                echo "OUTPUT-BEGIN" >> "$record"
+                tail -n 40 "$log" | sed 's/^/  /' >> "$record"
+                echo "OUTPUT-END" >> "$record"
+                failed=1
+            fi
+        done
+    done
+}
+
 if [[ "$self_test" -eq 1 ]]; then
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
@@ -121,6 +149,39 @@ if [[ "$self_test" -eq 1 ]]; then
     summary "$record" "${tests[@]}" > "$dir/fail.txt" || true
     grep -q 'RESULT: FAIL (beta)' "$dir/fail.txt" || { cat "$dir/fail.txt"; exit 1; }
 
+    # R28 F3: --only's summary still covers all proofs.
+    record="$dir/only.flake.txt"
+    : > "$record"
+    for _ in $(seq 1 3); do echo "TEST alpha PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    summary "$record" "${tests[@]}" > "$dir/only.txt" || true
+    grep -q 'RESULT: IN PROGRESS' "$dir/only.txt" || { cat "$dir/only.txt"; exit 1; }
+    if grep -q 'RESULT: PASS' "$dir/only.txt"; then
+        echo "--only summary must not claim PASS while beta has no runs"
+        exit 1
+    fi
+
+    # R28 F3: a failing proof is recorded and the rest of the chunk runs.
+    log="$dir/fake.log"
+    failed=0
+    run_one() { [[ "$1" != "fail" ]]; }
+    record="$dir/chunk.flake.txt"
+    : > "$record"
+    run_chunk "$record" 1 alpha fail beta
+    grep -q 'TEST alpha PASS' "$record" || { cat "$record"; exit 1; }
+    grep -q 'TEST fail FAIL' "$record" || { cat "$record"; exit 1; }
+    grep -q 'TEST beta PASS' "$record" || { cat "$record"; exit 1; }
+    [[ "$failed" -eq 1 ]] || { echo "the fixture failure did not set the exit state"; exit 1; }
+    summary "$record" alpha fail beta > "$dir/chunk-summary.txt" || true
+    for t in alpha fail beta; do
+        grep -q " $t" "$dir/chunk-summary.txt" || { cat "$dir/chunk-summary.txt"; exit 1; }
+    done
+
+    # R28 F2: Cargo.lock is in the shared list and moves the content key.
+    if ! printf '%s\n' "${graded_paths[@]}" | grep -qx 'Cargo.lock'; then
+        echo "graded-paths.txt is missing Cargo.lock"
+        exit 1
+    fi
+
     # R27-3: a docs-only commit keeps the content key; a graded edit moves it.
     repo="$dir/repo"
     mkdir -p "$repo/src" "$repo/docs"
@@ -128,6 +189,7 @@ if [[ "$self_test" -eq 1 ]]; then
     git -C "$repo" config user.email flake@example.com
     git -C "$repo" config user.name flake
     echo "pub const X: u32 = 1;" > "$repo/src/scoring.rs"
+    echo "version = 1" > "$repo/Cargo.lock"
     echo "one" > "$repo/docs/readme.md"
     git -C "$repo" add -A
     git -C "$repo" commit -qm one
@@ -137,11 +199,16 @@ if [[ "$self_test" -eq 1 ]]; then
     git -C "$repo" commit -qm two
     key2=$(flake_key "$repo" HEAD)
     [[ "$key1" == "$key2" ]] || { echo "doc-only commit changed the key"; exit 1; }
-    echo "pub const X: u32 = 2;" > "$repo/src/scoring.rs"
+    echo "version = 2" > "$repo/Cargo.lock"
     git -C "$repo" add -A
     git -C "$repo" commit -qm three
     key3=$(flake_key "$repo" HEAD)
-    [[ "$key1" != "$key3" ]] || { echo "graded edit kept the key"; exit 1; }
+    [[ "$key1" != "$key3" ]] || { echo "Cargo.lock edit kept the key"; exit 1; }
+    echo "pub const X: u32 = 2;" > "$repo/src/scoring.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm four
+    key4=$(flake_key "$repo" HEAD)
+    [[ "$key3" != "$key4" ]] || { echo "graded edit kept the key"; exit 1; }
     echo "RESULT: PASS (self-test, key=$key1)"
     exit 0
 fi
@@ -154,11 +221,13 @@ fi
 
 mapfile -t all_tests < <(tests_from_source)
 [[ ${#all_tests[@]} -gt 0 ]] || { echo "[flake] no live SQL proofs found" >&2; exit 1; }
+summary_tests=("${all_tests[@]}")
+run_tests=("${all_tests[@]}")
 if [[ -n "$only" ]]; then
     match=0
     for t in "${all_tests[@]}"; do [[ "$t" == "$only" ]] && match=1; done
     [[ "$match" -eq 1 ]] || { echo "[flake] unknown test: $only" >&2; exit 1; }
-    all_tests=("$only")
+    run_tests=("$only")
 fi
 
 commit="$(git rev-parse --short=12 HEAD)"
@@ -181,29 +250,11 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
 failed=0
-for _ in $(seq 1 "$passes"); do
-    for t in "${all_tests[@]}"; do
-        runs=$(runs_for "$t" "$record")
-        if [[ "$runs" -ge 20 ]]; then
-            continue
-        fi
-        t0=$SECONDS
-        if nice -n 10 cargo test --lib "pipeline::tests::$t" -- --exact --nocapture > "$log" 2>&1; then
-            echo "TEST $t PASS $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
-        else
-            echo "TEST $t FAIL $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
-            echo "OUTPUT-BEGIN" >> "$record"
-            tail -n 40 "$log" | sed 's/^/  /' >> "$record"
-            echo "OUTPUT-END" >> "$record"
-            failed=1
-            break 2
-        fi
-    done
-done
+run_chunk "$record" "$passes" "${run_tests[@]}"
 
 {
     echo "finished: $(date -u +%FT%TZ)"
-    summary "$record" "${all_tests[@]}" || true
+    summary "$record" "${summary_tests[@]}" || true
 } >> "$record"
 tail -n 80 "$record"
 echo "[flake] record: $record"
