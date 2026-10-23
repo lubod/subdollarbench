@@ -1629,10 +1629,10 @@ impl PortalExporter {
                     c.sqlite_version.as_deref()
                 ))
             );
-            if let Some(cap) =
-                crate::report::rules::recorded_cap_basis(&c.rules, c.cap_price_basis.as_deref())
+            if crate::report::rules::recorded_cap_basis(&c.rules, c.cap_price_basis.as_deref())
+                .is_some()
             {
-                text.push_str(&format!(" · cap {}", Self::esc(cap)));
+                text.push_str(" · cap at list price");
             }
             text
         };
@@ -3164,7 +3164,7 @@ mod tests {
             "2026-10-19.40",
         )]);
         assert!(recorded.contains("SQLite 3.0.0"), "{recorded}");
-        assert!(recorded.contains("cap recorded cap basis"), "{recorded}");
+        assert!(recorded.contains("cap at list price"), "{recorded}");
 
         let old = PortalExporter::render_sql_board(&[cell(None, None, "2026-10-19.38")]);
         assert!(!old.contains("SQLite 3.0.0"), "{old}");

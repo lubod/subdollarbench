@@ -108,7 +108,39 @@ pub fn digest_files(root: &Path, files: &[PathBuf]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn collect_dir_strict(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
+    let dir = root.join(rel_dir);
+    let entries = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("graded dir {} is unreadable: {e}", dir.display()));
+    for entry in entries.flatten() {
+        let rel = rel_dir.join(entry.file_name());
+        let path = root.join(&rel);
+        if path.is_dir() {
+            collect_dir_strict(root, &rel, out);
+        } else if path.is_file() {
+            out.push(rel);
+        }
+    }
+}
+
+/// Build-time files. Unlike the runtime `files` helper, a missing `dir`
+/// entry is a build error: a renamed/mistyped directory must not hash as
+/// nothing.
+pub fn compiled_files(root: &Path, manifest: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for (kind, rel) in parse(manifest) {
+        match kind {
+            Kind::File => out.push(PathBuf::from(rel)),
+            Kind::Dir => collect_dir_strict(root, Path::new(rel), &mut out),
+            Kind::RuntimeFile | Kind::RuntimeDir => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn compiled_digest(root: &Path, manifest: &str) -> String {
-    let files = files(root, manifest, false);
+    let files = compiled_files(root, manifest);
     digest_files(root, &files)
 }
