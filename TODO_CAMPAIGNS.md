@@ -37,7 +37,7 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | [26](docs/rounds/26.md) | Turns inside an attempt follow the dollar rule (R23-7) | merged |
 | [27](docs/rounds/27.md) | Freeze prerequisites: stable stamp (R24-4), snapshot ids (R24-6), list price vs bill (R26-2), missing live proofs, flake bar | merged |
 | [28](docs/rounds/28.md) | Freeze hardening: oracle in the stamp (R27-8), one path list (R27-9), flake-bar ergonomics (R27-4), build digest test (R27-5), cap shown (R27-7) | merged |
-| [29](docs/rounds/29.md) | The freeze: stamp/label fixes (R28-2..4), CI (D1), final rules version (history names R27-6) | open |
+| [29](docs/rounds/29.md) | The freeze: stamp/label fixes (R28-2..4), CI (D1), final rules version (history names R27-6) | merged |
 | — | The 20-pass flake bar on 29's content (reviewer, in chunks), then the freeze declaration (AGENTS.md, DECISIONS.md; docs only) | — |
 
 ## After the freeze: validation
