@@ -9519,11 +9519,154 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// R27 F4: stage-12 full live proof. The reference adapter runs the
+    /// cumulative suite through stage 12; the concurrency scenario checks
+    /// lost update, transfers and non-blocking readers.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage12_concurrency_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 66u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqlconc");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqlconc");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-12 fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlconc");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 12,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=12).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: (0..12).collect(),
+            spec_md: None,
+            preamble: None,
+            cap_headroom_usd: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-12 fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 12: Concurrency and isolation -> PASS",
+            "[CONCURRENCY] serializable: lost update, transfers, and readers never blocked",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (13, 13)
+        );
+        cleanup_covtest_network("sqlconc");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R27 F4: stage-12 lite live proof. The global-lock profile must pass
+    /// the lost-update and transfer checks; it does not claim non-blocking
+    /// readers.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage12_concurrency_lite_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 67u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqlconclite");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqlconclite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-12 lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqlconclite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 12,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=12).collect(),
+            lite_profile: vec!["concurrency-global-lock".to_string()],
+            passed_lite: Vec::new(),
+            passed_stages: (0..12).collect(),
+            spec_md: None,
+            preamble: None,
+            cap_headroom_usd: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-12 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 12: Concurrency and isolation -> PASS",
+            "[CONCURRENCY] lite: lost update and transfers are serializable (global lock)",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (13, 13)
+        );
+        cleanup_covtest_network("sqlconclite");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Ticket 15's gate needs `./test.sh`, a coverage line and stage-7/8
     /// commits; stage 16's acceptance includes ticket 15, so both live
     /// proofs install the same fixture. `sql_server.py` stays byte-identical
     /// to the harness reference (the anti-cheat check recognizes it).
     fn install_tests_ci_fixture(workdir: &std::path::Path, port: u16) {
+        install_tests_ci_fixture_with_coverage(workdir, port, 85.0);
+    }
+
+    /// R27 F4: the same stage-15 fixture with a chosen self-reported
+    /// coverage, so the lite proof can show the 60% gate accepting a value
+    /// the full 80% gate would reject.
+    fn install_tests_ci_fixture_with_coverage(workdir: &std::path::Path, port: u16, coverage: f64) {
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(args)
@@ -9550,7 +9693,11 @@ main()
         std::fs::write(workdir.join("feature_joins.py"), "JOIN = True\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "stage 8: Joins [pass]"]);
-        std::fs::write(workdir.join("coverage.txt"), "coverage: 85.0%\n").unwrap();
+        std::fs::write(
+            workdir.join("coverage.txt"),
+            format!("coverage: {coverage:.1}%\n"),
+        )
+        .unwrap();
         let suite = format!(
             "#!/bin/sh\n\
              set -eu\n\
@@ -9661,6 +9808,78 @@ main()
             (16, 16)
         );
         cleanup_covtest_network("sqltests");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R27 F4: stage-15 lite live proof. The fixture self-reports 65%
+    /// coverage: the lite 60% gate accepts it, where the full 80% gate
+    /// would fail it. The suite and both sensitivity reverts still pass.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn test_pipeline_eval_only_sql_stage15_tests_ci_lite_live() {
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = 68u8;
+        let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+        cleanup_covtest_network("sqltestslite");
+        if let Ok(out) = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("publish={port}")])
+            .output()
+        {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            if !ids.is_empty() {
+                let mut args = vec!["rm".to_string(), "-f".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("docker").args(&args).output();
+            }
+        }
+        let dir = covtest_dir("sqltestslite");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+        install_tests_ci_fixture_with_coverage(&workdir, port, 65.0);
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, "sdb-sql stage-15 lite fixture").unwrap();
+
+        let mut config = covtest_config(workdir.clone(), worker, "sqltestslite");
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 15,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=15).collect(),
+            lite_profile: vec!["coverage-60".to_string()],
+            passed_lite: Vec::new(),
+            passed_stages: (0..15).collect(),
+            spec_md: None,
+            preamble: None,
+            cap_headroom_usd: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
+            .await
+            .expect("the stage-15 lite fixture run must complete");
+        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        for needle in [
+            "Stage 15: Tests and CI gate -> PASS",
+            "Stage 14: Observability -> PASS",
+            "[TESTS] coverage 65.0% (self-report, not verified; gate 60%)",
+            "[TESTS] sensitivity ok (stage-7 diff reversed)",
+            "[TESTS] sensitivity ok (stage-8 diff reversed)",
+        ] {
+            assert!(
+                logger.contains(needle),
+                "missing {needle:?}; log:\n{}",
+                logger.text()
+            );
+        }
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (16, 16)
+        );
+        cleanup_covtest_network("sqltestslite");
         let _ = fs::remove_dir_all(&dir);
     }
 
