@@ -13,7 +13,7 @@ from `TEMPLATE.md`.
 | [25](25.md) | Display follow-ups (crash label, `waiting`, relabel, API cost, refusal text) | merged `b185773` |
 | [26](26.md) | Turns inside an attempt follow the dollar rule (R23-7) | merged `644931d` |
 | [27](27.md) | Freeze prerequisites: stable stamp, snapshot ids, list price vs bill, flake bar | merged `377b364` |
-| [28](28.md) | Freeze hardening: oracle in the stamp, one path list, flake-bar ergonomics, cap shown | draft |
+| [28](28.md) | Freeze hardening: oracle in the stamp, one path list, flake-bar ergonomics, cap shown | open |
 
 **Status values:**
 
