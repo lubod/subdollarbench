@@ -13,10 +13,13 @@ file src/scoring.rs
 file src/report/leaderboard.rs
 file src/bench/mod.rs
 file src/bench/batch_ref.rs
-file campaigns/sdb-sql/campaign.json
-dir tasks
+file extensions/bench-policy.js
 dir src/verifier
 dir src/prompts
 dir src/cost
 dir src/sandbox
+# Read from SDB_HOME at run time: the campaign spec holds the ladder and
+# the task prompts are read per attempt.
+runtime-file campaigns/sdb-sql/campaign.json
+runtime-dir tasks
 runtime-dir campaigns/sdb-sql/stages

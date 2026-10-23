@@ -780,7 +780,7 @@ fn manifest_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
             return None;
         }
         line.split_once(' ').filter(|(kind, rel)| {
-            !rel.is_empty() && matches!(*kind, "file" | "dir" | "runtime-dir")
+            !rel.is_empty() && matches!(*kind, "file" | "dir" | "runtime-file" | "runtime-dir")
         })
     })
 }
@@ -796,7 +796,7 @@ pub fn graded_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for (kind, rel) in manifest_entries() {
         match kind {
-            "file" => files.push(PathBuf::from(rel)),
+            "file" | "runtime-file" => files.push(PathBuf::from(rel)),
             "dir" | "runtime-dir" => collect_dir(root, Path::new(rel), &mut files),
             _ => unreachable!(),
         }
@@ -809,8 +809,10 @@ pub fn graded_files(root: &Path) -> Vec<PathBuf> {
 fn runtime_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for (kind, rel) in manifest_entries() {
-        if kind == "runtime-dir" {
-            collect_dir(root, Path::new(rel), &mut files);
+        match kind {
+            "runtime-file" => files.push(PathBuf::from(rel)),
+            "runtime-dir" => collect_dir(root, Path::new(rel), &mut files),
+            _ => {}
         }
     }
     files.sort();
@@ -981,8 +983,40 @@ mod tests {
         );
     }
 
-    /// R27 F1 acceptance: every source under the verifier/prompts/cost
-    /// directories is covered by the one graded list.
+    fn normalize_include(base: &Path, target: &str) -> PathBuf {
+        let joined = base.join(target);
+        let mut out = PathBuf::new();
+        for part in joined.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    fn include_targets(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for prefix in ["include_str!(\"", "include_bytes!(\""] {
+            let mut rest = text;
+            while let Some(at) = rest.find(prefix) {
+                let start = at + prefix.len();
+                let Some(end) = rest[start..].find('"') else {
+                    break;
+                };
+                out.push(rest[start..start + end].to_string());
+                rest = &rest[start + end..];
+            }
+        }
+        out
+    }
+
+    /// R27 F1/R27-2 acceptance: every source under the verifier/prompts/
+    /// cost directories and every `include_str!`/`include_bytes!` target
+    /// under pipeline/sandbox/cost/prompts is covered by the one list.
     #[test]
     fn r27_f1_every_graded_source_is_listed() {
         let root = crate::config::get_repo_root();
@@ -998,6 +1032,43 @@ mod tests {
                 );
             }
         }
+        let mut sources = vec![PathBuf::from("src/pipeline.rs")];
+        for dir in ["src/sandbox", "src/cost", "src/prompts"] {
+            collect_dir(&root, Path::new(dir), &mut sources);
+        }
+        for source in sources {
+            let Ok(text) = fs::read_to_string(root.join(&source)) else {
+                continue;
+            };
+            for target in include_targets(&text) {
+                let rel = normalize_include(source.parent().unwrap_or(Path::new("")), &target);
+                assert!(
+                    files.contains(&rel),
+                    "{source:?} includes {target:?} -> {rel:?}, which is missing from graded-files.txt"
+                );
+            }
+        }
+    }
+
+    /// R27-1 acceptance: the campaign spec is read from SDB_HOME at run
+    /// time, so editing it must move the runtime half of the stamp.
+    #[test]
+    fn r27_r1_campaign_json_under_sdb_home_changes_the_stamp() {
+        let root = temp_root("campaignhome");
+        let rel = put(
+            &root,
+            "campaigns/sdb-sql/campaign.json",
+            r#"{"name":"sdb-sql","stages":[]}"#,
+        );
+        let a = fingerprint_root(&root);
+        put(
+            &root,
+            rel.to_str().unwrap(),
+            r#"{"name":"sdb-sql","stages":[{}]}"#,
+        );
+        let b = fingerprint_root(&root);
+        assert_ne!(a, b, "a runtime campaign.json edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// R27 F1 acceptance: a stage prompt under SDB_HOME still moves the

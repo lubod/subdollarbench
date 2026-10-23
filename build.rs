@@ -29,7 +29,7 @@ fn main() {
             let path = root.join(rel);
             println!("cargo:rerun-if-changed={rel}");
             collect_dir(&path, Path::new(rel), &mut files);
-        } else if line.starts_with("runtime-dir ") {
+        } else if line.starts_with("runtime-dir ") || line.starts_with("runtime-file ") {
             // Hashed at run time, not built in.
         } else {
             panic!("unknown graded-files.txt entry: {line}");

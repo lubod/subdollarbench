@@ -9,6 +9,17 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
+# R27-3: the record is keyed by graded content, not by commit, so a
+# docs-only commit keeps the same resumable record.
+GRADED_PATHS=(src/verifier src/pipeline.rs src/sandbox src/campaign.rs
+    src/scoring.rs src/cost src/prompts src/report/rules.rs campaigns
+    extensions scripts/flake-bar.sh)
+flake_key() {
+    local repo="$1" tree="$2"
+    ( cd "$repo" && git ls-tree -r "$tree" -- "${GRADED_PATHS[@]}" \
+        | sha256sum | cut -c1-12 )
+}
+
 passes=1
 only=""
 self_test=0
@@ -109,7 +120,29 @@ if [[ "$self_test" -eq 1 ]]; then
     echo "TEST beta FAIL 1 2026-10-23T00:00:00Z" >> "$record"
     summary "$record" "${tests[@]}" > "$dir/fail.txt" || true
     grep -q 'RESULT: FAIL (beta)' "$dir/fail.txt" || { cat "$dir/fail.txt"; exit 1; }
-    echo "RESULT: PASS (self-test)"
+
+    # R27-3: a docs-only commit keeps the content key; a graded edit moves it.
+    repo="$dir/repo"
+    mkdir -p "$repo/src" "$repo/docs"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email flake@example.com
+    git -C "$repo" config user.name flake
+    echo "pub const X: u32 = 1;" > "$repo/src/scoring.rs"
+    echo "one" > "$repo/docs/readme.md"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm one
+    key1=$(flake_key "$repo" HEAD)
+    echo "two" > "$repo/docs/readme.md"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm two
+    key2=$(flake_key "$repo" HEAD)
+    [[ "$key1" == "$key2" ]] || { echo "doc-only commit changed the key"; exit 1; }
+    echo "pub const X: u32 = 2;" > "$repo/src/scoring.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm three
+    key3=$(flake_key "$repo" HEAD)
+    [[ "$key1" != "$key3" ]] || { echo "graded edit kept the key"; exit 1; }
+    echo "RESULT: PASS (self-test, key=$key1)"
     exit 0
 fi
 
@@ -129,18 +162,20 @@ if [[ -n "$only" ]]; then
 fi
 
 commit="$(git rev-parse --short=12 HEAD)"
+key="$(flake_key "$(git rev-parse --show-toplevel)" HEAD)"
 dir="$(git rev-parse --path-format=absolute --git-common-dir)/sdb-gates"
 mkdir -p "$dir"
-record="$dir/$commit.flake.txt"
+record="$dir/flake-$key.txt"
 if [[ ! -f "$record" ]]; then
     {
         echo "commit:  $(git rev-parse HEAD)"
+        echo "key:     flake-$key"
         echo "branch:  $(git rev-parse --abbrev-ref HEAD)"
         echo "subject: $(git log -1 --format=%s)"
         echo "started: $(date -u +%FT%TZ)"
     } > "$record"
 else
-    echo "resumed: $(date -u +%FT%TZ) (passes requested: $passes)" >> "$record"
+    echo "resumed: $(date -u +%FT%TZ) commit $commit (passes requested: $passes)" >> "$record"
 fi
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
