@@ -5728,6 +5728,11 @@ global.fetch = async (url) => {
   const live = el('liveBody').innerHTML;
   const board = el('boardBody').innerHTML;
   const fail = [];
+  if (typeof rulesAtLeast !== 'function') fail.push('rules-at-least-missing');
+  else if (!rulesAtLeast('2026-10-19.100', '2026-10-19.39')
+           || rulesAtLeast('2026-10-18.50', '2026-10-19.39')) {
+    fail.push('rules-version-order');
+  }
   // R23-2: the Board launcher defaults the wall to 480 and its resolved
   // command prints the 120-minute per-ticket guard.
   const indexPage = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
@@ -5781,7 +5786,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.40',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.41',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {

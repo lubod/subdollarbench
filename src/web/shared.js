@@ -6,6 +6,21 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
+// R28-3/R29 F1: compare rules versions as (date, number), not strings.
+function rulesAtLeast(version, minimum) {
+  function split(v) {
+    const s = String(v || '');
+    const at = s.lastIndexOf('.');
+    if (at < 0) return null;
+    const n = Number(s.slice(at + 1));
+    return Number.isFinite(n) ? [s.slice(0, at), n] : null;
+  }
+  const a = split(version);
+  const b = split(minimum);
+  if (!a || !b) return false;
+  return a[0] > b[0] || (a[0] === b[0] && a[1] >= b[1]);
+}
+
 function shortModelName(modelName) {
   if (!modelName) return '';
   return modelName.split('/').pop() || modelName;

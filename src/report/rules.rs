@@ -15,6 +15,21 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.41`: the freeze (round 29). The stamp is SHA-256 over a
+///   shared manifest, with compiled inputs hashed at build time and
+///   `campaigns/sdb-sql/stages`, `campaigns/sdb-sql/campaign.json` and the
+///   task prompts hashed from SDB_HOME at run time. New inputs include
+///   `extensions/bench-policy.js`, `Cargo.lock`, the linked SQLite version
+///   (`rusqlite::version()`, covering `rusqlite`/`libsqlite3-sys`) and the
+///   descriptor/agent source. The price snapshot drops
+///   `anthropic/claude-3-haiku`, renames `meta/muse-spark` to
+///   `meta/muse-spark-1.3`, and bills Gemini cache writes at the catalog
+///   rate: `gemini-3.8-flash` $0.825 -> $0.0416667/M, `gemini-2.5-flash`
+///   $0.30 -> $0.0833333/M, `gemini-2.5-flash-lite` $0.10 ->
+///   $0.0833333/M. The $0.99 cap is at list price from
+///   `src/cost/model_prices.json`; the provider bill is audit-only. Score
+///   impact: none for sdb-sql's grading; Gemini cells cost less in cache
+///   writes. Careers start again at phase 1.
 /// - `2026-10-19.40`: round-26 R23-7 — inside one attempt the only turn
 ///   bound is the 200-turn guard. The first session gets the whole guard
 ///   (the retired 50-turn checkpoint is gone). A repair session runs only
@@ -758,7 +773,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.40";
+pub const RULES_VERSION: &str = "2026-10-19.41";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
@@ -775,11 +790,24 @@ pub fn recorded_sqlite_version(recorded: Option<&str>) -> &str {
     recorded.unwrap_or("\u{2014}")
 }
 
+/// R28-3/R29 F1: compare the date and the numeric suffix separately, so
+/// `.100` is later than `.39` (a string comparison is not enough).
+pub fn rules_version_at_least(version: &str, minimum: &str) -> bool {
+    fn split(value: &str) -> Option<(&str, u64)> {
+        let (date, number) = value.rsplit_once('.')?;
+        Some((date, number.parse().ok()?))
+    }
+    match (split(version), split(minimum)) {
+        (Some((vd, vn)), Some((md, mn))) => vd > md || (vd == md && vn >= mn),
+        _ => false,
+    }
+}
+
 /// R28-1: a run's recorded cap basis. Old rows that predate the list-price
 /// policy (`.39`) get none; `.39` and later can derive it from the rules
 /// version when the field was not recorded yet.
 pub fn recorded_cap_basis<'a>(rules: &str, recorded: Option<&'a str>) -> Option<&'a str> {
-    recorded.or_else(|| (rules >= "2026-10-19.39").then_some(CAP_PRICE_BASIS))
+    recorded.or_else(|| rules_version_at_least(rules, "2026-10-19.39").then_some(CAP_PRICE_BASIS))
 }
 
 /// One shared list, also read by `build.rs`: `file`/`dir` entries are
@@ -914,7 +942,7 @@ mod tests {
         let rel = put(&root, "src/scoring.rs", "fixture\n");
         let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
         assert_eq!(
-            fp, "2026-10-19.40+de131c65cd98313aa04aae7588fea651",
+            fp, "2026-10-19.41+9f73ebc967b241a9fe489f2f04ff1d9c",
             "the SHA-256 stamp must be stable"
         );
         assert_eq!(fp, fingerprint_files(&root, &[rel]));
@@ -1047,6 +1075,32 @@ mod tests {
             recorded_cap_basis("2026-10-19.38", Some("recorded")),
             Some("recorded")
         );
+    }
+
+    /// R29 F1 acceptance: rules versions compare as (date, number).
+    #[test]
+    fn r29_f1_rules_versions_compare_numerically() {
+        assert!(rules_version_at_least("2026-10-19.100", "2026-10-19.39"));
+        assert!(!rules_version_at_least("2026-10-18.50", "2026-10-19.39"));
+        assert!(rules_version_at_least("2026-10-19.39", "2026-10-19.39"));
+        assert!(!rules_version_at_least("legacy-pre-cheat", "2026-10-19.39"));
+        assert_eq!(
+            recorded_cap_basis("2026-10-19.38", None),
+            None,
+            "the old string comparison must not make pre-.39 look priced"
+        );
+    }
+
+    /// R29 F1 acceptance: a missing compiled `dir` entry fails the build
+    /// digest instead of hashing as nothing.
+    #[test]
+    fn r29_f1_missing_graded_dir_fails() {
+        let root = temp_root("missingdir");
+        let result = std::panic::catch_unwind(|| {
+            graded_hash::compiled_digest(&root, "dir definitely_missing\n")
+        });
+        assert!(result.is_err(), "a missing dir must fail compiled_digest");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// R28 F1 acceptance: both the linked SQLite version and the compiled
