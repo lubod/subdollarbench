@@ -1,0 +1,25 @@
+# One graded-input list for build.rs and report::rules.
+#
+# `file` and `dir` entries are compiled into the binary. build.rs hashes
+# them at build time and emits SDB_COMPILED_RULES_DIGEST; changing any of
+# them (or rebuilding after a change) moves the stamp.
+#
+# `runtime-dir` entries are read from SDB_HOME at run time. rules.rs hashes
+# them when it computes the fingerprint, so a deployment with different
+# stage prompts gets a different stamp without rebuilding.
+file src/pipeline.rs
+file src/campaign.rs
+file src/scoring.rs
+file src/report/leaderboard.rs
+file src/bench/mod.rs
+file src/bench/batch_ref.rs
+file extensions/bench-policy.js
+dir src/verifier
+dir src/prompts
+dir src/cost
+dir src/sandbox
+# Read from SDB_HOME at run time: the campaign spec holds the ladder and
+# the task prompts are read per attempt.
+runtime-file campaigns/sdb-sql/campaign.json
+runtime-dir tasks
+runtime-dir campaigns/sdb-sql/stages

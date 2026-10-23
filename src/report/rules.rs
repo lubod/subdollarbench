@@ -3,10 +3,12 @@
 //! `RULES_VERSION` is bumped explicitly whenever grading changes
 //! (prompt edit, verifier logic, cheat-stage enable). `fingerprint()`
 //! hashes the graded inputs so CI fails if content drifts without a bump.
+//!
+//! The published cell cap is at list price from `src/cost/model_prices.json`;
+//! the provider bill is recorded for audit only.
 
-use std::collections::hash_map::DefaultHasher;
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// Bump this whenever grading changes. History:
@@ -755,64 +757,63 @@ use std::path::{Path, PathBuf};
 ///
 pub const RULES_VERSION: &str = "2026-10-19.40";
 
-/// Files whose content defines the published numbers: the prompts the model
-/// saw, the verifiers that judged it, *and* the code that turns a result into
-/// a score. `leaderboard.rs` treats `rules_version` as the comparability key,
-/// so anything that can change a score has to be in here - otherwise two runs
-/// scored by different maths carry the same stamp.
-const GRADED_FILES: &[&str] = &[
-    "tasks/binproto/prompt.md",
-    "tasks/http/prompt.md",
-    "tasks/pdf/prompt.md",
-    "tasks/proxy/prompt.md",
-    "tasks/pubsub/prompt.md",
-    "tasks/redis/prompt.md",
-    "tasks/wal/prompt.md",
-    "src/verifier/compliance.rs",
-    "src/verifier/binproto.rs",
-    "src/verifier/http.rs",
-    "src/verifier/pdf.rs",
-    "src/verifier/proxy.rs",
-    "src/verifier/pubsub.rs",
-    "src/verifier/redis.rs",
-    "src/verifier/wal.rs",
-    // The scoring and ranking path, not just the judging.
-    "src/cost/calculator.rs",
-    "src/report/leaderboard.rs",
-    // The measurement apparatus: load-test shape and batch-bracket math
-    // move every recorded denominator, so they are graded inputs too.
-    "src/bench/mod.rs",
-    "src/bench/batch_ref.rs",
-    // R24 R1: the active sdb-sql grading inputs. The stage prompts and the
-    // SQL verifier sources are swept as directories below, so a new stage or
-    // verifier file joins without editing this list. The retired task files
-    // above stay: they remain runnable through the generic single-shot path
-    // and their verifier/cost code is still shared.
-    "campaigns/sdb-sql/campaign.json",
-    "src/scoring.rs",
-    "src/cost/model_prices.json",
-    "src/prompts/session_budget.txt",
-    "src/prompts/omp_effective.md",
-    "src/prompts/omp_agents.md",
-    "src/prompts/opencode_effective.md",
-    "src/prompts/opencode_agents.md",
-];
+/// R27 F3: the rules-page statement of the cap's price basis. Kept as a
+/// constant so the page, the proposal and the test cannot drift.
+pub const CAP_PRICE_BASIS: &str = "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.";
 
-/// Directories swept recursively into the fingerprint. A new stage prompt
-/// or SQL verifier file is covered without touching `GRADED_FILES`.
-const GRADED_DIRS: &[&str] = &["campaigns/sdb-sql/stages", "src/verifier/sql"];
+/// One shared list, also read by `build.rs`: `file`/`dir` entries are
+/// compiled in and hashed at build time; `runtime-dir` entries are hashed
+/// from SDB_HOME when the stamp is computed.
+const GRADED_MANIFEST: &str = include_str!("graded-files.txt");
 
-/// Hash of the graded inputs, as `"{RULES_VERSION}+{hex8}"`.
+/// The SHA-256 of the compiled-in graded inputs, emitted by `build.rs`.
+pub const COMPILED_GRADED_DIGEST: &str = env!("SDB_COMPILED_RULES_DIGEST");
+
+/// Keep 128 bits of the SHA-256 digest in the public stamp (the round asks
+/// for at least 64).
+const STAMP_BYTES: usize = 16;
+
+fn manifest_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    GRADED_MANIFEST.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        line.split_once(' ').filter(|(kind, rel)| {
+            !rel.is_empty() && matches!(*kind, "file" | "dir" | "runtime-file" | "runtime-dir")
+        })
+    })
+}
+
+/// Hash of the graded inputs, as `"{RULES_VERSION}+{hex32}"`.
 pub fn fingerprint() -> String {
     fingerprint_root(&crate::config::get_repo_root())
 }
 
-/// The static files plus every regular file under [`GRADED_DIRS`], as paths
-/// relative to `root`, sorted and deduplicated.
+/// The static files plus every regular file under the manifest's
+/// directories, as paths relative to `root`, sorted and deduplicated.
 pub fn graded_files(root: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = GRADED_FILES.iter().map(PathBuf::from).collect();
-    for dir in GRADED_DIRS {
-        collect_dir(root, Path::new(dir), &mut files);
+    let mut files = Vec::new();
+    for (kind, rel) in manifest_entries() {
+        match kind {
+            "file" | "runtime-file" => files.push(PathBuf::from(rel)),
+            "dir" | "runtime-dir" => collect_dir(root, Path::new(rel), &mut files),
+            _ => unreachable!(),
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn runtime_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for (kind, rel) in manifest_entries() {
+        match kind {
+            "runtime-file" => files.push(PathBuf::from(rel)),
+            "runtime-dir" => collect_dir(root, Path::new(rel), &mut files),
+            _ => {}
+        }
     }
     files.sort();
     files.dedup();
@@ -835,39 +836,58 @@ fn collect_dir(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Hash exactly these files under `root` (relative paths). The production
-/// entry point uses [`graded_files`]; the tests use this form to perturb a
-/// temporary copy without touching the real tree.
-pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> String {
-    let mut h = DefaultHasher::new();
-    RULES_VERSION.hash(&mut h);
-    for f in files {
-        // A missing graded file must not hash as empty content: that would
-        // leave the stamp unchanged when a verifier is deleted or renamed, and
-        // results graded by a different code would compare as equal.
-        let content = fs::read_to_string(root.join(f)).unwrap_or_else(|e| {
-            panic!("graded file {} is unreadable: {e}", f.display());
-        });
-        f.to_string_lossy().hash(&mut h);
-        content.hash(&mut h);
-    }
-    format!("{RULES_VERSION}+{:08x}", h.finish() as u32)
+fn hash_entry(hasher: &mut Sha256, rel: &Path, content: &[u8]) {
+    hasher.update(rel.to_string_lossy().as_bytes());
+    hasher.update([0]);
+    hasher.update(content);
+    hasher.update([0]);
 }
 
+fn stamp(digest: &[u8]) -> String {
+    let hex: String = digest
+        .iter()
+        .take(STAMP_BYTES)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{RULES_VERSION}+{hex}")
+}
+
+/// Hash exactly these files under `root` (relative paths). The tests use
+/// this form to perturb a temporary copy without touching the real tree.
+pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> String {
+    let mut files = files.to_vec();
+    files.sort();
+    files.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(RULES_VERSION.as_bytes());
+    hasher.update([0]);
+    for f in files {
+        // A missing graded file must not hash as empty content: that would
+        // leave the stamp unchanged when a verifier is deleted or renamed.
+        let content = fs::read(root.join(&f)).unwrap_or_else(|e| {
+            panic!("graded file {} is unreadable: {e}", f.display());
+        });
+        hash_entry(&mut hasher, &f, &content);
+    }
+    stamp(&hasher.finalize())
+}
+
+/// Hash the binary's compiled-in graded digest plus the runtime stage files
+/// under `root` (SDB_HOME). The runtime path tolerates a minimal SDB_HOME: a
+/// missing stage directory simply contributes no entries.
 pub fn fingerprint_root(root: &Path) -> String {
-    // The production path tolerates a minimal SDB_HOME (the CLI tests point
-    // it at a temp tree): a missing path drops its path+content from the
-    // hash, which still changes the stamp; the test helper below is strict.
-    let mut h = DefaultHasher::new();
-    RULES_VERSION.hash(&mut h);
-    for f in graded_files(root) {
-        let Ok(content) = fs::read_to_string(root.join(&f)) else {
+    let mut hasher = Sha256::new();
+    hasher.update(RULES_VERSION.as_bytes());
+    hasher.update([0]);
+    hasher.update(COMPILED_GRADED_DIGEST.as_bytes());
+    hasher.update([0]);
+    for f in runtime_files(root) {
+        let Ok(content) = fs::read(root.join(&f)) else {
             continue;
         };
-        f.to_string_lossy().hash(&mut h);
-        content.hash(&mut h);
+        hash_entry(&mut hasher, &f, &content);
     }
-    format!("{RULES_VERSION}+{:08x}", h.finish() as u32)
+    stamp(&hasher.finalize())
 }
 
 #[cfg(test)]
@@ -902,6 +922,166 @@ mod tests {
             fp.starts_with(&format!("{RULES_VERSION}+")),
             "fingerprint {fp} must start with RULES_VERSION"
         );
+    }
+
+    /// R27 F1 acceptance: SHA-256 is deterministic across processes. The
+    /// expected value is pinned for a one-file fixture tree.
+    #[test]
+    fn r27_f1_stamp_is_stable_across_processes() {
+        let root = temp_root("sha");
+        let rel = put(&root, "src/scoring.rs", "fixture\n");
+        let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
+        assert_eq!(
+            fp, "2026-10-19.40+de131c65cd98313aa04aae7588fea651",
+            "the SHA-256 stamp must be stable"
+        );
+        assert_eq!(fp, fingerprint_files(&root, &[rel]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R27 F1 acceptance: a compiled-in file changed on disk after the
+    /// build does not move the binary's stamp; a rebuild (simulated by
+    /// fingerprint_files over the compiled list) does.
+    #[test]
+    fn r27_f1_compiled_in_files_hash_the_build() {
+        assert_eq!(COMPILED_GRADED_DIGEST.len(), 64);
+        assert!(COMPILED_GRADED_DIGEST
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+        let root = temp_root("compiled");
+        let rel = put(&root, "src/scoring.rs", "one\n");
+        let compiled_a = fingerprint_files(&root, std::slice::from_ref(&rel));
+        let runtime_a = fingerprint_root(&root);
+        put(&root, "src/scoring.rs", "two\n");
+        let compiled_b = fingerprint_files(&root, &[rel]);
+        let runtime_b = fingerprint_root(&root);
+        assert_eq!(
+            runtime_a, runtime_b,
+            "a compiled file on disk must not change the built binary's stamp"
+        );
+        assert_ne!(
+            compiled_a, compiled_b,
+            "a rebuild over the changed file must move the stamp"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R27 F3 acceptance: the rules page and proposal state the cap's
+    /// list-price basis and its snapshot source.
+    #[test]
+    fn r27_f3_rules_page_states_list_price() {
+        assert!(CAP_PRICE_BASIS.contains("list price"));
+        assert!(CAP_PRICE_BASIS.contains("src/cost/model_prices.json"));
+        let proposal = include_str!("../../docs/PROPOSAL-sdb-sql.md");
+        assert!(
+            proposal.contains("list price"),
+            "proposal missing list price"
+        );
+        assert!(
+            proposal.contains("src/cost/model_prices.json"),
+            "proposal missing the snapshot source"
+        );
+    }
+
+    fn normalize_include(base: &Path, target: &str) -> PathBuf {
+        let joined = base.join(target);
+        let mut out = PathBuf::new();
+        for part in joined.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    fn include_targets(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for prefix in ["include_str!(\"", "include_bytes!(\""] {
+            let mut rest = text;
+            while let Some(at) = rest.find(prefix) {
+                let start = at + prefix.len();
+                let Some(end) = rest[start..].find('"') else {
+                    break;
+                };
+                out.push(rest[start..start + end].to_string());
+                rest = &rest[start + end..];
+            }
+        }
+        out
+    }
+
+    /// R27 F1/R27-2 acceptance: every source under the verifier/prompts/
+    /// cost directories and every `include_str!`/`include_bytes!` target
+    /// under pipeline/sandbox/cost/prompts is covered by the one list.
+    #[test]
+    fn r27_f1_every_graded_source_is_listed() {
+        let root = crate::config::get_repo_root();
+        let files = graded_files(&root);
+        for dir in ["src/verifier/sql", "src/prompts", "src/cost"] {
+            let mut inner = Vec::new();
+            collect_dir(&root, Path::new(dir), &mut inner);
+            assert!(!inner.is_empty(), "no files under {dir}");
+            for rel in inner {
+                assert!(
+                    files.contains(&rel),
+                    "{rel:?} under {dir} is missing from graded-files.txt"
+                );
+            }
+        }
+        let mut sources = vec![PathBuf::from("src/pipeline.rs")];
+        for dir in ["src/sandbox", "src/cost", "src/prompts"] {
+            collect_dir(&root, Path::new(dir), &mut sources);
+        }
+        for source in sources {
+            let Ok(text) = fs::read_to_string(root.join(&source)) else {
+                continue;
+            };
+            for target in include_targets(&text) {
+                let rel = normalize_include(source.parent().unwrap_or(Path::new("")), &target);
+                assert!(
+                    files.contains(&rel),
+                    "{source:?} includes {target:?} -> {rel:?}, which is missing from graded-files.txt"
+                );
+            }
+        }
+    }
+
+    /// R27-1 acceptance: the campaign spec is read from SDB_HOME at run
+    /// time, so editing it must move the runtime half of the stamp.
+    #[test]
+    fn r27_r1_campaign_json_under_sdb_home_changes_the_stamp() {
+        let root = temp_root("campaignhome");
+        let rel = put(
+            &root,
+            "campaigns/sdb-sql/campaign.json",
+            r#"{"name":"sdb-sql","stages":[]}"#,
+        );
+        let a = fingerprint_root(&root);
+        put(
+            &root,
+            rel.to_str().unwrap(),
+            r#"{"name":"sdb-sql","stages":[{}]}"#,
+        );
+        let b = fingerprint_root(&root);
+        assert_ne!(a, b, "a runtime campaign.json edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R27 F1 acceptance: a stage prompt under SDB_HOME still moves the
+    /// runtime half of the stamp.
+    #[test]
+    fn r27_f1_a_stage_under_sdb_home_changes_the_stamp() {
+        let root = temp_root("stagehome");
+        let rel = put(&root, "campaigns/sdb-sql/stages/0_genesis/prompt.md", "one");
+        let a = fingerprint_root(&root);
+        put(&root, rel.to_str().unwrap(), "two");
+        let b = fingerprint_root(&root);
+        assert_ne!(a, b, "a runtime stage edit must move the stamp");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
