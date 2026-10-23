@@ -108,6 +108,8 @@ func main() {
         pass_at_1_lo: None,
         pass_at_1_hi: None,
         rules_version: None,
+        sqlite_version: None,
+        cap_price_basis: None,
         stability: None,
         trial_pass_rates: Vec::new(),
         is_published: None,

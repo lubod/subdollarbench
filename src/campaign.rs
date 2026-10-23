@@ -1913,6 +1913,8 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         cap_reached: false,
         over_wall: false,
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
+        sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
+        cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         points: 0.0,
@@ -2378,6 +2380,12 @@ pub struct CampaignRollup {
     /// different versions never rank on one board).
     #[serde(default)]
     pub rules_version: String,
+    /// R28-1: the oracle and cap policy recorded when this cell was graded.
+    /// Absent on old cells; readers show `—`/no label rather than today's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap_price_basis: Option<String>,
     /// Campaign-wide budget cap in USD (0 = uncapped), for the Run view's
     /// spend bar.
     #[serde(default)]
@@ -2735,6 +2743,8 @@ where
         cap_reached: false,
         over_wall: false,
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
+        sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
+        cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         points: 0.0,
@@ -3779,6 +3789,8 @@ mod tests {
             cap_reached: false,
             over_wall: false,
             rules_version: String::new(),
+            sqlite_version: None,
+            cap_price_basis: None,
             budget_usd: 0.0,
             wall_min: 0,
             points: 0.0,
@@ -4159,6 +4171,8 @@ mod tests {
             cap_reached: false,
             over_wall: false,
             rules_version: crate::report::rules::RULES_VERSION.to_string(),
+            sqlite_version: None,
+            cap_price_basis: None,
             budget_usd: 0.25,
             wall_min: 30,
             points: 1.0,
@@ -5803,6 +5817,8 @@ mod tests {
             cap_reached: false,
             over_wall: false,
             rules_version: crate::report::rules::RULES_VERSION.to_string(),
+            sqlite_version: None,
+            cap_price_basis: None,
             budget_usd: 0.99,
             wall_min: 150,
             points: 10.0,

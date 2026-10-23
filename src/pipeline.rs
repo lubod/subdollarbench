@@ -6014,6 +6014,8 @@ impl BenchmarkPipeline {
             env: None,
             git_commit: None,
             rules_version: Some(crate::report::rules_fingerprint()),
+            sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
+            cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
             // Sampling: OMP passes provider defaults through (no explicit
             // temp/top_p/seed knobs), so None = reproducible-by-default.
             // Prompt hash pins the graded input for this run.

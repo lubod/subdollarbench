@@ -770,6 +770,18 @@ pub fn sqlite_version() -> &'static str {
     rusqlite::version()
 }
 
+/// R28-1: a run shows its recorded oracle, never the current binary's.
+pub fn recorded_sqlite_version(recorded: Option<&str>) -> &str {
+    recorded.unwrap_or("\u{2014}")
+}
+
+/// R28-1: a run's recorded cap basis. Old rows that predate the list-price
+/// policy (`.39`) get none; `.39` and later can derive it from the rules
+/// version when the field was not recorded yet.
+pub fn recorded_cap_basis<'a>(rules: &str, recorded: Option<&'a str>) -> Option<&'a str> {
+    recorded.or_else(|| (rules >= "2026-10-19.39").then_some(CAP_PRICE_BASIS))
+}
+
 /// One shared list, also read by `build.rs`: `file`/`dir` entries are
 /// compiled in and hashed at build time; `runtime-file`/`runtime-dir`
 /// entries are hashed from SDB_HOME when the stamp is computed.
@@ -1018,6 +1030,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// R28-1 acceptance: recorded run values win; a pre-`.39` row gets no
+    /// list-price label even though today's binary uses the snapshot.
+    #[test]
+    fn r28_r1_recorded_oracle_and_cap_basis() {
+        assert_eq!(recorded_sqlite_version(Some("3.0.0")), "3.0.0");
+        assert_eq!(recorded_sqlite_version(None), "—");
+        assert_eq!(
+            recorded_cap_basis("2026-10-19.40", None),
+            Some(CAP_PRICE_BASIS)
+        );
+        assert_eq!(recorded_cap_basis("2026-10-19.38", None), None);
+        assert_eq!(
+            recorded_cap_basis("2026-10-19.38", Some("recorded")),
+            Some("recorded")
+        );
     }
 
     /// R28 F1 acceptance: both the linked SQLite version and the compiled

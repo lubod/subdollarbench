@@ -1303,10 +1303,6 @@ fn manifest_with_portal_flag(m: &RunManifest) -> serde_json::Value {
         serde_json::Value::Bool(is_hidden(&RunArchiver::resolve_runs_dir(), &m.run_id));
     v["poisoned"] =
         serde_json::Value::Bool(is_poisoned(&RunArchiver::resolve_runs_dir(), &m.run_id));
-    v["sqlite_version"] =
-        serde_json::Value::String(crate::report::rules::sqlite_version().to_string());
-    v["cap_price_basis"] =
-        serde_json::Value::String(crate::report::rules::CAP_PRICE_BASIS.to_string());
     v
 }
 
@@ -3696,8 +3692,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status["sqlite_version"], rusqlite::version());
-        let detail = manifest_with_portal_flag(&test_manifest("r28_f1_oracle"));
-        assert_eq!(detail["sqlite_version"], rusqlite::version());
+        let mut recorded = test_manifest("r28_f1_oracle");
+        recorded.sqlite_version = Some("3.0.0".to_string());
+        recorded.cap_price_basis = Some("recorded cap basis".to_string());
+        recorded.rules_version = Some("2026-10-19.40".to_string());
+        let detail = manifest_with_portal_flag(&recorded);
+        assert_eq!(detail["sqlite_version"], "3.0.0");
+        assert_eq!(detail["cap_price_basis"], "recorded cap basis");
+        let mut old = test_manifest("r28_f1_old");
+        old.rules_version = Some("2026-10-19.38".to_string());
+        let old_detail = manifest_with_portal_flag(&old);
+        assert!(
+            old_detail.get("sqlite_version").is_none(),
+            "an old run must not borrow today's oracle"
+        );
+        assert!(crate::report::rules::recorded_cap_basis("2026-10-19.38", None).is_none());
     }
 
     /// R28 F5: the cap basis is served and reaches the Board shell.
@@ -5152,6 +5161,8 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            sqlite_version: None,
+            cap_price_basis: None,
             protocol: None,
             solved: None,
             solved_at: None,
@@ -5220,6 +5231,8 @@ mod tests {
             harness_version: None,
 
             rules_version: None,
+            sqlite_version: None,
+            cap_price_basis: None,
             protocol: None,
             solved: None,
             solved_at: None,
