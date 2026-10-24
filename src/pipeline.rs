@@ -6363,6 +6363,44 @@ mod tests {
         }
     }
 
+    /// R31 F1: a live-proof assertion failure must carry the pipeline log
+    /// (the original infra_error panic did not, and the scratch dir was
+    /// already gone).
+    fn assert_proof_result(infra_error: bool, status: &str, logger: &RecordingLogger) {
+        assert!(
+            !infra_error,
+            "infra_error; status {status}; log:\n{}",
+            logger.text()
+        );
+    }
+
+    fn assert_proof_ok(out: &PipelineOutput, logger: &RecordingLogger) {
+        assert_proof_result(out.infra_error, &out.manifest.status, logger);
+    }
+
+    fn assert_proof_score(
+        out: &PipelineOutput,
+        logger: &RecordingLogger,
+        passed_stages: u32,
+        total_stages: u32,
+    ) {
+        assert_proof_ok(out, logger);
+        assert_eq!(
+            (out.manifest.passed_stages, out.manifest.total_stages),
+            (passed_stages, total_stages),
+            "score mismatch; log:\n{}",
+            logger.text()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "[INFRA]")]
+    fn r31_f1_proof_assert_prints_log() {
+        let logger = RecordingLogger::default();
+        logger.log("[INFRA] seeded failure");
+        assert_proof_result(true, "infra_error", &logger);
+    }
+
     /// A test's temp dir, removed when the guard drops — on success and on
     /// panic alike (the suite used to leave hundreds of `/tmp/covtest-*`
     /// dirs behind, round-3 review finding 9). Derefs to the path, so
@@ -8582,13 +8620,11 @@ main()
         )
         .await
         .expect("pipeline completes even without a candidate");
-        assert!(!out.infra_error && !out.disqualified && !out.agent_failed);
+        assert_proof_ok(&out, &logger);
+        assert!(!out.disqualified && !out.agent_failed);
         assert_eq!(out.manifest.status, "failed_tests");
         assert_eq!(out.manifest.pass_rate, 0.0);
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (0, 6)
-        );
+        assert_proof_score(&out, &logger, 0, 6);
         assert!(out.manifest.stages.is_empty());
         assert!(logger.contains("No runnable start.sh or Dockerfile found"));
         cleanup_covtest_network("norun");
@@ -8611,13 +8647,10 @@ main()
         .await
         .expect("disqualified run still returns Ok");
         assert!(out.disqualified);
-        assert!(!out.infra_error);
+        assert_proof_ok(&out, &logger);
         assert_eq!(out.manifest.status, "disqualified_cheat");
         assert_eq!(out.manifest.pass_rate, 0.0);
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (0, 6)
-        );
+        assert_proof_score(&out, &logger, 0, 6);
         assert_eq!(out.manifest.stages.len(), 1);
         assert_eq!(out.manifest.stages[0].stage, 0);
         assert!(out.manifest.stages[0]
@@ -8907,10 +8940,7 @@ main()
             logger.contains("Stage 1: Basic routing (200 + marker) -> PASS"),
             "stage 1 must pass through the proxy campaign path"
         );
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (1, 1)
-        );
+        assert_proof_score(&out, &logger, 1, 1);
         cleanup_covtest_network("edge");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -8966,10 +8996,7 @@ main()
         ] {
             assert!(logger.contains(needle), "missing {needle:?}");
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (8, 8)
-        );
+        assert_proof_score(&out, &logger, 8, 8);
         cleanup_covtest_network("edgefull");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9025,10 +9052,7 @@ main()
         ] {
             assert!(logger.contains(needle), "missing {needle:?}");
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (9, 9)
-        );
+        assert_proof_score(&out, &logger, 9, 9);
         cleanup_covtest_network("queuelive");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9085,10 +9109,7 @@ main()
         ] {
             assert!(logger.contains(needle), "missing {needle:?}");
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (10, 10)
-        );
+        assert_proof_score(&out, &logger, 10, 10);
         cleanup_covtest_network("httplive");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9140,10 +9161,7 @@ main()
         ] {
             assert!(logger.contains(needle), "missing {needle:?}");
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (4, 4)
-        );
+        assert_proof_score(&out, &logger, 4, 4);
         // The harness-owned contract lands in the prepared workspace.
         assert_eq!(
             fs::read_to_string(workdir.join("SPEC.md")).unwrap(),
@@ -9199,10 +9217,7 @@ main()
         ] {
             assert!(logger.contains(needle), "missing {needle:?}");
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (5, 5)
-        );
+        assert_proof_score(&out, &logger, 5, 5);
         assert!(
             dir.join("sentinel-4.json").is_file(),
             "the sentinel must be saved next to the store"
@@ -9261,10 +9276,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (6, 6)
-        );
+        assert_proof_score(&out, &logger, 6, 6);
         cleanup_covtest_network("sqlcrash");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9301,7 +9313,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-5 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 5: Crash safety -> PASS",
             "[CRASH] lite variant: acked rows and restarts only",
@@ -9323,10 +9335,7 @@ main()
                 "the lite variant must not run {absent:?}"
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (6, 6)
-        );
+        assert_proof_score(&out, &logger, 6, 6);
         cleanup_covtest_network("sqlcrashlite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9363,7 +9372,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-6 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 5: Crash safety -> PASS",
             "Stage 6: Transactions -> PASS",
@@ -9381,10 +9390,7 @@ main()
                 "stage 5 must stay lite in a later ticket: {absent:?}"
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (7, 7)
-        );
+        assert_proof_score(&out, &logger, 7, 7);
         cleanup_covtest_network("sqltxnlite5");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9423,7 +9429,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-7 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         assert!(
             logger.contains("Stage 7: Aggregates -> PASS"),
             "missing the stage-7 pass; log:\n{}",
@@ -9435,10 +9441,7 @@ main()
                 "{absent} ran although stage 5/6 are not in the suite"
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (6, 6)
-        );
+        assert_proof_score(&out, &logger, 6, 6);
         cleanup_covtest_network("sqlno5");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9498,7 +9501,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-14 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 14: Observability -> PASS",
             "Stage 13: Schema change -> PASS",
@@ -9513,10 +9516,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (15, 15)
-        );
+        assert_proof_score(&out, &logger, 15, 15);
         cleanup_covtest_network("sqlobs");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9570,7 +9570,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-12 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 12: Concurrency and isolation -> PASS",
             "[CONCURRENCY] serializable: lost update, transfers, and readers never blocked",
@@ -9581,10 +9581,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (13, 13)
-        );
+        assert_proof_score(&out, &logger, 13, 13);
         cleanup_covtest_network("sqlconc");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9638,7 +9635,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-12 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 12: Concurrency and isolation -> PASS",
             "[CONCURRENCY] lite: lost update and transfers are serializable (global lock)",
@@ -9649,10 +9646,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (13, 13)
-        );
+        assert_proof_score(&out, &logger, 13, 13);
         cleanup_covtest_network("sqlconclite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9789,7 +9783,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-15 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 15: Tests and CI gate -> PASS",
             "Stage 14: Observability -> PASS",
@@ -9805,10 +9799,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (16, 16)
-        );
+        assert_proof_score(&out, &logger, 16, 16);
         cleanup_covtest_network("sqltests");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9863,7 +9854,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-15 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 15: Tests and CI gate -> PASS",
             "Stage 14: Observability -> PASS",
@@ -9877,10 +9868,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (16, 16)
-        );
+        assert_proof_score(&out, &logger, 16, 16);
         cleanup_covtest_network("sqltestslite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -9987,7 +9975,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-16 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 16: Larger than memory -> PASS",
             "Stage 15: Tests and CI gate -> PASS",
@@ -10002,10 +9990,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (17, 17)
-        );
+        assert_proof_score(&out, &logger, 17, 17);
         cleanup_covtest_network("sqlmemory");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10062,7 +10047,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-17 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 17: Incident: disk full -> PASS",
             "Stage 16: Larger than memory -> PASS",
@@ -10077,10 +10062,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (18, 18)
-        );
+        assert_proof_score(&out, &logger, 18, 18);
         cleanup_covtest_network("sqldisk");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10137,7 +10119,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-18 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 18: Hostile input and limits -> PASS",
             "Stage 17: Incident: disk full -> PASS",
@@ -10152,10 +10134,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (19, 19)
-        );
+        assert_proof_score(&out, &logger, 19, 19);
         cleanup_covtest_network("sqlsec");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10213,7 +10192,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-19 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 19: Replication and failover -> PASS",
             "Stage 18: Hostile input and limits -> PASS",
@@ -10228,10 +10207,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (20, 20)
-        );
+        assert_proof_score(&out, &logger, 20, 20);
         cleanup_covtest_network("sqlrepl");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10288,7 +10264,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-19 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 19: Replication and failover -> PASS",
             "[REPL] cluster of 2 nodes on ports",
@@ -10302,10 +10278,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (20, 20)
-        );
+        assert_proof_score(&out, &logger, 20, 20);
         cleanup_covtest_network("sqlrepllite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10364,7 +10337,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-20 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 20: PostgreSQL wire protocol -> PASS",
             "Stage 19: Replication and failover -> PASS",
@@ -10379,10 +10352,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (21, 21)
-        );
+        assert_proof_score(&out, &logger, 21, 21);
         cleanup_covtest_network("sqlpg");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10439,7 +10409,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-20 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 20: PostgreSQL wire protocol -> PASS",
             "[PG] PostgreSQL wire scenario on port",
@@ -10453,10 +10423,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (21, 21)
-        );
+        assert_proof_score(&out, &logger, 21, 21);
         cleanup_covtest_network("sqlpglite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10509,7 +10476,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-13 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 13: Schema change -> PASS",
             "Stage 12: Concurrency and isolation -> PASS",
@@ -10523,10 +10490,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (14, 14)
-        );
+        assert_proof_score(&out, &logger, 14, 14);
         cleanup_covtest_network("sqlschema");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10568,7 +10532,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-11 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         // gui-spec.md §5.1: every verification round is recorded in the
         // manifest (the initial try here; eval-only runs have no repairs).
         assert!(
@@ -10592,10 +10556,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (12, 12)
-        );
+        assert_proof_score(&out, &logger, 12, 12);
         cleanup_covtest_network("sqlidx");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10633,7 +10594,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-10 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 10: Subqueries -> PASS",
             "Stage 9: Constraints -> PASS",
@@ -10645,10 +10606,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (11, 11)
-        );
+        assert_proof_score(&out, &logger, 11, 11);
         cleanup_covtest_network("sqlsub");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10686,7 +10644,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-9 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 9: Constraints -> PASS",
             "Stage 8: Joins -> PASS",
@@ -10698,10 +10656,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (10, 10)
-        );
+        assert_proof_score(&out, &logger, 10, 10);
         cleanup_covtest_network("sqlcons");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10739,7 +10694,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-8 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 8: Joins -> PASS",
             "Stage 7: Aggregates -> PASS",
@@ -10751,10 +10706,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (9, 9)
-        );
+        assert_proof_score(&out, &logger, 9, 9);
         cleanup_covtest_network("sqljoin");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10791,7 +10743,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-11 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in ["Stage 11: Indexes + perf gate -> PASS", "[PERF] point p50"] {
             assert!(
                 logger.contains(needle),
@@ -10804,10 +10756,7 @@ main()
             "the lite gate must not measure ranges; log:\n{}",
             logger.text()
         );
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (12, 12)
-        );
+        assert_proof_score(&out, &logger, 12, 12);
         cleanup_covtest_network("sqlidxlite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10844,7 +10793,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-8 lite fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in ["Stage 8: Joins -> PASS", "Stage 7: Aggregates -> PASS"] {
             assert!(
                 logger.contains(needle),
@@ -10852,10 +10801,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (9, 9)
-        );
+        assert_proof_score(&out, &logger, 9, 9);
         cleanup_covtest_network("sqljoinlite");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10893,7 +10839,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-7 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 7: Aggregates -> PASS",
             "Stage 6: Transactions -> PASS",
@@ -10906,10 +10852,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (8, 8)
-        );
+        assert_proof_score(&out, &logger, 8, 8);
         cleanup_covtest_network("sqlagg");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -10947,7 +10890,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the stage-6 fixture run must complete");
-        assert!(!out.infra_error, "{:?}", out.manifest.status);
+        assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 6: Transactions -> PASS",
             "[TXN] uncommitted rows stay invisible across connections",
@@ -10960,10 +10903,7 @@ main()
                 logger.text()
             );
         }
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (7, 7)
-        );
+        assert_proof_score(&out, &logger, 7, 7);
         cleanup_covtest_network("sqltxn");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -11008,7 +10948,7 @@ main()
         let out = BenchmarkPipeline::execute(config, logger.clone(), None)
             .await
             .expect("the drift fixture run must complete");
-        assert!(!out.infra_error);
+        assert_proof_ok(&out, &logger);
         assert!(
             logger.contains("[UPGRADE] sentinel from stage 4 FAILED"),
             "the drift must be reported"
@@ -11022,10 +10962,7 @@ main()
             "the stage error must carry the upgrade class"
         );
         // The suite itself passed: stages 0-3 are green, only stage 4 is red.
-        assert_eq!(
-            (out.manifest.passed_stages, out.manifest.total_stages),
-            (4, 5)
-        );
+        assert_proof_score(&out, &logger, 4, 5);
         cleanup_covtest_network("sqldrift");
         let _ = std::fs::remove_dir_all(&dir);
     }
