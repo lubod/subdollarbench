@@ -91,8 +91,7 @@ if [[ $fast == 1 ]]; then
     skips=()
     while read -r name; do
         skips+=(--skip "$name")
-    done < <(awk '/async fn |^\s*fn /{match($0, /fn [a-z0-9_]+/); n=substr($0, RSTART+3, RLENGTH-3)}
-                  /SQL_PERF_LIVE\.lock/{print n}' src/pipeline.rs | sort -u)
+    done < <(scripts/live-proofs.sh)
     echo "skipped: $(( ${#skips[@]} / 2 )) tests (the SQL_PERF_LIVE ladder proofs)" >>"$out"
     step "cargo test (fast: no serialized SQL ladder proofs)" cargo test -- "${skips[@]}"
 else
