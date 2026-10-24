@@ -15,13 +15,13 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
-/// - `2026-10-19.41`: the freeze (round 29). The stamp is SHA-256 over a
+/// - `2026-10-19.41`: the final version (round 29). The stamp is SHA-256 over a
 ///   shared manifest, with compiled inputs hashed at build time and
 ///   `campaigns/sdb-sql/stages`, `campaigns/sdb-sql/campaign.json` and the
 ///   task prompts hashed from SDB_HOME at run time. New inputs include
 ///   `extensions/bench-policy.js`, `Cargo.lock`, the linked SQLite version
-///   (`rusqlite::version()`, covering `rusqlite`/`libsqlite3-sys`) and the
-///   descriptor/agent source. The price snapshot drops
+///   (`rusqlite::version()`, covering `rusqlite`/`libsqlite3-sys`). The
+///   price snapshot drops
 ///   `anthropic/claude-3-haiku`, renames `meta/muse-spark` to
 ///   `meta/muse-spark-1.3`, and bills Gemini cache writes at the catalog
 ///   rate: `gemini-3.8-flash` $0.825 -> $0.0416667/M, `gemini-2.5-flash`
