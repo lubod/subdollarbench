@@ -16,6 +16,7 @@ from `TEMPLATE.md`.
 | [28](28.md) | Freeze hardening: oracle in the stamp, one path list, flake-bar ergonomics, cap shown | merged `2b1db80` |
 | [29](29.md) | The freeze: final rules version, CI, last stamp fixes | merged `bde6527` |
 | [30](30.md) | CI runs once; the Board's rules fallback works (no graded path) | draft |
+| [31](31.md) | A failed live proof keeps its evidence (proof log, flake-bar output, `.41` wording) | draft |
 
 **Status values:**
 
