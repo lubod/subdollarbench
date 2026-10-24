@@ -6378,6 +6378,16 @@ mod tests {
         assert_proof_result(out.infra_error, &out.manifest.status, logger);
     }
 
+    /// R30 F3: every needle failure carries the pipeline log.
+    fn assert_logged(logger: &RecordingLogger, needle: &str) {
+        assert!(
+            logger.contains(needle),
+            "missing {needle:?}; log:
+{}",
+            logger.text()
+        );
+    }
+
     fn assert_proof_score(
         out: &PipelineOutput,
         logger: &RecordingLogger,
@@ -8994,7 +9004,7 @@ main()
             "Stage 8: Response caching (TTL + X-Cache) -> PASS",
             "Stage 9: Limits and hostile input -> PASS",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert_logged(&logger, needle);
         }
         assert_proof_score(&out, &logger, 8, 8);
         cleanup_covtest_network("edgefull");
@@ -9050,7 +9060,7 @@ main()
             "Stage 8: Delayed delivery + DLQ redrive -> PASS",
             "Stage 9: Limits and hostile input -> PASS",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert_logged(&logger, needle);
         }
         assert_proof_score(&out, &logger, 9, 9);
         cleanup_covtest_network("queuelive");
@@ -9107,7 +9117,7 @@ main()
             "Stage 9: Chunked uploads, 100-continue, size limits -> PASS",
             "Stage 10: Hardening (traversal, limits, slow-loris) -> PASS",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert_logged(&logger, needle);
         }
         assert_proof_score(&out, &logger, 10, 10);
         cleanup_covtest_network("httplive");
@@ -9159,7 +9169,7 @@ main()
             "Stage 2: Sorting and paging -> PASS",
             "Stage 3: UPDATE and DELETE -> PASS",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert_logged(&logger, needle);
         }
         assert_proof_score(&out, &logger, 4, 4);
         // The harness-owned contract lands in the prepared workspace.
@@ -9215,7 +9225,7 @@ main()
             "Stage 4: Persistence -> PASS",
             "  [UPGRADE] sentinel for stage 4 written",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert_logged(&logger, needle);
         }
         assert_proof_score(&out, &logger, 5, 5);
         assert!(
@@ -9379,7 +9389,7 @@ main()
             "[CRASH] lite variant: acked rows and restarts only",
             "[TXN] a kill with an open transaction discarded it",
         ] {
-            assert!(logger.contains(needle), "missing {needle:?}");
+            assert_logged(&logger, needle);
         }
         for absent in [
             "[CRASH] the killed bulk UPDATE was all-or-nothing",
