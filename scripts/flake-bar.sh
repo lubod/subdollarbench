@@ -110,7 +110,12 @@ run_chunk() {
             if run_one "$t" > "$log" 2>&1; then
                 echo "TEST $t PASS $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
             else
-                echo "TEST $t FAIL $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
+                local utc base full_log
+                utc="$(date -u +%Y%m%dT%H%M%SZ)"
+                base="${record%.txt}"
+                full_log="${base}-${t}-${utc}.log"
+                cp "$log" "$full_log"
+                echo "TEST $t FAIL $((SECONDS - t0)) $(date -u +%FT%TZ) log=$full_log" >> "$record"
                 echo "OUTPUT-BEGIN" >> "$record"
                 tail -n 40 "$log" | sed 's/^/  /' >> "$record"
                 echo "OUTPUT-END" >> "$record"
@@ -170,6 +175,11 @@ if [[ "$self_test" -eq 1 ]]; then
     grep -q 'TEST alpha PASS' "$record" || { cat "$record"; exit 1; }
     grep -q 'TEST fail FAIL' "$record" || { cat "$record"; exit 1; }
     grep -q 'TEST beta PASS' "$record" || { cat "$record"; exit 1; }
+    grep -q 'TEST fail FAIL .*log=' "$record" || { cat "$record"; exit 1; }
+    ls "$dir"/chunk.flake-fail-*.log >/dev/null 2>&1 || {
+        echo "the failed run did not leave its full output file"
+        exit 1
+    }
     [[ "$failed" -eq 1 ]] || { echo "the fixture failure did not set the exit state"; exit 1; }
     summary "$record" alpha fail beta > "$dir/chunk-summary.txt" || true
     for t in alpha fail beta; do
