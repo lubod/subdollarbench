@@ -16,3 +16,4 @@ src/report/graded-files.txt
 scripts/graded-paths.txt
 extensions
 Cargo.lock
+rust-toolchain.toml

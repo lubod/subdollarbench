@@ -15,8 +15,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (bench pin)
+        uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: clippy, rustfmt, llvm-tools-preview
 
@@ -33,26 +33,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run cargo check
-        run: cargo check --all-targets
-
       - name: Check code formatting (cargo fmt)
         run: cargo fmt --check
 
       - name: Run clippy linter
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run fast gate (no live SQL ladder proofs)
-        run: bash scripts/gate.sh --fast
-
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Check test code coverage (fast set)
+      - name: Test and coverage (fast set, one run)
         run: |
           skips=()
           while read -r name; do
             skips+=(--skip "$name")
-          done < <(awk '/async fn |^[[:space:]]*fn /{match($0, /fn [a-z0-9_]+/); n=substr($0, RSTART+3, RLENGTH-3)}
-                         /SQL_PERF_LIVE\.lock/{print n}' src/pipeline.rs | sort -u)
+          done < <(scripts/live-proofs.sh)
           cargo llvm-cov --all-targets --summary-only --fail-under-lines 84 -- "${skips[@]}"

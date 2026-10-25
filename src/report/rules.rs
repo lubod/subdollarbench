@@ -1103,6 +1103,23 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// R30-1 acceptance: the pinned toolchain is in the graded manifest.
+    #[test]
+    fn r30_r1_toolchain_is_a_graded_input() {
+        let root = crate::config::get_repo_root();
+        let files = graded_files(&root);
+        assert!(
+            files.iter().any(|p| p == Path::new("rust-toolchain.toml")),
+            "graded_files misses rust-toolchain.toml"
+        );
+        assert!(
+            GRADED_MANIFEST
+                .lines()
+                .any(|line| line.trim() == "file rust-toolchain.toml"),
+            "graded-files.txt misses the toolchain entry"
+        );
+    }
+
     /// R28 F1 acceptance: both the linked SQLite version and the compiled
     /// crate digest move the stamp.
     #[test]

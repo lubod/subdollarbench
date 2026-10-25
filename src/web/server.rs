@@ -170,7 +170,10 @@ pub struct StatusResponse {
     /// path and skip EventSource entirely.
     #[serde(default)]
     pub proxy: bool,
-    /// R28 F1/F5: the oracle and cap basis next to the rules version.
+    /// R28 F1/F5/R30 F2: the rules version, oracle and cap basis next to
+    /// the live status.
+    #[serde(default)]
+    pub rules_version: String,
     #[serde(default)]
     pub sqlite_version: String,
     #[serde(default)]
@@ -213,6 +216,7 @@ pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
         proxy: !state.engine_url.is_empty(),
         campaign: crate::campaign::live_lock_holder()
             .map(|h| serde_json::json!({"pid": h.pid, "campaign_id": h.campaign_id})),
+        rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: crate::report::rules::sqlite_version().to_string(),
         cap_price_basis: crate::report::rules::CAP_PRICE_BASIS.to_string(),
     })
@@ -3677,6 +3681,23 @@ mod tests {
         }
     }
 
+    /// R30 F2: /api/status carries the current rules version for the
+    /// Board's fallback.
+    #[tokio::test]
+    async fn r30_f2_status_carries_rules_version() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["rules_version"], crate::report::rules::RULES_VERSION);
+    }
+
     /// R28 F1: the rules/status endpoint and a run's detail carry the
     /// linked SQLite oracle version.
     #[tokio::test]
@@ -5709,11 +5730,14 @@ global.fetch = async (url) => {
   if (u.includes('/log')) body = { offset: 0, lines: [] };
   else if (/\/api\/campaigns\/[^/?]+$/.test(u)) body = detail;
   else if (u.includes('/api/campaigns')) body = [cell];
-  else if (u.includes('/api/status')) body = { is_running: false };
+  else if (u.includes('/api/status')) body = { is_running: false, rules_version: '2026-10-19.41' };
   else if (u.includes('/api/queue')) body = [];
   return { ok: true, status: 200, headers: { get: () => null }, json: async () => body, text: async () => '' };
 };
 (async () => {
+  delete window.__SDB_RULES__;
+  await loadRulesVersion();
+  const rulesFallback = window.__SDB_RULES__;
   try {
     await refreshBoard();
     await loadRunDetail('campaign_fixture');
@@ -5728,6 +5752,7 @@ global.fetch = async (url) => {
   const live = el('liveBody').innerHTML;
   const board = el('boardBody').innerHTML;
   const fail = [];
+  if (rulesFallback !== '2026-10-19.41') fail.push('rules-fallback:' + rulesFallback);
   if (typeof rulesAtLeast !== 'function') fail.push('rules-at-least-missing');
   else if (!rulesAtLeast('2026-10-19.100', '2026-10-19.39')
            || rulesAtLeast('2026-10-18.50', '2026-10-19.39')) {
