@@ -40,7 +40,8 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | [29](docs/rounds/29.md) | The freeze: stamp/label fixes (R28-2..4), CI (D1), final rules version (history names R27-6) | merged |
 | [30](docs/rounds/30.md) | CI matches the bench (1.92.0 pin) and runs once; `/api/status` rules version; needle checks print the log; toolchain is graded | merged |
 | [31](docs/rounds/31.md) | A failed live proof keeps its evidence (after the stage-18 `infra_error` in the first bar) | merged |
-| — | The 20-pass flake bar on 30's merged content (the first bar on `5ebad6e` failed once, `27.md`), then the freeze declaration (AGENTS.md, DECISIONS.md; docs only) | — |
+| — | The 20-pass flake bar on 30's merged content: **PASS** on `7f7e15b`, 500/500 (`31.md`, "After the merge"); the first bar on `5ebad6e` failed once (`27.md`) | done |
+| — | The freeze declaration (AGENTS.md, DECISIONS.md; docs only) | next |
 
 ## After the freeze: validation
 
