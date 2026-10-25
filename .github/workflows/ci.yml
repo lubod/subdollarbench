@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain (bench pin)
         uses: dtolnay/rust-toolchain@1.92.0
@@ -21,7 +21,7 @@ jobs:
           components: clippy, rustfmt, llvm-tools-preview
 
       - name: Cache cargo registry & index
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -41,6 +41,9 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Build sandbox image
+        run: docker build -t subdollar-sandbox -f Dockerfile.sandbox .
 
       - name: Test and coverage (fast set, one run)
         run: |
