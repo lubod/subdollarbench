@@ -17,7 +17,7 @@ from `TEMPLATE.md`.
 | [29](29.md) | The freeze: final rules version, CI, last stamp fixes | merged `bde6527` |
 | [30](30.md) | CI matches the bench and runs once; status `rules_version`; needle checks print the log | merged `94b24ba` |
 | [31](31.md) | A failed live proof keeps its evidence (proof log, flake-bar output, `.41` wording) | merged `1e69d41` |
-| [32](32.md) | CI builds the sandbox image (no graded path; gate after the flake bar) | open |
+| [32](32.md) | CI builds the sandbox image (no graded path; gate after the flake bar) | merged `458cf06` |
 
 **Status values:**
 
