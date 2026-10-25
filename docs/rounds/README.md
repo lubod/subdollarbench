@@ -15,7 +15,7 @@ from `TEMPLATE.md`.
 | [27](27.md) | Freeze prerequisites: stable stamp, snapshot ids, list price vs bill, flake bar | merged `377b364` |
 | [28](28.md) | Freeze hardening: oracle in the stamp, one path list, flake-bar ergonomics, cap shown | merged `2b1db80` |
 | [29](29.md) | The freeze: final rules version, CI, last stamp fixes | merged `bde6527` |
-| [30](30.md) | CI matches the bench and runs once; status `rules_version`; needle checks print the log | blocked |
+| [30](30.md) | CI matches the bench and runs once; status `rules_version`; needle checks print the log | merged `94b24ba` |
 | [31](31.md) | A failed live proof keeps its evidence (proof log, flake-bar output, `.41` wording) | merged `1e69d41` |
 
 **Status values:**
