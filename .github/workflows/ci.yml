@@ -43,7 +43,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Build sandbox image
-        run: docker build -t subdollar-sandbox -f Dockerfile.sandbox .
+        run: >-
+          docker build -t subdollar-sandbox
+          --build-arg SANDBOX_UID=$(id -u)
+          --build-arg SANDBOX_GID=$(id -g)
+          -f Dockerfile.sandbox .
 
       - name: Test and coverage (fast set, one run)
         run: |
