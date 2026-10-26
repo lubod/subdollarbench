@@ -4454,9 +4454,10 @@ impl BenchmarkPipeline {
                                                 Ok(()) => {
                                                     logger.log(&format!(
                                                         "  [UPGRADE] sentinel for stage {top} \
-                                                         written: {} writes, {} reads",
+                                                         written: {} writes, {} reads (seed {})",
                                                         s.writes.len(),
-                                                        s.queries.len()
+                                                        s.queries.len(),
+                                                        s.seed
                                                     ));
                                                     // A candidate may flush on
                                                     // SIGTERM (ticket 4's
@@ -6016,6 +6017,7 @@ impl BenchmarkPipeline {
             rules_version: Some(crate::report::rules_fingerprint()),
             sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
             cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
+            sandbox_image: crate::sandbox::omp_updater::sandbox_image_id(),
             // Sampling: OMP passes provider defaults through (no explicit
             // temp/top_p/seed knobs), so None = reproducible-by-default.
             // Prompt hash pins the graded input for this run.

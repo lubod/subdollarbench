@@ -482,6 +482,7 @@ pub async fn run(
             .ok()
             .and_then(|t| serde_json::from_str::<campaign::LadderState>(&t).ok());
         let phase = phase.expect("a chain implies a phase");
+        let sandbox_image = subdollarbench::sandbox::omp_updater::sandbox_image_id();
         let mut state = campaign::validate_chain(
             &rollup,
             state.as_ref(),
@@ -490,6 +491,7 @@ pub async fn run(
             &harness.to_string(),
             &effort,
             subdollarbench::report::rules::RULES_VERSION,
+            sandbox_image.as_deref(),
         )?;
         if let Some(ps) = &phase_spec {
             state.hints = campaign::phase_hints(&rollup, &lc.spec, ps, &state);
@@ -1382,6 +1384,7 @@ mod tests {
             rules_version: subdollarbench::report::rules::RULES_VERSION.to_string(),
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             points: 0.0,
             max_points: 0.0,
             phase: None,

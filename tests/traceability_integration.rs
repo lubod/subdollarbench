@@ -110,6 +110,7 @@ func main() {
         rules_version: None,
         sqlite_version: None,
         cap_price_basis: None,
+        sandbox_image: None,
         stability: None,
         trial_pass_rates: Vec::new(),
         is_published: None,
