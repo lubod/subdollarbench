@@ -452,6 +452,28 @@ live docker test pins resolve → unreachable → resolve.
   a new 20-pass flake bar before the next published cell.
 - **CI first.** The freeze waited for a green GitHub run.
 
+**Known gaps at the freeze** (each with the round that takes it):
+
+- **The sandbox image isn't stamped.**
+  - `Dockerfile.sandbox` installs Rust `stable` and unpinned apt
+    packages, so a rebuild can change the candidate's environment under
+    the same stamp (`docs/rounds/32.md`, "Out of scope").
+  - Taken by the first round after the freeze: stamp the image ID at run
+    time.
+- **Real cells assume the host user is UID 1000**, the image's
+  `ubuntu`. CI gets around it with a build argument (round 33); the bench
+  doesn't. Taken in the image-stamp round.
+- **The stage-18 `infra_error`:** 1 failure in 40 stage-18 runs (770
+  proof runs in all), cause unknown. If it happens again, the run keeps
+  its log (round 31).
+- **Small findings**, for a later round:
+  - R30-2: the literal line break in `assert_logged`.
+  - R31-2: the `.expect` on `BenchmarkPipeline::execute` prints no log.
+  - The six clippy lints under Rust 1.99 (`docs/rounds/29.md`, run 1).
+    The 1.92.0 pin holds them off.
+  - `scripts/flake-bar.sh`'s header still names the record
+    `<commit>.flake.txt`. It is `flake-<key>.txt`.
+
 ## 21. Dollars bind; wall time is a guard (2026-10-22)
 
 The benchmark answers "what does a dollar buy" (round 23):
