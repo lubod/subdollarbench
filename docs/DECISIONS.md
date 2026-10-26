@@ -496,7 +496,7 @@ the freeze, under the rules below):
     fast gate. The flake bar runs the SQL proofs one at a time, so it
     can't hit this.
   - Taken in round 37 (moved from the image-stamp round), with a test
-    that no two tests share a host port.
+    that no two tests share a host port. **Done in round 37.**
 - **The stage-4 dataset faults for about 1 seed in 5,000.**
   - `sentinel::build` (`src/verifier/sql/sentinel.rs:114`) returns an
     error when a seed's 40-step script leaves no writes or no ordered
@@ -525,6 +525,8 @@ the freeze, under the rules below):
   - Taken in round 37 (moved from the image-stamp round): a readiness
     probe for the pool, and a pdf test that skips itself when the image
     is missing. That round removes the skips and raises the ratchet.
+    **Done in round 37:** CI runs both. The ratchet stays 83 (measured
+    83.56 %, rounded down).
 - **The retired campaigns' code** (verifiers, `tasks/`, `campaigns/`) is
   still compiled, only so that old rows stay readable (#19). Deleting it
   touches graded paths, so it's its own round after the freeze.

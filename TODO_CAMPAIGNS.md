@@ -46,22 +46,19 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | [35](docs/rounds/35.md) | CI skips two tests that need the bench host; ratchet 83 on active code | merged |
 | [34](docs/rounds/34.md) | The freeze declaration (AGENTS.md, `docs/DECISIONS.md` #20-21) | merged |
 | [36](docs/rounds/36.md) | The candidate's image is stamped; host UID; stage-4 re-seed (rules `.42`) | merged |
+| [37](docs/rounds/37.md) | Tests don't share host state; pool readiness; pdf self-skip; CI runs the whole fast set | merged |
 
 ## After the freeze: validation
 
 - **Done: the image-stamp round** (round 36, rules `.42`): the image ID
   is stamped and chains need the same image; the image build uses the
   host's UID and GID; an empty stage-4 dataset moves to the next seed.
-- **Next: round 37, test infrastructure** (graded, no bump):
-  - moves one of the tests that share host port 15380, with a check that
-    no two tests share a host port;
-  - adds the upstream-pool readiness probe and the pdf test's self-skip,
-    then removes round 35's two CI skips and raises the ratchet;
-  - small findings: R30-2, R31-2, R35-1, R36-1..5, the `flake-bar.sh`
-    header.
-
-  Then the full gate and a new 20-pass bar on 36 + 37, before the
-  calibration career.
+- **Done: round 37, test infrastructure:** no shared host ports or
+  temp paths between tests (with a port-table check), workers 0-7 left
+  to live cells, pool readiness, pdf self-skip, CI without round 35's
+  skips, and the rollup's image from the first ticket.
+- **Next: the 20-pass flake bar** on master (rounds 36 + 37), then the
+  calibration career. Open from 37: R37-3..6, R37-8.
 - **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
   `campaigns/`), keeping old rows readable. Graded, with its own bar.
 - **Calibration and test cells** (after round 23): the test model is

@@ -206,9 +206,11 @@ inside `.git`, so it is shared by every worktree and never committed.
 
 - `fmt` and `clippy` on the pinned toolchain;
 - it builds `subdollar-sandbox` with the runner's UID and GID (round 33);
-- it runs every test except two groups:
-  - the ones `scripts/live-proofs.sh` prints;
-  - two tests that need the bench host (round 35).
+- it runs every test except the ones `scripts/live-proofs.sh` prints
+  (round 37 removed round 35's two bench-host skips);
+- test workers 8 and above only: 0-7 are the live cells' slots, and
+  `r37_f1_worker_ports_do_not_collide` checks that no two tests share a
+  host port (round 37);
 - Line coverage is gated at 83 % or more, measured on the active code
   only: the retired verifiers are excluded (round 35).
 - The ratchet only goes up.
