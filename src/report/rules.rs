@@ -15,6 +15,15 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.42`: round 36. Each run records the sandbox image ID it
+///   used, and a career phase chains only onto a phase with the same image
+///   (D1 a). `update_sandbox_image` passes the bench user's UID/GID, so the
+///   image matches the host user (default 1000 is unchanged). Stage-4
+///   empty sentinel datasets retry the next seed (up to 16); a seed that
+///   built before keeps its exact dataset (the first attempt). Score
+///   impact: no change for runs whose stage-4 seed built; roughly 1 in
+///   5,000 now gets graded instead of ending as `infra_error`. Careers
+///   restart at phase 1 when the image changes.
 /// - `2026-10-19.41`: the final version (round 29). The stamp is SHA-256 over a
 ///   shared manifest, with compiled inputs hashed at build time and
 ///   `campaigns/sdb-sql/stages`, `campaigns/sdb-sql/campaign.json` and the
@@ -773,7 +782,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.41";
+pub const RULES_VERSION: &str = "2026-10-19.42";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
@@ -942,7 +951,7 @@ mod tests {
         let rel = put(&root, "src/scoring.rs", "fixture\n");
         let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
         assert_eq!(
-            fp, "2026-10-19.41+9f73ebc967b241a9fe489f2f04ff1d9c",
+            fp, "2026-10-19.42+f27855ff3d6dd893c58d9938e26071cd",
             "the SHA-256 stamp must be stable"
         );
         assert_eq!(fp, fingerprint_files(&root, &[rel]));
