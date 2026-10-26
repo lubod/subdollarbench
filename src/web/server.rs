@@ -3716,16 +3716,22 @@ mod tests {
         let mut recorded = test_manifest("r28_f1_oracle");
         recorded.sqlite_version = Some("3.0.0".to_string());
         recorded.cap_price_basis = Some("recorded cap basis".to_string());
+        recorded.sandbox_image = Some("sha256:test-image".to_string());
         recorded.rules_version = Some("2026-10-19.40".to_string());
         let detail = manifest_with_portal_flag(&recorded);
         assert_eq!(detail["sqlite_version"], "3.0.0");
         assert_eq!(detail["cap_price_basis"], "recorded cap basis");
+        assert_eq!(detail["sandbox_image"], "sha256:test-image");
         let mut old = test_manifest("r28_f1_old");
         old.rules_version = Some("2026-10-19.38".to_string());
         let old_detail = manifest_with_portal_flag(&old);
         assert!(
             old_detail.get("sqlite_version").is_none(),
             "an old run must not borrow today's oracle"
+        );
+        assert!(
+            old_detail.get("sandbox_image").is_none(),
+            "an old run has no image stamp"
         );
         assert!(crate::report::rules::recorded_cap_basis("2026-10-19.38", None).is_none());
     }
@@ -5184,6 +5190,7 @@ mod tests {
             rules_version: None,
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             protocol: None,
             solved: None,
             solved_at: None,
@@ -5254,6 +5261,7 @@ mod tests {
             rules_version: None,
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             protocol: None,
             solved: None,
             solved_at: None,
@@ -5811,7 +5819,7 @@ global.fetch = async (url) => {
   // retry, and a running phase 3. The faulted cell is not in the career; the
   // leaf is the newest finished child (the retry), not the older child, and
   // the running cell hangs under the same root.
-  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.41',max_points:76};
+  const cbase = {model:'m',harness:'omp',effort:'high',rules_version:'2026-10-19.42',max_points:76};
   const p1 = {id:'campaign_career_p1', state:'done', ladder:[], rollup:Object.assign({}, cbase, {
     phase:1, started_at:'2026-10-21T00:00:00Z', career:{cells:['campaign_career_p1'],points:10,total_cost_usd:0.5}})};
   const old = {id:'campaign_career_old', state:'done', ladder:[], rollup:Object.assign({}, cbase, {

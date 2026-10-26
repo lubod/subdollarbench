@@ -159,6 +159,10 @@ pub struct RunManifest {
     pub sqlite_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cap_price_basis: Option<String>,
+    /// R36 F1: the sandbox image ID this run used. None on old rows and
+    /// eval-only runs; the Board shows `—`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_image: Option<String>,
     /// Trial count for consolidated parent manifests (None on single-trial records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_trials: Option<u32>,
@@ -628,6 +632,7 @@ mod tests {
             rules_version: None,
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             protocol: None,
             solved: None,
             solved_at: None,
@@ -807,6 +812,7 @@ mod tests {
             rules_version: None,
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             protocol: None,
             solved: None,
             solved_at: None,

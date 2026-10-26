@@ -70,6 +70,26 @@ pub fn check_image_exists() -> bool {
         .unwrap_or(false)
 }
 
+/// R36 F1: the exact image ID a run uses. None when the image is absent
+/// or Docker cannot inspect it (old rows and eval-only tests).
+pub fn sandbox_image_id() -> Option<String> {
+    let output = Command::new("docker")
+        .args([
+            "image",
+            "inspect",
+            "subdollar-sandbox",
+            "--format",
+            "{{.Id}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
 pub fn get_installed_sandbox_version() -> Option<String> {
     let output = Command::new("docker")
         .args(["run", "--rm", "subdollar-sandbox", "omp", "--version"])
@@ -175,6 +195,10 @@ pub async fn update_sandbox_image(target_version: Option<&str>) -> Result<OmpVer
         .arg(&dockerfile)
         .arg("--build-arg")
         .arg(format!("OMP_VERSION={}", target_ver))
+        .arg("--build-arg")
+        .arg(format!("SANDBOX_UID={}", unsafe { libc::getuid() }))
+        .arg("--build-arg")
+        .arg(format!("SANDBOX_GID={}", unsafe { libc::getgid() }))
         .arg(&root);
 
     let output = cmd
@@ -297,24 +321,31 @@ mod tests {
     const BIN_ENV: &str = "SDB_COVTEST_UPD_BIN";
     const WORK_ENV: &str = "SDB_COVTEST_UPD_WORK";
     const SCENARIO_ENV: &str = "SDB_COVTEST_UPD_SCENARIO";
+    const ARGS_ENV: &str = "SDB_COVTEST_UPD_ARGS";
 
     const FAKE_DOCKER: &str = r#"#!/bin/sh
 # covtest fake `docker`: scenario-driven exits, no engine.
 scenario="${SDB_COVTEST_UPD_SCENARIO:-}"
+if [ -n "${SDB_COVTEST_UPD_ARGS:-}" ]; then printf '%s\n' "$@" >> "$SDB_COVTEST_UPD_ARGS"; fi
 case "$1" in
   image)
     case "$scenario" in
+      image_id) printf 'sha256:r36fixture\n'; exit 0 ;;
       image_yes|build_ok) exit 0 ;;
       *) exit 1 ;;
     esac
     ;;
   run)
     case "$scenario" in
+      image_id) printf 'fake-anchor\n'; exit 0 ;;
       version_ok|image_yes|build_ok) printf 'omp/18.1.21\n'; exit 0 ;;
       version_empty) printf '\n'; exit 0 ;;
       *) exit 1 ;;
     esac
     ;;
+  network)
+    # The image test only needs the network create to succeed.
+    exit 0 ;;
   build)
     case "$scenario" in
       build_ok) exit 0 ;;
@@ -339,6 +370,50 @@ exit 1
         assert!(check_image_exists(), "exit 0 means the image exists");
         std::env::set_var(SCENARIO_ENV, "image_no");
         assert!(!check_image_exists(), "exit 1 means no image");
+        std::env::set_var(SCENARIO_ENV, "image_id");
+        assert_eq!(
+            sandbox_image_id().as_deref(),
+            Some("sha256:r36fixture"),
+            "the run stamp records the image ID"
+        );
+
+        // R36 F1: a real eval-only pipeline run records the image ID in its
+        // manifest while the fake docker is on PATH.
+        let pipe_dir = work.join("pipeline-image");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        struct PipeLogger;
+        impl crate::pipeline::PipelineLogger for PipeLogger {
+            fn log(&self, _msg: &str) {}
+        }
+        let cfg = crate::pipeline::BenchmarkConfig {
+            model: "image-test".to_string(),
+            task: crate::config::TaskType::Redis,
+            effort: "low".to_string(),
+            harness: crate::config::Harness::Omp,
+            max_turns: 1,
+            budget_usd: 0.01,
+            timeout_min: 1,
+            api_key: None,
+            workdir: pipe_dir,
+            eval_only: true,
+            run_id: Some("r36_image_test".to_string()),
+            save_results: false,
+            review_model: None,
+            batch_reference: None,
+            worker: 0,
+            feedback_rounds: 0,
+            campaign_stage: None,
+            baseline_rps: None,
+        };
+        let out =
+            crate::pipeline::BenchmarkPipeline::execute(cfg, std::sync::Arc::new(PipeLogger), None)
+                .await
+                .expect("the eval-only image run completes");
+        assert_eq!(
+            out.manifest.sandbox_image.as_deref(),
+            Some("sha256:r36fixture"),
+            "the pipeline manifest carries the image ID"
+        );
 
         // Installed version parsing off `docker run ... omp --version`.
         std::env::set_var(SCENARIO_ENV, "version_ok");
@@ -455,9 +530,17 @@ exit 1
         // Successful build refresh (fake build + failed loopback fetch).
         std::env::set_var(SCENARIO_ENV, "build_ok");
         std::env::set_var("SDB_HOME", &repo);
+        let args_file = work.join("build-args.txt");
+        std::env::set_var(ARGS_ENV, &args_file);
         let built = update_sandbox_image(Some("2.0.0"))
             .await
             .expect("build ok must converge");
+        let args = std::fs::read_to_string(&args_file).unwrap_or_default();
+        std::env::remove_var(ARGS_ENV);
+        assert!(
+            args.contains("SANDBOX_UID=") && args.contains("SANDBOX_GID="),
+            "the build must pass the bench user's UID/GID; args:\n{args}"
+        );
         assert!(built.image_exists);
         // Target None: the latest fetch fails on the loopback proxy, so the
         // build falls back to the literal "latest" pin.

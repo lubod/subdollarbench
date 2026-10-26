@@ -907,6 +907,7 @@ pub fn validate_chain(
     harness: &str,
     effort: &str,
     rules_version: &str,
+    sandbox_image: Option<&str>,
 ) -> Result<LadderState> {
     if phase <= 1 {
         bail!("phase 1 has no chain");
@@ -943,6 +944,14 @@ pub fn validate_chain(
             prev.campaign_id,
             prev.rules_version,
             rules_version
+        );
+    }
+    if prev.sandbox_image.as_deref() != sandbox_image {
+        bail!(
+            "chain cell {} ran image {}, not {}",
+            prev.campaign_id,
+            prev.sandbox_image.as_deref().unwrap_or("—"),
+            sandbox_image.unwrap_or("—")
         );
     }
     if prev.finished_at.trim().is_empty() {
@@ -1915,6 +1924,7 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
+        sandbox_image: crate::sandbox::omp_updater::sandbox_image_id(),
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         points: 0.0,
@@ -2386,6 +2396,10 @@ pub struct CampaignRollup {
     pub sqlite_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cap_price_basis: Option<String>,
+    /// R36 F1/D1: the sandbox image this cell ran on. A phase chains only
+    /// onto the same image ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_image: Option<String>,
     /// Campaign-wide budget cap in USD (0 = uncapped), for the Run view's
     /// spend bar.
     #[serde(default)]
@@ -2745,6 +2759,7 @@ where
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
+        sandbox_image: crate::sandbox::omp_updater::sandbox_image_id(),
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         points: 0.0,
@@ -3791,6 +3806,7 @@ mod tests {
             rules_version: String::new(),
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             budget_usd: 0.0,
             wall_min: 0,
             points: 0.0,
@@ -4173,6 +4189,7 @@ mod tests {
             rules_version: crate::report::rules::RULES_VERSION.to_string(),
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             budget_usd: 0.25,
             wall_min: 30,
             points: 1.0,
@@ -4503,6 +4520,39 @@ mod tests {
     }
 
     /// R23 D2: an unspent ticket raises the next ticket's pool share.
+    /// R36 F1/D1: a phase chains only onto the same sandbox image ID.
+    #[test]
+    fn r36_f1_chain_requires_the_same_sandbox_image() {
+        let state = phase1_state();
+        let mut prev = chain_rollup(1, true);
+        prev.sandbox_image = Some("sha256:image-a".into());
+        validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            Some("sha256:image-a"),
+        )
+        .expect("the same image chains");
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            Some("sha256:image-b"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sha256:image-a"), "{msg}");
+        assert!(msg.contains("sha256:image-b"), "{msg}");
+    }
+
     #[tokio::test]
     async fn r23_d2_a_cheap_ticket_raises_the_next_budget() {
         let mut lc = fixture_campaign();
@@ -5819,6 +5869,7 @@ mod tests {
             rules_version: crate::report::rules::RULES_VERSION.to_string(),
             sqlite_version: None,
             cap_price_basis: None,
+            sandbox_image: None,
             budget_usd: 0.99,
             wall_min: 150,
             points: 10.0,
@@ -5958,6 +6009,7 @@ mod tests {
             "omp",
             "high",
             crate::report::rules::RULES_VERSION,
+            None,
         )
         .expect("the matching chain validates");
         let err = validate_chain(
@@ -5968,6 +6020,7 @@ mod tests {
             "omp",
             "high",
             crate::report::rules::RULES_VERSION,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("expected phase 1"), "{err}");
@@ -5979,6 +6032,7 @@ mod tests {
             "omp",
             "high",
             crate::report::rules::RULES_VERSION,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("used model"), "{err}");
@@ -5990,6 +6044,7 @@ mod tests {
             "omp",
             "high",
             crate::report::rules::RULES_VERSION,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("did not finish"), "{err}");
@@ -6001,6 +6056,7 @@ mod tests {
             "omp",
             "high",
             crate::report::rules::RULES_VERSION,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("no ladder state"), "{err}");
@@ -6014,6 +6070,7 @@ mod tests {
             "omp",
             "high",
             crate::report::rules::RULES_VERSION,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("non-result"), "{err}");
