@@ -1,5 +1,10 @@
 FROM ubuntu:24.04
 
+# R33: CI passes the runner's UID/GID so the mounted workspace is writable
+# by the sandbox user. The defaults keep the bench image unchanged.
+ARG SANDBOX_UID=1000
+ARG SANDBOX_GID=1000
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
@@ -21,7 +26,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 # Prepare workspace
 WORKDIR /workspace
 USER root
-RUN chown -R ubuntu:ubuntu /workspace
+RUN chown -R ubuntu:ubuntu /workspace \
+    && if [ "$SANDBOX_GID" != "1000" ]; then groupmod -g "$SANDBOX_GID" ubuntu; fi \
+    && if [ "$SANDBOX_UID" != "1000" ]; then usermod -u "$SANDBOX_UID" ubuntu; fi \
+    && if [ "$SANDBOX_UID" != "1000" ] || [ "$SANDBOX_GID" != "1000" ]; then \
+         chown -R ubuntu:ubuntu /home/ubuntu /workspace; \
+       fi
 
 # Install OMP (Oh My Pi agent harness)
 ARG OMP_VERSION=18.4.2
