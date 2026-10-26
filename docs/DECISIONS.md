@@ -466,6 +466,17 @@ live docker test pins resolve → unreachable → resolve.
 - **The stage-18 `infra_error`:** 1 failure in 40 stage-18 runs (770
   proof runs in all), cause unknown. If it happens again, the run keeps
   its log (round 31).
+- **Two tests share host port 15380.**
+  - The mock Redis flow test (worker 90) starts its Redis reference on
+    `worker_port(6380, 90)` (`src/pipeline.rs:4890`).
+  - The SQL stage-6 proof (worker 99) gives its candidate
+    `worker_port(5480, 99)`.
+  - Both run in parallel in the gates and in CI, so either can fail with
+    "port is already allocated". It happened once, in round 34's first
+    fast gate. The flake bar runs the SQL proofs one at a time, so it
+    can't hit this.
+  - Taken in the image-stamp round, with a test that no two tests share a
+    host port.
 - **Small findings**, for a later round:
   - R30-2: the literal line break in `assert_logged`.
   - R31-2: the `.expect` on `BenchmarkPipeline::execute` prints no log.
