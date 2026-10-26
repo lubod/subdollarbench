@@ -59,7 +59,29 @@ pub const SENTINEL_STEPS: usize = 40;
 /// one): creates and inserts are the dataset, selects are the reads.
 /// Statements that are not kept are not executed either, so the oracle
 /// state matches exactly what the candidate will hold.
+/// R36 F3: an empty dataset is a seed fault, not a candidate fault. Try
+/// the next seeds in sequence; a seed that builds today keeps its exact
+/// dataset because it succeeds on the first attempt. The returned
+/// `Sentinel.seed` is the seed actually used.
+pub const SENTINEL_SEED_ATTEMPTS: u64 = 16;
+const EMPTY_DATASET: &str = "sentinel has no dataset or no ordered reads";
+
 pub fn build(seed: u64, stage: u32, profile: &Profile) -> Result<Sentinel, String> {
+    let mut last = String::new();
+    for offset in 0..SENTINEL_SEED_ATTEMPTS {
+        let candidate = seed.wrapping_add(offset);
+        match build_one(candidate, stage, profile) {
+            Ok(sent) => return Ok(sent),
+            Err(e) if e == EMPTY_DATASET => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(format!(
+        "{last} (after {SENTINEL_SEED_ATTEMPTS} seeds from {seed})"
+    ))
+}
+
+fn build_one(seed: u64, stage: u32, profile: &Profile) -> Result<Sentinel, String> {
     let script = build_script(seed, profile, SENTINEL_STEPS);
     if !script.unknown.is_empty() {
         return Err(format!(
@@ -111,7 +133,7 @@ pub fn build(seed: u64, stage: u32, profile: &Profile) -> Result<Sentinel, Strin
         });
     }
     if sent.writes.is_empty() || sent.queries.is_empty() {
-        return Err("sentinel has no dataset or no ordered reads".to_string());
+        return Err(EMPTY_DATASET.to_string());
     }
     Ok(sent)
 }
@@ -440,6 +462,67 @@ mod tests {
         }
         assert!(same_answer("ROWS 1\na\nEND 0", "ROWS 1\na\nEND 0", false));
         assert!(same_answer("ERR syntax", "ERR syntax", false));
+    }
+
+    /// R36 F3: the four known empty seeds fall through to a later seed.
+    #[test]
+    fn r36_f3_empty_seed_moves_on() {
+        let profile = Profile::through(4);
+        for seed in [
+            9231256963851754504u64,
+            5445690653175984392,
+            12529112926788068867,
+            15487456800110868460,
+        ] {
+            let sent = build(seed, 4, &profile).expect("a later seed must build");
+            assert!(
+                sent.seed > seed,
+                "bad seed {seed} did not move on (used {})",
+                sent.seed
+            );
+            assert!(!sent.writes.is_empty() && !sent.queries.is_empty());
+        }
+    }
+
+    /// R36 F3: good seeds keep exactly the same dataset; these hashes were
+    /// recorded before the retry wrapper was added.
+    #[test]
+    fn r36_f3_good_seed_unchanged() {
+        use sha2::{Digest, Sha256};
+        let profile = Profile::through(4);
+        let expected = [
+            (
+                1u64,
+                "fdb5cc4ed37a127c3f0f3a511c3fb9068cddf88be65fa7eafa65600953165cc8",
+            ),
+            (
+                2u64,
+                "8b4c319d8571f10490fd3ed218c4af2005694593de20cbb739daaccfa88da786",
+            ),
+            (
+                3u64,
+                "c14e9eeb7307ccc94d4ee62824fb6b188204d02b9197aceb871e482e785eab21",
+            ),
+        ];
+        for (seed, want) in expected {
+            let sent = build(seed, 4, &profile).expect("good seed");
+            assert_eq!(sent.seed, seed, "a good seed must not move");
+            let txt = serde_json::to_string(&sent).unwrap();
+            let mut h = Sha256::new();
+            h.update(txt.as_bytes());
+            assert_eq!(format!("{:x}", h.finalize()), want, "seed {seed} changed");
+        }
+    }
+
+    /// R36 F3: the full scan is intentionally ignored (20k builds). The
+    /// known bad seeds and good-seed fixtures above are the gate evidence.
+    #[test]
+    #[ignore = "20k sentinel builds; run manually for the scan evidence"]
+    fn r36_f3_scan_20k_no_fault() {
+        let profile = Profile::through(4);
+        for seed in 0u64..20_000 {
+            build(seed, 4, &profile).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        }
     }
 
     #[test]
