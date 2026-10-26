@@ -19,7 +19,7 @@ from `TEMPLATE.md`.
 | [31](31.md) | A failed live proof keeps its evidence (proof log, flake-bar output, `.41` wording) | merged `1e69d41` |
 | [32](32.md) | CI builds the sandbox image (no graded path; gate after the flake bar) | merged `458cf06` |
 | [33](33.md) | The CI sandbox runs as the runner's UID (no graded path; gate waived) | merged `f23b3ac` |
-| [34](34.md) | The freeze declaration (docs only; merges after 35's green GitHub run) | open (the reviewer implements; implementer: take 35) |
+| [34](34.md) | The freeze declaration (docs only; rules frozen at `.41`) | merged `9450354` |
 | [35](35.md) | CI skips two tests that need the bench host (`ci.yml` only; ratchet 83 on active code) | merged `2eac5aa` |
 
 **Status values:**
