@@ -55,14 +55,9 @@ jobs:
           while read -r name; do
             skips+=(--skip "$name")
           done < <(scripts/live-proofs.sh)
-          # CI-only, bench-host images: the pdf test needs the local pdf-ref
-          # image; the proxy test needs a warmed 3-upstream pool. The
-          # image-stamp round removes both exclusions.
-          skips+=(--skip live_test_reference_pdf_starts_dual_attached)
-          skips+=(--skip test_pipeline_eval_only_proxy_full_ladder_live)
           # Coverage measures active code only: the retired single-shot
           # verifiers remain compiled but are not dispatched by sdb-sql.
-          # Active-code lines measured 83.21% on this CI set; round 29's
+          # Active-code lines measured 83.56% on this CI set; round 29's
           # measured-round-down rule gives the 83 ratchet, which only goes up.
           cargo llvm-cov --all-targets --summary-only \
             --ignore-filename-regex 'src/verifier/(redis|http|proxy|pdf|wal|queue|binproto|pubsub)\.rs$' \

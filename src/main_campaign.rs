@@ -1219,6 +1219,7 @@ async fn run_one_stage(
         duration_seconds: Some(output.manifest.duration_seconds),
         max_call_usd: output.max_call_usd,
         stop_reason: output.stop_reason.clone(),
+        sandbox_image: output.manifest.sandbox_image.clone(),
         agent_failed: output.agent_failed,
         infra_error: output.infra_error,
         disqualified: output.disqualified,

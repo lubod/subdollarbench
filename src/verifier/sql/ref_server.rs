@@ -1674,6 +1674,83 @@ mod tests {
         }
     }
 
+    /// R37 F5/R36-1: the persistence path records the sentinel seed it
+    /// actually used, and that seed stays out of the candidate-visible
+    /// failure detail. The run seed maps onto a known bad persistence seed.
+    #[test]
+    fn r37_f5_persistence_seed_is_evidence_not_feedback() {
+        let bad = 9231256963851754504u64;
+        let run_seed = bad ^ 0x5E27_A510_0000_0004;
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let mut used = None;
+        let mut keep = || proc.restart();
+        assert_eq!(
+            super::super::scenarios::persistence_with_seed(
+                &addr,
+                Duration::from_secs(10),
+                run_seed,
+                &Profile::through(4),
+                &mut keep,
+                &mut used,
+            ),
+            super::super::scenarios::ScenarioResult::Pass
+        );
+        let used = used.expect("the used seed is recorded");
+        assert!(used > bad, "the bad seed moved on: {used} > {bad}");
+
+        // The same run seed against an empty store fails; its detail is
+        // candidate-visible and must not contain the harness seed.
+        proc.data =
+            std::env::temp_dir().join(format!("sdb-sql-seed-lost-{}-{port}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proc.data);
+        std::fs::create_dir_all(&proc.data).unwrap();
+        let mut used_again = None;
+        let mut fresh = || proc.restart();
+        match super::super::scenarios::persistence_with_seed(
+            &addr,
+            Duration::from_secs(10),
+            run_seed,
+            &Profile::through(4),
+            &mut fresh,
+            &mut used_again,
+        ) {
+            super::super::scenarios::ScenarioResult::Fail(d) => {
+                assert!(!d.contains(&used.to_string()), "seed leaked: {d}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(used_again, Some(used));
+    }
+
+    /// R37 F5: the driver carries the persistence seed into its outcome.
+    #[test]
+    fn r37_f5_driver_records_the_persistence_seed() {
+        let bad = 9231256963851754504u64;
+        let run_seed = bad ^ 0x5E27_A510_0000_0004;
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let mut restart = || proc.restart();
+        let out = run_stage(
+            &addr,
+            Duration::from_secs(10),
+            run_seed,
+            &[0, 1, 2, 3, 4],
+            120,
+            None,
+            Some(&mut restart),
+        )
+        .expect("stage run");
+        assert!(out.passed, "{}", out.detail);
+        let used = out
+            .sentinel_seed
+            .expect("the stage outcome records the seed");
+        assert!(used > bad, "the bad seed moved on: {used} > {bad}");
+        assert!(!out.detail.contains(&used.to_string()), "{}", out.detail);
+    }
+
     /// Review round 14, G1, as it happened live. A ladder that failed
     /// tickets 2 and 4 is graded on `[0, 1, 3, 9]`: no restart, no
     /// persistence dataset (gating on the highest stage used to run it). One

@@ -80,11 +80,27 @@ pub fn persistence(
     profile: &super::generator::Profile,
     restart: &mut dyn FnMut() -> Result<(), String>,
 ) -> ScenarioResult {
+    let mut used_seed = None;
+    persistence_with_seed(addr, timeout, seed, profile, restart, &mut used_seed)
+}
+
+/// R37 F5: the same path, reporting the sentinel seed it actually used.
+/// The caller records it in the stage outcome; it is never part of the
+/// candidate-visible failure detail.
+pub fn persistence_with_seed(
+    addr: &str,
+    timeout: Duration,
+    seed: u64,
+    profile: &super::generator::Profile,
+    restart: &mut dyn FnMut() -> Result<(), String>,
+    used_seed: &mut Option<u64>,
+) -> ScenarioResult {
     let pseed = seed ^ 0x5E27_A510_0000_0004;
     let sent = match super::sentinel::build(pseed, 4, profile) {
         Ok(s) => s,
         Err(e) => return ScenarioResult::Fault(format!("persistence dataset: {e}")),
     };
+    *used_seed = Some(sent.seed);
     if let Err(e) = super::sentinel::write(addr, timeout, &sent) {
         return ScenarioResult::Fail(format!("persistence: writing the dataset: {e}"));
     }

@@ -1100,6 +1100,9 @@ pub struct StageOutcome {
     /// ready | crash. None on eval-only/short paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// R36/R37: the sandbox image this attempt's manifest recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_image: Option<String>,
     pub agent_failed: bool,
     pub infra_error: bool,
     pub disqualified: bool,
@@ -2760,7 +2763,7 @@ where
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
-        sandbox_image: crate::sandbox::omp_updater::sandbox_image_id(),
+        sandbox_image: None,
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         points: 0.0,
@@ -3313,6 +3316,16 @@ fn push_attempt_record(
             _ => 0.0,
         }
     };
+    match (
+        rollup.sandbox_image.as_deref(),
+        out.sandbox_image.as_deref(),
+    ) {
+        (None, Some(image)) => rollup.sandbox_image = Some(image.to_string()),
+        (Some(existing), Some(image)) if existing != image => {
+            rollup.sandbox_image = Some("mixed".to_string());
+        }
+        _ => {}
+    }
     rollup.stages.push(StageRecord {
         id: stage.id,
         title: stage.title.clone(),
@@ -4248,6 +4261,7 @@ mod tests {
             duration_seconds: Some(60.0),
             max_call_usd: 0.0,
             stop_reason: None,
+            sandbox_image: None,
             agent_failed: false,
             infra_error: false,
             rounds: Vec::new(),
@@ -4520,7 +4534,6 @@ mod tests {
         seen.into_inner()
     }
 
-    /// R23 D2: an unspent ticket raises the next ticket's pool share.
     /// R36 F1/D1: a phase chains only onto the same sandbox image ID.
     #[test]
     fn r36_f1_chain_requires_the_same_sandbox_image() {
@@ -4554,6 +4567,68 @@ mod tests {
         assert!(msg.contains("sha256:image-b"), "{msg}");
     }
 
+    /// R37 F6: the rollup takes the first ticket's image; a mixed cell
+    /// cannot be chained onto.
+    #[tokio::test]
+    async fn r37_f6_rollup_uses_first_ticket_image_and_refuses_mixed() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r37f6".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let first = run_campaign(
+            &lc,
+            &opts,
+            |_attempt| {
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.sandbox_image = Some("sha256:first".into());
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.sandbox_image.as_deref(), Some("sha256:first"));
+
+        let mixed_opts = CampaignRunOptions {
+            campaign_id: "r37f6mixed".into(),
+            ..opts
+        };
+        let mixed = run_campaign(
+            &lc,
+            &mixed_opts,
+            |attempt| {
+                let mut o = outcome(true, &[(0, true), (1, true), (2, true)]);
+                o.sandbox_image = Some(format!("sha256:image{}", attempt.stage.id));
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(mixed.sandbox_image.as_deref(), Some("mixed"));
+        let state = phase1_state();
+        let mut prev = chain_rollup(1, true);
+        prev.sandbox_image = Some("mixed".into());
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            Some("sha256:first"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("mixed"), "{err}");
+    }
+
+    /// R23 D2: an unspent ticket raises the next ticket's pool share.
     #[tokio::test]
     async fn r23_d2_a_cheap_ticket_raises_the_next_budget() {
         let mut lc = fixture_campaign();

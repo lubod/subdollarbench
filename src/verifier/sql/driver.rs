@@ -104,6 +104,10 @@ pub fn stage_seed(verifier_seed: &str, stage: u32) -> u64 {
 #[derive(Debug, Clone)]
 pub struct StageOutcome {
     pub seed: u64,
+    /// R37 F5: the persistence sentinel seed actually used, when the suite
+    /// ran the stage-4 restart scenario. Harness evidence, not candidate
+    /// feedback.
+    pub sentinel_seed: Option<u64>,
     pub passed: bool,
     /// Statements graded before the run stopped (all of them on a pass).
     pub checks: usize,
@@ -294,6 +298,7 @@ fn run_stage_profiled(
 
     let failed = |checks: usize, kind: MismatchKind, detail: String| StageOutcome {
         seed,
+        sentinel_seed: None,
         passed: false,
         checks,
         discarded: script.discarded,
@@ -329,8 +334,16 @@ fn run_stage_profiled(
             // candidate must come back on the same store it wrote. A suite
             // without it (ticket 4 failed or skipped) does not: gating on
             // the highest stage used to grade ticket 9 on persistence.
+            let mut sentinel_seed = None;
             if let (Some(pprofile), Some(restart)) = (persistence, restart) {
-                match super::scenarios::persistence(addr, timeout, seed, pprofile, restart) {
+                match super::scenarios::persistence_with_seed(
+                    addr,
+                    timeout,
+                    seed,
+                    pprofile,
+                    restart,
+                    &mut sentinel_seed,
+                ) {
                     ScenarioResult::Pass => {}
                     ScenarioResult::Fail(d) => {
                         return Ok(failed(checks, MismatchKind::Protocol, d))
@@ -340,6 +353,7 @@ fn run_stage_profiled(
             }
             Ok(StageOutcome {
                 seed,
+                sentinel_seed,
                 passed: true,
                 checks,
                 discarded: script.discarded,
@@ -401,6 +415,7 @@ fn run_stage_profiled(
             };
             Ok(StageOutcome {
                 seed,
+                sentinel_seed: None,
                 passed: false,
                 checks: f.index + 1,
                 discarded: script.discarded,
