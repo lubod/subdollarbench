@@ -6426,37 +6426,109 @@ mod tests {
         );
     }
 
-    /// R37 F1: every pipeline test has its own worker id, and the
-    /// Redis-mock / SQL-stage6 pair that met on 15380 no longer does.
+    /// R37 F1: for every pipeline test, compute every host port it can
+    /// bind and reject two concurrent tests sharing one. Tests serialized
+    /// by SQL_PERF_LIVE may share with each other.
     #[test]
     fn r37_f1_worker_ports_do_not_collide() {
+        use std::collections::{HashMap, HashSet};
         let source = include_str!("pipeline.rs");
-        let mut workers = Vec::new();
+        let mut current = String::new();
+        let mut entries: Vec<(String, u8)> = Vec::new();
+        let mut serialized: HashSet<String> = HashSet::new();
         for line in source.lines() {
             let line = line.trim();
+            if let Some(rest) = line
+                .strip_prefix("async fn ")
+                .or_else(|| line.strip_prefix("fn "))
+            {
+                current = rest.split('(').next().unwrap_or("").trim().to_string();
+            }
+            if line.contains("SQL_PERF_LIVE.lock") {
+                serialized.insert(current.clone());
+            }
             if let Some(rest) = line.strip_prefix("let worker = ") {
                 if let Some(num) = rest.strip_suffix("u8;") {
-                    workers.push(num.parse::<u8>().expect("worker id"));
+                    entries.push((current.clone(), num.parse::<u8>().expect("worker id")));
+                }
+            } else if let Some(rest) = line.strip_prefix("worker: ") {
+                if let Some(num) = rest.strip_suffix(',') {
+                    if let Ok(id) = num.parse::<u8>() {
+                        entries.push((current.clone(), id));
+                    }
                 }
             }
         }
         assert!(
-            workers.len() >= 39,
-            "worker table lost entries: {workers:?}"
+            entries.len() >= 41,
+            "worker table lost entries: {entries:?}"
         );
-        let mut unique = workers.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(
-            unique.len(),
-            workers.len(),
-            "two pipeline tests share a worker id: {workers:?}"
-        );
-        let redis_mock = crate::web::server::worker_port(TaskType::Redis.default_port(), 90);
-        let sql_stage6 = crate::web::server::worker_port(TaskType::Sql.default_port(), 70);
-        assert_ne!(
-            redis_mock, sql_stage6,
-            "the Redis mock and SQL stage 6 share host port {redis_mock}"
+        let task = |name: &str| {
+            if name.contains("_sql_")
+                || name.contains("sql_sentinel")
+                || name.contains("sql_shrink")
+            {
+                TaskType::Sql
+            } else if name.contains("_proxy_") {
+                TaskType::Proxy
+            } else if name.contains("_queue_") {
+                TaskType::Queue
+            } else if name.contains("_http_") {
+                TaskType::Http
+            } else {
+                TaskType::Redis
+            }
+        };
+        let mut owners: HashMap<u16, String> = HashMap::new();
+        let mut max_port = 0u16;
+        for (name, worker) in &entries {
+            let task_kind = task(name);
+            let base = task_kind.default_port();
+            // A test binds its own task's reference, plus the shared admin,
+            // dashboard, HA and proxy-pool ports. A campaign only starts the
+            // reference of its own task, so the other refs are not here.
+            let mut ports = vec![
+                crate::web::server::worker_port(base, *worker),
+                crate::web::server::worker_port(6395, *worker),
+                crate::web::server::worker_port(8090, *worker),
+                crate::web::server::worker_port(7001, *worker),
+                crate::web::server::worker_port(7002, *worker),
+                crate::web::server::worker_port(7003, *worker),
+                crate::web::server::worker_port(8101, *worker),
+                crate::web::server::worker_port(8102, *worker),
+                crate::web::server::worker_port(8103, *worker),
+            ];
+            match task_kind {
+                TaskType::Redis => {
+                    ports.push(crate::web::server::worker_port(6380, *worker));
+                }
+                TaskType::Http => {
+                    ports.push(crate::web::server::worker_port(8081, *worker));
+                }
+                TaskType::Sql => {
+                    ports.push(crate::web::server::worker_port(5481, *worker));
+                    ports.push(crate::web::server::worker_port(base + 50, *worker));
+                    ports.push(crate::web::server::worker_port(base + 60, *worker));
+                    ports.push(crate::web::server::worker_port(base + 61, *worker));
+                    ports.push(crate::web::server::worker_port(base + 62, *worker));
+                }
+                TaskType::Proxy | TaskType::Queue => {}
+                _ => {}
+            }
+            for port in ports {
+                max_port = max_port.max(port);
+                if let Some(other) = owners.get(&port) {
+                    if other != name && !(serialized.contains(other) && serialized.contains(name)) {
+                        panic!("{name} and {other} both bind host port {port}");
+                    }
+                } else {
+                    owners.insert(port, name.clone());
+                }
+            }
+        }
+        assert!(
+            max_port < 20_000,
+            "worker ports leave the free_port range: {max_port}"
         );
     }
 
@@ -8364,7 +8436,7 @@ main()
             save_results: false,
             review_model: None,
             batch_reference: None,
-            worker: 0,
+            worker: 14,
             harness: Harness::Omp,
             feedback_rounds: 0,
             campaign_stage: None,
@@ -8397,10 +8469,10 @@ main()
             save_results: true,
             review_model: None,
             batch_reference: None,
-            // Worker 99: this test only asserts the archive path; worker 0
-            // ports (6379/6380/8090) belong to live campaign cells on this
-            // host, so keep test traffic on the high offset.
-            worker: 99,
+            // Dedicated worker: this test only asserts the archive path;
+            // worker 0 ports (6379/6380/8090) belong to live campaign cells
+            // on this host, so keep test traffic on its own offset.
+            worker: 0,
             harness: Harness::Omp,
             feedback_rounds: 0,
             campaign_stage: None,
@@ -8735,7 +8807,7 @@ main()
     /// 0% model verdict.
     #[tokio::test]
     async fn test_pipeline_eval_only_infra_error_on_port_conflict() {
-        let worker = 93u8;
+        let worker = 18u8;
         let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
         let workdir = covtest_dir("infra");
         write_mock_candidate(&workdir, port, 0);
@@ -8782,7 +8854,7 @@ main()
     /// (not infra). Driven through `run_verification` directly.
     #[tokio::test]
     async fn test_verification_classifies_model_packaging_fault() {
-        let worker = 94u8;
+        let worker = 27u8;
         let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
         let workdir = covtest_dir("packaging");
         fs::create_dir_all(&workdir).unwrap();
@@ -8829,7 +8901,7 @@ main()
     /// Err after the sandbox is cleaned up, never as a scored trial.
     #[tokio::test]
     async fn test_pipeline_cancel_after_verification_returns_err() {
-        let worker = 95u8;
+        let worker = 9u8;
         let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
         let workdir = covtest_dir("cancel");
         // Slow boot keeps the run inside verification past the timer.
@@ -8859,7 +8931,7 @@ main()
     /// the manifest records the subset totals.
     #[tokio::test]
     async fn test_pipeline_campaign_acceptance_subset_scopes_verdict() {
-        let worker = 96u8;
+        let worker = 5u8;
         let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
         let workdir = covtest_dir("campaign");
         write_mock_candidate(&workdir, port, 0);
@@ -8909,7 +8981,7 @@ main()
     /// footprint gate, and the SDB1 v2 admin channel end to end.
     #[tokio::test]
     async fn test_pipeline_eval_only_stage2_disk_and_admin_live() {
-        let worker = 97u8;
+        let worker = 23u8;
         let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
         let dir = covtest_dir("s2live");
         let workdir = dir.join("workspace");
@@ -8971,7 +9043,7 @@ main()
     /// stage-log contract.
     #[tokio::test]
     async fn test_pipeline_eval_only_proxy_campaign_stage1_live() {
-        let worker = 98u8;
+        let worker = 67u8;
         let port = crate::web::server::worker_port(TaskType::Proxy.default_port(), worker);
         let dir = covtest_dir("edge");
         let workdir = dir.join("workspace");
@@ -9019,7 +9091,7 @@ main()
     /// SDB_PROXY_CACHE_TTL, and the 128MB-capped limits stage.
     #[tokio::test]
     async fn test_pipeline_eval_only_proxy_full_ladder_live() {
-        let worker = 99u8;
+        let worker = 83u8;
         let port = crate::web::server::worker_port(TaskType::Proxy.default_port(), worker);
         let dir = covtest_dir("edgefull");
         let workdir = dir.join("workspace");
@@ -9130,7 +9202,7 @@ main()
     /// stages 9/10 (uploads + hardening).
     #[tokio::test]
     async fn test_pipeline_eval_only_http_full_ladder_live() {
-        let worker = 91u8;
+        let worker = 58u8;
         let port = crate::web::server::worker_port(TaskType::Http.default_port(), worker);
         let dir = covtest_dir("httplive");
         let workdir = dir.join("workspace");
@@ -9188,7 +9260,7 @@ main()
     /// the seed-namespaced schemas cannot collide.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stages_0_3_live() {
-        let worker = 61u8;
+        let worker = 112u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqllive");
         let workdir = dir.join("workspace");
@@ -9245,7 +9317,7 @@ main()
     /// for later tickets.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage4_persistence_live() {
-        let worker = 63u8;
+        let worker = 75u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlpersist");
         let workdir = dir.join("workspace");
@@ -9299,7 +9371,7 @@ main()
     /// restart — and the stage result stays green.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage5_crash_live() {
-        let worker = 65u8;
+        let worker = 80u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlcrash");
         let workdir = dir.join("workspace");
@@ -9353,7 +9425,7 @@ main()
     /// reference passes and the bulk/torn checks do not run.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage5_lite_live() {
-        let worker = 69u8;
+        let worker = 85u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlcrashlite");
         let workdir = dir.join("workspace");
@@ -9412,7 +9484,7 @@ main()
     /// demand work ticket 5 never asked for) while stage 6 runs in full.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage6_after_lite_stage5() {
-        let worker = 85u8;
+        let worker = 87u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqltxnlite5");
         let workdir = dir.join("workspace");
@@ -9469,7 +9541,7 @@ main()
     /// list made one storage failure sink every later ticket).
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage7_without_storage_stages() {
-        let worker = 80u8;
+        let worker = 100u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlno5");
         let workdir = dir.join("workspace");
@@ -9526,7 +9598,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage14_observability_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 60u8;
+        let worker = 42u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqlobs");
         if let Ok(out) = std::process::Command::new("docker")
@@ -9595,7 +9667,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage12_concurrency_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 66u8;
+        let worker = 30u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqlconc");
         if let Ok(out) = std::process::Command::new("docker")
@@ -9660,7 +9732,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage12_concurrency_lite_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 67u8;
+        let worker = 28u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqlconclite");
         if let Ok(out) = std::process::Command::new("docker")
@@ -9807,7 +9879,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage15_tests_ci_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 86u8;
+        let worker = 45u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqltests");
         if let Ok(out) = std::process::Command::new("docker")
@@ -9878,7 +9950,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage15_tests_ci_lite_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 68u8;
+        let worker = 43u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqltestslite");
         if let Ok(out) = std::process::Command::new("docker")
@@ -9999,7 +10071,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage16_memory_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 78u8;
+        let worker = 51u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqlmemory");
         if let Ok(out) = std::process::Command::new("docker")
@@ -10071,7 +10143,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage17_disk_full_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 77u8;
+        let worker = 55u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqldisk");
         if let Ok(out) = std::process::Command::new("docker")
@@ -10143,7 +10215,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage18_security_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 76u8;
+        let worker = 60u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqlsec");
         if let Ok(out) = std::process::Command::new("docker")
@@ -10216,7 +10288,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage19_replication_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 75u8;
+        let worker = 65u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let ha_ports = [port + 60, port + 61, port + 62];
         cleanup_covtest_network("sqlrepl");
@@ -10288,7 +10360,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage19_replication_lite_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 74u8;
+        let worker = 63u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let ha_ports = [port + 60, port + 61];
         cleanup_covtest_network("sqlrepllite");
@@ -10433,7 +10505,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage20_pgwire_lite_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 72u8;
+        let worker = 88u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let pg_port = port + 50;
         cleanup_covtest_network("sqlpglite");
@@ -10502,7 +10574,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage13_schema_change_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 89u8;
+        let worker = 33u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         // A previous failed run's reference holds this worker's host port;
         // a new run would silently talk to that stale binary. Clear it.
@@ -10575,7 +10647,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage11_indexes_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 88u8;
+        let worker = 21u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlidx");
         let workdir = dir.join("workspace");
@@ -10637,7 +10709,7 @@ main()
     /// `INSERT ... SELECT` — plus everything 0-9 again.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage10_subqueries_live() {
-        let worker = 79u8;
+        let worker = 8u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlsub");
         let workdir = dir.join("workspace");
@@ -10687,7 +10759,7 @@ main()
     /// (including the violation probes) — plus everything 0-8 again.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage9_constraints_live() {
-        let worker = 81u8;
+        let worker = 105u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlcons");
         let workdir = dir.join("workspace");
@@ -10737,7 +10809,7 @@ main()
     /// probe — plus everything 0-7 again.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage8_joins_live() {
-        let worker = 83u8;
+        let worker = 102u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqljoin");
         let workdir = dir.join("workspace");
@@ -10786,7 +10858,7 @@ main()
     /// only the equality point lookups are gated.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage11_lite_live() {
-        let worker = 87u8;
+        let worker = 24u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlidxlite");
         let workdir = dir.join("workspace");
@@ -10836,7 +10908,7 @@ main()
     /// never runs a `LEFT JOIN`.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage8_lite_live() {
-        let worker = 82u8;
+        let worker = 104u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqljoinlite");
         let workdir = dir.join("workspace");
@@ -10882,7 +10954,7 @@ main()
     /// aggregate error probes — plus everything 0-6 again.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage7_aggregates_live() {
-        let worker = 84u8;
+        let worker = 97u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlagg");
         let workdir = dir.join("workspace");
@@ -10983,7 +11055,7 @@ main()
     /// the stage result is overridden even though the suite itself passes.
     #[tokio::test]
     async fn test_pipeline_sql_sentinel_drift_fails_the_writing_stage() {
-        let worker = 64u8;
+        let worker = 117u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqldrift");
         let workdir = dir.join("workspace");
@@ -11045,7 +11117,7 @@ main()
     /// restore starts.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_shrink_uses_a_throwaway_store() {
-        let worker = 62u8;
+        let worker = 6u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlshrink");
         let workdir = dir.join("workspace");
