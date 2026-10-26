@@ -6438,13 +6438,17 @@ mod tests {
         let mut serialized: HashSet<String> = HashSet::new();
         for line in source.lines() {
             let line = line.trim();
+            // Build the markers so scripts/live-proofs.sh's awk does not
+            // mistake this source for a test holding the lock.
+            let async_prefix = "async".to_string() + " fn ";
             if let Some(rest) = line
-                .strip_prefix("async fn ")
+                .strip_prefix(&async_prefix)
                 .or_else(|| line.strip_prefix("fn "))
             {
                 current = rest.split('(').next().unwrap_or("").trim().to_string();
             }
-            if line.contains("SQL_PERF_LIVE.lock") {
+            let lock_name = "SQL_PERF_LIVE".to_string() + ".lock";
+            if line.contains(&lock_name) {
                 serialized.insert(current.clone());
             }
             if let Some(rest) = line.strip_prefix("let worker = ") {
