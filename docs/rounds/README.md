@@ -20,6 +20,7 @@ from `TEMPLATE.md`.
 | [32](32.md) | CI builds the sandbox image (no graded path; gate after the flake bar) | merged `458cf06` |
 | [33](33.md) | The CI sandbox runs as the runner's UID (no graded path; gate waived) | merged `f23b3ac` |
 | [34](34.md) | The freeze declaration (docs only; merges after 33's green GitHub run) | open (the reviewer implements; implementer: take 33) |
+| [35](35.md) | CI skips two tests that need the bench host (`ci.yml` only) | draft |
 
 **Status values:**
 
