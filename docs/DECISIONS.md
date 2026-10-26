@@ -420,3 +420,48 @@ detached from the run network for every verification window
 `run_verification` calls, including repair rounds) so no candidate can
 proxy to `ref-*` and fake stages; the agent and the bench keep them. A
 live docker test pins resolve → unreachable → resolve.
+
+## 20. The sdb-sql rules freeze at `2026-10-19.41` (2026-10-26)
+
+**Frozen:**
+
+- `RULES_VERSION` `2026-10-19.41`, deployed and shown in `/api/status`
+  (rounds 29-30).
+- The run stamp `fingerprint()` (`src/report/rules.rs`) over the inputs
+  in `src/report/graded-files.txt`.
+- The graded paths in `scripts/graded-paths.txt`, which key the gate's
+  scope and the flake record.
+
+**Evidence:**
+
+- **The first flake bar**, on `5ebad6e`: 249 of 250 runs passed. The one
+  failure was a stage-18 `infra_error` with no log. It didn't come back
+  in 20 repro runs. Round 31 makes a failure keep its full log.
+- **The second bar**, on `7f7e15b` (rounds 30 and 31): every one of the
+  25 proofs passed 20/20, 500 runs in 16.6 h. Record
+  `flake-50f1d60f0002.txt`. The rounds after it change no graded path.
+- **CI:** GitHub run `<id>` on master was green. The CI image is built
+  with the runner's UID (rounds 29-33, `docs/rounds/29.md`, "R29-1").
+
+**Operator decisions** (2026-10-26, `docs/rounds/34.md`):
+
+- **Bumps.** A rules bump needs its own round and the operator's
+  go-ahead. Its `src/report/rules.rs` entry gives the score impact, and
+  careers restart at phase 1. Published results name their version.
+- **Graded-path changes without a bump.** These need the full gate and
+  a new 20-pass flake bar before the next published cell.
+- **CI first.** The freeze waited for a green GitHub run.
+
+## 21. Dollars bind; wall time is a guard (2026-10-22)
+
+The benchmark answers "what does a dollar buy" (round 23):
+
+- **The cap.** `CELL_BUDGET_USD` is $0.99 per phase
+  (`src/scoring.rs:141`), keeping the "Under-$1" identity.
+- **The budget counts the API bill only**, at list price. The compute
+  floor is reported, not budgeted.
+- **Turn limits are runaway guards.** Money, not turns, ends a session.
+- **Wall time is a guard.** `CELL_WALL_MIN` is 480, about 8 h per phase
+  (`src/scoring.rs:174`).
+- **Bumps.** Rules bumps were free while sdb-sql was in development,
+  until #20.
