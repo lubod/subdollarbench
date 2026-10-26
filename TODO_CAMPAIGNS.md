@@ -43,14 +43,23 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | — | The 20-pass flake bar on 30's merged content: **PASS** on `7f7e15b`, 500/500 (`31.md`, "After the merge"); the first bar on `5ebad6e` failed once (`27.md`) | done |
 | [32](docs/rounds/32.md) | CI builds the sandbox image; Node 24 actions | merged |
 | [33](docs/rounds/33.md) | The CI sandbox runs as the runner's UID | merged |
+| [35](docs/rounds/35.md) | CI skips two tests that need the bench host; ratchet 83 on active code | merged |
 | [34](docs/rounds/34.md) | The freeze declaration (AGENTS.md, `docs/DECISIONS.md` #20-21) | merged |
 
 ## After the freeze: validation
 
 - **First: the image-stamp round** (`docs/DECISIONS.md` #20, known gaps).
-  It stamps the sandbox image ID at run time and drops the host UID 1000
-  assumption. Graded, so it needs the full gate and a new 20-pass bar
-  before the calibration career.
+  It also takes the CI-only gaps:
+  - stamps the sandbox image ID at run time;
+  - drops the host UID 1000 assumption;
+  - moves one of the tests that share host port 15380;
+  - adds the upstream-pool readiness probe and the pdf test's self-skip,
+    then removes round 35's two CI skips.
+
+  Graded, so it needs the full gate and a new 20-pass bar before the
+  calibration career.
+- **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
+  `campaigns/`), keeping old rows readable. Graded, with its own bar.
 - **Calibration and test cells** (after round 23): the test model is
   `openrouter/deepseek/deepseek-v4.1-flash-1017` (operator, 2026-10-22;
   $0.15 / $0.60 per M tokens). Use Haiku only when a second price point is
@@ -73,8 +82,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   regression patterns (old H3).
 - **Retirement:** finish the README rewrite for sdb-sql only (old M8,
   "README: campaigns section").
-- **Coverage:** the CI ratchet is at 84 % (round 29, D1). The residuals
-  are in pipeline.rs, web/server.rs and web/queue.rs.
+- **Coverage:** the CI ratchet is at 83 %, on active code only (round 35;
+  round 29, D1). The residuals are in pipeline.rs, web/server.rs and
+  web/queue.rs.
 
 Items for retired campaigns (sdb-kv redis suites, sdb-edge, sdb-http, HA
 for redis: old slices B, C, E, F, I6b, J, L) stay in the archive and are

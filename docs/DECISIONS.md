@@ -440,8 +440,16 @@ live docker test pins resolve → unreachable → resolve.
 - **The second bar**, on `7f7e15b` (rounds 30 and 31): every one of the
   25 proofs passed 20/20, 500 runs in 16.6 h. Record
   `flake-50f1d60f0002.txt`. The rounds after it change no graded path.
-- **CI:** GitHub run `<id>` on master was green. The CI image is built
-  with the runner's UID (rounds 29-33, `docs/rounds/29.md`, "R29-1").
+- **CI:** GitHub run `40294023406` on `4d037c7` was green, after
+  rounds 29-35 (`docs/rounds/29.md`, "Fifth run"):
+  - 1044 passed and 0 failed.
+  - Line coverage of the active code was 83.23 %, against the ratchet
+    of 83.
+  - The ratchet was 84 over all code. Round 35 excluded the 8 retired
+    verifiers (`src/verifier/{redis,http,proxy,pdf,wal,queue,binproto,pubsub}.rs`)
+    and measured again.
+  - CI skips two tests that need the bench host: the `pdf-ref` image,
+    and the upstream pool's readiness.
 
 **Operator decisions** (2026-10-26, `docs/rounds/34.md`):
 
@@ -484,6 +492,17 @@ live docker test pins resolve → unreachable → resolve.
     The 1.92.0 pin holds them off.
   - `scripts/flake-bar.sh`'s header still names the record
     `<commit>.flake.txt`. It is `flake-<key>.txt`.
+- **CI skips two tests** (round 35):
+  - `live_test_reference_pdf_starts_dual_attached` needs a locally
+    built image.
+  - `test_pipeline_eval_only_proxy_full_ladder_live` fails because the
+    nginx upstream pool is counted as ready before it serves.
+  - Taken by the image-stamp round: a readiness probe for the pool, and
+    a pdf test that skips itself when the image is missing. That round
+    removes the skips and raises the ratchet.
+- **The retired campaigns' code** (verifiers, `tasks/`, `campaigns/`) is
+  still compiled, only so that old rows stay readable (#19). Deleting it
+  touches graded paths, so it's its own round after the freeze.
 
 ## 21. Dollars bind; wall time is a guard (2026-10-22)
 

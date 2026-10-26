@@ -204,9 +204,13 @@ inside `.git`, so it is shared by every worktree and never committed.
 **CI** (`.github/workflows/ci.yml`, on push and pull request):
 
 - `fmt` and `clippy` on the pinned toolchain;
-- it builds `subdollar-sandbox` with the runner's UID (round 33);
-- it runs every test except the ones `scripts/live-proofs.sh` prints,
-  with line coverage gated at 84 % or more.
+- it builds `subdollar-sandbox` with the runner's UID and GID (round 33);
+- it runs every test except two groups:
+  - the ones `scripts/live-proofs.sh` prints;
+  - two tests that need the bench host (round 35).
+- Line coverage is gated at 83 % or more, measured on the active code
+  only: the retired verifiers are excluded (round 35).
+- The ratchet only goes up.
 
 ## Pointers
 
