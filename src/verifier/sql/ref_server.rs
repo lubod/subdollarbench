@@ -1724,6 +1724,33 @@ mod tests {
         assert_eq!(used_again, Some(used));
     }
 
+    /// R37 F5: the driver carries the persistence seed into its outcome.
+    #[test]
+    fn r37_f5_driver_records_the_persistence_seed() {
+        let bad = 9231256963851754504u64;
+        let run_seed = bad ^ 0x5E27_A510_0000_0004;
+        let port = free_port();
+        let mut proc = start_reference(port);
+        let addr = format!("127.0.0.1:{port}");
+        let mut restart = || proc.restart();
+        let out = run_stage(
+            &addr,
+            Duration::from_secs(10),
+            run_seed,
+            &[0, 1, 2, 3, 4],
+            120,
+            None,
+            Some(&mut restart),
+        )
+        .expect("stage run");
+        assert!(out.passed, "{}", out.detail);
+        let used = out
+            .sentinel_seed
+            .expect("the stage outcome records the seed");
+        assert!(used > bad, "the bad seed moved on: {used} > {bad}");
+        assert!(!out.detail.contains(&used.to_string()), "{}", out.detail);
+    }
+
     /// Review round 14, G1, as it happened live. A ladder that failed
     /// tickets 2 and 4 is graded on `[0, 1, 3, 9]`: no restart, no
     /// persistence dataset (gating on the highest stage used to run it). One
