@@ -6486,6 +6486,10 @@ mod tests {
         let mut owners: HashMap<u16, String> = HashMap::new();
         let mut max_port = 0u16;
         for (name, worker) in &entries {
+            assert!(
+                *worker >= 8,
+                "{name} uses worker {worker}; workers 0..7 are live cell slots"
+            );
             let task_kind = task(name);
             let base = task_kind.default_port();
             // A test binds its own task's reference, plus the shared admin,
@@ -8473,10 +8477,10 @@ main()
             save_results: true,
             review_model: None,
             batch_reference: None,
-            // Dedicated worker: this test only asserts the archive path;
-            // worker 0 ports (6379/6380/8090) belong to live campaign cells
-            // on this host, so keep test traffic on its own offset.
-            worker: 0,
+            // Dedicated worker 114: this test only asserts the archive path;
+            // workers 0..7 belong to live campaign cells on this host, so
+            // keep test traffic on its own offset.
+            worker: 114,
             harness: Harness::Omp,
             feedback_rounds: 0,
             campaign_stage: None,
@@ -8935,7 +8939,7 @@ main()
     /// the manifest records the subset totals.
     #[tokio::test]
     async fn test_pipeline_campaign_acceptance_subset_scopes_verdict() {
-        let worker = 5u8;
+        let worker = 82u8;
         let port = crate::web::server::worker_port(TaskType::Redis.default_port(), worker);
         let workdir = covtest_dir("campaign");
         write_mock_candidate(&workdir, port, 0);
@@ -11121,7 +11125,7 @@ main()
     /// restore starts.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_shrink_uses_a_throwaway_store() {
-        let worker = 6u8;
+        let worker = 118u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlshrink");
         let workdir = dir.join("workspace");
