@@ -485,6 +485,19 @@ live docker test pins resolve → unreachable → resolve.
     can't hit this.
   - Taken in the image-stamp round, with a test that no two tests share a
     host port.
+- **The stage-4 dataset faults for about 1 seed in 5,000.**
+  - `sentinel::build` (`src/verifier/sql/sentinel.rs:114`) returns an
+    error when a seed's 40-step script leaves no writes or no ordered
+    reads.
+  - The persistence scenario reports that as a verifier fault
+    (`src/verifier/sql/scenarios.rs:86`), and the run ends as
+    `infra_error` (`src/verifier/sql/driver.rs:338`). It is never a
+    candidate failure.
+  - A scratch scan found 4 bad seeds in 20,000. It hit round 34's fast
+    gate once, in the stage-10 proof.
+  - Taken in the image-stamp round, with the rules bump that round needs:
+    move to the next seed until the dataset isn't empty. That changes
+    only the seeds that fault today.
 - **Small findings**, for a later round:
   - R30-2: the literal line break in `assert_logged`.
   - R31-2: the `.expect` on `BenchmarkPipeline::execute` prints no log.

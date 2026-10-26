@@ -53,6 +53,8 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   - stamps the sandbox image ID at run time;
   - drops the host UID 1000 assumption;
   - moves one of the tests that share host port 15380;
+  - re-seeds an empty stage-4 dataset (about 1 seed in 5,000; a grading
+    change, so it rides on the same rules bump);
   - adds the upstream-pool readiness probe and the pdf test's self-skip,
     then removes round 35's two CI skips.
 
