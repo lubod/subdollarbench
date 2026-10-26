@@ -55,4 +55,9 @@ jobs:
           while read -r name; do
             skips+=(--skip "$name")
           done < <(scripts/live-proofs.sh)
+          # CI-only, bench-host images: the pdf test needs the local pdf-ref
+          # image; the proxy test needs a warmed 3-upstream pool. The
+          # image-stamp round removes both exclusions.
+          skips+=(--skip live_test_reference_pdf_starts_dual_attached)
+          skips+=(--skip test_pipeline_eval_only_proxy_full_ladder_live)
           cargo llvm-cov --all-targets --summary-only --fail-under-lines 84 -- "${skips[@]}"
