@@ -18,7 +18,7 @@ from `TEMPLATE.md`.
 | [30](30.md) | CI matches the bench and runs once; status `rules_version`; needle checks print the log | merged `94b24ba` |
 | [31](31.md) | A failed live proof keeps its evidence (proof log, flake-bar output, `.41` wording) | merged `1e69d41` |
 | [32](32.md) | CI builds the sandbox image (no graded path; gate after the flake bar) | merged `458cf06` |
-| [33](33.md) | The CI sandbox runs as the runner's UID (no graded path; gate waived) | open |
+| [33](33.md) | The CI sandbox runs as the runner's UID (no graded path; gate waived) | merged `f23b3ac` |
 | [34](34.md) | The freeze declaration (docs only; merges after 33's green GitHub run) | open (the reviewer implements; implementer: take 33) |
 
 **Status values:**
