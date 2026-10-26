@@ -122,14 +122,18 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
   - Never commit `bench.db*`, `runs/` or `.env`.
   - `~/.omp/logs/http-400-requests/*.json` may hold credentials: read
     fields from them, never paste them.
-- **Rules version (operator decision 2026-10-22):**
-  - While sdb-sql is in development, bump `RULES_VERSION` whenever
-    grading, scoring or what the candidate sees changes. Bumps are cheap.
-  - Every bump gets a history entry in `src/report/rules.rs`: what
-    changed, why, and the score impact.
-  - Chained career phases must share a rules version, so a bump means
-    the next career starts again at phase 1.
-  - The freeze comes later, as its own round.
+- **Rules version: frozen at `2026-10-19.41`** (operator decision
+  2026-10-26, `docs/DECISIONS.md` #20):
+  - **A bump** (grading, scoring or what the candidate sees changes)
+    needs its own round, with the operator's go-ahead in that round file.
+    - Its history entry in `src/report/rules.rs` says what changed, why,
+      and the score impact.
+    - Chained career phases must share a rules version, so a bump means
+      the next career starts again at phase 1.
+    - Published results always name their rules version.
+  - **A graded-path change without a bump** (for example, test code in
+    `src/pipeline.rs`) needs the full gate and a new 20-pass flake bar on
+    that content before the next published cell (see "Flake bar").
 - **Claims cite code:** a statement about behaviour in a round file or a
   review names `path:line`, or the test that shows it.
 
