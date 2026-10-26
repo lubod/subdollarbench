@@ -899,6 +899,7 @@ pub fn resolve_refork(
 /// Validate a career chain and return its ladder state (P1). The previous
 /// cell must be the immediately preceding phase, the same model/harness/
 /// effort/rules, finished, and carry a ladder state.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_chain(
     prev: &CampaignRollup,
     state: Option<&LadderState>,
