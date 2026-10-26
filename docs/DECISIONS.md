@@ -420,3 +420,113 @@ detached from the run network for every verification window
 `run_verification` calls, including repair rounds) so no candidate can
 proxy to `ref-*` and fake stages; the agent and the bench keep them. A
 live docker test pins resolve → unreachable → resolve.
+
+## 20. The sdb-sql rules freeze at `2026-10-19.41` (2026-10-26)
+
+**Frozen:**
+
+- `RULES_VERSION` `2026-10-19.41`, deployed and shown in `/api/status`
+  (rounds 29-30).
+- The run stamp `fingerprint()` (`src/report/rules.rs`) over the inputs
+  in `src/report/graded-files.txt`.
+- The graded paths in `scripts/graded-paths.txt`, which key the gate's
+  scope and the flake record.
+
+**Evidence:**
+
+- **The first flake bar**, on `5ebad6e`: 249 of 250 runs passed. The one
+  failure was a stage-18 `infra_error` with no log. It didn't come back
+  in 20 repro runs. Round 31 makes a failure keep its full log.
+- **The second bar**, on `7f7e15b` (rounds 30 and 31): every one of the
+  25 proofs passed 20/20, 500 runs in 16.6 h. Record
+  `flake-50f1d60f0002.txt`. The rounds after it change no graded path.
+- **CI:** GitHub run `40294023406` on `4d037c7` was green, after
+  rounds 29-35 (`docs/rounds/29.md`, "Fifth run"):
+  - 1044 passed and 0 failed.
+  - Line coverage of the active code was 83.23 %, against the ratchet
+    of 83.
+  - The ratchet was 84 over all code. Round 35 excluded the 8 retired
+    verifiers (`src/verifier/{redis,http,proxy,pdf,wal,queue,binproto,pubsub}.rs`)
+    and measured again.
+  - CI skips two tests that need the bench host: the `pdf-ref` image,
+    and the upstream pool's readiness.
+
+**Operator decisions** (2026-10-26, `docs/rounds/34.md`):
+
+- **Bumps.** A rules bump needs its own round and the operator's
+  go-ahead. Its `src/report/rules.rs` entry gives the score impact, and
+  careers restart at phase 1. Published results name their version.
+- **Graded-path changes without a bump.** These need the full gate and
+  a new 20-pass flake bar before the next published cell.
+- **CI first.** The freeze waited for a green GitHub run.
+
+**Known gaps at the freeze** (each with the round that takes it):
+
+- **The sandbox image isn't stamped.**
+  - `Dockerfile.sandbox` installs Rust `stable` and unpinned apt
+    packages, so a rebuild can change the candidate's environment under
+    the same stamp (`docs/rounds/32.md`, "Out of scope").
+  - Taken by the first round after the freeze: stamp the image ID at run
+    time.
+- **Real cells assume the host user is UID 1000**, the image's
+  `ubuntu`. CI gets around it with a build argument (round 33); the bench
+  doesn't. Taken in the image-stamp round.
+- **The stage-18 `infra_error`:** 1 failure in 40 stage-18 runs (770
+  proof runs in all), cause unknown. If it happens again, the run keeps
+  its log (round 31).
+- **Two tests share host port 15380.**
+  - The mock Redis flow test (worker 90) starts its Redis reference on
+    `worker_port(6380, 90)` (`src/pipeline.rs:4890`).
+  - The SQL stage-6 proof (worker 99) gives its candidate
+    `worker_port(5480, 99)`.
+  - Both run in parallel in the gates and in CI, so either can fail with
+    "port is already allocated". It happened once, in round 34's first
+    fast gate. The flake bar runs the SQL proofs one at a time, so it
+    can't hit this.
+  - Taken in the image-stamp round, with a test that no two tests share a
+    host port.
+- **The stage-4 dataset faults for about 1 seed in 5,000.**
+  - `sentinel::build` (`src/verifier/sql/sentinel.rs:114`) returns an
+    error when a seed's 40-step script leaves no writes or no ordered
+    reads.
+  - The persistence scenario reports that as a verifier fault
+    (`src/verifier/sql/scenarios.rs:86`), and the run ends as
+    `infra_error` (`src/verifier/sql/driver.rs:338`). It is never a
+    candidate failure.
+  - A scratch scan found 4 bad seeds in 20,000. It hit round 34's fast
+    gate once, in the stage-10 proof.
+  - Taken in the image-stamp round, with the rules bump that round needs:
+    move to the next seed until the dataset isn't empty. That changes
+    only the seeds that fault today.
+- **Small findings**, for a later round:
+  - R30-2: the literal line break in `assert_logged`.
+  - R31-2: the `.expect` on `BenchmarkPipeline::execute` prints no log.
+  - The six clippy lints under Rust 1.99 (`docs/rounds/29.md`, run 1).
+    The 1.92.0 pin holds them off.
+  - `scripts/flake-bar.sh`'s header still names the record
+    `<commit>.flake.txt`. It is `flake-<key>.txt`.
+- **CI skips two tests** (round 35):
+  - `live_test_reference_pdf_starts_dual_attached` needs a locally
+    built image.
+  - `test_pipeline_eval_only_proxy_full_ladder_live` fails because the
+    nginx upstream pool is counted as ready before it serves.
+  - Taken by the image-stamp round: a readiness probe for the pool, and
+    a pdf test that skips itself when the image is missing. That round
+    removes the skips and raises the ratchet.
+- **The retired campaigns' code** (verifiers, `tasks/`, `campaigns/`) is
+  still compiled, only so that old rows stay readable (#19). Deleting it
+  touches graded paths, so it's its own round after the freeze.
+
+## 21. Dollars bind; wall time is a guard (2026-10-22)
+
+The benchmark answers "what does a dollar buy" (round 23):
+
+- **The cap.** `CELL_BUDGET_USD` is $0.99 per phase
+  (`src/scoring.rs:141`), keeping the "Under-$1" identity.
+- **The budget counts the API bill only**, at list price. The compute
+  floor is reported, not budgeted.
+- **Turn limits are runaway guards.** Money, not turns, ends a session.
+- **Wall time is a guard.** `CELL_WALL_MIN` is 480, about 8 h per phase
+  (`src/scoring.rs:174`).
+- **Bumps.** Rules bumps were free while sdb-sql was in development,
+  until #20.
