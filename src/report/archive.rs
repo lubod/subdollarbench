@@ -159,8 +159,8 @@ pub struct RunManifest {
     pub sqlite_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cap_price_basis: Option<String>,
-    /// R36 F1: the sandbox image ID this run used. None on old rows and
-    /// eval-only runs; the Board shows `—`.
+    /// R36 F1: the sandbox image ID this run used. None on old rows or
+    /// when Docker cannot inspect it; the Board shows `—`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_image: Option<String>,
     /// Trial count for consolidated parent manifests (None on single-trial records).

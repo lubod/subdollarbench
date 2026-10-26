@@ -3,7 +3,7 @@
 #
 # Usage: scripts/flake-bar.sh [--passes K] [--only <test>] [--self-test]
 #
-# The record is <git-common-dir>/sdb-gates/<commit>.flake.txt. Each finished
+# The record is <git-common-dir>/sdb-gates/flake-<key>.txt. Each finished
 # test run appends one line immediately, so an interrupted chunk is kept;
 # the summary at the end is recomputed over every line so far.
 set -euo pipefail

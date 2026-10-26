@@ -6384,10 +6384,31 @@ mod tests {
     fn assert_logged(logger: &RecordingLogger, needle: &str) {
         assert!(
             logger.contains(needle),
-            "missing {needle:?}; log:
-{}",
+            "missing {needle:?}; log:\n{}",
             logger.text()
         );
+    }
+
+    /// R31-2/R37 F5: a failed proof execute prints the recorded log before
+    /// the panic, not only the error.
+    async fn expect_proof(
+        fut: impl std::future::Future<Output = anyhow::Result<PipelineOutput>>,
+        logger: &RecordingLogger,
+        context: &str,
+    ) -> PipelineOutput {
+        match fut.await {
+            Ok(out) => out,
+            Err(e) => panic!("{context}: {e}; log:\n{}", logger.text()),
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "[INFRA]")]
+    async fn r37_f5_proof_execute_err_prints_log() {
+        let logger = RecordingLogger::default();
+        logger.log("[INFRA] seeded execute failure");
+        let _: PipelineOutput =
+            expect_proof(async { Err(anyhow::anyhow!("boom")) }, &logger, "proof").await;
     }
 
     fn assert_proof_score(
@@ -6402,6 +6423,40 @@ mod tests {
             (passed_stages, total_stages),
             "score mismatch; log:\n{}",
             logger.text()
+        );
+    }
+
+    /// R37 F1: every pipeline test has its own worker id, and the
+    /// Redis-mock / SQL-stage6 pair that met on 15380 no longer does.
+    #[test]
+    fn r37_f1_worker_ports_do_not_collide() {
+        let source = include_str!("pipeline.rs");
+        let mut workers = Vec::new();
+        for line in source.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("let worker = ") {
+                if let Some(num) = rest.strip_suffix("u8;") {
+                    workers.push(num.parse::<u8>().expect("worker id"));
+                }
+            }
+        }
+        assert!(
+            workers.len() >= 39,
+            "worker table lost entries: {workers:?}"
+        );
+        let mut unique = workers.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            workers.len(),
+            "two pipeline tests share a worker id: {workers:?}"
+        );
+        let redis_mock = crate::web::server::worker_port(TaskType::Redis.default_port(), 90);
+        let sql_stage6 = crate::web::server::worker_port(TaskType::Sql.default_port(), 70);
+        assert_ne!(
+            redis_mock, sql_stage6,
+            "the Redis mock and SQL stage 6 share host port {redis_mock}"
         );
     }
 
@@ -9133,7 +9188,7 @@ main()
     /// the seed-namespaced schemas cannot collide.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stages_0_3_live() {
-        let worker = 93u8;
+        let worker = 61u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqllive");
         let workdir = dir.join("workspace");
@@ -9190,7 +9245,7 @@ main()
     /// for later tickets.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage4_persistence_live() {
-        let worker = 95u8;
+        let worker = 63u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlpersist");
         let workdir = dir.join("workspace");
@@ -9244,7 +9299,7 @@ main()
     /// restart — and the stage result stays green.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage5_crash_live() {
-        let worker = 97u8;
+        let worker = 65u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlcrash");
         let workdir = dir.join("workspace");
@@ -9298,7 +9353,7 @@ main()
     /// reference passes and the bulk/torn checks do not run.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage5_lite_live() {
-        let worker = 98u8;
+        let worker = 69u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlcrashlite");
         let workdir = dir.join("workspace");
@@ -9471,7 +9526,7 @@ main()
     #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn test_pipeline_eval_only_sql_stage14_observability_live() {
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = 90u8;
+        let worker = 60u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         cleanup_covtest_network("sqlobs");
         if let Ok(out) = std::process::Command::new("docker")
@@ -10128,9 +10183,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-18 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-18 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 18: Hostile input and limits -> PASS",
@@ -10875,7 +10933,7 @@ main()
     /// -9 with a transaction open.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_stage6_transactions_live() {
-        let worker = 99u8;
+        let worker = 70u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqltxn");
         let workdir = dir.join("workspace");
@@ -10925,7 +10983,7 @@ main()
     /// the stage result is overridden even though the suite itself passes.
     #[tokio::test]
     async fn test_pipeline_sql_sentinel_drift_fails_the_writing_stage() {
-        let worker = 96u8;
+        let worker = 64u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqldrift");
         let workdir = dir.join("workspace");
@@ -10987,7 +11045,7 @@ main()
     /// restore starts.
     #[tokio::test]
     async fn test_pipeline_eval_only_sql_shrink_uses_a_throwaway_store() {
-        let worker = 94u8;
+        let worker = 62u8;
         let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
         let dir = covtest_dir("sqlshrink");
         let workdir = dir.join("workspace");

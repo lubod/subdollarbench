@@ -1189,6 +1189,40 @@ impl SandboxManager {
         format!("upstream-{} marker\n", idx)
     }
 
+    /// R37 F2: `docker run -d` only means the container exists. Wait until
+    /// the upstream actually serves its marker (bounded), so the pool is
+    /// usable the moment `start_upstream_pool` returns.
+    fn wait_for_upstream(idx: u8, port: u16, timeout: std::time::Duration) -> Result<()> {
+        use std::io::{Read, Write};
+        let marker = Self::upstream_marker_body(idx);
+        let deadline = std::time::Instant::now() + timeout;
+        let mut last: Option<String>;
+        loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(mut stream) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                    let _ = stream.write_all(
+                        b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    );
+                    let mut body = String::new();
+                    if stream.read_to_string(&mut body).is_ok() && body.contains(&marker) {
+                        return Ok(());
+                    }
+                    last = Some("response did not contain the marker".to_string());
+                }
+                Err(e) => last = Some(e.to_string()),
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "upstream {idx} on port {port} did not become ready within {}s: {}",
+                    timeout.as_secs(),
+                    last.as_deref().unwrap_or("no response")
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn start_upstream_on(&self, idx: u8, port: u16, net: &str) -> Result<()> {
         let name = self.upstream_name(idx);
         fs::write(
@@ -1223,7 +1257,7 @@ impl SandboxManager {
             ])
             .output()?;
         if out.status.success() {
-            Ok(())
+            Self::wait_for_upstream(idx, port, std::time::Duration::from_secs(30))
         } else {
             Err(anyhow!(
                 "upstream {} start failed: {}",
@@ -3618,6 +3652,18 @@ mod live_docker_cov_tests {
         }
     }
 
+    /// R37 F2: a port that never serves gives a named error within the
+    /// bounded readiness window.
+    #[test]
+    fn r37_f2_upstream_timeout_names_upstream_and_port() {
+        let port = free_port();
+        let err = SandboxManager::wait_for_upstream(3, port, std::time::Duration::from_millis(150))
+            .expect_err("an unused port must time out");
+        let msg = err.to_string();
+        assert!(msg.contains("upstream 3"), "{msg}");
+        assert!(msg.contains(&port.to_string()), "{msg}");
+    }
+
     fn free_ports(n: usize) -> Vec<u16> {
         let mut out: Vec<u16> = Vec::new();
         while out.len() < n {
@@ -4127,6 +4173,19 @@ mod live_docker_cov_tests {
     /// works) and then joins the run network under `ref-pdf`.
     #[test]
     fn live_test_reference_pdf_starts_dual_attached() {
+        // R37 F3: the runner does not build the host-local pdf-ref image.
+        // Skip explicitly there; the bench host still runs the assertions.
+        let forced_missing = std::env::var("SDB_TEST_PDF_IMAGE_MISSING").as_deref() == Ok("1");
+        let image_present = !forced_missing
+            && docker(&["image", "inspect", REF_PDF_RUN_IMAGE])
+                .status
+                .success();
+        if !image_present {
+            eprintln!(
+                "[SKIP] live_test_reference_pdf_starts_dual_attached: REF_PDF_RUN_IMAGE is not available"
+            );
+            return;
+        }
         let id = id_for("ref-pdf");
         let _cleanup = InstanceCleanup::new_guard(&id);
         let sm = SandboxManager::with_id(&id);

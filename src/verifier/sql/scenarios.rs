@@ -85,6 +85,9 @@ pub fn persistence(
         Ok(s) => s,
         Err(e) => return ScenarioResult::Fault(format!("persistence dataset: {e}")),
     };
+    // R36-1/R37 F5: record the seed actually used. This is harness stderr,
+    // never the candidate-visible failure text.
+    eprintln!("[SENTINEL] persistence dataset seed {}", sent.seed);
     if let Err(e) = super::sentinel::write(addr, timeout, &sent) {
         return ScenarioResult::Fail(format!("persistence: writing the dataset: {e}"));
     }
@@ -461,6 +464,21 @@ mod tests {
             ScenarioResult::Fail(d) => assert!(d.contains("after a 2 MiB line"), "{d}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// R36-1/R37 F5: the persistence scenario derives its run seed from the
+    /// ticket seed; choosing the run seed for a known bad persistence seed
+    /// shows the sentinel moves on and the used seed is available for the
+    /// log (never the candidate feedback).
+    #[test]
+    fn r36_1_persistence_moves_off_a_bad_seed() {
+        let bad = 9231256963851754504u64;
+        let run_seed = bad ^ 0x5E27_A510_0000_0004;
+        let pseed = run_seed ^ 0x5E27_A510_0000_0004;
+        assert_eq!(pseed, bad);
+        let sent = super::super::sentinel::build(pseed, 4, &Profile::through(4))
+            .expect("a later seed builds");
+        assert!(sent.seed > bad);
     }
 
     #[test]

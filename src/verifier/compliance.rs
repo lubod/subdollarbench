@@ -1526,8 +1526,10 @@ mod tests {
     fn test_go_import_block_not_a_daemon() {
         // Regression (http trial): paths inside a multi-line `import ( )`
         // block name local packages. Import lines are not executions.
-        let temp_dir =
-            std::env::temp_dir().join(format!("test_compliance_goimport_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_compliance_goimport_block_{}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&temp_dir);
         fs::write(
             temp_dir.join("main.go"),
@@ -1545,8 +1547,10 @@ mod tests {
     fn test_go_import_path_not_a_daemon() {
         // Regression (http trial): `import rawhttp/internal/httpd` names a
         // local package path. Import lines are not executions.
-        let temp_dir =
-            std::env::temp_dir().join(format!("test_compliance_goimport_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_compliance_goimport_path_{}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&temp_dir);
         fs::write(
             temp_dir.join("main.go"),
