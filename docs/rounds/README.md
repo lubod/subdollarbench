@@ -22,7 +22,7 @@ from `TEMPLATE.md`.
 | [34](34.md) | The freeze declaration (docs only; rules frozen at `.41`) | merged `9450354` |
 | [35](35.md) | CI skips two tests that need the bench host (`ci.yml` only; ratchet 83 on active code) | merged `2eac5aa` |
 | [36](36.md) | The candidate's image is stamped; no empty stage-4 dataset (rules `.42`) | merged `cc074f3` |
-| [37](37.md) | Tests don't share host state; CI runs the whole fast set | open |
+| [37](37.md) | Tests don't share host state; CI runs the whole fast set | blocked |
 
 **Status values:**
 
