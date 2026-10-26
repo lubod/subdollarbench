@@ -156,11 +156,13 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
 - `cargo fmt --check`;
 - `cargo clippy --all-targets -- -D warnings`;
 - the niced `cargo test`, in one of two modes:
-  - **full** (the default): unfiltered, about 33 min;
-  - **fast** (`--fast`): everything except the live SQL ladder proofs
-    that hold the `SQL_PERF_LIVE` lock (about 12 tests, which run one at a
-    time and take about 28 of the 33 min). The skip list is read from
-    `src/pipeline.rs`, so a new proof is skipped automatically.
+  - **full** (the default): unfiltered, about 40 min (round 31's record
+    `3acf7ae264fe.txt`: 2367 s of tests);
+  - **fast** (`--fast`): everything except the 15 tests that hold the
+    `SQL_PERF_LIVE` lock. They run one at a time and take nearly all of
+    the 40 min; the rest takes about 4 min (`b898bcb6a83b.fast.txt`:
+    222 s). The skip list is printed by `scripts/live-proofs.sh`, which
+    reads `src/pipeline.rs`, so a new proof is skipped automatically.
 
 It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full) or
 `<commit>.fast.txt` (fast) and prints the path. That directory lives
@@ -173,7 +175,8 @@ inside `.git`, so it is shared by every worktree and never committed.
   - **Full** when the round changes a graded path since master. The
     graded paths are listed once, in `scripts/graded-paths.txt` (the
     verifier, the pipeline, the sandbox, scoring, cost, prompts, the
-    rules stamp, `campaigns/`, `extensions/`, `build.rs`, `Cargo.lock`).
+    rules stamp, `campaigns/`, `extensions/`, `build.rs`, `Cargo.lock`,
+    `rust-toolchain.toml`).
     `gate.sh` uses the list for its `scope:` line and
     `scripts/flake-bar.sh` for its record key. A rules bump always lands
     in one of these paths.
@@ -183,6 +186,27 @@ inside `.git`, so it is shared by every worktree and never committed.
 - **The reviewer** reads the gate file for the `ready` commit instead of
   rerunning the whole suite. It reruns only what the change puts at risk,
   and may ask for the full gate on any round.
+
+**Flake bar** (`scripts/flake-bar.sh`, `--passes K`):
+
+- It runs the 25 `test_pipeline_eval_only_sql_*_live` proofs K times,
+  about 50 min per pass (`31.md`, "After the merge": 20 passes in
+  16.6 h).
+- The record is `<git-common-dir>/sdb-gates/flake-<key>.txt`. The key
+  hashes the graded paths, so docs-only commits keep the record. A FAIL
+  line names a file with that run's full output.
+- **When:** 20 passes after any graded-path change, before the next
+  published cell ("Rules version").
+- **While it runs:** never start a second runner (the `SQL_PERF_LIVE`
+  lock works only inside one process), and don't run `cargo test`, the
+  gate or local Docker builds next to it.
+
+**CI** (`.github/workflows/ci.yml`, on push and pull request):
+
+- `fmt` and `clippy` on the pinned toolchain;
+- it builds `subdollar-sandbox` with the runner's UID (round 33);
+- it runs every test except the ones `scripts/live-proofs.sh` prints,
+  with line coverage gated at 84 % or more.
 
 ## Pointers
 
