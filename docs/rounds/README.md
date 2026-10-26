@@ -21,7 +21,7 @@ from `TEMPLATE.md`.
 | [33](33.md) | The CI sandbox runs as the runner's UID (no graded path; gate waived) | merged `f23b3ac` |
 | [34](34.md) | The freeze declaration (docs only; rules frozen at `.41`) | merged `9450354` |
 | [35](35.md) | CI skips two tests that need the bench host (`ci.yml` only; ratchet 83 on active code) | merged `2eac5aa` |
-| [36](36.md) | The candidate's image is stamped; no empty stage-4 dataset (rules `.42`) | draft |
+| [36](36.md) | The candidate's image is stamped; no empty stage-4 dataset (rules `.42`) | open |
 
 **Status values:**
 
