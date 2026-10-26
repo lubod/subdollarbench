@@ -122,8 +122,9 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
   - Never commit `bench.db*`, `runs/` or `.env`.
   - `~/.omp/logs/http-400-requests/*.json` may hold credentials: read
     fields from them, never paste them.
-- **Rules version: frozen at `2026-10-19.41`** (operator decision
-  2026-10-26, `docs/DECISIONS.md` #20):
+- **Rules version: frozen at `2026-10-19.42`** (operator decision
+  2026-10-26, `docs/DECISIONS.md` #20; the freeze was declared at `.41`,
+  and round 36 bumped it):
   - **A bump** (grading, scoring or what the candidate sees changes)
     needs its own round, with the operator's go-ahead in that round file.
     - Its history entry in `src/report/rules.rs` says what changed, why,

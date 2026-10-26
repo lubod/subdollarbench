@@ -45,20 +45,22 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 | [33](docs/rounds/33.md) | The CI sandbox runs as the runner's UID | merged |
 | [35](docs/rounds/35.md) | CI skips two tests that need the bench host; ratchet 83 on active code | merged |
 | [34](docs/rounds/34.md) | The freeze declaration (AGENTS.md, `docs/DECISIONS.md` #20-21) | merged |
+| [36](docs/rounds/36.md) | The candidate's image is stamped; host UID; stage-4 re-seed (rules `.42`) | merged |
 
 ## After the freeze: validation
 
-- **First: the image-stamp round** (`docs/DECISIONS.md` #20, known gaps).
-  It also takes the CI-only gaps:
-  - stamps the sandbox image ID at run time;
-  - drops the host UID 1000 assumption;
-  - moves one of the tests that share host port 15380;
-  - re-seeds an empty stage-4 dataset (about 1 seed in 5,000; a grading
-    change, so it rides on the same rules bump);
+- **Done: the image-stamp round** (round 36, rules `.42`): the image ID
+  is stamped and chains need the same image; the image build uses the
+  host's UID and GID; an empty stage-4 dataset moves to the next seed.
+- **Next: round 37, test infrastructure** (graded, no bump):
+  - moves one of the tests that share host port 15380, with a check that
+    no two tests share a host port;
   - adds the upstream-pool readiness probe and the pdf test's self-skip,
-    then removes round 35's two CI skips.
+    then removes round 35's two CI skips and raises the ratchet;
+  - small findings: R30-2, R31-2, R35-1, R36-1..5, the `flake-bar.sh`
+    header.
 
-  Graded, so it needs the full gate and a new 20-pass bar before the
+  Then the full gate and a new 20-pass bar on 36 + 37, before the
   calibration career.
 - **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
   `campaigns/`), keeping old rows readable. Graded, with its own bar.

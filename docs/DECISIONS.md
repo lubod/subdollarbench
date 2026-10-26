@@ -432,6 +432,18 @@ live docker test pins resolve → unreachable → resolve.
 - The graded paths in `scripts/graded-paths.txt`, which key the gate's
   scope and the flake record.
 
+**Bump to `2026-10-19.42`** (round 36, 2026-10-26, the first bump after
+the freeze, under the rules below):
+
+- Each run records the sandbox image ID, and a career phase chains only
+  onto a phase with the same image (`docs/rounds/36.md`, D1 a).
+- `update_sandbox_image` passes the host's UID and GID to the image
+  build.
+- An empty stage-4 sentinel dataset retries the next seed (up to 16). A
+  seed that built before keeps its exact dataset.
+- Careers restart at phase 1. No career on `.41` was published.
+- The 20-pass flake bar on this content runs after round 37.
+
 **Evidence:**
 
 - **The first flake bar**, on `5ebad6e`: 249 of 250 runs passed. The one
@@ -467,10 +479,10 @@ live docker test pins resolve → unreachable → resolve.
     packages, so a rebuild can change the candidate's environment under
     the same stamp (`docs/rounds/32.md`, "Out of scope").
   - Taken by the first round after the freeze: stamp the image ID at run
-    time.
+    time. **Done in round 36 (`.42`).**
 - **Real cells assume the host user is UID 1000**, the image's
   `ubuntu`. CI gets around it with a build argument (round 33); the bench
-  doesn't. Taken in the image-stamp round.
+  doesn't. Taken in the image-stamp round. **Done in round 36.**
 - **The stage-18 `infra_error`:** 1 failure in 40 stage-18 runs (770
   proof runs in all), cause unknown. If it happens again, the run keeps
   its log (round 31).
@@ -483,8 +495,8 @@ live docker test pins resolve → unreachable → resolve.
     "port is already allocated". It happened once, in round 34's first
     fast gate. The flake bar runs the SQL proofs one at a time, so it
     can't hit this.
-  - Taken in the image-stamp round, with a test that no two tests share a
-    host port.
+  - Taken in round 37 (moved from the image-stamp round), with a test
+    that no two tests share a host port.
 - **The stage-4 dataset faults for about 1 seed in 5,000.**
   - `sentinel::build` (`src/verifier/sql/sentinel.rs:114`) returns an
     error when a seed's 40-step script leaves no writes or no ordered
@@ -497,7 +509,7 @@ live docker test pins resolve → unreachable → resolve.
     gate once, in the stage-10 proof.
   - Taken in the image-stamp round, with the rules bump that round needs:
     move to the next seed until the dataset isn't empty. That changes
-    only the seeds that fault today.
+    only the seeds that fault today. **Done in round 36 (`.42`).**
 - **Small findings**, for a later round:
   - R30-2: the literal line break in `assert_logged`.
   - R31-2: the `.expect` on `BenchmarkPipeline::execute` prints no log.
@@ -510,9 +522,9 @@ live docker test pins resolve → unreachable → resolve.
     built image.
   - `test_pipeline_eval_only_proxy_full_ladder_live` fails because the
     nginx upstream pool is counted as ready before it serves.
-  - Taken by the image-stamp round: a readiness probe for the pool, and
-    a pdf test that skips itself when the image is missing. That round
-    removes the skips and raises the ratchet.
+  - Taken in round 37 (moved from the image-stamp round): a readiness
+    probe for the pool, and a pdf test that skips itself when the image
+    is missing. That round removes the skips and raises the ratchet.
 - **The retired campaigns' code** (verifiers, `tasks/`, `campaigns/`) is
   still compiled, only so that old rows stay readable (#19). Deleting it
   touches graded paths, so it's its own round after the freeze.
