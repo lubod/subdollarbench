@@ -1688,7 +1688,11 @@ mod tests {
         }
         let cells = careers(runs.to_str().unwrap());
         assert_eq!(cells.len(), 1);
-        let s = cells[0].survival();
+        let s = cells
+            .iter()
+            .find(|c| c.model == "m")
+            .expect("survival career")
+            .survival();
         assert_eq!(s[4], 1.0, "a later pass keeps reached above 4");
         assert_eq!(s[19], 1.0);
         assert_eq!(s[20], 0.0);
