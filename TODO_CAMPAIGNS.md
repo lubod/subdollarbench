@@ -57,26 +57,25 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   temp paths between tests (with a port-table check), workers 0-7 left
   to live cells, pool readiness, pdf self-skip, CI without round 35's
   skips, and the rollup's image from the first ticket.
-- **Now: the 20-pass flake bar** on master (rounds 36 + 37), started
-  2026-10-27; `.42` is deployed and the old results are archived
-  (`37.md`, "After the merge"). Then the calibration career.
-- **Round 38 (open, no graded path):** R37-9 (fresh `bench.db`) and
-  R37-6. Its gate waits for the bar.
-- **Round 40 (open after 38, no graded path; before 39):** `campaign run`
-  defaults to the official cell, `sql-cell.sh` refuses a dirty tree or a
-  missing bar, `--version` names the rules, `eval`/`replay` stop scoring
-  sdb-sql on 4 stages, help without retired defaults. With round 38, it
-  comes before the calibration cell.
-- **Round 39 (draft, GUI only):** Run becomes a page from the Board, Live
-  an overlay with a header button while a cell runs (operator,
-  2026-10-27).
+- **Only sdb-sql, before calibration** (operator, 2026-10-27, "plan a
+  a"). `.42` is deployed and the old results are archived. The bar on
+  rounds 36 + 37 was stopped at 126/500, 0 failures (`37.md`), because
+  the deletion changes graded paths. Order:
+  1. **Round 38 (open):** R37-9 (fresh `bench.db`) and R37-6.
+  2. **Round 40 (open, after 38):** `campaign run` defaults to the
+     official cell, `sql-cell.sh` refuses a dirty tree or a missing bar,
+     `--version` names the rules.
+  3. **Round 41 (draft, no graded path):** the CLI, API, console and
+     portal serve only sdb-sql.
+  4. **Round 42 (draft, graded):** delete the retired verifiers, tasks
+     and campaigns, plus the graded findings (R36-3, R36-5, R37-4,
+     R37-5, R37-8) and aligning `graded-paths.txt` with the fingerprint.
+     Full gate, then the 20-pass bar.
+  5. **Calibration**, then round 39 (GUI: Run as a page, Live as an
+     overlay).
 - **After calibration:** `campaign cells`, `campaign show <id>`,
   `campaign next <id>` (the round 40 analysis), from what calibration
   needs.
-- **The graded round:** R36-3, R36-5, R37-3, R37-4, R37-5, R37-8,
-  R37-10, with the retired-code deletion below; one bar for all.
-- **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
-  `campaigns/`), keeping old rows readable. Graded, with its own bar.
 - **Calibration and test cells** (after round 23): the test model is
   `openrouter/deepseek/deepseek-v4.1-flash-1017` (operator, 2026-10-22;
   $0.15 / $0.60 per M tokens). Use Haiku only when a second price point is

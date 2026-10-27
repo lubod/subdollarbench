@@ -26,6 +26,8 @@ from `TEMPLATE.md`.
 | [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | open |
 | [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | draft |
 | [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | open (after 38) |
+| [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | draft |
+| [42](42.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | draft |
 
 **Status values:**
 
