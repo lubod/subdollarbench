@@ -25,11 +25,11 @@ from `TEMPLATE.md`.
 | [37](37.md) | Tests don't share host state; CI runs the whole fast set | merged `64d83d4` |
 | [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | merged `ba83d58` |
 | [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | draft |
-| [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | open |
+| [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | draft (after the grid) |
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | draft |
 | [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | draft |
 | [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | draft |
-| [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | draft |
+| [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | open |
 
 **Status values:**
 
