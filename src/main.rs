@@ -1660,7 +1660,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 println!("{}", "Career variance:".bold().cyan());
                 print!("{}", PortalExporter::variance_report(&runs_dir)?);
             }
-            println!("  Deploy: rsync -az --delete {}/ <vps>:/srv/bench/", out);
+            println!("  Deploy: scripts/publish.sh (checked dry run; --yes pushes)");
         }
 
         Commands::Sandbox { command } => match command {
