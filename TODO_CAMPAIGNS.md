@@ -57,30 +57,33 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   temp paths between tests (with a port-table check), workers 0-7 left
   to live cells, pool readiness, pdf self-skip, CI without round 35's
   skips, and the rollup's image from the first ticket.
-- **Only sdb-sql, before calibration** (operator, 2026-10-27, "plan a
-  a"). `.42` is deployed and the old results are archived. The bar on
-  rounds 36 + 37 was stopped at 126/500, 0 failures (`37.md`), because
-  the deletion changes graded paths. Order:
-  1. **Round 38: merged `ba83d58`.** R37-9 (fresh `bench.db`), R37-6.
-     R38-1 (cap the WAL retry time) is open.
-  2. **Round 40 (open):** `campaign run` defaults to the
-     official cell, `sql-cell.sh` refuses a dirty tree or a missing bar,
-     `--version` names the rules.
-  3. **Round 41 (draft, no graded path):** the CLI, API, console and
-     portal serve only sdb-sql.
-  4. **Round 42 (draft, graded through `Cargo.lock`):** `subdollarbench
-     tui`, an htop-like terminal console on the engine API (operator,
-     2026-10-27). Full gate.
-  5. **Round 43 (draft, graded):** delete the retired verifiers, tasks
-     and campaigns, plus the graded findings (R36-3, R36-5, R37-4,
-     R37-5, R37-8) and aligning `graded-paths.txt` with the fingerprint.
-     Full gate, then the 20-pass bar, which covers rounds 42 and 43.
-  6. **Calibration**, then round 39 (GUI: Run as a page, Live as an
-     overlay).
-- **After calibration:** `campaign next <id>` (the round 40 analysis).
-  Round 42's `tui` covers the cells list and the ticket table, so
-  `campaign cells` and `campaign show` are needed only if a script needs
-  their output.
+- **The fastest route to publishing** (operator, 2026-10-27, "a a pick").
+  It replaces "plan a a"'s D1: the cleanup now waits until after
+  publishing. Every published cell then shares one fingerprint, the
+  current one. Cells after the deletion start a new fingerprint on the
+  same rules version.
+  - **D2:** a clean calibration career counts as deepseek's first grid
+    career. Clean means no harness fault, and stop reasons mostly
+    `dollars`.
+  - **Order:**
+    1. **The bar on master's graded content** (`flake-9c90cfcf4b7b.txt`):
+       resumed 2026-10-27 at 126/500 (`37.md`). It needs `RESULT: PASS`,
+       about 12 h, before any published cell.
+    2. **Calibration:** one deepseek-v4.1-flash-1017 career, then the
+       grid, one cell at a time (models: the reviewer's pick in chat,
+       2026-10-27).
+    3. **The publish round, during the grid:** worked in a worktree,
+       touching no graded or fingerprinted file. Merged only between
+       careers.
+    4. **Variance check, then publish.**
+    5. **After publishing:** round 41 (CLI and API, plus R38-1), 42
+       (`tui`), 43 (deletion, then a bar), 39 (browser GUI).
+  - **Round 40 (open)** merges when it's ready. It doesn't block
+    calibration: `sql-cell.sh` passes the official values, and the
+    reviewer checks the clean tree and the bar by hand before each cell.
+  - **Round 38:** merged `ba83d58`.
+- **After publishing:** `campaign next <id>` (the round 40 analysis).
+  Round 42's `tui` covers the cells list and the ticket table.
 - **Calibration and test cells** (after round 23): the test model is
   `openrouter/deepseek/deepseek-v4.1-flash-1017` (operator, 2026-10-22;
   $0.15 / $0.60 per M tokens). Use Haiku only when a second price point is
