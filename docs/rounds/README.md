@@ -27,7 +27,7 @@ from `TEMPLATE.md`.
 | [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | draft |
 | [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | open |
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | draft |
-| [42](42.md) | `subdollarbench top`, a terminal console like htop (graded: `Cargo.lock`) | draft |
+| [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | draft |
 | [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | draft |
 
 **Status values:**

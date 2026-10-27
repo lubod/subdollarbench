@@ -69,7 +69,7 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   3. **Round 41 (draft, no graded path):** the CLI, API, console and
      portal serve only sdb-sql.
   4. **Round 42 (draft, graded through `Cargo.lock`):** `subdollarbench
-     top`, an htop-like terminal console on the engine API (operator,
+     tui`, an htop-like terminal console on the engine API (operator,
      2026-10-27). Full gate.
   5. **Round 43 (draft, graded):** delete the retired verifiers, tasks
      and campaigns, plus the graded findings (R36-3, R36-5, R37-4,
@@ -78,7 +78,7 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   6. **Calibration**, then round 39 (GUI: Run as a page, Live as an
      overlay).
 - **After calibration:** `campaign next <id>` (the round 40 analysis).
-  Round 42's `top` covers the cells list and the ticket table, so
+  Round 42's `tui` covers the cells list and the ticket table, so
   `campaign cells` and `campaign show` are needed only if a script needs
   their output.
 - **Calibration and test cells** (after round 23): the test model is
