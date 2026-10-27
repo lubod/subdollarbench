@@ -23,9 +23,9 @@ from `TEMPLATE.md`.
 | [35](35.md) | CI skips two tests that need the bench host (`ci.yml` only; ratchet 83 on active code) | merged `2eac5aa` |
 | [36](36.md) | The candidate's image is stamped; no empty stage-4 dataset (rules `.42`) | merged `cc074f3` |
 | [37](37.md) | Tests don't share host state; CI runs the whole fast set | merged `64d83d4` |
-| [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | open |
+| [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | merged `ba83d58` |
 | [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | draft |
-| [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | open (after 38) |
+| [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | open |
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | draft |
 | [42](42.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | draft |
 

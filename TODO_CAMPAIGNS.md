@@ -61,8 +61,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   a"). `.42` is deployed and the old results are archived. The bar on
   rounds 36 + 37 was stopped at 126/500, 0 failures (`37.md`), because
   the deletion changes graded paths. Order:
-  1. **Round 38 (open):** R37-9 (fresh `bench.db`) and R37-6.
-  2. **Round 40 (open, after 38):** `campaign run` defaults to the
+  1. **Round 38: merged `ba83d58`.** R37-9 (fresh `bench.db`), R37-6.
+     R38-1 (cap the WAL retry time) is open.
+  2. **Round 40 (open):** `campaign run` defaults to the
      official cell, `sql-cell.sh` refuses a dirty tree or a missing bar,
      `--version` names the rules.
   3. **Round 41 (draft, no graded path):** the CLI, API, console and
