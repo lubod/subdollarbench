@@ -57,8 +57,13 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   temp paths between tests (with a port-table check), workers 0-7 left
   to live cells, pool readiness, pdf self-skip, CI without round 35's
   skips, and the rollup's image from the first ticket.
-- **Next: the 20-pass flake bar** on master (rounds 36 + 37), then the
-  calibration career. Open from 37: R37-3..6, R37-8, R37-9.
+- **Now: the 20-pass flake bar** on master (rounds 36 + 37), started
+  2026-10-27; `.42` is deployed and the old results are archived
+  (`37.md`, "After the merge"). Then the calibration career.
+- **Round 38 (draft, no graded path):** R37-9 (fresh `bench.db`) and
+  R37-6. Its gate waits for the bar.
+- **The graded round:** R36-3, R36-5, R37-3, R37-4, R37-5, R37-8,
+  R37-10, with the retired-code deletion below; one bar for all.
 - **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
   `campaigns/`), keeping old rows readable. Graded, with its own bar.
 - **Calibration and test cells** (after round 23): the test model is
