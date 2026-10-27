@@ -29,7 +29,7 @@ from `TEMPLATE.md`.
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | draft |
 | [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | draft |
 | [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | draft |
-| [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | open (pre-review: 5 blockers) |
+| [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | open (re-review: 2 blockers) |
 
 **Status values:**
 
