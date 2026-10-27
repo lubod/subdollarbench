@@ -13,10 +13,15 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 
 mode=dry
 self_test=0
+check_dir=""
+check_bar=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --yes) mode=push; shift ;;
         --self-test) self_test=1; shift ;;
+        --check)
+            [[ $# -ge 3 ]] || { echo '[publish] --check needs a directory and a bar record' >&2; exit 2; }
+            check_dir="$2"; check_bar="$3"; shift 3 ;;
         -h|--help)
             sed -n '1,12p' "$0"; exit 0 ;;
         *) echo "[publish] unknown argument: $1" >&2; exit 2 ;;
@@ -109,6 +114,11 @@ deploy() {
         rsync -an --delete --itemize-changes "$dir/" "$target"
     fi
 }
+
+if [[ -n "$check_dir" ]]; then
+    validate_export "$check_dir" "$check_bar"
+    exit $?
+fi
 
 if [[ "$self_test" -eq 1 ]]; then
     root="$(mktemp -d /tmp/sdb-publish-self-test.XXXXXX)"

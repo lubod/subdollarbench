@@ -199,7 +199,7 @@ cargo run --release -- leaderboard
 #### Export Static Portal
 ```bash
 cargo run --release -- portal --out ./portal
-rsync -az --delete ./portal/ <vps>:/srv/bench/
+scripts/publish.sh --yes
 ```
 
 
@@ -324,13 +324,10 @@ runs/<run_id>/
 3. Launch the Web UI (`cargo run --release -- ui`) or run via CLI.
 4. When a run passes, export the portal and sync it to your VPS:
    ```bash
-   cargo run --release -- portal --out ./portal
-   rsync -az --delete ./portal/ <vps>:/srv/bench/
+   scripts/publish.sh --yes
    ```
-5. Point your domain at the VPS, rsync `./portal/` to `/srv/bench/`, and start the static file service behind your existing Traefik (TLS stays on your current certbot/Traefik setup):
-   ```bash
-   docker compose -f deploy/docker-compose.yml up -d
-   ```
+5. Point your domain at the VPS and follow the nginx/certbot block in
+   **Publishing** below. `scripts/publish.sh` performs the checked push.
 
 ---
 

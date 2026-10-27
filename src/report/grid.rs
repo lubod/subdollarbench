@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::campaign::{self, BoardSortKey, CampaignRollup, CampaignSpec, LadderEntry, StageRecord};
 use crate::report::portal::{is_hidden, is_poisoned, publishable, PortalSummary};
@@ -38,6 +38,8 @@ pub struct CareerCell {
     pub sqlite_version: Option<String>,
     pub cap_price_basis: Option<String>,
     pub sandbox_image: Option<String>,
+    /// Full rules fingerprints recorded by this career's ticket manifests.
+    pub fingerprints: Vec<String>,
     pub cost: f64,
     pub over_budget: bool,
     pub cap_reached: bool,
@@ -66,27 +68,15 @@ impl CareerCell {
             .count()
     }
 
-    /// Per-ticket survival, using the same rule as
-    /// [`CampaignRollup::survival`]: ticket 0 is its own pass; ticket i is
-    /// the pass of i given i-1 passed. Missing records are zero.
+    /// P(reached >= i), where `reached` is the highest passed ticket as
+    /// the rollup defines it. This is monotone by construction; a gap in
+    /// the ladder (a failed ticket followed by a later pass) cannot make
+    /// the curve rise again.
     pub fn survival(&self) -> Vec<f64> {
-        let records = unique_stage_records(&self.stage_records);
-        let mut out = vec![0.0; 21];
-        for id in 0..=20u32 {
-            let rec = records.iter().find(|r| r.id == id);
-            let ok = if id == 0 {
-                rec.map(|r| r.passed).unwrap_or(false)
-            } else {
-                let prev = records
-                    .iter()
-                    .find(|r| r.id == id - 1)
-                    .map(|r| r.passed)
-                    .unwrap_or(true);
-                prev && rec.map(|r| r.passed).unwrap_or(false)
-            };
-            out[id as usize] = if ok { 1.0 } else { 0.0 };
-        }
-        out
+        let reached = self.reached.unwrap_or(0);
+        (0..=20)
+            .map(|i| if i <= reached { 1.0 } else { 0.0 })
+            .collect()
     }
 }
 
@@ -112,6 +102,7 @@ fn unique_stage_records(records: &[StageRecord]) -> Vec<&StageRecord> {
 
 struct RawCell {
     name: String,
+    dir: PathBuf,
     rollup: Value,
     parsed: Option<CampaignRollup>,
     state: String,
@@ -127,11 +118,26 @@ fn read_json(path: &Path) -> Option<Value> {
         .and_then(|t| serde_json::from_str(&t).ok())
 }
 
-fn load_raw(runs_dir: &str) -> Vec<RawCell> {
+fn drop_lineage(dropped: &mut HashSet<String>, name: &str, rollup: &Value) {
+    dropped.insert(name.to_string());
+    if let Some(cells) = rollup["career"]["cells"].as_array() {
+        for c in cells {
+            if let Some(c) = c.as_str() {
+                dropped.insert(c.to_string());
+            }
+        }
+    }
+    if let Some(chain) = rollup["chain_from"].as_str() {
+        dropped.insert(chain.to_string());
+    }
+}
+
+fn load_raw(runs_dir: &str) -> (Vec<RawCell>, HashSet<String>) {
     let runs = Path::new(runs_dir);
     let mut out = Vec::new();
+    let mut dropped = HashSet::new();
     let Ok(rd) = fs::read_dir(runs) else {
-        return out;
+        return (out, dropped);
     };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
@@ -139,6 +145,13 @@ fn load_raw(runs_dir: &str) -> Vec<RawCell> {
             continue;
         }
         if is_hidden(runs, &name) || is_poisoned(runs, &name) {
+            if let Some(v) = read_json(&e.path().join("campaign.json")).or_else(|| {
+                read_json(&e.path().join("status.json")).and_then(|s| s.get("rollup").cloned())
+            }) {
+                drop_lineage(&mut dropped, &name, &v);
+            } else {
+                dropped.insert(name.clone());
+            }
             continue;
         }
         let status = read_json(&e.path().join("status.json"));
@@ -175,6 +188,7 @@ fn load_raw(runs_dir: &str) -> Vec<RawCell> {
             })
             .unwrap_or(false);
         if flagged {
+            drop_lineage(&mut dropped, &name, &rollup);
             continue;
         }
         let state = status
@@ -192,12 +206,14 @@ fn load_raw(runs_dir: &str) -> Vec<RawCell> {
             .unwrap_or("");
         let naive = stamp.get(..19).unwrap_or(stamp);
         if !publishable(naive) {
+            drop_lineage(&mut dropped, &name, &rollup);
             continue;
         }
         let mut parsed: Option<CampaignRollup> = serde_json::from_value(rollup.clone()).ok();
         if let Some(r) = parsed.as_mut() {
             campaign::relabel_graded_crashes(r, &e.path());
             if r.harness_fault.is_some() {
+                drop_lineage(&mut dropped, &name, &rollup);
                 continue;
             }
         }
@@ -219,6 +235,7 @@ fn load_raw(runs_dir: &str) -> Vec<RawCell> {
             .unwrap_or_default();
         out.push(RawCell {
             name,
+            dir: e.path(),
             rollup,
             parsed,
             state,
@@ -228,7 +245,7 @@ fn load_raw(runs_dir: &str) -> Vec<RawCell> {
             career_cells,
         });
     }
-    out
+    (out, dropped)
 }
 
 fn chain_for<'a>(leaf: &'a RawCell, by_name: &HashMap<String, &'a RawCell>) -> Vec<&'a RawCell> {
@@ -292,6 +309,37 @@ fn merge_stage_records(cells: &[&RawCell], spec: Option<&CampaignSpec>) -> Vec<S
     out
 }
 
+fn recorded_fingerprints(cells: &[&RawCell]) -> Vec<String> {
+    let mut out = Vec::new();
+    for cell in cells {
+        let Some(parsed) = cell.parsed.as_ref() else {
+            continue;
+        };
+        for rec in &parsed.stages {
+            let variants: Vec<&str> = if rec.variant.is_empty() {
+                vec!["full", "lite"]
+            } else {
+                vec![rec.variant.as_str()]
+            };
+            for variant in variants {
+                let path = cell
+                    .dir
+                    .join(format!("s{}_{}", rec.id, variant))
+                    .join("manifest.json");
+                let Some(v) = read_json(&path) else {
+                    continue;
+                };
+                if let Some(fp) = v["rules_version"].as_str().filter(|f| !f.is_empty()) {
+                    out.push(fp.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
     let spec_loaded = campaign::load_campaign(
         leaf.parsed
@@ -314,6 +362,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         true
     };
     let stage_records = merge_stage_records(cells, spec);
+    let fingerprints = recorded_fingerprints(cells);
     let unique = unique_stage_records(&stage_records);
     let reached = unique.iter().filter(|r| r.passed).map(|r| r.id).max();
     let regression_free = unique
@@ -406,6 +455,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         sandbox_image: parsed
             .and_then(|r| r.sandbox_image.clone())
             .or_else(|| leaf.rollup["sandbox_image"].as_str().map(str::to_string)),
+        fingerprints,
         cost,
         over_budget: leaf.rollup["over_budget"].as_bool().unwrap_or(false),
         cap_reached: leaf.rollup["cap_reached"].as_bool().unwrap_or(false),
@@ -421,7 +471,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
 
 /// Load one row per career (leaf phase cell).
 pub fn careers(runs_dir: &str) -> Vec<CareerCell> {
-    let raw = load_raw(runs_dir);
+    let (raw, dropped) = load_raw(runs_dir);
     let by_name: HashMap<String, &RawCell> = raw.iter().map(|c| (c.name.clone(), c)).collect();
     let mut referenced = HashSet::new();
     for c in &raw {
@@ -431,6 +481,25 @@ pub fn careers(runs_dir: &str) -> Vec<CareerCell> {
     }
     let mut out = Vec::new();
     for leaf in raw.iter().filter(|c| !referenced.contains(&c.name)) {
+        // A career that contains a hidden, poisoned or harness-fault phase
+        // is not a measurement. Merely dropping the bad cell would publish
+        // a later phase with cumulative totals that still include it.
+        let mut related: Vec<String> = leaf.career_cells.clone();
+        related.push(leaf.name.clone());
+        let mut cur = leaf;
+        loop {
+            let Some(prev_name) = cur.chain_from.as_ref() else {
+                break;
+            };
+            related.push(prev_name.clone());
+            match by_name.get(prev_name) {
+                Some(prev) => cur = prev,
+                None => break,
+            }
+        }
+        if related.iter().any(|id| dropped.contains(id)) {
+            continue;
+        }
         let cells = chain_for(leaf, &by_name);
         out.push(career_from_leaf(leaf, &cells));
     }
@@ -739,7 +808,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — sdb-sql campaign careers</title><style>");
     h.push_str(include_str!("portal_board.css"));
     h.push_str("</style></head><body><main>");
-    h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign careers</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database checked statement by statement against SQLite. A model ranks by its median career; careers rank by difficulty-weighted points, then points per dollar.</div></div><div class=\"right\"><a href=\"results.html\">📈 Results</a><a href=\"/\">🚀 Benchmark Runner &amp; Console</a>");
+    h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign careers</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database checked statement by statement against SQLite. A model ranks by its median career; careers rank by difficulty-weighted points, then points per dollar.</div></div><div class=\"right\"><a href=\"results.html\">📈 Results</a>");
     h.push_str(&format!(
         "<div class=\"mut\">Updated {}</div></div></header>",
         esc(&now)
@@ -946,6 +1015,28 @@ fn render_results(cells: &[CareerCell]) -> String {
     models.sort();
     models.dedup();
     let caps = current.len();
+    let binary_fingerprint = crate::report::rules::fingerprint();
+    let mut recorded: Vec<String> = current
+        .iter()
+        .flat_map(|c| c.fingerprints.iter().cloned())
+        .collect();
+    recorded.sort();
+    recorded.dedup();
+    let recorded_text = if recorded.is_empty() {
+        "—".to_string()
+    } else {
+        recorded.join(", ")
+    };
+    let fingerprint_note = if recorded.is_empty() {
+        " <span class=\"b warn\">no recorded fingerprint</span>".to_string()
+    } else if recorded.iter().any(|f| f != &binary_fingerprint) {
+        format!(
+            " <span class=\"b warn\">recorded fingerprint differs from binary {}</span>",
+            esc(&binary_fingerprint)
+        )
+    } else {
+        String::new()
+    };
     let rules = current
         .iter()
         .map(|c| c.rules.as_str())
@@ -1058,9 +1149,10 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
     ));
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint</th><td><code>{}</code></td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{} / {}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
+        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{} / {}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
         esc(rules),
-        esc(&crate::report::rules::fingerprint()),
+        esc(&recorded_text),
+        fingerprint_note,
         esc(crate::report::rules::sqlite_version()),
         esc(image),
         esc(&harness),
@@ -1112,12 +1204,18 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
     ranked_rules.sort();
     ranked_rules.dedup();
     let fingerprint = crate::report::rules::fingerprint();
+    let mut ranked_fingerprints: Vec<String> = ranked
+        .iter()
+        .flat_map(|c| c.fingerprints.iter().cloned())
+        .collect();
+    ranked_fingerprints.sort();
+    ranked_fingerprints.dedup();
     let meta = serde_json::json!({
         "rules_version": cells.iter().map(|c| c.rules.as_str()).find(|r| !r.is_empty()).unwrap_or(crate::report::rules::RULES_VERSION),
         "current_rules": crate::report::rules::RULES_VERSION,
         "ranked_rules": ranked_rules,
         "fingerprint": fingerprint,
-        "ranked_fingerprints": if ranked.is_empty() { Vec::<String>::new() } else { vec![fingerprint.clone()] },
+        "ranked_fingerprints": ranked_fingerprints,
         "careers": cells.len(),
         "ranked": ranked.len(),
         "models": model_groups(&cells).iter().map(|g| g.model.clone()).collect::<Vec<_>>(),
@@ -1273,6 +1371,24 @@ mod tests {
     }
 
     fn career(runs: &Path, prefix: &str, model: &str, points: [f64; 4], cost: [f64; 4]) {
+        career_with_stamp(
+            runs,
+            prefix,
+            model,
+            points,
+            cost,
+            &crate::report::rules::fingerprint(),
+        );
+    }
+
+    fn career_with_stamp(
+        runs: &Path,
+        prefix: &str,
+        model: &str,
+        points: [f64; 4],
+        cost: [f64; 4],
+        stamp: &str,
+    ) {
         let ids = [
             (1u32, vec![0, 1, 2, 3, 4, 5, 6]),
             (2u32, vec![7, 8, 9, 10]),
@@ -1298,6 +1414,19 @@ mod tests {
                 career_points,
                 career_cost,
             );
+            for id in stage_ids {
+                let dir = runs.join(format!("{prefix}_p{phase}/s{id}_full"));
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(
+                    dir.join("manifest.json"),
+                    serde_json::json!({
+                        "run_id": format!("run{id}"),
+                        "rules_version": stamp,
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
             prior = Some(format!("{prefix}_p{phase}"));
         }
     }
@@ -1416,8 +1545,16 @@ mod tests {
         );
         assert!(pos(&html, "phase 2 of 4") < pos(&html, "u1_p2"), "{html}");
         assert!(
-            pos(&html, "beta") < pos(&html, "alpha"),
+            pos(&html, "alpha") < pos(&html, "beta"),
             "median order: {html}"
+        );
+        assert!(
+            !html.contains("Benchmark Runner"),
+            "public board links to the console: {html}"
+        );
+        assert!(
+            !html.contains("href=\"/\""),
+            "public board links to the console: {html}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -1462,6 +1599,39 @@ mod tests {
     }
 
     #[test]
+    fn r44_r1_recorded_fingerprint_is_not_the_binary() {
+        let (base, runs, out) = fixture("r44fp");
+        career_with_stamp(&runs, "f1", "m1", [1.0; 4], [0.01; 4], "fp-a");
+        career_with_stamp(&runs, "f2", "m2", [2.0; 4], [0.01; 4], "fp-b");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
+        let fps: Vec<String> = meta["ranked_fingerprints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(fps, vec!["fp-a".to_string(), "fp-b".to_string()]);
+        assert_ne!(meta["fingerprint"].as_str().unwrap(), "fp-a");
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("fp-a") && html.contains("fp-b"), "{html}");
+        assert!(html.contains("recorded fingerprint differs"), "{html}");
+
+        let bar = base.join("bar.txt");
+        fs::write(&bar, "RESULT: PASS\n").unwrap();
+        let status = std::process::Command::new("bash")
+            .arg(env!("CARGO_MANIFEST_DIR").to_string() + "/scripts/publish.sh")
+            .args(["--check", out.to_str().unwrap(), bar.to_str().unwrap()])
+            .status()
+            .expect("run publish check");
+        assert!(
+            !status.success(),
+            "mixed recorded fingerprints were accepted"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn r44_f2_pareto_frontier() {
         let (base, runs, out) = fixture("r44pareto");
         career(&runs, "c1", "m1", [2.5; 4], [0.075; 4]); // 10 pts / 0.3
@@ -1496,6 +1666,51 @@ mod tests {
             html.contains("100.0%"),
             "all 21 tickets regression-free: {html}"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn r44_f2_survival_is_monotone() {
+        let (base, runs, out) = fixture("r44survival");
+        career(&runs, "s", "m", [1.0; 4], [0.01; 4]);
+        // Fail ticket 4 and the last ticket 20; later tickets still pass.
+        for (file, id) in [("s_p1", 4u32), ("s_p4", 20u32)] {
+            let path = runs.join(file).join("campaign.json");
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            for st in v["stages"].as_array_mut().unwrap() {
+                if st["id"].as_u64() == Some(id as u64) {
+                    st["passed"] = serde_json::json!(false);
+                }
+            }
+            fs::write(&path, v.to_string()).unwrap();
+        }
+        let cells = careers(runs.to_str().unwrap());
+        assert_eq!(cells.len(), 1);
+        let s = cells[0].survival();
+        assert_eq!(s[4], 1.0, "a later pass keeps reached above 4");
+        assert_eq!(s[19], 1.0);
+        assert_eq!(s[20], 0.0);
+        for i in 0..20 {
+            assert!(s[i] >= s[i + 1], "survival rose at {i}: {s:?}");
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn r44_f1_dropped_phase_career_is_not_published() {
+        let (base, runs, out) = fixture("r44dropped");
+        career(&runs, "drop", "m", [1.0; 4], [0.01; 4]);
+        fs::write(
+            runs.join("drop_p2").join(".poisoned"),
+            "bad phase
+",
+        )
+        .unwrap();
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(!html.contains("m"), "dropped phase leaked: {html}");
+        assert!(!html.contains("drop_p4"), "{html}");
         let _ = fs::remove_dir_all(&base);
     }
 
