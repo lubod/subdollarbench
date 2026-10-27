@@ -68,15 +68,19 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
      `--version` names the rules.
   3. **Round 41 (draft, no graded path):** the CLI, API, console and
      portal serve only sdb-sql.
-  4. **Round 42 (draft, graded):** delete the retired verifiers, tasks
+  4. **Round 42 (draft, graded through `Cargo.lock`):** `subdollarbench
+     top`, an htop-like terminal console on the engine API (operator,
+     2026-10-27). Full gate.
+  5. **Round 43 (draft, graded):** delete the retired verifiers, tasks
      and campaigns, plus the graded findings (R36-3, R36-5, R37-4,
      R37-5, R37-8) and aligning `graded-paths.txt` with the fingerprint.
-     Full gate, then the 20-pass bar.
-  5. **Calibration**, then round 39 (GUI: Run as a page, Live as an
+     Full gate, then the 20-pass bar, which covers rounds 42 and 43.
+  6. **Calibration**, then round 39 (GUI: Run as a page, Live as an
      overlay).
-- **After calibration:** `campaign cells`, `campaign show <id>`,
-  `campaign next <id>` (the round 40 analysis), from what calibration
-  needs.
+- **After calibration:** `campaign next <id>` (the round 40 analysis).
+  Round 42's `top` covers the cells list and the ticket table, so
+  `campaign cells` and `campaign show` are needed only if a script needs
+  their output.
 - **Calibration and test cells** (after round 23): the test model is
   `openrouter/deepseek/deepseek-v4.1-flash-1017` (operator, 2026-10-22;
   $0.15 / $0.60 per M tokens). Use Haiku only when a second price point is
