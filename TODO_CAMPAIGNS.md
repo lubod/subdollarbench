@@ -83,7 +83,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     - a phase that fails for a harness reason (`infra_error`);
     - a new model whose first phase faults;
     - the grid's spend passing $40;
-    - stop reasons in calibration that aren't mostly `dollars`.
+    - a phase in calibration that stops on wall time or turns, not the
+      budget cap or the end of its ladder. Finishing a phase's tickets
+      under the cap is fine: haiku's archived phase 2 ended at $0.705
+      with its ladder done.
 
     Publishing (`publish.sh --yes`) is **not** pre-approved.
   - **Order:**
