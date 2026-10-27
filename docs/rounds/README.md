@@ -24,6 +24,7 @@ from `TEMPLATE.md`.
 | [36](36.md) | The candidate's image is stamped; no empty stage-4 dataset (rules `.42`) | merged `cc074f3` |
 | [37](37.md) | Tests don't share host state; CI runs the whole fast set | merged `64d83d4` |
 | [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | open |
+| [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | draft |
 
 **Status values:**
 

@@ -62,6 +62,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   (`37.md`, "After the merge"). Then the calibration career.
 - **Round 38 (open, no graded path):** R37-9 (fresh `bench.db`) and
   R37-6. Its gate waits for the bar.
+- **Round 39 (draft, GUI only):** Run becomes a page from the Board, Live
+  an overlay with a header button while a cell runs (operator,
+  2026-10-27).
 - **The graded round:** R36-3, R36-5, R37-3, R37-4, R37-5, R37-8,
   R37-10, with the retired-code deletion below; one bar for all.
 - **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
