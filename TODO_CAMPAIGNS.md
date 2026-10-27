@@ -58,7 +58,7 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   to live cells, pool readiness, pdf self-skip, CI without round 35's
   skips, and the rollup's image from the first ticket.
 - **Next: the 20-pass flake bar** on master (rounds 36 + 37), then the
-  calibration career. Open from 37: R37-3..6, R37-8.
+  calibration career. Open from 37: R37-3..6, R37-8, R37-9.
 - **Later: delete the retired campaigns' code** (verifiers, `tasks/`,
   `campaigns/`), keeping old rows readable. Graded, with its own bar.
 - **Calibration and test cells** (after round 23): the test model is
