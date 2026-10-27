@@ -351,7 +351,11 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
     )
     .ok();
     let spec = spec_loaded.as_ref().map(|l| &l.spec);
-    let phase_total = total_phases(spec);
+    let phase_total = if leaf.phase.is_some() {
+        total_phases(spec)
+    } else {
+        0
+    };
     let phases: HashSet<u32> = cells.iter().filter_map(|c| c.phase).collect();
     let finished = if leaf.phase.is_some() {
         leaf.state == "done"
