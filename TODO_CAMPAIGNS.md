@@ -97,10 +97,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        grid, one cell at a time. D3 = (a): deepseek-v4.1-flash-1017,
        claude-haiku-5.5, gpt-6-luna and glm-5.3-flash, 3 careers each
        (about 50 h, $30-35).
-    3. **Round 44 (open), the publish round, during the grid:** careers on the
+    3. **Round 44, merged `a3a4e19` before calibration:** careers on the
        public board, the results page, the variance check, and
        `scripts/publish.sh` to the operator's VPS (D4 = a). No graded or
-       fingerprinted file. Merged only between careers.
+       fingerprinted file.
     4. **Variance check, then publish.**
     5. **After publishing:** round 41 (CLI and API, plus R38-1), 42
        (`tui`), 43 (deletion, then a bar), 39 (browser GUI).
