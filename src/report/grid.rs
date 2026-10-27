@@ -1324,7 +1324,7 @@ mod tests {
         career_points: f64,
         career_cost: f64,
     ) {
-        let id = format!("{prefix}_p{phase}");
+        let id = format!("campaign_{prefix}_p{phase}");
         let dir = runs.join(&id);
         fs::create_dir_all(&dir).unwrap();
         let stages: Vec<Value> = ids.iter().map(|i| stage(*i)).collect();
@@ -1397,7 +1397,7 @@ mod tests {
             (3u32, vec![11, 12, 13, 14, 15]),
             (4u32, vec![16, 17, 18, 19, 20]),
         ];
-        let cells: Vec<String> = (1..=4).map(|p| format!("{prefix}_p{p}")).collect();
+        let cells: Vec<String> = (1..=4).map(|p| format!("campaign_{prefix}_p{p}")).collect();
         let mut prior = None;
         let career_points: f64 = points.iter().sum();
         let career_cost: f64 = cost.iter().sum();
@@ -1417,7 +1417,7 @@ mod tests {
                 career_cost,
             );
             for id in stage_ids {
-                let dir = runs.join(format!("{prefix}_p{phase}/s{id}_full"));
+                let dir = runs.join(format!("campaign_{prefix}_p{phase}/s{id}_full"));
                 fs::create_dir_all(&dir).unwrap();
                 fs::write(
                     dir.join("manifest.json"),
@@ -1429,7 +1429,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            prior = Some(format!("{prefix}_p{phase}"));
+            prior = Some(format!("campaign_{prefix}_p{phase}"));
         }
     }
 
@@ -1509,7 +1509,7 @@ mod tests {
             "unfinished",
             1,
             None,
-            &["u1_p1".into()],
+            &["campaign_u1_p1".into()],
             &[0, 1, 2, 3, 4, 5, 6],
             1.0,
             0.01,
@@ -1522,8 +1522,8 @@ mod tests {
             "u1",
             "unfinished",
             2,
-            Some("u1_p1"),
-            &["u1_p1".into(), "u1_p2".into()],
+            Some("campaign_u1_p1"),
+            &["campaign_u1_p1".into(), "campaign_u1_p2".into()],
             &[7, 8, 9, 10],
             2.0,
             0.01,
@@ -1542,10 +1542,13 @@ mod tests {
             "{html}"
         );
         assert!(
-            pos(&html, "unfinished careers") < pos(&html, "u1_p2"),
+            pos(&html, "unfinished careers") < pos(&html, "campaign_u1_p2"),
             "{html}"
         );
-        assert!(pos(&html, "phase 2 of 4") < pos(&html, "u1_p2"), "{html}");
+        assert!(
+            pos(&html, "phase 2 of 4") < pos(&html, "campaign_u1_p2"),
+            "{html}"
+        );
         assert!(
             pos(&html, "alpha") < pos(&html, "beta"),
             "median order: {html}"
@@ -1648,7 +1651,7 @@ mod tests {
         assert!(html.contains("pareto-frontier"), "{html}");
         let mut ids = pareto_ids(&careers(runs.to_str().unwrap()));
         ids.sort();
-        assert_eq!(ids, vec!["c2_p4", "c4_p4"], "{html}");
+        assert_eq!(ids, vec!["campaign_c2_p4", "campaign_c4_p4"], "{html}");
         assert!(
             !html.contains("data-cost=\"0.1000\" data-points=\"10.0\""),
             "{html}"
@@ -1676,7 +1679,7 @@ mod tests {
         let (base, runs, out) = fixture("r44survival");
         career(&runs, "s", "m", [1.0; 4], [0.01; 4]);
         // Fail ticket 4 and the last ticket 20; later tickets still pass.
-        for (file, id) in [("s_p1", 4u32), ("s_p4", 20u32)] {
+        for (file, id) in [("campaign_s_p1", 4u32), ("campaign_s_p4", 20u32)] {
             let path = runs.join(file).join("campaign.json");
             let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
             for st in v["stages"].as_array_mut().unwrap() {
@@ -1704,7 +1707,7 @@ mod tests {
         // never a free 1.0 at ticket 0.
         career(&runs, "none", "none", [1.0; 4], [0.01; 4]);
         for phase in 1..=4 {
-            let path = runs.join(format!("none_p{phase}/campaign.json"));
+            let path = runs.join(format!("campaign_none_p{phase}/campaign.json"));
             let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
             for st in v["stages"].as_array_mut().unwrap() {
                 st["passed"] = serde_json::json!(false);
@@ -1725,14 +1728,21 @@ mod tests {
     fn r44_f1_dropped_phase_career_is_not_published() {
         let (base, runs, out) = fixture("r44dropped");
         career(&runs, "drop", "dropped-model", [1.0; 4], [0.01; 4]);
-        fs::write(runs.join("drop_p2").join(".poisoned"), "bad phase\n").unwrap();
+        fs::write(
+            runs.join("campaign_drop_p2").join(".poisoned"),
+            "bad phase\n",
+        )
+        .unwrap();
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         assert!(
             !html.contains("<b>dropped-model</b>"),
             "dropped phase model row leaked: {html}"
         );
-        assert!(!html.contains("drop_p"), "dropped phase id leaked: {html}");
+        assert!(
+            !html.contains("campaign_drop_p"),
+            "dropped phase id leaked: {html}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1768,7 +1778,10 @@ mod tests {
         assert!(report.contains("tied"), "{report}");
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        assert!(html.contains("2="), "{html}");
+        assert!(
+            html.contains("<td class=\"num\">2=</td>"),
+            "the tied row has no 2= rank cell: {html}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }
