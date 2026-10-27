@@ -65,6 +65,27 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   - **D2:** a clean calibration career counts as deepseek's first grid
     career. Clean means no harness fault, and stop reasons mostly
     `dollars`.
+  - **Pre-approved** (operator, 2026-10-27, "pre-approve all"). The
+    reviewer runs these without asking again, each only when its
+    conditions hold:
+    1. **Merge round 44:** the review has no blockers, the gate is
+       PASS, and no cell is running.
+    2. **Deploy:** release build and service restart after that merge.
+    3. **The calibration career:** the bar says `RESULT: PASS` for the
+       current graded content, the tree is clean, and no other cell or
+       engine run is active.
+    4. **The grid:** the 11 remaining careers, one at a time, rotating
+       deepseek → haiku → luna → glm.
+
+    **Stop and wait for the operator** at any of these:
+    - a harness fault;
+    - a phase over $0.99;
+    - a phase that fails for a harness reason (`infra_error`);
+    - a new model whose first phase faults;
+    - the grid's spend passing $40;
+    - stop reasons in calibration that aren't mostly `dollars`.
+
+    Publishing (`publish.sh --yes`) is **not** pre-approved.
   - **Order:**
     1. **The bar on master's graded content** (`flake-9c90cfcf4b7b.txt`):
        resumed 2026-10-27 at 126/500 (`37.md`). It needs `RESULT: PASS`,
