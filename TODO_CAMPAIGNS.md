@@ -70,11 +70,13 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        resumed 2026-10-27 at 126/500 (`37.md`). It needs `RESULT: PASS`,
        about 12 h, before any published cell.
     2. **Calibration:** one deepseek-v4.1-flash-1017 career, then the
-       grid, one cell at a time (models: the reviewer's pick in chat,
-       2026-10-27).
-    3. **The publish round, during the grid:** worked in a worktree,
-       touching no graded or fingerprinted file. Merged only between
-       careers.
+       grid, one cell at a time. D3 = (a): deepseek-v4.1-flash-1017,
+       claude-haiku-5.5, gpt-6-luna and glm-5.3-flash, 3 careers each
+       (about 50 h, $30-35).
+    3. **Round 44, the publish round, during the grid:** careers on the
+       public board, the results page, the variance check, and
+       `scripts/publish.sh` to the operator's VPS (D4 = a). No graded or
+       fingerprinted file. Merged only between careers.
     4. **Variance check, then publish.**
     5. **After publishing:** round 41 (CLI and API, plus R38-1), 42
        (`tui`), 43 (deletion, then a bar), 39 (browser GUI).
