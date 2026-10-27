@@ -293,6 +293,10 @@ pub enum Commands {
         /// Maximum number of runs to include (newest first)
         #[arg(long, default_value_t = 200)]
         keep: usize,
+
+        /// Print the career variance report (points/$ ranges and rank ties)
+        #[arg(long, default_value_t = false)]
+        variance: bool,
     },
 
     /// Manage the Docker sandbox image and OMP agent
@@ -1803,6 +1807,7 @@ mod tests {
                 out,
                 base_url,
                 keep,
+                variance: _,
             } => {
                 assert_eq!(runs_dir, "./runs");
                 assert_eq!(results_dir, "./results");

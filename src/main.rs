@@ -1642,7 +1642,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             force,
         } => review_cmd::handle_review_run(run_id, runs_dir, model, api_key, force).await?,
 
-        Commands::Portal { runs_dir, out, .. } => {
+        Commands::Portal {
+            runs_dir,
+            out,
+            variance,
+            ..
+        } => {
             // Round-12 P1: the legacy pre-sdb-sql page is retired; the
             // public surface is the sdb-sql board (same as the engine's
             // rebuild endpoint and the campaign finish).
@@ -1650,7 +1655,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             let summary = PortalExporter::export_sql_board(&runs_dir, &out)?;
             println!("{}", "✅ Portal exported!".bold().green());
             println!("  Output: {}", out);
-            println!("  Cells:  {}", summary.run_count);
+            println!("  Careers: {}", summary.run_count);
+            if variance {
+                println!("{}", "Career variance:".bold().cyan());
+                print!("{}", PortalExporter::variance_report(&runs_dir)?);
+            }
             println!("  Deploy: rsync -az --delete {}/ <vps>:/srv/bench/", out);
         }
 
@@ -2964,6 +2973,7 @@ mod tests {
                 out: out_dir.to_string_lossy().to_string(),
                 base_url: "".to_string(),
                 keep: 50,
+                variance: false,
             },
         };
         assert!(run_cli(cli).await.is_ok());
