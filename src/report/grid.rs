@@ -73,7 +73,9 @@ impl CareerCell {
     /// the ladder (a failed ticket followed by a later pass) cannot make
     /// the curve rise again.
     pub fn survival(&self) -> Vec<f64> {
-        let reached = self.reached.unwrap_or(0);
+        let Some(reached) = self.reached else {
+            return vec![0.0; 21];
+        };
         (0..=20)
             .map(|i| if i <= reached { 1.0 } else { 0.0 })
             .collect()
@@ -1693,6 +1695,24 @@ mod tests {
         for i in 0..20 {
             assert!(s[i] >= s[i + 1], "survival rose at {i}: {s:?}");
         }
+
+        // A career that passed nothing has no reached ticket: all zeros,
+        // never a free 1.0 at ticket 0.
+        career(&runs, "none", "none", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            let path = runs.join(format!("none_p{phase}/campaign.json"));
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            for st in v["stages"].as_array_mut().unwrap() {
+                st["passed"] = serde_json::json!(false);
+            }
+            fs::write(&path, v.to_string()).unwrap();
+        }
+        let none = careers(runs.to_str().unwrap())
+            .into_iter()
+            .find(|c| c.model == "none")
+            .expect("none career");
+        assert!(none.reached.is_none());
+        assert!(none.survival().iter().all(|v| *v == 0.0));
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let _ = fs::remove_dir_all(&base);
     }
@@ -1701,12 +1721,7 @@ mod tests {
     fn r44_f1_dropped_phase_career_is_not_published() {
         let (base, runs, out) = fixture("r44dropped");
         career(&runs, "drop", "m", [1.0; 4], [0.01; 4]);
-        fs::write(
-            runs.join("drop_p2").join(".poisoned"),
-            "bad phase
-",
-        )
-        .unwrap();
+        fs::write(runs.join("drop_p2").join(".poisoned"), "bad phase\n").unwrap();
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         assert!(!html.contains("m"), "dropped phase leaked: {html}");
