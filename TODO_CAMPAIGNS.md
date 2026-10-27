@@ -91,8 +91,8 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     Publishing (`publish.sh --yes`) is **not** pre-approved.
   - **Order:**
     1. **The bar on master's graded content** (`flake-9c90cfcf4b7b.txt`):
-       resumed 2026-10-27 at 126/500 (`37.md`). It needs `RESULT: PASS`,
-       about 12 h, before any published cell.
+       resumed 2026-10-27 at 126/500; **`RESULT: PASS`, 500/500, at
+       22:01Z** (`37.md`, "After the merge").
     2. **Calibration:** one deepseek-v4.1-flash-1017 career, then the
        grid, one cell at a time. D3 = (a): deepseek-v4.1-flash-1017,
        claude-haiku-5.5, gpt-6-luna and glm-5.3-flash, 3 careers each
