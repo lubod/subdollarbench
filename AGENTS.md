@@ -76,7 +76,7 @@ therefore live in the repo, and a short phrase is enough:
 
 | The operator says | To | Meaning |
 |---|---|---|
-| `next round` | Implementer | Read `docs/rounds/README.md` on master. Take the one round whose status is `open`; if there is none, say so and stop. Follow its file and this file, from step 2 of the workflow. Start a new worktree and branch `roundNN` from the tag `round-NN-open`. |
+| `next round` | Implementer | Read `docs/rounds/README.md` on master. Take the round whose status is `open` (with more than one, the lowest number); if there is none, say so and stop. Follow its file and this file, from step 2 of the workflow. Start a new worktree and branch `roundNN` from the tag `round-NN-open`. |
 | `blockers` | Implementer | Merge master into `roundNN`, read the round's **Review**, fix every blocker, gate, and set `ready` again. |
 | `review` | Reviewer | Review the round whose status is `ready`. |
 | `merge` | Reviewer | Merge the reviewed round, record it, and draft or open the next one. |

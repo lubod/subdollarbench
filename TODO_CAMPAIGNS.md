@@ -62,7 +62,7 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   (`37.md`, "After the merge"). Then the calibration career.
 - **Round 38 (open, no graded path):** R37-9 (fresh `bench.db`) and
   R37-6. Its gate waits for the bar.
-- **Round 40 (draft, no graded path; before 39):** `campaign run`
+- **Round 40 (open after 38, no graded path; before 39):** `campaign run`
   defaults to the official cell, `sql-cell.sh` refuses a dirty tree or a
   missing bar, `--version` names the rules, `eval`/`replay` stop scoring
   sdb-sql on 4 stages, help without retired defaults. With round 38, it
