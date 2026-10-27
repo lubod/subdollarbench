@@ -23,6 +23,35 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
+/// The WAL switch can return SQLITE_BUSY without invoking the busy handler
+/// while the journal mode changes. Retry it briefly before failing.
+const WAL_RETRIES: u32 = 50;
+const WAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if matches!(
+                e.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+fn enable_wal(conn: &Connection) -> Result<()> {
+    for attempt in 0..WAL_RETRIES {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(e) if is_sqlite_busy(&e) && attempt + 1 < WAL_RETRIES => {
+                std::thread::sleep(WAL_RETRY_DELAY);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("the last WAL attempt returns or sleeps only while attempts remain")
+}
+
 fn queue_status_str(status: &QueueStatus) -> &'static str {
     match status {
         QueueStatus::Pending => "Pending",
@@ -50,8 +79,12 @@ impl Store {
             }
         }
         let conn = Connection::open(db_path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Set the busy timeout before the WAL switch: on a new file the
+        // switch needs an exclusive lock, and without a timeout a second
+        // opener gets SQLITE_BUSY immediately. The timeout also covers the
+        // CREATE TABLE batch.
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        enable_wal(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS parents (
                 id TEXT PRIMARY KEY,
@@ -867,6 +900,71 @@ mod tests {
         assert_eq!(added2, 0);
         assert_eq!(store.parent_count() - before2, added2);
         let _ = std::fs::remove_file(&db);
+    }
+
+    /// R38 F1: two openers of a brand-new file must both get a usable
+    /// store. Before the fix, the WAL switch ran without a busy timeout and
+    /// the second opener failed immediately with SQLITE_BUSY.
+    #[test]
+    fn r38_f1_concurrent_fresh_open() {
+        use std::sync::{Arc, Barrier};
+        for i in 0..50 {
+            let db =
+                std::env::temp_dir().join(format!("store-fresh-{}-{i}.db", std::process::id()));
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+            }
+            let barrier = Arc::new(Barrier::new(2));
+            let mut handles = Vec::new();
+            for id in 0..2 {
+                let path = db.clone();
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || -> Result<(), String> {
+                    barrier.wait();
+                    let store = Store::open(&path).map_err(|e| e.to_string())?;
+                    let conn = store.conn.lock();
+                    conn.execute(
+                        "INSERT OR REPLACE INTO queue (id, status, enqueued_at, doc)
+                         VALUES (?1, 'Pending', ?2, '{}')",
+                        params![format!("q{id}"), "now"],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let count: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM queue WHERE id = ?1",
+                            params![format!("q{id}")],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    assert_eq!(count, 1);
+                    Ok(())
+                }));
+            }
+            for handle in handles {
+                let result = handle.join().expect("opener thread");
+                assert!(result.is_ok(), "fresh open {i}: {:?}", result.err());
+            }
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+            }
+        }
+    }
+
+    /// R38 F1: an impossible path still returns `Err`, so the server's
+    /// temp-DB fallback keeps working.
+    #[test]
+    fn r38_f1_open_error_still_errs() {
+        let dir = std::env::temp_dir().join(format!(
+            "store-directory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create directory");
+        assert!(Store::open(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
