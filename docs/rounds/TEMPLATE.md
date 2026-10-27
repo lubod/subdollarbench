@@ -33,10 +33,22 @@ takes it. -->
 
 <!-- Only with operator approval: date, what changed, why. -->
 
+## Spec questions
+
+<!-- Implementer: anything in the spec that looks wrong (a definition, a
+line reference, an approach), asked before implementing it. Reviewer:
+the answer, under each question. An answer that changes an item also
+goes under "Changes after open". -->
+
 ## Implementer notes
 
 <!-- Implementer, per item: the commit, the tests added, anything the
-reviewer should look at, and anything deferred and why. -->
+reviewer should look at, and anything deferred and why. For each new
+test, the command and the failing line on the code without its fix
+(AGENTS.md, "Tests"). -->
+
+Ready: `Status: ready <gated commit>`. After that commit, only this file
+changes.
 
 Gate: `<git-common-dir>/sdb-gates/<commit>.txt`, RESULT: <PASS/FAIL>
 

@@ -30,6 +30,12 @@ change it here, in the same commit as the work that needs it.
      example `R22 F2: a graded crash is failed, not fault`).
    - The implementer ticks each acceptance box and writes its evidence
      under **Implementer notes** in the round file.
+   - **When a spec item looks wrong** (a definition, a line reference,
+     an approach), the implementer asks first, under **Spec questions**
+     in the round file, and doesn't implement the item as written. The
+     reviewer answers there, on master. An answer that changes an item
+     goes under **Changes after open**, with the operator's approval
+     (step 3).
 3. **The round is frozen once open.**
    - The reviewer never adds items to an open round. Anything new goes to
      the next round file (`Status: draft`).
@@ -43,8 +49,11 @@ change it here, in the same commit as the work that needs it.
 5. **Ready.**
    - The implementer sets `Status: ready <commit>` in the round file
      (as the last commit) and stops.
-   - The operator tells the reviewer, or the reviewer notices it, since
-     the reviewer may watch `roundNN`.
+   - `<commit>` is the gated commit. After it, only
+     `docs/rounds/NN.md` may change.
+   - The reviewer watches `roundNN` and starts the review when it sees
+     `ready`, without waiting to be told. The merge still needs the
+     operator's approval.
 6. **Review.**
    - The reviewer checks every acceptance box against the code and tests.
    - The reviewer never commits on the implementer's branch, because its
@@ -91,6 +100,7 @@ the round file, never only in chat.
 | `AGENTS.md`, `CLAUDE.md` | Reviewer, on operator decisions | Implementer proposes changes in its round notes |
 | `docs/rounds/NN.md`: header, items, acceptance, review | Reviewer | — |
 | `docs/rounds/NN.md`: ticks, **Implementer notes**, `Status: ready` | Implementer | — |
+| `docs/rounds/NN.md`: **Spec questions** | Implementer asks | Reviewer answers in place, on master |
 | Code, tests, `src/report/rules.rs` history | Implementer during a round | The reviewer's own fixes go in separate commits **after** the merge, never inside the implementer's open branch |
 | `TODO_CAMPAIGNS.md` (roadmap only) | Reviewer | — |
 | `gui-spec.md` | Operator | Read only |
@@ -110,6 +120,13 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
   - Run them niced: `nice -n 10 cargo test`.
   - Docker-heavy tests can flake in parallel. Rerun a failure alone
     before calling it real.
+  - **A new test must be seen failing** (rounds 37, 44: tests that could
+    never fail, or never pass).
+    - Before `ready`, run each test that an acceptance box names once
+      against the code without its fix: revert the fix in the worktree,
+      run the test, restore the fix.
+    - The notes give the command and quote the failing line.
+    - A test that can't fail, or can't pass, is a blocker.
 - **Other people's state:** never drop, pop or apply another agent's
   stash, and never delete another agent's worktree or branch.
 - **Other projects:** don't touch Docker volumes or containers that
