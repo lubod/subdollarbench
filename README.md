@@ -199,7 +199,7 @@ cargo run --release -- leaderboard
 #### Export Static Portal
 ```bash
 cargo run --release -- portal --out ./portal
-rsync -az --delete ./portal/ <vps>:/srv/bench/
+scripts/publish.sh --yes
 ```
 
 
@@ -324,13 +324,55 @@ runs/<run_id>/
 3. Launch the Web UI (`cargo run --release -- ui`) or run via CLI.
 4. When a run passes, export the portal and sync it to your VPS:
    ```bash
-   cargo run --release -- portal --out ./portal
-   rsync -az --delete ./portal/ <vps>:/srv/bench/
+   scripts/publish.sh --yes
    ```
-5. Point your domain at the VPS, rsync `./portal/` to `/srv/bench/`, and start the static file service behind your existing Traefik (TLS stays on your current certbot/Traefik setup):
-   ```bash
-   docker compose -f deploy/docker-compose.yml up -d
-   ```
+5. Point your domain at the VPS and follow the nginx/certbot block in
+   **Publishing** below. `scripts/publish.sh` performs the checked push.
+
+---
+
+## 🚀 Publishing
+
+The grid is published as static files. Copy the two keys into `.env`
+(never commit it):
+
+```dotenv
+SDB_PUBLISH_TARGET=deploy@your-host:/var/www/subdollarbench/
+SDB_PUBLISH_URL=https://bench.example.com/
+```
+
+`scripts/publish.sh` exports the board and results page to a temporary
+directory, checks that every ranked career is on the current rules and
+shares one fingerprint, requires the matching flake record to say
+`RESULT: PASS`, scans for secrets, and then runs an `rsync` dry run. Use
+`--yes` to push:
+
+```bash
+scripts/publish.sh          # checked dry run
+scripts/publish.sh --yes    # checked push
+```
+
+The script never pushes without `SDB_PUBLISH_TARGET`. On the VPS, point
+nginx at the target directory; this minimal static server block is enough:
+
+```nginx
+server {
+    listen 80;
+    server_name bench.example.com;
+    root /var/www/subdollarbench;
+    index index.html;
+    location / { try_files $uri $uri/ =404; }
+}
+```
+
+Then issue a certificate with the usual certbot flow:
+
+```bash
+sudo certbot --nginx -d bench.example.com
+```
+
+The VPS, DNS and TLS setup belong to the operator; the repository only
+publishes the checked static export.
 
 ---
 
