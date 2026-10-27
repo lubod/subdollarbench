@@ -1720,12 +1720,15 @@ mod tests {
     #[test]
     fn r44_f1_dropped_phase_career_is_not_published() {
         let (base, runs, out) = fixture("r44dropped");
-        career(&runs, "drop", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "drop", "dropped-model", [1.0; 4], [0.01; 4]);
         fs::write(runs.join("drop_p2").join(".poisoned"), "bad phase\n").unwrap();
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        assert!(!html.contains("m"), "dropped phase leaked: {html}");
-        assert!(!html.contains("drop_p4"), "{html}");
+        assert!(
+            !html.contains("<b>dropped-model</b>"),
+            "dropped phase model row leaked: {html}"
+        );
+        assert!(!html.contains("drop_p"), "dropped phase id leaked: {html}");
         let _ = fs::remove_dir_all(&base);
     }
 
