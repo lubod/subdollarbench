@@ -1790,6 +1790,8 @@
     let liveOpen = false;
     let liveReturnHash = '#board';
     let liveOpener = null;
+    let liveFromApp = false;
+    let routeInitialized = false;
     let boardScrollY = 0;
 
     // Pure display switch (the hash router is the only place that changes
@@ -1861,9 +1863,18 @@
     function closeLive() {
       if (!liveOpen) return;
       const target = liveReturnHash || '#board';
+      const fromApp = liveFromApp;
       hideLive();
       if (liveOpener && typeof liveOpener.focus === 'function') liveOpener.focus();
-      if (location.hash.startsWith('#live')) location.hash = target;
+      if (!location.hash.startsWith('#live')) return;
+      if (fromApp && typeof history !== 'undefined' && typeof history.back === 'function') {
+        // Closing the overlay returns to the entry that was underneath;
+        // setting location.hash here would push a second history entry.
+        history.back();
+      } else {
+        // Direct load on #live/<id>: there is no in-app entry to go back to.
+        location.replace(target);
+      }
     }
 
     document.addEventListener('keydown', e => {
@@ -1874,6 +1885,7 @@
 
     function applyHash() {
       const raw = location.hash || '';
+      const hadRoute = routeInitialized;
       if (raw.startsWith('#live') && !liveOpen) liveReturnHash = lastNonLiveHash || '#board';
       const route = typeof routeFor === 'function'
         ? routeFor(raw, boardCache, currentView)
@@ -1882,6 +1894,7 @@
         boardScrollY = window.scrollY || 0;
       }
       if (route.overlay) {
+        if (!liveOpen) liveFromApp = hadRoute;
         showTab(route.view === 'run' || route.view === 'admin' ? route.view : 'board');
         currentView = route.view;
         openLive(route.overlay.id);
@@ -1899,6 +1912,7 @@
           setTimeout(() => { if (currentView === 'board') window.scrollTo(0, boardScrollY); }, 0);
         }
       }
+      routeInitialized = true;
       updateLiveButton();
     }
     window.addEventListener('hashchange', applyHash);
