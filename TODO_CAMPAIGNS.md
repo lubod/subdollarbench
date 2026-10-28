@@ -75,7 +75,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        current graded content, the tree is clean, and no other cell or
        engine run is active.
     4. **The grid:** the 11 remaining careers, one at a time, rotating
-       deepseek → haiku → luna → glm.
+       deepseek → haiku → luna → glm; since 2026-10-28, muse-spark and
+       gemini-flash-lite in place of luna and glm (operator: "swap for
+       priced models").
 
     **Stop and wait for the operator** at any of these:
     - a harness fault;
@@ -94,8 +96,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        resumed 2026-10-27 at 126/500; **`RESULT: PASS`, 500/500, at
        22:01Z** (`37.md`, "After the merge").
     2. **Calibration:** one deepseek-v4.1-flash-1017 career, then the
-       grid, one cell at a time. D3 = (a): deepseek-v4.1-flash-1017,
-       claude-haiku-5.5, gpt-6-luna and glm-5.3-flash, 3 careers each
+       grid, one cell at a time. D3 = (a), changed 2026-10-28 (below):
+       deepseek-v4.1-flash-1017, claude-haiku-5.5,
+       muse-spark-1.3-contributor and gemini-2.5-flash-lite, 3 careers each
        (about 50 h, $30-35).
     3. **Round 44, merged `a3a4e19` before calibration:** careers on the
        public board, the results page, the variance check, and
@@ -111,6 +114,17 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        **Grid career 1, Haiku 5.5:** 66.4/76 for $2.322 (8.8 $0.291,
        12.0 $0.685, 19.6 $0.671, 26.0 $0.676); lite on 5 and 11, s16
        failed. Clean.
+       **D3 changed** (operator, 2026-10-28, "swap for priced models"):
+       luna (`openai/gpt-6-luna`) and glm (`z-ai/glm-5.3-flash`) are
+       not in the graded price snapshot (`src/cost/model_prices.json`),
+       and `sql-cell.sh` refused luna's first phase before any API call
+       ($0 spent). Adding them would change the fingerprint, and the
+       careers already run would need rerunning. Replaced by priced
+       models: **`meta/muse-spark-1.3-contributor`** ($0.10/$0.20) and
+       **`google/gemini-2.5-flash-lite`** ($0.10/$0.40). The remaining
+       10 careers rotate muse-spark → gemini-flash-lite → deepseek →
+       haiku. Luna and glm can join with v2 (round 45 bumps the rules
+       anyway).
     4. **Variance check, then publish.**
     5. **v2, the perf score** (operator, 2026-10-28: "double down on
        performance and latency"; publish `.42` first): round 45 (draft),
