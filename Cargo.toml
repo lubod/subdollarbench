@@ -28,6 +28,8 @@ rand = "0.10.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 parking_lot = "0.12"
 libc = "0.2"
+ratatui = "0.29"
+crossterm = "0.29"
 
 [build-dependencies]
 sha2 = "0.10"
