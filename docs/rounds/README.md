@@ -26,8 +26,8 @@ from `TEMPLATE.md`.
 | [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | merged `ba83d58` |
 | [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | merged `9ec5c32` |
 | [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | draft (after the grid) |
-| [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | ready; conflicts with 39 to resolve |
-| [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | open |
+| [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | ready; conflicts with 39 and 42 to resolve |
+| [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | merged `b28674d` |
 | [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | open |
 | [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | merged `a3a4e19` |
 | [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | open |
