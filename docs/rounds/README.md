@@ -24,7 +24,7 @@ from `TEMPLATE.md`.
 | [36](36.md) | The candidate's image is stamped; no empty stage-4 dataset (rules `.42`) | merged `cc074f3` |
 | [37](37.md) | Tests don't share host state; CI runs the whole fast set | merged `64d83d4` |
 | [38](38.md) | A fresh `bench.db` opens on the first try (no graded path) | merged `ba83d58` |
-| [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | open |
+| [39](39.md) | Run is a page from the Board, Live is an overlay (GUI only) | blocked (R39-1, R39-2) |
 | [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | draft (after the grid) |
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | open |
 | [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | open |
