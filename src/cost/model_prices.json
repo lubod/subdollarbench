@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-23",
+  "as_of": "2026-10-28",
   "source": "OpenRouter /api/v1/models; exact catalog ids; cache_read is input_cache_read, cache_write is input_cache_write or the prompt rate when absent",
   "models": [
     {
@@ -85,6 +85,27 @@
       "completion_per_million": 4.25,
       "cache_read_per_million": 0.15,
       "cache_write_per_million": 1.25
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.125
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-flash",
+      "prompt_per_million": 0.14,
+      "completion_per_million": 0.28,
+      "cache_read_per_million": 0.0028,
+      "cache_write_per_million": 0.14
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.47,
+      "cache_read_per_million": 0.016,
+      "cache_write_per_million": 0.15
     }
   ]
 }

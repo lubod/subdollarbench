@@ -554,6 +554,56 @@ mod tests {
         assert_eq!(unknown.completion_per_million, 0.60);
     }
 
+    /// R46 F1: the five grid models are all in the committed snapshot.
+    #[test]
+    fn r46_f1_grid_models_are_priced() {
+        let expect = [
+            (
+                "openrouter/deepseek/deepseek-v4.1-flash-1017",
+                0.15,
+                0.6,
+                0.003,
+                0.15,
+            ),
+            (
+                "openrouter/anthropic/claude-haiku-5.5",
+                0.1,
+                0.5,
+                0.01,
+                0.125,
+            ),
+            ("openrouter/openai/gpt-6-luna", 0.1, 0.5, 0.01, 0.125),
+            (
+                "openrouter/xiaomi/mimo-v2.6-flash",
+                0.14,
+                0.28,
+                0.0028,
+                0.14,
+            ),
+            ("openrouter/qwen/qwen3.8-flash", 0.15, 0.47, 0.016, 0.15),
+        ];
+        for (model, prompt, completion, read, write) in expect {
+            let r = ModelPricing::snapshot_rates(model)
+                .unwrap_or_else(|| panic!("missing snapshot price for {model}"));
+            assert!(
+                (r.prompt_per_million - prompt).abs() < 1e-12,
+                "{model} prompt"
+            );
+            assert!(
+                (r.completion_per_million - completion).abs() < 1e-12,
+                "{model} completion"
+            );
+            assert!(
+                (r.cache_read_per_million - read).abs() < 1e-12,
+                "{model} cache read"
+            );
+            assert!(
+                (r.cache_write_per_million - write).abs() < 1e-12,
+                "{model} cache write"
+            );
+        }
+    }
+
     /// R24-1: the operator's test/calibration models must be launchable.
     #[test]
     fn r24_r1_every_test_or_calibration_model_has_a_snapshot_price() {
