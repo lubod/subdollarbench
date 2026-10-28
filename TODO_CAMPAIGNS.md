@@ -127,13 +127,14 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        anyway).
        **Restart** (operator, 2026-10-28, after muse-spark hit 8 h in
        phase 1): "replace" with gpt-6-luna, mimo-v2.6-flash and
-       qwen3.6-flash; "prices + 42, then bar"; "5 models". Round 46 adds
+       qwen3.8-flash ("use qwen 3.8 flash", in place of 3.6); "prices + 42, then bar"; "5 models". Round 46 adds
        the three prices (graded: the fingerprint changes) and merges
        with round 42; one full gate and one 20-pass bar on the merged
        master; then the grid starts from zero: deepseek, haiku, luna,
        mimo, qwen, 3 careers each (15 careers, ~$35, ~3 days). The `.42`
        careers on the old fingerprint (deepseek 70.0, Haiku 66.4,
-       muse-spark phase 1) stay unpublished. Tiered prices: open
+       muse-spark phase 1, stopped by the reviewer on "stop it") stay
+       unpublished. Tiered prices: open
        question Q8.
     4. **Variance check, then publish.**
     5. **v2, the perf score** (operator, 2026-10-28: "double down on

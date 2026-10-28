@@ -73,8 +73,8 @@ drain. (Accepted by default; no answer needed.)
 
 The snapshot (`src/cost/model_prices.json`) prices every call at the
 model's base rate. The OpenRouter catalog now lists overrides: Haiku 5.5
-charges 5x the prompt rate above 100k prompt tokens, qwen3.6-flash 4x
-above 256k, gpt-6-luna 2x above 272k, and deepseek-v4.1-flash-1017 2x
+charges 5x the prompt rate above 100k prompt tokens, gpt-6-luna 2x
+above 272k, and deepseek-v4.1-flash-1017 2x
 in weekday peak hours. A career's prompts reach several hundred
 thousand tokens, so for some models the scored cost (and the $0.99 cap)
 sits below the bill. Options: (a) keep base rates and say so on the
