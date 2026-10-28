@@ -68,3 +68,16 @@ exemption.
 
 No scoring change; regenerate the portal's frontier section on the next
 drain. (Accepted by default; no answer needed.)
+
+## Q8. Tiered and time-of-day prices (open, 2026-10-28)
+
+The snapshot (`src/cost/model_prices.json`) prices every call at the
+model's base rate. The OpenRouter catalog now lists overrides: Haiku 5.5
+charges 5x the prompt rate above 100k prompt tokens, qwen3.6-flash 4x
+above 256k, gpt-6-luna 2x above 272k, and deepseek-v4.1-flash-1017 2x
+in weekday peak hours. A career's prompts reach several hundred
+thousand tokens, so for some models the scored cost (and the $0.99 cap)
+sits below the bill. Options: (a) keep base rates and say so on the
+results page; (b) price the overrides in the snapshot (a rules bump);
+(c) cap context so no call crosses a threshold. Found in round 46.
+

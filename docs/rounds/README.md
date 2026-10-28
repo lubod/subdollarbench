@@ -31,6 +31,7 @@ from `TEMPLATE.md`.
 | [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | open |
 | [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | merged `a3a4e19` |
 | [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | open |
+| [46](46.md) | Price the grid models: luna, mimo-v2.6-flash, qwen3.6-flash (graded: `src/cost`) | open |
 
 **Status values:**
 
