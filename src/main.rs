@@ -1153,8 +1153,6 @@ mod tests {
         }
     }
 
-    /// Write a result row as the export copy the CLI scanners read.
-
     /// Write a full RunManifest fixture into runs/<id>/manifest.json.
     fn write_manifest(runs_dir: &Path, id: &str, mutate: impl FnOnce(&mut RunManifest)) -> PathBuf {
         let mut m = test_manifest_with_status("completed");
