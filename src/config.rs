@@ -155,87 +155,11 @@ pub enum Commands {
         runs_dir: String,
     },
 
-    /// [operate] List recent runs (newest first; merged-away trials hidden)
-    Runs {
-        /// Filter by task ('http', 'redis', 'pdf', ...)
-        #[arg(short, long)]
-        task: Option<String>,
-
-        /// Filter by model substring (e.g. 'muse-spark', 'glm')
-        #[arg(long)]
-        model: Option<String>,
-
-        /// Filter by effort ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
-        #[arg(long)]
-        effort: Option<String>,
-
-        /// Filter by status ('completed', 'failed_tests', 'disqualified_cheat', ...)
-        #[arg(long)]
-        status: Option<String>,
-
-        /// Maximum rows to show
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-
-        /// Include merged-away trial subruns
-        #[arg(long, default_value_t = false)]
-        all: bool,
-
-        /// Path to runs directory
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
-    },
-
-    /// [analyze] One-screen verdict for a run (exit 0 pass / 1 fail / 2 infra-error)
-    Verdict {
-        /// Run id or unambiguous prefix
-        run: String,
-
-        /// Emit machine-readable JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-
-        /// Path to runs directory
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
-    },
-
-    /// [analyze] Stage-by-stage diff of two runs (same task)
-    Diff {
-        /// Baseline run id or prefix
-        a: String,
-
-        /// Candidate run id or prefix
-        b: String,
-
-        /// Path to runs directory
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
-    },
-
     /// [operate] Campaign mode: ordered tickets on one living workspace,
     /// cumulative acceptance, cost-first (see campaigns/ and TODO_CAMPAIGNS.md)
     Campaign {
         #[command(subcommand)]
         action: CampaignAction,
-    },
-
-    /// [analyze] Per-stage pass/fail detail for a run
-    Stages {
-        /// Run id or unambiguous prefix
-        run: String,
-
-        /// Trial number to inspect (appends _trial<N> when the id has no trial suffix)
-        #[arg(long)]
-        trial: Option<u32>,
-
-        /// Emit machine-readable JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-
-        /// Path to runs directory
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
     },
 
     /// [maintain] Remove leaked subdollar Docker containers and networks
@@ -317,55 +241,6 @@ pub enum Commands {
         /// Follow: poll with the server cursor until idle
         #[arg(long, default_value_t = false)]
         follow: bool,
-
-        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
-        #[arg(long)]
-        server: Option<String>,
-    },
-
-    /// [analyze] Archived manifest for a run (GET /api/runs/:id)
-    Detail {
-        /// Run id or unambiguous prefix (resolved locally)
-        run: String,
-
-        /// Emit raw JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-
-        /// Path to runs directory (for prefix resolution)
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
-
-        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
-        #[arg(long)]
-        server: Option<String>,
-    },
-
-    /// [analyze] Workspace file list for a run (GET /api/runs/:id/files)
-    Ls {
-        /// Run id or unambiguous prefix (resolved locally)
-        run: String,
-
-        /// Path to runs directory (for prefix resolution)
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
-
-        /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
-        #[arg(long)]
-        server: Option<String>,
-    },
-
-    /// [analyze] One workspace file for a run (GET /api/runs/:id/file)
-    Cat {
-        /// Run id or unambiguous prefix (resolved locally)
-        run: String,
-
-        /// Workspace-relative file path
-        file: String,
-
-        /// Path to runs directory (for prefix resolution)
-        #[arg(long, default_value = "./runs")]
-        runs_dir: String,
 
         /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.
         #[arg(long)]

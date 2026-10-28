@@ -5,11 +5,19 @@ use std::path::Path;
 
 use subdollarbench::config::{Cli, Commands};
 use subdollarbench::remote;
-use subdollarbench::report::{PortalExporter, RunManifest};
+use subdollarbench::report::PortalExporter;
 use subdollarbench::web;
 
 mod main_campaign;
 mod main_queue;
+
+#[cfg(test)]
+fn apply_trial_suffix(run_id: &str, trial: Option<u32>) -> String {
+    match trial {
+        Some(t) if !run_id.contains("_trial") => format!("{run_id}_trial{t}"),
+        _ => run_id.to_string(),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,28 +50,6 @@ pub(crate) fn resolve_run_id(runs_dir: &str, prefix: &str) -> Result<String> {
             }
             anyhow::bail!("{} runs match; give a longer prefix", hits.len())
         }
-    }
-}
-
-fn load_run_manifest(runs_dir: &str, run_id: &str) -> Result<RunManifest> {
-    let text = std::fs::read_to_string(Path::new(runs_dir).join(run_id).join("manifest.json"))
-        .with_context(|| format!("read manifest for {run_id}"))?;
-    Ok(serde_json::from_str(&text)?)
-}
-
-fn apply_trial_suffix(run_id: &str, trial: Option<u32>) -> String {
-    match trial {
-        Some(t) if !run_id.contains("_trial") => format!("{run_id}_trial{t}"),
-        _ => run_id.to_string(),
-    }
-}
-
-/// Exit code for `verdict`: 0 pass / 1 test failure / 2 infra-error.
-fn verdict_code(m: &RunManifest) -> i32 {
-    match m.status.as_str() {
-        "completed" => 0,
-        "failed_tests" | "disqualified_cheat" => 1,
-        _ => 2,
     }
 }
 
@@ -230,166 +216,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        }
-
-        Commands::Runs {
-            task,
-            model,
-            effort,
-            status,
-            limit,
-            runs_dir,
-            all,
-        } => {
-            let path = Path::new(&runs_dir);
-            let mut rows: Vec<RunManifest> = std::fs::read_dir(path)
-                .with_context(|| format!("read runs dir {runs_dir}"))?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                .filter(|e| all || !e.path().join(".portal_hidden").exists())
-                .filter_map(|e| {
-                    std::fs::read_to_string(e.path().join("manifest.json"))
-                        .ok()
-                        .and_then(|t| serde_json::from_str(&t).ok())
-                })
-                .filter(|m: &RunManifest| {
-                    if let Some(t) = task.as_ref() {
-                        if &m.task != t {
-                            return false;
-                        }
-                    }
-                    if let Some(pat) = model.as_ref() {
-                        if !m.model.to_lowercase().contains(&pat.to_lowercase()) {
-                            return false;
-                        }
-                    }
-                    if let Some(pat) = effort.as_ref() {
-                        if m.effort.as_deref().unwrap_or("").to_lowercase() != pat.to_lowercase() {
-                            return false;
-                        }
-                    }
-                    if let Some(pat) = status.as_ref() {
-                        if !m.status.eq_ignore_ascii_case(pat) {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .collect();
-            rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-            println!(
-                "{:<64} {:<22} {:<7} {:<8} {:<16} {:>6}",
-                "run", "model", "effort", "task", "status", "pass%"
-            );
-            for m in rows.iter().take(limit) {
-                println!(
-                    "{:<64} {:<22} {:<7} {:<8} {:<16} {:>5.1}%",
-                    m.run_id,
-                    m.model.rsplit('/').next().unwrap_or(&m.model),
-                    m.effort.as_deref().unwrap_or("-"),
-                    m.task,
-                    m.status,
-                    m.pass_rate,
-                );
-            }
-        }
-
-        Commands::Verdict {
-            run,
-            json,
-            runs_dir,
-        } => {
-            let id = resolve_run_id(&runs_dir, &run)?;
-            let m = load_run_manifest(&runs_dir, &id)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&m)?);
-            } else {
-                println!("run:     {}", id);
-                println!("model:   {}", m.model);
-                println!("task:    {}", m.task);
-                println!("status:  {}", m.status);
-                println!(
-                    "stages:  {}/{} ({:.1}%)",
-                    m.passed_stages, m.total_stages, m.pass_rate
-                );
-                if let Some(n) = m.total_trials {
-                    if n > 1 {
-                        let p1 = m
-                            .pass_at_1
-                            .map(|v| format!(" P@1 {v:.0}%"))
-                            .unwrap_or_default();
-                        println!("trials:  {n} merged{p1}");
-                    }
-                }
-                if let Some(st) = m.stability.as_deref() {
-                    println!("stability: {st}");
-                }
-                if let Some(tp) = m.throughput_req_sec {
-                    match m.reference_throughput_req_sec {
-                        Some(r) => println!("tput:    {tp:.0} req/s vs ref {r:.0}"),
-                        None => println!("tput:    {tp:.0} req/s (no reference)"),
-                    }
-                }
-                println!(
-                    "turns:   {}",
-                    m.turns.map(|t| t.to_string()).unwrap_or("-".into())
-                );
-                println!("spent:   {:.1}s", m.duration_seconds);
-            }
-            std::process::exit(verdict_code(&m));
-        }
-
-        Commands::Diff { a, b, runs_dir } => {
-            let ida = resolve_run_id(&runs_dir, &a)?;
-            let idb = resolve_run_id(&runs_dir, &b)?;
-            let ma = load_run_manifest(&runs_dir, &ida)?;
-            let mb = load_run_manifest(&runs_dir, &idb)?;
-            println!("a: {ida}  ({:.1}%)", ma.pass_rate);
-            println!("b: {idb}  ({:.1}%)", mb.pass_rate);
-            println!("{:<5} {:<46} {:<6} {:<6}", "n", "stage", "a", "b");
-            let n = ma.stages.len().max(mb.stages.len());
-            for i in 0..n {
-                let sa = ma.stages.get(i);
-                let sb = mb.stages.get(i);
-                let name = sa
-                    .map(|s| s.name.as_str())
-                    .or_else(|| sb.map(|s| s.name.as_str()))
-                    .unwrap_or("?");
-                let fa = sa
-                    .map(|s| if s.passed { "PASS" } else { "FAIL" })
-                    .unwrap_or("-");
-                let fb = sb
-                    .map(|s| if s.passed { "PASS" } else { "FAIL" })
-                    .unwrap_or("-");
-                println!("{:<5} {:<46} {:<6} {:<6}", i + 1, name, fa, fb);
-            }
-        }
-
-        Commands::Stages {
-            run,
-            trial,
-            json,
-            runs_dir,
-        } => {
-            let prefix_id = resolve_run_id(&runs_dir, &run)?;
-            let id = apply_trial_suffix(&prefix_id, trial);
-            let m = load_run_manifest(&runs_dir, &id)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&m.stages)?);
-            } else {
-                println!("{id}: {} {}/{}", m.status, m.passed_stages, m.total_stages);
-                for s in &m.stages {
-                    let mark = if s.passed { "PASS" } else { "FAIL" };
-                    println!("  {} -> {}", s.name, mark);
-                    if !s.passed {
-                        if let Some(e) = s.error.as_deref() {
-                            if !e.is_empty() {
-                                println!("      {e}");
-                            }
-                        }
-                    }
-                }
             }
         }
 
@@ -608,49 +434,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Detail {
-            run,
-            json,
-            runs_dir,
-            server,
-        } => {
-            let server = resolve_server_flag(&server);
-            let id = resolve_run_id(&runs_dir, &run)?;
-            let v = remote::get_json(&server, &format!("/api/runs/{id}")).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-            } else {
-                print!("{}", remote::format_detail(&v));
-            }
-        }
-
-        Commands::Ls {
-            run,
-            runs_dir,
-            server,
-        } => {
-            let server = resolve_server_flag(&server);
-            let id = resolve_run_id(&runs_dir, &run)?;
-            let v = remote::get_json(&server, &format!("/api/runs/{id}/files")).await?;
-            let files = v.as_array().cloned().unwrap_or_default();
-            for f in &files {
-                let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                let size = f.get("size_bytes").and_then(|n| n.as_u64()).unwrap_or(0);
-                println!("{size:>10}  {name}");
-            }
-        }
-
-        Commands::Cat {
-            run,
-            file,
-            runs_dir,
-            server,
-        } => {
-            let server = resolve_server_flag(&server);
-            let id = resolve_run_id(&runs_dir, &run)?;
-            print!("{}", remote::get_file_text(&server, &id, &file).await?);
-        }
-
         Commands::Prompt { task, save, server } => {
             let server = resolve_server_flag(&server);
             if save {
@@ -779,15 +562,25 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use subdollarbench::report::RunManifest;
+
+    fn verdict_code(m: &RunManifest) -> i32 {
+        match m.status.as_str() {
+            "completed" => 0,
+            "failed_tests" | "disqualified_cheat" => 1,
+            _ => 2,
+        }
+    }
+
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
     use subdollarbench::config::Harness;
-    use subdollarbench::report::RunManifest;
 
     /// Round-8 finding 2: the argv the console launcher spawns must be
     /// accepted by the real clap definition (a stale argv once reached a
     /// spawn and died in libtest's parser instead).
+
     #[test]
     fn launcher_argv_parses_as_the_campaign_run_command() {
         let args = subdollarbench::campaign::launcher_args(
@@ -1168,37 +961,6 @@ mod tests {
         dir
     }
 
-    /// Manifest with two stages (one failing when pass_rate < 100).
-    fn manifest_fixture(id: &str, pass_rate: f64) -> RunManifest {
-        let mut m = test_manifest_with_status(if pass_rate >= 100.0 {
-            "completed"
-        } else {
-            "failed_tests"
-        });
-        m.run_id = id.to_string();
-        m.model = "openrouter/meta/muse-spark".to_string();
-        m.task = "redis".to_string();
-        m.effort = Some("low".to_string());
-        m.pass_rate = pass_rate;
-        m.passed_stages = if pass_rate >= 100.0 { 2 } else { 1 };
-        m.total_stages = 2;
-        m.stages = vec![
-            subdollarbench::verifier::StageResult {
-                stage: 1,
-                name: "Stage 1: basic protocol".to_string(),
-                passed: true,
-                error: None,
-            },
-            subdollarbench::verifier::StageResult {
-                stage: 2,
-                name: "Stage 2: dbsize".to_string(),
-                passed: pass_rate >= 100.0,
-                error: Some("expected 1 key".to_string()),
-            },
-        ];
-        m
-    }
-
     /// Consolidated parent result with one subrun per pass rate. Equal pass
     /// rates and no throughput make it `Stability::Stable` by construction
     /// (so `stability`/`extend` never hit their `process::exit` arms).
@@ -1245,83 +1007,6 @@ mod tests {
                 no_follow: true,
                 stages_only: false,
                 runs_dir: runs_s,
-            },
-        };
-        assert!(run_cli(cli).await.is_err());
-        let _ = fs::remove_dir_all(&runs);
-    }
-
-    #[tokio::test]
-    async fn test_main_cli_diff_stages_fixture_and_missing_ids() {
-        let runs = test_tmp_dir("diff_stages");
-        for m in [
-            manifest_fixture("redis_a_20261001", 100.0),
-            manifest_fixture("redis_b_20261002", 50.0),
-        ] {
-            let d = runs.join(&m.run_id);
-            fs::create_dir_all(&d).unwrap();
-            fs::write(d.join("manifest.json"), serde_json::to_string(&m).unwrap()).unwrap();
-        }
-        let runs_s = runs.to_string_lossy().to_string();
-
-        // Diff: exact id on one side, unambiguous prefix on the other.
-        let cli = Cli {
-            command: Commands::Diff {
-                a: "redis_a".to_string(),
-                b: "redis_b_20261002".to_string(),
-                runs_dir: runs_s.clone(),
-            },
-        };
-        assert!(run_cli(cli).await.is_ok());
-
-        // Stages: human-readable and JSON.
-        for json in [false, true] {
-            let cli = Cli {
-                command: Commands::Stages {
-                    run: "redis_a".to_string(),
-                    trial: None,
-                    json,
-                    runs_dir: runs_s.clone(),
-                },
-            };
-            assert!(run_cli(cli).await.is_ok());
-        }
-
-        // --trial appends _trialN when the id has no trial suffix; that dir
-        // does not exist, so this is a clean error.
-        let cli = Cli {
-            command: Commands::Stages {
-                run: "redis_a_20261001".to_string(),
-                trial: Some(2),
-                json: false,
-                runs_dir: runs_s.clone(),
-            },
-        };
-        assert!(run_cli(cli).await.is_err());
-
-        // Unknown ids fail during resolution (before verdict's exit/format).
-        let cli = Cli {
-            command: Commands::Verdict {
-                run: "missing".to_string(),
-                json: false,
-                runs_dir: runs_s.clone(),
-            },
-        };
-        assert!(run_cli(cli).await.is_err());
-        let cli = Cli {
-            command: Commands::Diff {
-                a: "redis_a".to_string(),
-                b: "missing".to_string(),
-                runs_dir: runs_s.clone(),
-            },
-        };
-        assert!(run_cli(cli).await.is_err());
-        let cli = Cli {
-            command: Commands::Stages {
-                run: "redis_a".to_string(),
-                trial: None,
-                json: false,
-                runs_dir: runs.join("missing").to_string_lossy().to_string(),
             },
         };
         assert!(run_cli(cli).await.is_err());
@@ -1393,46 +1078,6 @@ mod tests {
     }
 
     // ---- Synthetic-fixture coverage (offline) ---------------------------
-
-    #[tokio::test]
-    async fn test_main_cli_stages_failed_stage_and_trial_suffix() {
-        let runs = test_tmp_dir("stages_more");
-        for m in [
-            manifest_fixture("redis_fail_fixture", 50.0),
-            manifest_fixture("redis_trial_target_trial2", 100.0),
-        ] {
-            let d = runs.join(&m.run_id);
-            fs::create_dir_all(&d).unwrap();
-            fs::write(d.join("manifest.json"), serde_json::to_string(&m).unwrap()).unwrap();
-        }
-        let runs_s = runs.to_string_lossy().to_string();
-
-        // Failed stage with a verifier error message.
-        assert!(run_cli(Cli {
-            command: Commands::Stages {
-                run: "redis_fail".to_string(),
-                trial: None,
-                json: false,
-                runs_dir: runs_s.clone(),
-            },
-        })
-        .await
-        .is_ok());
-
-        // --trial appends _trialN only when the resolved id has no suffix.
-        assert!(run_cli(Cli {
-            command: Commands::Stages {
-                run: "redis_trial_target".to_string(),
-                trial: Some(2),
-                json: false,
-                runs_dir: runs_s.clone(),
-            },
-        })
-        .await
-        .is_ok());
-
-        let _ = fs::remove_dir_all(&runs);
-    }
 
     #[tokio::test]
     async fn test_main_cli_watch_follow_loop_without_manifest() {
