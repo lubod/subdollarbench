@@ -1005,7 +1005,7 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "deadline not bounded"
         );
-        assert!(calls >= 2 && calls <= 8, "unexpected retry count {calls}");
+        assert!((2..=8).contains(&calls), "unexpected retry count {calls}");
 
         let mut calls = 0u32;
         enable_wal_with(
