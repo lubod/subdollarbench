@@ -5554,6 +5554,12 @@ mod tests {
     #[test]
     fn test_gui_console_has_board_run_live_and_parses() {
         let html = include_str!("index.html");
+        assert_eq!(
+            html.matches("window.addEventListener('hashchange', applyHash)")
+                .count(),
+            1,
+            "applyHash must be registered exactly once"
+        );
         for marker in [
             "data-tab=\"board\"",
             "data-tab=\"admin\"",
