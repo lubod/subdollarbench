@@ -25,8 +25,8 @@ pub struct Store {
 
 /// The WAL switch can return SQLITE_BUSY without invoking the busy handler
 /// while the journal mode changes. Retry it briefly before failing.
-const WAL_RETRIES: u32 = 50;
 const WAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const WAL_RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
     matches!(
@@ -40,16 +40,20 @@ fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
 }
 
 fn enable_wal(conn: &Connection) -> Result<()> {
-    for attempt in 0..WAL_RETRIES {
+    let deadline = std::time::Instant::now() + WAL_RETRY_DEADLINE;
+    loop {
         match conn.pragma_update(None, "journal_mode", "WAL") {
             Ok(()) => return Ok(()),
-            Err(e) if is_sqlite_busy(&e) && attempt + 1 < WAL_RETRIES => {
-                std::thread::sleep(WAL_RETRY_DELAY);
+            Err(e) if is_sqlite_busy(&e) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(e.into());
+                }
+                std::thread::sleep(WAL_RETRY_DELAY.min(deadline - now));
             }
             Err(e) => return Err(e.into()),
         }
     }
-    unreachable!("the last WAL attempt returns or sleeps only while attempts remain")
 }
 
 fn queue_status_str(status: &QueueStatus) -> &'static str {
@@ -965,6 +969,29 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create directory");
         assert!(Store::open(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn r41_f5_wal_retry_is_bounded() {
+        use std::time::{Duration, Instant};
+        let db = std::env::temp_dir().join(format!("store-wal-bound-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let holder = Connection::open(&db).expect("holder open");
+        holder
+            .execute_batch(
+                "CREATE TABLE held (x INTEGER); BEGIN IMMEDIATE; INSERT INTO held VALUES (1);",
+            )
+            .expect("hold write transaction");
+        let started = Instant::now();
+        let result = Store::open(&db);
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "a held write transaction must time out");
+        assert!(
+            elapsed < WAL_RETRY_DEADLINE + Duration::from_secs(7),
+            "Store::open took {elapsed:?}, beyond the bounded retry"
+        );
+        let _ = holder.execute_batch("ROLLBACK;");
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

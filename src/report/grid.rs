@@ -1788,4 +1788,34 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    #[test]
+    fn r41_f3_portal_is_the_sql_board() {
+        let (base, runs, out) = fixture("r41portal");
+        career(&runs, "one", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        assert!(out.join("index.html").exists());
+        assert!(out.join("results.html").exists());
+        assert!(out.join("grid.json").exists());
+        assert!(!out.join("runs").exists());
+        assert!(!out.join("results.json").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn r41_f3_old_sql_row_renders() {
+        let (base, runs, out) = fixture("r41old");
+        career(&runs, "old", "old-model", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            let path = runs.join(format!("campaign_old_p{phase}/campaign.json"));
+            let mut v: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            v["rules_version"] = serde_json::json!("2026-10-19.41");
+            std::fs::write(&path, v.to_string()).unwrap();
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(html.contains("old-model"), "{html}");
+        assert!(html.contains("older rule sets"), "{html}");
+        let _ = fs::remove_dir_all(&base);
+    }
 }
