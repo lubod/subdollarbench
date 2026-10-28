@@ -82,10 +82,22 @@ impl App {
         self.engine_error = Some(err.into());
     }
     pub fn set_campaigns(&mut self, campaigns: Vec<Value>) {
+        let previous = self.selected_id().map(str::to_string);
         self.campaigns = campaigns;
-        if self.selected >= self.campaigns.len() {
+        if let Some(id) = previous {
+            if let Some(pos) = self
+                .campaigns
+                .iter()
+                .position(|c| c["id"].as_str() == Some(&id))
+            {
+                self.selected = pos;
+                return;
+            }
             self.selected = self.campaigns.len().saturating_sub(1);
+            self.clear_cell_state();
+            return;
         }
+        self.selected = self.selected.min(self.campaigns.len().saturating_sub(1));
     }
     pub fn set_tickets(&mut self, tickets: Vec<Value>) {
         self.tickets = tickets;

@@ -215,3 +215,31 @@ fn r42_f2_selection_resets_log_and_tickets() {
     assert!(path.contains("/campaign_b/log"), "{path}");
     assert!(path.contains("tail=400"), "{path}");
 }
+
+#[test]
+fn r42_f2_selection_survives_poll_reorder() {
+    let mut a = App::new();
+    a.set_campaigns(vec![
+        campaign("campaign_a", "running", "a-model", 1.0, 0.1, 1),
+        campaign("campaign_b", "running", "b-model", 2.0, 0.2, 2),
+    ]);
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(a.selected_id(), Some("campaign_b"));
+    a.apply_log_page(9, vec![serde_json::json!({"kind":"verdict","text":"keep"})]);
+    a.set_campaigns(vec![
+        campaign("campaign_b", "running", "b-model", 2.0, 0.2, 2),
+        campaign("campaign_a", "running", "a-model", 1.0, 0.1, 1),
+    ]);
+    assert_eq!(a.selected_id(), Some("campaign_b"));
+    assert_eq!(a.log_len(), 1);
+    a.set_campaigns(vec![campaign(
+        "campaign_a",
+        "running",
+        "a-model",
+        1.0,
+        0.1,
+        1,
+    )]);
+    assert_eq!(a.selected_id(), Some("campaign_a"));
+    assert_eq!(a.log_len(), 0);
+}
