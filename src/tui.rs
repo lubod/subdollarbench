@@ -179,6 +179,7 @@ impl App {
             KeyCode::Up => {
                 if self.view == View::Cells && self.selected > 0 {
                     self.selected -= 1;
+                    self.clear_cell_state();
                 } else if self.view == View::Tickets && self.selected_ticket > 0 {
                     self.selected_ticket -= 1;
                 }
@@ -186,6 +187,7 @@ impl App {
             KeyCode::Down => {
                 if self.view == View::Cells && self.selected + 1 < self.campaigns.len() {
                     self.selected += 1;
+                    self.clear_cell_state();
                 } else if self.view == View::Tickets
                     && self.selected_ticket + 1 < self.tickets.len()
                 {

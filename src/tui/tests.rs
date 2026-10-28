@@ -194,3 +194,24 @@ fn r42_f1_ctrl_c_quits() {
     assert!(a.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(!a.handle_key(KeyCode::Char('c'), KeyModifiers::NONE));
 }
+
+#[test]
+fn r42_f2_selection_resets_log_and_tickets() {
+    let mut a = App::new();
+    a.set_campaigns(vec![
+        campaign("campaign_a", "running", "a-model", 1.0, 0.1, 1),
+        campaign("campaign_b", "running", "b-model", 2.0, 0.2, 2),
+    ]);
+    a.apply_log_page(40, vec![serde_json::json!({"kind":"verdict","text":"old"})]);
+    a.set_tickets(vec![
+        serde_json::json!({"id":0,"title":"old","status":"pass"}),
+    ]);
+    a.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(a.log_len(), 0);
+    assert_eq!(a.log_offset(), 0);
+    assert_eq!(a.tickets_len(), 0);
+    let path = a.log_request_path(0).unwrap();
+    assert!(path.contains("/campaign_b/log"), "{path}");
+    assert!(path.contains("tail=400"), "{path}");
+}
