@@ -130,8 +130,12 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        performance and latency"; publish `.42` first): round 45 (draft),
        rules `.43`, a new bar and a new grid. Round 46 shows it on the
        board.
-    6. **After publishing:** round 41 (CLI and API, plus R38-1), 42
-       (`tui`), 43 (deletion, then a bar), 39 (browser GUI).
+    6. **Opened during the grid** (operator, 2026-10-28: "work on next
+       rounds ... without waiting"; the fast gate may run next to a
+       cell, AGENTS.md): 39 (GUI) and 41 (CLI and API, plus R38-1)
+       merge in career gaps; 42 (`tui`), 43 (deletion) and 45 (perf
+       score) are built on their branches and merge after publishing,
+       in that order, with one bar for all three.
   - **Round 40: back to draft until after the grid** (round 44 D3). It
     doesn't block calibration: `sql-cell.sh` passes the official values, and the
     reviewer checks the clean tree and the bar by hand before each cell.

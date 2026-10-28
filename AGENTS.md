@@ -89,6 +89,8 @@ therefore live in the repo, and a short phrase is enough:
 | `blockers` | Implementer | Merge master into `roundNN`, read the round's **Review**, fix every blocker, gate, and set `ready` again. |
 | `review` | Reviewer | Review the round whose status is `ready`. |
 | `merge` | Reviewer | Merge the reviewed round, record it, and draft or open the next one. |
+| `gap` | Reviewer | Hold the grid at the next career boundary (the driver's pause file), and say when no cell runs. |
+| `resume` | Reviewer | Release the hold; the grid goes on. |
 
 Anything round-specific (a choice to make, something not to do) goes in
 the round file, never only in chat.
@@ -114,8 +116,18 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
     operator go-ahead.
   - The services (`subdollarbench-engine`, `subdollarbench-gui`) are
     restarted only by the reviewer, on request.
-- **While a cell runs:** don't touch the main checkout's working tree,
-  `target/release` or the services. Work in a worktree.
+- **While a cell runs** (operator, 2026-10-28):
+  - Don't touch `target/release` or the services, and change nothing in
+    the main checkout but docs. Code work happens in a worktree.
+  - Docs-only commits to master (round files, the roadmap, this file)
+    are fine: docs enter neither the release build nor the graded key
+    (the one `include_str!` of a doc is in a test). The reviewer checks
+    the key after each one.
+  - Tests: unit tests and `scripts/gate.sh --fast` may run, under
+    `nice -n 19`. The full gate, the live proofs, the flake bar and
+    sandbox image builds wait for a gap (`gap`, under "Operator
+    shortcuts") or the end of the grid. When a round's next step needs
+    a gap, the implementer says so in its notes and stops.
 - **Tests:**
   - Run them niced: `nice -n 10 cargo test`.
   - Docker-heavy tests can flake in parallel. Rerun a failure alone
