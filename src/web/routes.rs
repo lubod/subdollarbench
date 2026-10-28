@@ -5,15 +5,14 @@
 
 use super::portal_proxy::{serve_portal, serve_portal_index};
 use super::server::{
-    balance_check_handler, clear_queue, compare_runs, csrf_guard, delete_run, enqueue_run,
-    extend_parent_run, get_active_console, get_campaign_detail, get_campaign_log, get_campaigns,
-    get_env, get_integrity, get_leaderboard, get_models, get_prompt, get_queue, get_run_detail,
-    get_run_file, get_run_files, get_run_log, get_run_review, get_runs, get_sandbox_omp_status,
-    get_sandbox_opencode_status, get_status, login, logout, me, pause_queue_handler,
-    rebuild_portal, remove_queued_run, resume_queue_handler, save_prompt, serve_index,
-    serve_routes_js, serve_shared_js, set_campaign_poison, set_campaign_portal_visibility,
-    set_run_poison, set_run_portal_visibility, start_campaign, start_run, stop_run, stream_logs,
-    update_sandbox_omp, AppState,
+    balance_check_handler, clear_queue, csrf_guard, delete_run, get_active_console,
+    get_campaign_detail, get_campaign_log, get_campaigns, get_env, get_integrity, get_models,
+    get_prompt, get_queue, get_run_detail, get_run_file, get_run_files, get_run_log, get_runs,
+    get_sandbox_omp_status, get_sandbox_opencode_status, get_status, login, logout, me,
+    pause_queue_handler, rebuild_portal, remove_queued_run, resume_queue_handler, save_prompt,
+    serve_index, serve_routes_js, serve_shared_js, set_campaign_poison,
+    set_campaign_portal_visibility, set_run_poison, set_run_portal_visibility, start_campaign,
+    stop_run, stream_logs, update_sandbox_omp, AppState,
 };
 use axum::{
     response::Redirect,
@@ -27,19 +26,13 @@ pub fn build_app(state: AppState) -> Router {
         .route("/", get(serve_index))
         .route("/api/models", get(get_models))
         .route("/api/prompt/:task", get(get_prompt).post(save_prompt))
-        .route("/api/leaderboard", get(get_leaderboard))
         .route("/api/status", get(get_status))
-        .route("/api/run", post(start_run))
         .route("/api/run/stop", post(stop_run))
-        .route(
-            "/api/queue",
-            get(get_queue).post(enqueue_run).delete(clear_queue),
-        )
+        .route("/api/queue", get(get_queue).delete(clear_queue))
         .route("/api/queue/pause", post(pause_queue_handler))
         .route("/api/queue/resume", post(resume_queue_handler))
         .route("/api/balance/check", get(balance_check_handler))
         .route("/api/queue/:id", delete(remove_queued_run))
-        .route("/api/compare", get(compare_runs))
         .route("/api/integrity", get(get_integrity))
         .route("/api/stream", get(stream_logs))
         .route("/api/console", get(get_active_console))
@@ -64,8 +57,6 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
-        .route("/api/runs/:id/extend", post(extend_parent_run))
-        .route("/api/runs/:id/review", get(get_run_review))
         .route("/api/runs/:id", delete(delete_run))
         .route("/portal/*path", get(serve_portal))
         .route("/static/shared.js", get(serve_shared_js))
@@ -74,6 +65,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sandbox/opencode", get(get_sandbox_opencode_status))
         .route("/api/sandbox/omp/update", post(update_sandbox_omp))
         .route("/api/env", get(get_env))
+        .method_not_allowed_fallback(|| async { axum::http::StatusCode::NOT_FOUND })
         .route_layer(axum::middleware::from_fn(csrf_guard))
         .with_state(state)
 }

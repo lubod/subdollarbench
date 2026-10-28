@@ -25,8 +25,8 @@ pub struct Store {
 
 /// The WAL switch can return SQLITE_BUSY without invoking the busy handler
 /// while the journal mode changes. Retry it briefly before failing.
-const WAL_RETRIES: u32 = 50;
 const WAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const WAL_RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
     matches!(
@@ -40,16 +40,30 @@ fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
 }
 
 fn enable_wal(conn: &Connection) -> Result<()> {
-    for attempt in 0..WAL_RETRIES {
-        match conn.pragma_update(None, "journal_mode", "WAL") {
+    enable_wal_with(
+        || conn.pragma_update(None, "journal_mode", "WAL"),
+        WAL_RETRY_DEADLINE,
+    )
+}
+
+fn enable_wal_with(
+    mut attempt: impl FnMut() -> rusqlite::Result<()>,
+    limit: std::time::Duration,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match attempt() {
             Ok(()) => return Ok(()),
-            Err(e) if is_sqlite_busy(&e) && attempt + 1 < WAL_RETRIES => {
-                std::thread::sleep(WAL_RETRY_DELAY);
+            Err(e) if is_sqlite_busy(&e) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(e.into());
+                }
+                std::thread::sleep(WAL_RETRY_DELAY.min(deadline - now));
             }
             Err(e) => return Err(e.into()),
         }
     }
-    unreachable!("the last WAL attempt returns or sleeps only while attempts remain")
 }
 
 fn queue_status_str(status: &QueueStatus) -> &'static str {
@@ -965,6 +979,48 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create directory");
         assert!(Store::open(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn r41_f5_wal_retry_is_bounded() {
+        use std::time::{Duration, Instant};
+        fn busy() -> rusqlite::Result<()> {
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5),
+                Some("busy".to_string()),
+            ))
+        }
+        let started = Instant::now();
+        let mut calls = 0u32;
+        let err = enable_wal_with(
+            || {
+                calls += 1;
+                busy()
+            },
+            Duration::from_millis(300),
+        )
+        .expect_err("always-busy must fail");
+        assert!(err.to_string().contains("busy"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "deadline not bounded"
+        );
+        assert!((2..=8).contains(&calls), "unexpected retry count {calls}");
+
+        let mut calls = 0u32;
+        enable_wal_with(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    busy()
+                } else {
+                    Ok(())
+                }
+            },
+            Duration::from_secs(2),
+        )
+        .expect("third-try success");
+        assert_eq!(calls, 3);
     }
 
     #[test]

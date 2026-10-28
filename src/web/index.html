@@ -1070,7 +1070,7 @@
         <p>Autonomous Under-$1 Systems Benchmark for Budget LLMs (Docker + OMP)</p>
       </div>
       <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-        <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">Leaderboard ↗</a>
+        <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">Results ↗</a>
         <a id="liveHeaderBtn" href="#live" style="display:none;padding:6px 12px;font-size:.78rem;font-weight:600;text-decoration:none;">▶ Live</a>
         <span id="healthDot" class="status-dot" style="background: var(--success); width: 12px; height: 12px;" title="health"></span>
         <span id="healthText" class="hint" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Ready</span>
@@ -1134,7 +1134,7 @@
           </label>
           <span class="hint">Runs bill the server <code>.env OPENROUTER_API_KEY</code> — no browser key needed.</span>
           <label for="uiToken" style="margin-top:8px;">
-            <span>UI Token <span class="hint">(once per browser — unlocks Start/Queue/＋/Extend)</span></span>
+            <span>UI Token <span class="hint">(once per browser — unlocks campaign starts, queueing and moderation)</span></span>
           </label>
           <input type="password" id="uiToken" placeholder="from .env SDB_UI_TOKEN" autocomplete="off" />
           <span class="hint">Stored in your browser. Sent as <code>Authorization: Bearer</code> on every mutating call.</span>
@@ -1258,138 +1258,6 @@
           <span class="hint">Ranks never mix harnesses: compare within one harness.</span>
         </div>
 
-        <!-- Legacy (not campaigns): round-11 finding 6 — everything below
-             predates the campaign launcher above. -->
-        <details class="form-group" id="legacySection">
-          <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;">Legacy (not campaigns) <span class="hint">(single run, prompt editor, review judge, run queue)</span></summary>
-          <div style="display:flex;flex-direction:column;gap:16px;margin-top:10px;">
-        <!-- Review Judge Model -->
-        <div class="form-group">
-          <label for="reviewModel">Review Judge Model (end-of-run code review)</label>
-          <input type="text" id="reviewModel" value="openrouter/meta/muse-spark-1.3-contributor" />
-          <span class="hint">Clear to fall back to the default judge. Judging uses the OpenRouter key.</span>
-        </div>
-
-        <details class="form-group" id="singleRunSection">
-          <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;">Advanced — single run <span class="hint">(not a campaign; does not appear on the board)</span></summary>
-          <div style="display:flex;flex-direction:column;gap:16px;margin-top:10px;">
-        <!-- Task Selection -->
-        <div class="form-group">
-          <label for="task">Benchmark Task</label>
-          <select id="task" onchange="onTaskChange(this.value)">
-            <option value="sql">SQL Database (sdb-sql ladder)</option>
-          </select>
-        </div>
-
-        <details class="form-group" id="promptSection" open>
-          <summary style="font-weight: 600; cursor: pointer; font-size: 0.85rem;">📝 Task Spec <span class="hint">(follows this task — graded prompts, saving bumps rules)</span></summary>
-          <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px;">
-          <!-- Prompt Toolbar -->
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <span class="hint" style="font-weight: 600; color: #fff;">Task Spec:</span>
-              <select id="promptTaskSelect" onchange="onTaskChange(this.value)" style="padding: 4px 10px; font-size: 0.78rem; font-weight: 600;">
-                <option value="sql">🗄️ sql (Differential SQL Database)</option>
-              </select>
-              <span id="promptStatusIndicator" style="font-size: 0.72rem; color: var(--text-muted);"></span>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <!-- View mode toggle -->
-              <div style="display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
-                <button id="promptViewBtnPreview" class="btn-toggle active" onclick="setPromptViewMode('preview')">👁️ Formatted</button>
-                <button id="promptViewBtnEdit" class="btn-toggle" onclick="setPromptViewMode('edit')">✏️ Edit Raw</button>
-                <button id="promptViewBtnSplit" class="btn-toggle" onclick="setPromptViewMode('split')">◫ Split</button>
-              </div>
-              <button class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.76rem;" onclick="copyPromptMarkdown()">📋 Copy Markdown</button>
-              <button id="promptSaveBtn" class="btn btn-primary" style="padding: 5px 12px; font-size: 0.76rem;" onclick="savePrompt()">💾 Save Changes</button>
-            </div>
-          </div>
-
-          <!-- Formatted Preview Container -->
-          <div id="promptPreviewContainer" class="markdown-body" style="display: block;">
-            <div style="text-align: center; color: var(--text-muted); padding: 30px;">Loading prompt specification...</div>
-          </div>
-
-          <!-- Raw Editor Container -->
-          <div id="promptEditContainer" style="display: none; flex-direction: column; gap: 8px;">
-            <textarea id="promptEditor" oninput="onPromptEditorInput()" placeholder="Loading prompt specification..." style="min-height: 540px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5;"></textarea>
-          </div>
-
-          <!-- Split View Container -->
-          <div id="promptSplitContainer" style="display: none; grid-template-columns: 1fr 1fr; gap: 14px;">
-            <textarea id="promptSplitEditor" oninput="onPromptSplitInput()" placeholder="Raw Markdown..." style="min-height: 540px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; line-height: 1.5;"></textarea>
-            <div id="promptSplitPreview" class="markdown-body" style="max-height: 560px;"></div>
-          </div>
-          </div>
-        </details>
-
-        <!-- Budget, Turns, Timeout & Subruns -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-          <div class="form-group">
-            <label for="budget">Budget ($)</label>
-            <input type="number" id="budget" value="1.00" step="0.05" min="0.01" />
-          </div>
-          <div class="form-group">
-            <label for="turns">Max Turns</label>
-            <input type="number" id="turns" value="100" min="1" max="500" />
-          </div>
-          <div class="form-group">
-            <label for="timeout_min">Timeout (min)</label>
-            <input type="number" id="timeout_min" value="120" min="0" max="480" title="Backstop only (0 = off); budget caps spend" />
-          </div>
-          <div class="form-group">
-            <label for="trials" style="display: flex; justify-content: space-between; align-items: center;">
-              <span>Subruns</span>
-              <span class="badge" style="background: rgba(163, 113, 247, 0.2); color: #d2a8ff; font-size: 0.65rem;">Default: 3</span>
-            </label>
-            <input type="number" id="trials" value="9" min="1" max="30" title="Number of subruns/trials to run and average (Pass@k)" />
-          </div>
-        </div>
-        <span class="hint" style="margin-top: -4px; margin-bottom: 8px; display: block;">Runs 3 subruns (3× cost &amp; runtime) by default to compute Pass@k and average throughput. Set to 1 for quick single-shot runs.</span>
-
-        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
-          <input type="checkbox" id="evalOnly" style="width: auto;" />
-          <label for="evalOnly" style="font-weight: normal; cursor: pointer;">Eval only (skip OMP agent)</label>
-        </div>
-        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
-          <input type="checkbox" id="stopOnPass" checked style="width: auto;" />
-          <label for="stopOnPass" style="font-weight: normal; cursor: pointer;" title="Capability mode: evaluate up to 4 tries, stop immediately on first 100% pass; a 0/4 with every trial a harness fault auto-extends within the wave envelope, anything else is manual.">Sequential Capability (stop on pass, cap 4)</label>
-        </div>
-        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
-          <input type="checkbox" id="feedbackRepair" checked style="width: auto;" />
-          <label for="feedbackRepair" style="font-weight: normal; cursor: pointer;" title="Interactive feedback repair: if verification fails (&lt; 100%), supply failure diagnostics and container logs back to agent to fix in the same workspace.">Interactive Feedback Repair</label>
-          <label for="feedbackRounds" style="font-weight: normal;">rounds</label>
-          <input type="number" id="feedbackRounds" value="2" min="1" max="5" style="width: 56px;" />
-        </div>
-        <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
-          <input type="checkbox" id="extendUnstable" style="width: auto;" />
-          <label for="extendUnstable" style="font-weight: normal; cursor: pointer;" title="While the merged result is unstable, keep adding trials in batches of 3 (up to the cap) and re-merge">Auto-extend if unstable (+3 trials)</label>
-          <label for="maxTrials" style="font-weight: normal;">cap</label>
-          <input type="number" id="maxTrials" value="9" min="2" max="30" style="width: 64px;" />
-        </div>
-
-        <div style="display: flex; gap: 8px;">
-          <button class="btn" id="startBtn" onclick="startBenchmark()" style="flex: 1;">
-            <span>🚀</span> Start Benchmark Run
-          </button>
-          <button class="btn btn-danger" id="stopBtn" onclick="stopRun()" style="display: none; padding: 10px 16px; font-weight: 600;">
-            <span>🛑</span> Stop Run
-          </button>
-          <button class="btn" id="queueBtn" onclick="enqueueRun()" title="Add current settings to the run queue (starts when the engine is free)">
-            <span>＋</span> Queue
-          </button>
-        </div>
-          </div>
-        </details>
-        <div style="margin-top: 10px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-            <label style="font-weight: 600;">Run Queue <span id="queueCount" class="badge">0</span></label>
-            <a href="#" onclick="clearFinishedQueue(); return false;" style="font-size: 0.75rem; color: var(--primary);" title="Drop finished queue entries">clear finished</a>
-          </div>
-          <div id="queueList"><div class="hint">Empty — queue runs to run them hands-free.</div></div>
-        </div>
-          </div>
-        </details>
 
               </div>
 
@@ -3570,7 +3438,7 @@
       if (!m) { card.style.display = 'none'; bar.innerHTML = ''; return; }
       const modelShort = String(m.model || '').split('/').pop();
       const review = (m.review_model && String(m.review_model).split('/').pop()) || 'default';
-      bar.innerHTML = `RUNNING: <b>${escapeHtml(modelShort)}</b> \u00b7 ${escapeHtml(m.task || '')} \u00b7 ${escapeHtml(m.effort || '')} \u00b7 ${(m.subrun ?? '?')}/${(m.total_subruns ?? '?')} \u00b7 $${Number(m.budget_usd ?? 0).toFixed(2)} \u00b7 ${m.max_turns ?? '?'} turns \u00b7 ${m.timeout_min ?? '?'} min \u00b7 ${m.trials ?? '?'} trials${m.eval_only ? ' \u00b7 eval-only' : ''}${m.extend_if_unstable ? ` \u00b7 extend\u2192${m.max_trials ?? '?'}` : ''} \u00b7 judge ${escapeHtml(review)}`;
+      bar.innerHTML = `RUNNING: <b>${escapeHtml(modelShort)}</b> \u00b7 ${escapeHtml(m.task || '')} \u00b7 ${escapeHtml(m.effort || '')} \u00b7 ${(m.subrun ?? '?')}/${(m.total_subruns ?? '?')} \u00b7 $${Number(m.budget_usd ?? 0).toFixed(2)} \u00b7 ${m.max_turns ?? '?'} turns \u00b7 ${m.timeout_min ?? '?'} min \u00b7 ${m.trials ?? '?'} trials${m.eval_only ? ' \u00b7 eval-only' : ''}\u00b7 judge ${escapeHtml(review)}`;
       card.style.display = 'block';
     }
 
@@ -3813,34 +3681,6 @@
       return (bytes / 1048576).toFixed(2) + ' MB';
     }
 
-    async function extendRun(runId) {
-      if (!confirm(`Run 3 more trials for ${runId} and re-merge? This spends extra budget.`)) return;
-      try {
-        const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/extend`, {
-          method: 'POST',
-          headers: authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ trials: 3, queue: true })
-        });
-        const text = await res.text();
-        let detail = text;
-        try {
-          const j = JSON.parse(text);
-          if (j.queued) detail = `queued as ${j.queued}` + (j.position ? ` (position ${j.position})` : '');
-          else if (j.started) detail = `started now`;
-        } catch (e) { /* plain-text fallback (immediate path legacy) */ }
-        if (res.ok) {
-          appendLog(`[QUEUE] Extend ${runId}: ${detail}.`);
-          refreshQueue();
-          switchTab('console');
-        } else if (res.status === 409) {
-          appendLog(`[QUEUE] Extension refused (busy, not queued): ${text}`);
-        } else {
-          appendLog(`[QUEUE] Extension refused: ${text}`);
-        }
-      } catch (e) {
-        alert(`Error starting extension: ${e.message}`);
-      }
-    }
 
     // Entry from tables/cells: fresh trail. Trial drill-down uses
     // inspectTrial (push), crumbs/back navigate without pushing.
@@ -3863,7 +3703,6 @@
         if (!res.ok) throw new Error('Run manifest not found');
         const m = await res.json();
         currentInspectRun = m;
-        loadInspectReview(runId);
         loadInspectSubruns(runId);
 
         // Populate Header & Badges
@@ -4303,7 +4142,7 @@ function copyRunId() {
         const los = kids.map(k => k.pass_rate || 0);
         const spread = Math.max(...los) - Math.min(...los);
         const blocks = kids.map(k => `<span title="${escapeHtml(k.run_id)}: ${Math.round(k.pass_rate || 0)}%" style="display:inline-block;width:14px;height:10px;border-radius:2px;background:${(k.pass_rate || 0) >= 100 ? 'var(--success)' : (k.pass_rate || 0) > 0 ? 'var(--warning)' : 'var(--danger)'};"></span>`).join('');
-        title.innerHTML = `📦 ${kids.length} subruns (best: ${escapeHtml(best.run_id.slice(-8))}) <span style="font-weight:400;">${blocks}</span><br><span style="font-weight:400;color:var(--text-muted);">pass spread ${Math.round(Math.min(...los))}–${Math.round(Math.max(...los))}% · cost $${Math.min(...costs).toFixed(4)}–$${Math.max(...costs).toFixed(4)}</span> <button class="btn-secondary" id="modalCompareBtn" style="padding:1px 9px;font-size:0.7rem;margin-left:8px;" onclick="compareCheckedTrials()" disabled>Compare selected</button>`;
+        title.innerHTML = `📦 ${kids.length} subruns (best: ${escapeHtml(best.run_id.slice(-8))}) <span style="font-weight:400;">${blocks}</span><br><span style="font-weight:400;color:var(--text-muted);">pass spread ${Math.round(Math.min(...los))}–${Math.round(Math.max(...los))}% · cost $${Math.min(...costs).toFixed(4)}–$${Math.max(...costs).toFixed(4)}</span>`;
         // Trials × stages matrix: rows = trials, cols = stages, click a red
         // cell to open that trial filtered to the failing stage.
         const stageNames = [];
@@ -4361,58 +4200,6 @@ function copyRunId() {
         if (n !== 2 && wasActive) switchModalTab('code');
       }
     }
-    async function compareCheckedTrials() {
-      const sel = [...document.querySelectorAll('#modalSubrunsBody .cmp-check:checked')].map(c => c.dataset.rid);
-      if (sel.length !== 2) return;
-      switchModalTab('compare');
-      const box = document.getElementById('modalCompareBody');
-      if (box) box.innerHTML = '<span style="color:var(--text-muted);">Loading comparison...</span>';
-      try {
-        const res = await fetch(`/api/compare?run_a=${encodeURIComponent(sel[0])}&run_b=${encodeURIComponent(sel[1])}`);
-        if (!res.ok) throw new Error(await res.text());
-        const c = await res.json();
-        const d = c.metric_diff || {};
-        const fmtD = (v, u) => `${v > 0 ? '+' : ''}${Number(v).toFixed(4)}${u || ''}`;
-        let html = `<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:0.76rem;margin-bottom:10px;">
-          <span class="badge badge-info">${escapeHtml(sel[0].slice(-14))} → ${escapeHtml(sel[1].slice(-14))}</span>
-          <span>pass: <b>${fmtD((c.run_b?.pass_rate ?? 0) - (c.run_a?.pass_rate ?? 0), '%')}</b></span>
-          <span>cost: <b>${fmtD(d.effective_cost_delta ?? d.cost_delta ?? 0, '$')}</b></span>
-          <span>tokens: <b>${(d.tokens_delta ?? 0) > 0 ? '+' : ''}${d.tokens_delta ?? 0}</b></span>
-          <span>duration: <b>${fmtD(d.duration_delta ?? 0, 's')}</b></span>
-        </div>`;
-        for (const f of (c.file_diffs || [])) {
-          if (f.status === 'identical') continue;
-          html += `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:0.78rem;"><b>${escapeHtml(f.path)}</b> <span style="color:var(--text-muted);">${escapeHtml(f.status)} (${f.lines_a}→${f.lines_b} lines)</span></summary><pre style="background:#0b0f18;border:1px solid var(--border);border-radius:6px;padding:8px;overflow:auto;font-size:0.72rem;max-height:320px;">${escapeHtml(f.diff || '(binary/unreadable)')}</pre></details>`;
-        }
-        if (!(c.file_diffs || []).some(f => f.status !== 'identical')) html += '<span style="color:var(--text-muted);">Workspaces identical; only metrics differ.</span>';
-        if (box) box.innerHTML = html;
-      } catch (e) {
-        if (box) box.innerHTML = `<span style="color:var(--danger);">Compare failed: ${escapeHtml(e.message)}</span>`;
-      }
-    }
-    async function loadInspectReview(runId) {
-      const box = document.getElementById('modalInspectReviewBody');
-      if (!box) return;
-      box.innerHTML = '<span style="color: var(--text-muted);">Loading review...</span>';
-      try {
-        const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/review`);
-        if (!res.ok) {
-          box.innerHTML = '<span style="color: var(--text-muted);">No review recorded for this run.</span>';
-          return;
-        }
-        const r = await res.json();
-        const sec = (title, items, color) => {
-          const lis = (items || []).map(t => `<li style="margin: 4px 0;">${escapeHtml(t)}</li>`).join('');
-          return `<div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;"><h4 style="font-size: 0.82rem; color: ${color}; margin: 0 0 6px;">${title}</h4><ul style="margin: 0; padding-left: 1.2rem; font-size: 0.8rem;">${lis}</ul></div>`;
-        };
-        box.innerHTML = `<div style="display: flex; flex-direction: column; gap: 12px;">`
-          + sec('Strengths', r.good, '#3fb950')
-          + sec('Weaknesses', r.bad, '#f85149')
-          + `<div style="background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 0.82rem;"><b>Conclusion:</b> ${escapeHtml(r.conclusion || '—')}</div></div>`;
-      } catch (e) {
-        box.innerHTML = '<span style="color: var(--text-muted);">Review unavailable.</span>';
-      }
-    }
 
     function copyInspectLog() {
       if (!currentInspectLogRaw) return;
@@ -4456,7 +4243,6 @@ function copyRunId() {
         if (res.ok) {
           appendLog('[STOP] Benchmark cancellation requested by user.');
           stopElapsedTimer();
-          resetStatus();
           checkActiveRun();
         } else {
           const err = await res.text();
@@ -4540,50 +4326,7 @@ function copyRunId() {
       }
     }
 
-    function buildRunPayload() {
-      const stopOnPass = document.getElementById('stopOnPass') ? document.getElementById('stopOnPass').checked : false;
-      const feedbackRepair = document.getElementById('feedbackRepair') ? document.getElementById('feedbackRepair').checked : false;
-      const feedbackRounds = feedbackRepair ? (parseInt(document.getElementById('feedbackRounds').value, 10) || 2) : 0;
-      return {
-        model: document.getElementById('model').value.trim(),
-        task: document.getElementById('task').value,
-        effort: document.getElementById('effortSelect').value,
-        harness: document.getElementById('harnessSelect').value || 'omp',
-        api_key: null, // server .env key bills the run
-        budget_usd: parseFloat(document.getElementById('budget').value) || 1.00,
-        max_turns: parseInt(document.getElementById('turns').value, 10) || 100,
-        timeout_min: parseInt(document.getElementById('timeout_min').value, 10) || 120,
-        trials: parseInt(document.getElementById('trials').value, 10) || (stopOnPass ? 3 : 9),
-        eval_only: document.getElementById('evalOnly').checked,
-        stop_on_pass: stopOnPass,
-        protocol: stopOnPass ? 'sequential_cap' : null,
-        feedback_rounds: feedbackRounds,
-        extend_if_unstable: document.getElementById('extendUnstable').checked,
-        max_trials: parseInt(document.getElementById('maxTrials').value, 10) || (stopOnPass ? 5 : 9),
-        review_model: document.getElementById("reviewModel").value.trim() || null
-      };
-    }
 
-    async function enqueueRun() {
-      const payload = buildRunPayload();
-      try {
-        const res = await fetch('/api/queue', {
-          method: 'POST',
-          headers: authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) {
-          appendLog(`[QUEUE] Failed to queue run: ${await res.text()}`);
-          return;
-        }
-        const data = await res.json();
-        const where = data.started ? 'started now' : ('position ' + (data.position ?? '?'));
-        appendLog(`[QUEUE] Queued ${data.id} (${payload.model} / ${payload.task} / ${payload.trials}x${payload.stop_on_pass ? ` → screening ≤${Math.min(payload.trials ?? 4, 4)}` : ''}) — ${where}.`);
-        refreshQueue();
-      } catch (e) {
-        alert(`Error queueing run: ${e.message}`);
-      }
-    }
 
     let authed = false;
     async function checkAuth() {
@@ -4648,11 +4391,6 @@ function copyRunId() {
         list.innerHTML = items.map(q => {
           const pill = q.status === 'Running' ? 'badge-pass' : q.status === 'Pending' ? 'badge-info' : 'badge';
           const rm = q.status === 'Pending' ? ` <a href="#" onclick="removeQueued('${q.id}'); return false;" title="Remove from queue">✕</a>` : '';
-          if (q.kind && q.kind.Extend) {
-            const e = q.kind.Extend;
-            const short = (e.parent_run_id || '').slice(-14);
-            return `<div class="queue-row"><span class="badge">${q.id}</span> <span class="badge badge-effort">extend</span> ${escapeHtml(short)} · +${e.trials ?? '?'} trial(s) <span class="${pill}" title="${escapeHtml(q.note || q.status)}">${q.status}</span>${rm}</div>`;
-          }
           const r = (q.kind && q.kind.Run) || q.request || {};
           const modelShort = (r.model || '').split('/').pop();
           const hh = r.harness || 'omp';
@@ -4672,67 +4410,8 @@ function copyRunId() {
       refreshQueue();
     }
 
-    async function startBenchmark() {
-      const startBtn = document.getElementById('startBtn');
-      if (startBtn) startBtn.disabled = true;
-      try {
-        const res = await fetch('/api/run', {
-          method: 'POST',
-          headers: authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify(buildRunPayload())
-        });
-
-        if (!res.ok) {
-          const errText = await res.text();
-          if (res.status === 409) {
-            appendLog(`[BUSY] Engine is running \u2014 queueing instead: ${errText}`);
-            await enqueueRun();
-            if (startBtn) startBtn.disabled = false;
-            checkActiveRun();
-            return;
-          }
-          appendLog(`[ERROR] Failed to start run: ${errText}`);
-          if (activeEventSource) {
-            try { activeEventSource.close(); } catch(e) {}
-            activeEventSource = null;
-          }
-          resetStatus();
-          return;
-        }
-
-        location.hash = 'board';
-        refreshBoard();
-        appendLog(`[INIT] Starting benchmark for ${model} (Effort: ${effort}, Subruns: ${trials}) on task '${task}'...`);
-        liveTelemetry.turns = 0;
-        liveTelemetry.maxTurns = turns;
-        liveTelemetry.spent = 0.0;
-        liveTelemetry.tokens = 0;
-        liveTelemetry.subrun = 1;
-        liveTelemetry.totalSubruns = trials;
-        liveTelemetry.durationSecs = null;
-        startElapsedTimer(Date.now());
-        if (startBtn) startBtn.disabled = false;
-        checkActiveRun();
-
-      } catch (e) {
-        appendLog(`[ERROR] Connection failure: ${e.message}`);
-        if (activeEventSource) {
-          try { activeEventSource.close(); } catch(e) {}
-          activeEventSource = null;
-        }
-        resetStatus();
-      }
-    }
 
 
-    function resetStatus() {
-      document.getElementById('startBtn').disabled = false;
-      const stopBtn = document.getElementById('stopBtn');
-      if (stopBtn) stopBtn.style.display = 'none';
-      renderRunningSetup(null);
-      document.getElementById('statusDot').className = 'status-dot';
-      document.getElementById('statusText').textContent = 'Ready';
-    }
 
     // Initial load & persistent status sync
     const savedModel = localStorage.getItem('selected_benchmark_model');
