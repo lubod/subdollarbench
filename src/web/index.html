@@ -1042,7 +1042,25 @@
     }
     .diff-line-add { background: rgba(63, 185, 80, 0.15); color: #7ee787; display: block; }
     .diff-line-del { background: rgba(248, 81, 73, 0.15); color: #ffa198; display: block; }
-  </style>
+  
+    /* Round 39: Run is a page and Live is a full-height overlay. */
+    #liveHeaderBtn { color: var(--primary); border: 1px solid rgba(88,166,255,.35); border-radius: 4px; background: rgba(88,166,255,.12); }
+    #liveHeaderBtn.stalled { color: var(--danger); border-color: rgba(218,54,51,.45); background: rgba(218,54,51,.10); }
+    #liveHeaderBtn.off { display: none !important; }
+    #liveOverlay { position: fixed; inset: 0; z-index: 1000; background: var(--bg); overflow: auto; padding: 18px; }
+    .live-overlay-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; max-width: 1180px; margin: 0 auto 12px; }
+    .live-overlay-head h2 { margin: 0; font-size: 1rem; }
+    #liveBody { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+    @media (max-width: 700px) {
+      #liveOverlay { padding: 8px; }
+      #liveBody .liveCard, #liveBody > div { max-width: 100%; }
+    }
+    @media (max-width: 390px) {
+      body, #liveOverlay { overflow-x: hidden; }
+      #liveOverlay { padding: 6px; }
+      #liveBody pre, #liveBody code { max-width: 100%; overflow-wrap: anywhere; }
+    }
+</style>
 </head>
 <body>
   <div class="container">
@@ -1053,6 +1071,7 @@
       </div>
       <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
         <a class="btn-secondary" href="/portal/" target="_blank" rel="noopener" style="padding: 6px 12px; font-size: 0.78rem; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; color: var(--primary);">Results ↗</a>
+        <a id="liveHeaderBtn" href="#live" style="display:none;padding:6px 12px;font-size:.78rem;font-weight:600;text-decoration:none;">▶ Live</a>
         <span id="healthDot" class="status-dot" style="background: var(--success); width: 12px; height: 12px;" title="health"></span>
         <span id="healthText" class="hint" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Ready</span>
         <!-- versions/integrity live in the health tooltip (U5); kept as
@@ -1091,8 +1110,6 @@
       <main class="card" id="appMain" style="display:none;">
         <div class="tabs" role="tablist" aria-label="views">
           <button class="tab active" role="tab" aria-selected="true" data-tab="board" onclick="switchTab('board')">Board</button>
-          <button class="tab" role="tab" aria-selected="false" data-tab="run" onclick="switchTab('run')">Run</button>
-          <button class="tab" role="tab" aria-selected="false" data-tab="live" onclick="switchTab('live')">Live</button>
           <button class="tab" role="tab" aria-selected="false" data-tab="admin" onclick="switchTab('admin')">Admin</button>
         </div>
       <div id="tab-board" style="flex-direction: column; gap: 16px;">
@@ -1101,9 +1118,6 @@
       </div>
       <div id="tab-run" style="display: none; flex-direction: column; gap: 16px;">
         <div id="runBody"><div class="hint">Select a run on the Board.</div></div>
-      </div>
-      <div id="tab-live" style="display: none; flex-direction: column; gap: 16px;">
-        <div id="liveBody"><div class="hint">Open a run to follow it live.</div></div>
       </div>
       <!-- Admin Tab Panel (launcher and housekeeping) -->
       <div id="tab-admin" style="display: none; flex-direction: column; gap: 16px;">
@@ -1253,7 +1267,16 @@
     </div>
   </div>
 
+  <div id="liveOverlay" role="dialog" aria-modal="true" aria-label="Live console" style="display:none;">
+    <div class="live-overlay-head">
+      <h2>▶ Live</h2>
+      <button id="liveClose" class="btn-secondary" style="padding:4px 10px;font-size:.78rem;" onclick="closeLive()" aria-label="Close Live">✕</button>
+    </div>
+    <div id="liveBody"></div>
+  </div>
+
   <script src="/static/shared.js"></script>
+  <script src="/static/routes.js"></script>
   <!--__SHARED_JS__-->
   <!--__RULES__-->
   <script>
@@ -1629,7 +1652,15 @@
     }
 
     // Setup panel lives outside <main> (single-column grid stacks it above).
-    const TAB_IDS = { board: 'tab-board', run: 'tab-run', live: 'tab-live', admin: 'tab-admin' };
+    const TAB_IDS = { board: 'tab-board', run: 'tab-run', admin: 'tab-admin' };
+    let currentView = 'board';
+    let lastNonLiveHash = '#board';
+    let liveOpen = false;
+    let liveReturnHash = '#board';
+    let liveOpener = null;
+    let liveFromApp = false;
+    let routeInitialized = false;
+    let boardScrollY = 0;
 
     // Pure display switch (the hash router is the only place that changes
     // the URL; tab clicks go through switchTab below).
@@ -1648,34 +1679,109 @@
       if (el) el.style.display = 'flex';
       if (name === 'board') refreshBoard();
       if (name === 'run' && currentRunDetail) renderRun();
-      if (name === 'live' && typeof renderLive === 'function') renderLive();
       if (name === 'admin' && typeof loadPrompt === 'function') loadPrompt();
     }
 
     function switchTab(name) {
-      if (name === 'run' && currentRunDetail) {
-        location.hash = 'run/' + encodeURIComponent(currentRunDetail.id);
-        return;
-      }
       if (TAB_IDS[name]) location.hash = name;
     }
 
-    function applyHash() {
-      const h = decodeURIComponent(location.hash.replace(/^#/, ''));
-      if (h === 'run' || h.startsWith('run/')) {
-        let id = h.startsWith('run/') ? h.slice(4) : '';
-        if (!id) {
-          // No id: the live cell, else the most recent (round-10 U4).
-          const cell = boardCache.find(c => c.state === 'running') || boardCache[0] || null;
-          id = cell ? cell.id : '';
-        }
-        if (id && (!currentRunDetail || currentRunDetail.id !== id)) loadRunDetail(id);
-        showTab('run');
-      } else if (TAB_IDS[h]) {
-        showTab(h);
-      } else {
-        showTab('board');
+    function updateLiveButton() {
+      const btn = document.getElementById('liveHeaderBtn');
+      if (!btn) return;
+      const b = typeof liveButton === 'function' ? liveButton(boardCache) : null;
+      if (!b) {
+        btn.style.display = 'none';
+        btn.classList.add('off');
+        return;
       }
+      btn.style.display = 'inline-flex';
+      btn.classList.remove('off');
+      btn.href = '#live/' + encodeURIComponent(b.id);
+      btn.textContent = b.text;
+      btn.classList.toggle('stalled', !!b.stalled);
+    }
+
+    function openLive(id) {
+      if (!id) return;
+      if (!liveOpen) {
+        liveOpener = document.activeElement;
+        liveReturnHash = lastNonLiveHash || '#board';
+      }
+      liveOpen = true;
+      liveRunId = id;
+      liveOffset = 0;
+      liveLines = [];
+      liveBlocks = {};
+      const overlay = document.getElementById('liveOverlay');
+      if (overlay) overlay.style.display = 'block';
+      renderLive();
+      const close = document.getElementById('liveClose');
+      if (close && typeof close.focus === 'function') close.focus();
+    }
+
+    function hideLive() {
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      liveOpen = false;
+      const overlay = document.getElementById('liveOverlay');
+      if (overlay) overlay.style.display = 'none';
+      liveRunId = null;
+    }
+
+    function closeLive() {
+      if (!liveOpen) return;
+      const target = liveReturnHash || '#board';
+      const fromApp = liveFromApp;
+      hideLive();
+      if (liveOpener && typeof liveOpener.focus === 'function') liveOpener.focus();
+      if (!location.hash.startsWith('#live')) return;
+      if (fromApp && typeof history !== 'undefined' && typeof history.back === 'function') {
+        // Closing the overlay returns to the entry that was underneath;
+        // setting location.hash here would push a second history entry.
+        history.back();
+      } else {
+        // Direct load on #live/<id>: there is no in-app entry to go back to.
+        location.replace(target);
+      }
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      if (liveOpen) closeLive();
+      else if (currentView !== 'board') location.hash = '#board';
+    });
+
+    function applyHash() {
+      const raw = location.hash || '';
+      const hadRoute = routeInitialized;
+      if (raw.startsWith('#live') && !liveOpen) liveReturnHash = lastNonLiveHash || '#board';
+      const route = typeof routeFor === 'function'
+        ? routeFor(raw, boardCache, currentView)
+        : { view: 'board', runId: null, overlay: null };
+      if (currentView === 'board' && route.view !== 'board') {
+        boardScrollY = window.scrollY || 0;
+      }
+      if (route.overlay) {
+        if (!liveOpen) liveFromApp = hadRoute;
+        showTab(route.view === 'run' || route.view === 'admin' ? route.view : 'board');
+        currentView = route.view;
+        openLive(route.overlay.id);
+      } else {
+        if (liveOpen) hideLive();
+        if (route.view === 'run' && route.runId) {
+          if (!currentRunDetail || currentRunDetail.id !== route.runId) loadRunDetail(route.runId);
+          showTab('run');
+        } else {
+          showTab(route.view === 'admin' ? 'admin' : 'board');
+        }
+        currentView = route.view === 'run' || route.view === 'admin' ? route.view : 'board';
+        lastNonLiveHash = raw || '#board';
+        if (route.view === 'board') {
+          setTimeout(() => { if (currentView === 'board') window.scrollTo(0, boardScrollY); }, 0);
+        }
+      }
+      routeInitialized = true;
+      updateLiveButton();
     }
     window.addEventListener('hashchange', applyHash);
 
@@ -1884,9 +1990,9 @@
       // A finished cell is *supposed* to be quiet: no staleness colours.
       const stale = finished ? '' : age != null && age > 300 ? 'var(--danger)' : age != null && age > 120 ? 'var(--warning)' : '';
       const stateTag = state === 'done'
-        ? `<span style="color:var(--success);font-weight:600;">finished${stop ? ' \u00b7 ' + escapeHtml(stop) : ''}</span> `
+        ? `<span style="color:var(--success);font-weight:600;">finished${stop ? ' \u00b7 ' + escapeHtml(stop) : ''}</span> <a href="#run/${encodeURIComponent(liveRunId)}" style="color:var(--primary);">open its Run \u203a</a> `
         : state === 'stalled'
-        ? `<span style="color:var(--danger);font-weight:600;">stalled${(() => { const since = latestStamp(live.last_activity_at, cell && cell.updated_at, d && d.updated_at, d && d.log_mtime); return since ? ' since ' + escapeHtml(stampOf(since)) : ''; })()}</span> `
+        ? `<span style="color:var(--danger);font-weight:600;">stalled${(() => { const since = latestStamp(live.last_activity_at, cell && cell.updated_at, d && d.updated_at, d && d.log_mtime); return since ? ' since ' + escapeHtml(stampOf(since)) : ''; })()}</span> <a href="#run/${encodeURIComponent(liveRunId)}" style="color:var(--primary);">open its Run \u203a</a> `
         : '';
       const ladder = (cell && cell.ladder) || (d && d.ladder) || [];
       const head = [model,
@@ -1933,6 +2039,8 @@
           liveLines = liveLines.concat(data.lines);
           if (liveLines.length > 1500) liveLines = liveLines.slice(-1500);
           renderLiveStream();
+          const cell = boardCache.find(c => c.id === liveRunId);
+          if (cell && cell.state !== 'running' && liveTimer) { clearInterval(liveTimer); liveTimer = null; }
         } else {
           const cell = boardCache.find(c => c.id === liveRunId);
           if (cell && cell.state !== 'running' && liveTimer) { clearInterval(liveTimer); liveTimer = null; }
@@ -1943,24 +2051,28 @@
     function renderLive() {
       const body = document.getElementById('liveBody');
       if (!body) return;
-      const running = boardCache.find(c => c.state === 'running');
-      // Order of preference (round-10 U4): the open run if it is live, the
-      // running cell, the open run, else the most recently started cell.
-      let wantId = currentRunDetail && currentRunDetail.state === 'running' ? currentRunDetail.id : null;
-      if (!wantId) wantId = running ? running.id : null;
-      if (!wantId) wantId = currentRunDetail ? currentRunDetail.id : null;
-      if (!wantId && boardCache.length) {
-        const latest = boardCache.slice().sort((a, b) =>
-          Date.parse((b.rollup || {}).started_at || 0) - Date.parse((a.rollup || {}).started_at || 0))[0];
-        wantId = latest ? latest.id : null;
-      }
-      if (wantId && wantId !== liveRunId) {
-        liveRunId = wantId;
+      // Direct render calls (the boot smoke) have no overlay route; keep
+      // the legacy fallback for that case only. The overlay always sets id.
+      if (!liveRunId) {
+        const running = boardCache.find(c => c.state === 'running');
+        liveRunId = (running && running.id)
+          || (currentRunDetail && currentRunDetail.id)
+          || (boardCache[0] && boardCache[0].id)
+          || null;
+        if (!liveRunId) return;
         liveOffset = 0;
         liveLines = [];
         liveBlocks = {};
       }
+      const liveChoices = boardCache.filter(c => c && (c.state === 'running' || c.state === 'stalled'));
+      const picker = liveChoices.length > 1
+        ? `<div class="hint" style="display:flex;align-items:center;gap:6px;">Console:
+             <select onchange="if(this.value){location.hash='live/'+encodeURIComponent(this.value);}">
+               ${liveChoices.map(c => `<option value="${escapeHtml(c.id)}" ${c.id === liveRunId ? 'selected' : ''}>${escapeHtml(shortModel((c.rollup || {}).model || c.id))} · ${escapeHtml(c.state)}</option>`).join('')}
+             </select></div>`
+        : '';
       body.innerHTML = `
+        ${picker}
         ${liveCard()}
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
           <div>${liveRunId ? '' : '<span class="hint">no run selected</span>'}</div>
@@ -1975,8 +2087,10 @@
         </div>`;
       if (liveRunId) {
         pollLive();
-        if (liveTimer) clearInterval(liveTimer);
-        liveTimer = setInterval(() => { if (location.hash.startsWith('#live')) pollLive(); }, 4000);
+        if (liveOpen) {
+          if (liveTimer) clearInterval(liveTimer);
+          liveTimer = setInterval(() => { if (liveOpen && location.hash.startsWith('#live')) pollLive(); }, 4000);
+        }
       }
     }
 
@@ -2407,6 +2521,7 @@
         boardCache = await r.json();
       } catch (e) { return; }
       renderBoard();
+      updateLiveButton();
       updatePageTitle();
       updateHealth();
       updateCampaignLauncher();
@@ -2736,7 +2851,8 @@
           </div>
           <div class="hint" style="display:flex;gap:10px;align-items:center;">
             ${prev ? `<a href="#run/${encodeURIComponent(prev.id)}" style="color:var(--primary);">\u2039 prev</a>` : '<span style="opacity:.4;">\u2039 prev</span>'}
-            <a href="#board" style="color:var(--primary);">Board</a>
+            <a href="#board" style="color:var(--primary);">\u2039 Board</a>
+            <a href="#live/${encodeURIComponent(d.id)}" data-live-console style="color:var(--primary);">Console</a>
             ${next ? `<a href="#run/${encodeURIComponent(next.id)}" style="color:var(--primary);">next \u203a</a>` : '<span style="opacity:.4;">next \u203a</span>'}
           </div>
         </div>

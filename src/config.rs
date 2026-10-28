@@ -173,6 +173,17 @@ pub enum Commands {
     /// Exit 1 on findings. Also runs warn-only on every engine boot.
     MigrateCheck,
 
+    /// Full-screen read-only TUI (htop-like) of the campaign board
+    Tui {
+        /// `ui` engine base URL (as status; SDB_SERVER default)
+        #[arg(long)]
+        server: Option<String>,
+
+        /// Poll interval in seconds (minimum 1)
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
+
     /// [operate] Live engine status: idle/running, current + last run (GET /api/status)
     Status {
         /// `ui` engine base URL. Precedence: --server flag > SDB_SERVER env > http://127.0.0.1:3000 default.

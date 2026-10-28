@@ -10,6 +10,7 @@ use subdollarbench::web;
 
 mod main_campaign;
 mod main_queue;
+mod tui;
 
 #[cfg(test)]
 fn apply_trial_suffix(run_id: &str, trial: Option<u32>) -> String {
@@ -378,6 +379,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("doctor: all green");
         }
 
+        Commands::Tui { server, interval } => tui::run(server, interval).await?,
         Commands::Status { server, json } => main_queue::handle_status(server, json).await?,
 
         Commands::Queue { server, json } => main_queue::handle_queue(server, json).await?,

@@ -10,9 +10,9 @@ use super::server::{
     get_prompt, get_queue, get_run_detail, get_run_file, get_run_files, get_run_log, get_runs,
     get_sandbox_omp_status, get_sandbox_opencode_status, get_status, login, logout, me,
     pause_queue_handler, rebuild_portal, remove_queued_run, resume_queue_handler, save_prompt,
-    serve_index, serve_shared_js, set_campaign_poison, set_campaign_portal_visibility,
-    set_run_poison, set_run_portal_visibility, start_campaign, stop_run, stream_logs,
-    update_sandbox_omp, AppState,
+    serve_index, serve_routes_js, serve_shared_js, set_campaign_poison,
+    set_campaign_portal_visibility, set_run_poison, set_run_portal_visibility, start_campaign,
+    stop_run, stream_logs, update_sandbox_omp, AppState,
 };
 use axum::{
     response::Redirect,
@@ -60,6 +60,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/runs/:id", delete(delete_run))
         .route("/portal/*path", get(serve_portal))
         .route("/static/shared.js", get(serve_shared_js))
+        .route("/static/routes.js", get(serve_routes_js))
         .route("/api/sandbox/omp", get(get_sandbox_omp_status))
         .route("/api/sandbox/opencode", get(get_sandbox_opencode_status))
         .route("/api/sandbox/omp/update", post(update_sandbox_omp))

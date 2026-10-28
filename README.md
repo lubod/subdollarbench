@@ -37,6 +37,16 @@ subdollarbench campaign run --name sdb-sql --model <model> \
 - **Admin** starts campaign cells and hosts the model picker; queue status
   and moderation stay there.
 
+## Watching a cell
+
+`subdollarbench tui` opens the read-only terminal console over ssh. It polls
+the engine API and shows the Board's cells, the live pane and log, the
+ticket table (`Enter`) and help (`?`). `q` or Ctrl-C restores the terminal.
+
+```bash
+subdollarbench tui --server http://127.0.0.1:3000 --interval 2
+```
+
 ## Results
 
 `subdollarbench portal --out ./portal` writes the public sdb-sql board and
