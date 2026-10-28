@@ -40,9 +40,19 @@ fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
 }
 
 fn enable_wal(conn: &Connection) -> Result<()> {
-    let deadline = std::time::Instant::now() + WAL_RETRY_DEADLINE;
+    enable_wal_with(
+        || conn.pragma_update(None, "journal_mode", "WAL"),
+        WAL_RETRY_DEADLINE,
+    )
+}
+
+fn enable_wal_with(
+    mut attempt: impl FnMut() -> rusqlite::Result<()>,
+    limit: std::time::Duration,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + limit;
     loop {
-        match conn.pragma_update(None, "journal_mode", "WAL") {
+        match attempt() {
             Ok(()) => return Ok(()),
             Err(e) if is_sqlite_busy(&e) => {
                 let now = std::time::Instant::now();
@@ -974,24 +984,43 @@ mod tests {
     #[test]
     fn r41_f5_wal_retry_is_bounded() {
         use std::time::{Duration, Instant};
-        let db = std::env::temp_dir().join(format!("store-wal-bound-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&db);
-        let holder = Connection::open(&db).expect("holder open");
-        holder
-            .execute_batch(
-                "CREATE TABLE held (x INTEGER); BEGIN IMMEDIATE; INSERT INTO held VALUES (1);",
-            )
-            .expect("hold write transaction");
+        fn busy() -> rusqlite::Result<()> {
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5),
+                Some("busy".to_string()),
+            ))
+        }
         let started = Instant::now();
-        let result = Store::open(&db);
-        let elapsed = started.elapsed();
-        assert!(result.is_err(), "a held write transaction must time out");
+        let mut calls = 0u32;
+        let err = enable_wal_with(
+            || {
+                calls += 1;
+                busy()
+            },
+            Duration::from_millis(300),
+        )
+        .expect_err("always-busy must fail");
+        assert!(err.to_string().contains("busy"), "{err}");
         assert!(
-            elapsed < WAL_RETRY_DEADLINE + Duration::from_secs(7),
-            "Store::open took {elapsed:?}, beyond the bounded retry"
+            started.elapsed() < Duration::from_secs(2),
+            "deadline not bounded"
         );
-        let _ = holder.execute_batch("ROLLBACK;");
-        let _ = std::fs::remove_file(&db);
+        assert!(calls >= 2 && calls <= 8, "unexpected retry count {calls}");
+
+        let mut calls = 0u32;
+        enable_wal_with(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    busy()
+                } else {
+                    Ok(())
+                }
+            },
+            Duration::from_secs(2),
+        )
+        .expect("third-try success");
+        assert_eq!(calls, 3);
     }
 
     #[test]
