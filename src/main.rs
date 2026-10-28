@@ -25,6 +25,7 @@ use subdollarbench::web::server::compute_pass_at_k;
 mod main_campaign;
 mod main_queue;
 mod review_cmd;
+mod tui;
 
 struct CliPipelineLogger;
 
@@ -2411,6 +2412,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             }
         }
 
+        Commands::Tui { server, interval } => tui::run(server, interval).await?,
         Commands::Status { server, json } => main_queue::handle_status(server, json).await?,
 
         Commands::Queue { server, json } => main_queue::handle_queue(server, json).await?,
