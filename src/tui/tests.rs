@@ -162,13 +162,13 @@ fn r42_f4_live_pane_render() {
     let s = draw(&a, 120, 30);
     assert!(s.contains("campaign $ 0.6412"));
     assert!(s.contains("Stage 7: Aggregates -> FAIL"));
-    a.handle_key(KeyCode::Down);
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
     assert!(draw(&a, 120, 30).contains("stalled"));
 }
 #[test]
 fn r42_f5_help_lists_every_key() {
     let mut a = App::new();
-    a.handle_key(KeyCode::Char('?'));
+    a.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
     assert!(a.help_open());
     let s = draw(&a, 100, 24);
     for k in [
@@ -186,4 +186,11 @@ fn r42_f5_header_states() {
     assert!(draw(&a, 120, 10).contains("engine ● running"));
     a.unreachable("refused");
     assert!(draw(&a, 120, 10).contains("engine ● unreachable"));
+}
+
+#[test]
+fn r42_f1_ctrl_c_quits() {
+    let mut a = App::new();
+    assert!(a.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(!a.handle_key(KeyCode::Char('c'), KeyModifiers::NONE));
 }

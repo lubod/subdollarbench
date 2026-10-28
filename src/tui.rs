@@ -5,12 +5,12 @@
 //! status. Actions are deliberately out of scope (D2).
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::execute;
-use crossterm::terminal::{
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -119,6 +119,11 @@ impl App {
         self.log.len()
     }
 
+    #[cfg(test)]
+    pub fn tickets_len(&self) -> usize {
+        self.tickets.len()
+    }
+
     pub fn apply_log_page(&mut self, offset: u64, lines: Vec<Value>) -> bool {
         if offset < self.log_offset {
             self.log.clear();
@@ -157,7 +162,10 @@ impl App {
     }
 
     /// Returns true when the app should quit.
-    pub fn handle_key(&mut self, code: KeyCode) -> bool {
+    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+            return true;
+        }
         if self.help {
             if code == KeyCode::Esc || code == KeyCode::Char('?') || code == KeyCode::Char('q') {
                 self.help = false;
@@ -218,6 +226,13 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    fn clear_cell_state(&mut self) {
+        self.log.clear();
+        self.log_offset = 0;
+        self.tickets.clear();
+        self.selected_ticket = 0;
     }
 
     fn filtered_log(&self) -> Vec<Line<'static>> {
@@ -604,7 +619,7 @@ pub async fn run(server_arg: Option<String>, interval: u64) -> Result<()> {
         terminal.draw(|f| render(f, &app))?;
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press && app.handle_key(k.code) {
+                if k.kind == KeyEventKind::Press && app.handle_key(k.code, k.modifiers) {
                     break;
                 }
             }
