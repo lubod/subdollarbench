@@ -30,6 +30,7 @@ from `TEMPLATE.md`.
 | [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | draft |
 | [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | draft |
 | [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | merged `a3a4e19` |
+| [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | draft |
 
 **Status values:**
 

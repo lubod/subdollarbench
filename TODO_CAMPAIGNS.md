@@ -108,8 +108,15 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        own `kill $(cat /proc/<pid>/stat)` hit its agent; the ticket
        passed). No harness fault, `infra_error`, wall or turns stop. It is
        deepseek's first grid career (D2). The grid follows.
+       **Grid career 1, Haiku 5.5:** 66.4/76 for $2.322 (8.8 $0.291,
+       12.0 $0.685, 19.6 $0.671, 26.0 $0.676); lite on 5 and 11, s16
+       failed. Clean.
     4. **Variance check, then publish.**
-    5. **After publishing:** round 41 (CLI and API, plus R38-1), 42
+    5. **v2, the perf score** (operator, 2026-10-28: "double down on
+       performance and latency"; publish `.42` first): round 45 (draft),
+       rules `.43`, a new bar and a new grid. Round 46 shows it on the
+       board.
+    6. **After publishing:** round 41 (CLI and API, plus R38-1), 42
        (`tui`), 43 (deletion, then a bar), 39 (browser GUI).
   - **Round 40: back to draft until after the grid** (round 44 D3). It
     doesn't block calibration: `sql-cell.sh` passes the official values, and the
