@@ -731,6 +731,16 @@ pub(crate) async fn serve_shared_js() -> Response {
         .into_response()
 }
 
+/// Round 39: pure route/Live-button functions, served separately so the
+/// node tests can exercise them without the console DOM.
+pub(crate) async fn serve_routes_js() -> Response {
+    (
+        [("content-type", "application/javascript; charset=utf-8")],
+        include_str!("routes.js"),
+    )
+        .into_response()
+}
+
 static INDEX_HTML: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// GUI shell with shared helpers inlined (offline single-file preserved).
@@ -5544,15 +5554,25 @@ mod tests {
     #[test]
     fn test_gui_console_has_board_run_live_and_parses() {
         let html = include_str!("index.html");
+        assert_eq!(
+            html.matches("window.addEventListener('hashchange', applyHash)")
+                .count(),
+            1,
+            "applyHash must be registered exactly once"
+        );
         for marker in [
             "data-tab=\"board\"",
-            "data-tab=\"run\"",
-            "data-tab=\"live\"",
             "data-tab=\"admin\"",
             "id=\"tab-board\"",
             "id=\"tab-run\"",
             "id=\"runBody\"",
             "id=\"liveStream\"",
+            "id=\"liveOverlay\"",
+            "role=\"dialog\"",
+            "id=\"liveHeaderBtn\"",
+            "static/routes.js",
+            "data-live-console",
+            "\\u2039 Board",
             "function renderBoard(",
             "function renderRun(",
             "function renderLive(",
@@ -5575,6 +5595,8 @@ mod tests {
             "loadLeaderboard",
             "campaignsList",
             "renderRuns",
+            "data-tab=\"run\"",
+            "data-tab=\"live\"",
             "data-tab=\"matrix\"",
             "data-tab=\"leaderboard\"",
             "data-tab=\"traceability\"",
@@ -5613,6 +5635,80 @@ mod tests {
             ),
             Err(_) => eprintln!("node not found; skipping GUI JS parse check"),
         }
+    }
+
+    fn run_routes_node(body: &str) {
+        let dir = std::env::temp_dir().join(format!(
+            "gui_routes_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("routes.js"), include_str!("routes.js")).unwrap();
+        std::fs::write(
+            dir.join("test.js"),
+            format!(
+                "const fs=require('fs');\neval(fs.readFileSync('{}/routes.js','utf8'));\n{body}\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(dir.join("test.js"))
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
+        match out {
+            Ok(o) => assert!(
+                o.status.success(),
+                "routes node test failed:\n{}\n{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(_) => eprintln!("node not found; skipping routes node test"),
+        }
+    }
+
+    #[test]
+    fn r39_f1_route_table() {
+        run_routes_node(
+            r#"
+const cells = [{id:'live1',state:'running',live:{ticket:2,turn:1,max_turns:4,campaign_spent:0.1}},{id:'done1',state:'done'}];
+function eq(a,b,msg){ if (a !== b) { console.log('FAIL',msg,a,b); process.exit(1); } }
+eq(routeFor('#run/x', cells).view, 'run', 'run view');
+eq(routeFor('#run/x', cells).runId, 'x', 'run id');
+eq(routeFor('#run', cells).view, 'board', 'bare run');
+eq(routeFor('#board', cells).view, 'board', 'board');
+eq(routeFor('', cells).view, 'board', 'empty');
+eq(routeFor('#admin', cells).view, 'admin', 'admin');
+eq(routeFor('#live', cells, 'board').overlay.id, 'live1', 'live running');
+eq(routeFor('#live/done1', cells, 'run').overlay.id, 'done1', 'live finished over run');
+eq(routeFor('#live/done1', cells, 'run').view, 'run', 'previous view');
+eq(routeFor('#live', [{id:'done',state:'done'}], 'board').overlay, null, 'no live cell');
+eq(routeFor('#live', [{id:'done',state:'done'}], 'board').view, 'board', 'no live board');
+console.log('routes OK');
+"#,
+        );
+    }
+
+    #[test]
+    fn r39_f3_live_button() {
+        run_routes_node(
+            r#"
+function fail(msg){ console.log('FAIL',msg); process.exit(1); }
+if (liveButton([]) !== null) fail('empty');
+if (liveButton([{id:'d',state:'done'}]) !== null) fail('done');
+const r = liveButton([{id:'r',state:'running',live:{ticket:3,turn:4,max_turns:10,campaign_spent:0.12}}]);
+if (!r || r.id !== 'r' || r.stalled) fail('running');
+if (r.text !== '▶ Live · t3 · 4/10 · $0.1200') fail('text ' + r.text);
+const s = liveButton([{id:'s',state:'stalled'}]);
+if (!s || s.id !== 's' || !s.stalled || s.text !== 'Live · stalled') fail('stalled');
+console.log('live button OK');
+"#,
+        );
     }
 
     /// The DOM stubs the console boot smoke needs: every element is a
