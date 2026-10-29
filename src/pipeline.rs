@@ -9323,12 +9323,12 @@ main()
     /// run in the sandbox (2 CPUs, 2 GiB) through the production runner.
     #[test]
     fn r45_f1_reference_scores_one() {
-        use crate::verifier::sql::perfscore::{run_workspace, PerfConfig};
+        use crate::verifier::sql::perfscore::{run_workspace_at, PerfConfig};
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = covtest_dir("perfref");
         let workdir = dir.join("workspace");
         crate::verifier::sql::ref_server::write_reference(&workdir, 5480).unwrap();
-        let score = run_workspace(&workdir, 4, &PerfConfig::default())
+        let score = run_workspace_at(&workdir, 4, &PerfConfig::default(), &dir.join("runs"))
             .expect("the reference workspace must start and score");
         for w in &score.workloads {
             assert!(
@@ -9457,13 +9457,17 @@ main()
     /// the phase-4 shape (all five workloads) without the 30 s W5.
     #[test]
     fn r45_f5_perfscore_cli() {
-        use crate::verifier::sql::perfscore::{cli_with, render, PerfConfig};
+        use crate::verifier::sql::perfscore::{cli_with_at, render, PerfConfig};
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = covtest_dir("perfcli");
         let workdir = dir.join("workspace");
         crate::verifier::sql::ref_server::write_reference(&workdir, 5480).unwrap();
-        let score = cli_with(&workdir, &PerfConfig::fixture_for_tests())
-            .expect("the reference workspace must start and score");
+        let score = cli_with_at(
+            &workdir,
+            &PerfConfig::fixture_for_tests(),
+            &dir.join("runs"),
+        )
+        .expect("the reference workspace must start and score");
         let text = render(&score);
         assert!(text.contains("perf score"), "{text}");
         assert_eq!(score.workloads.len(), 5, "{text}");

@@ -1560,6 +1560,12 @@ pub fn cli_with(workspace: &Path, cfg: &PerfConfig) -> anyhow::Result<PerfScore>
     run_workspace(workspace, 4, cfg)
 }
 
+/// [`cli_with`] with an explicit data root (the live proofs run on a disk
+/// while the test harness's ambient `SDB_RUNS_DIR` may be tmpfs).
+pub fn cli_with_at(workspace: &Path, cfg: &PerfConfig, root: &Path) -> anyhow::Result<PerfScore> {
+    run_workspace_at(workspace, 4, cfg, root)
+}
+
 /// `subdollarbench perfscore --workspace <dir>` (F5).
 pub fn cli(workspace: &str, json: bool) -> anyhow::Result<()> {
     let score = cli_with(Path::new(workspace), &PerfConfig::default())?;
