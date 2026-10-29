@@ -15,6 +15,19 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.43`: round 45. The perf score (v2). At the end of every
+///   phase the harness measures the final server against the SQLite
+///   reference in the same sandbox (2 CPUs, 2 GiB), alternating rounds:
+///   W1 point-lookup p50 and W2 range p50 (100k rows), W3 join p50
+///   (50k x 5k rows), W4 durable autocommit insert rate (1 and 8 clients)
+///   and W5 mixed 80/20 throughput (16 clients, 30 s). Each workload's
+///   ratio is clipped to [0.1, 100], a wrong answer floors it, and the
+///   phase score is the geometric mean; a career carries its latest phase
+///   score. Points stay primary and the perf score breaks points ties.
+///   Score impact: the 21 tickets, their points and the $0.99 cap are
+///   unchanged; speed is a new, separate axis. The ticket-0 prompt and the
+///   phase-opening prompts state the contract, so careers restart at phase
+///   1; `.42` and `.43` careers never chain.
 /// - `2026-10-19.42`: round 36. Each run records the sandbox image ID it
 ///   used, and a career phase chains only onto a phase with the same image
 ///   (D1 a). `update_sandbox_image` passes the bench user's UID/GID, so the
@@ -782,7 +795,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.42";
+pub const RULES_VERSION: &str = "2026-10-19.43";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
@@ -951,7 +964,7 @@ mod tests {
         let rel = put(&root, "src/scoring.rs", "fixture\n");
         let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
         assert_eq!(
-            fp, "2026-10-19.42+f27855ff3d6dd893c58d9938e26071cd",
+            fp, "2026-10-19.43+4d632a4b73f9817511c59947378d29a8",
             "the SHA-256 stamp must be stable"
         );
         assert_eq!(fp, fingerprint_files(&root, &[rel]));

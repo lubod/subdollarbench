@@ -40,9 +40,10 @@ done
     echo "[flake] --passes must be a positive integer" >&2; exit 2
 }
 
+# One list, shared with the fast-gate skip list: every test that holds
+# SQL_PERF_LIVE (the r45 perf proofs included).
 tests_from_source() {
-    grep -oE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs \
-        | sed 's/^fn //' | sort -u
+    scripts/live-proofs.sh | sort -u
 }
 
 runs_for() {
