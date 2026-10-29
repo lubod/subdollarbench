@@ -107,6 +107,12 @@ rounds, each in a container with **2 CPUs and 2 GiB**. The reference is
 | W4 | durable autocommit single-row `INSERT`, 1 and 8 clients | 2 s | commits/s |
 | W5 | mixed 80/20 read/write, 16 clients | 30 s | throughput (p99 reported) |
 
+**Durable** means each acknowledged commit is on disk (`fsync` or
+`fdatasync`) before the `OK`. The harness counts the disk's flush
+requests during the 1-client W4 window; fewer flushes than commits
+floors W4. If the reference's counter cannot be read, the check is a
+harness fault (no score).
+
 For each workload `r` is `reference / candidate` for latency and
 `candidate / reference` for throughput, clipped to `[0.1, 100]`; W4
 combines its 1-client and 8-client rates with a geometric mean. The perf
