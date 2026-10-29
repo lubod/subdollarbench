@@ -15,6 +15,16 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.44`: round 49. W4 counts only durable commits. The perf
+///   data dirs live on the runs disk (a memory data root is a harness
+///   fault), the harness reads the backing disk's flush-request counter
+///   during the 1-client W4 window, and a candidate with fewer flushes
+///   than 0.9 x its acknowledged commits floors W4. The ticket-0 contract
+///   says what "durable" means. R45-3/R45-6: the career keeps its latest
+///   scored perf block, and a scoreless (harness-fault) phase does not
+///   replace it. Score impact: points and the cap are unchanged; a server
+///   that skips `fsync` no longer gets W4's throughput credit. Careers
+///   restart at phase 1; `.43` and `.44` never chain.
 /// - `2026-10-19.43`: round 45. The perf score (v2). At the end of every
 ///   phase the harness measures the final server against the SQLite
 ///   reference in the same sandbox (2 CPUs, 2 GiB), alternating rounds:
@@ -795,7 +805,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.43";
+pub const RULES_VERSION: &str = "2026-10-19.44";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
@@ -964,7 +974,7 @@ mod tests {
         let rel = put(&root, "src/scoring.rs", "fixture\n");
         let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
         assert_eq!(
-            fp, "2026-10-19.43+4d632a4b73f9817511c59947378d29a8",
+            fp, "2026-10-19.44+769e9623e9f76d5c8620fdf5a53abbd6",
             "the SHA-256 stamp must be stable"
         );
         assert_eq!(fp, fingerprint_files(&root, &[rel]));
