@@ -238,5 +238,19 @@ mod tests {
         let args = crate::sandbox::docker::cpuset_args("0-3");
         assert_eq!(args, vec!["--cpuset-cpus".to_string(), "0-3".to_string()]);
         assert!(crate::sandbox::docker::cpuset_args("").is_empty());
+        // R48-3: the agent's ref-sql carries the session set, not the
+        // grading set.
+        let ref_args =
+            crate::sandbox::docker::reference_sql_args("i", "ref", "net", "/src:/srv:ro", 5481);
+        if slow.is_empty() {
+            assert!(!ref_args.iter().any(|a| a == "--cpuset-cpus"));
+        } else {
+            assert!(
+                ref_args
+                    .windows(2)
+                    .any(|w| w[0] == "--cpuset-cpus" && w[1] == slow),
+                "ref-sql must use the session set: {ref_args:?}"
+            );
+        }
     }
 }

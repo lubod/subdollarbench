@@ -108,6 +108,52 @@ pub fn cpuset_args(set: &str) -> Vec<String> {
     }
 }
 
+/// R48 F2/R48-3: the agent's development reference (`ref-sql`) runs on the
+/// session cores, not the fast grading set. It is alive during the model's
+/// session, so it must not share the graded candidates' cores.
+pub fn reference_sql_args(
+    instance_id: &str,
+    name: &str,
+    net: &str,
+    mount: &str,
+    port: u16,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-d".into(),
+        "--rm".into(),
+        "--label".into(),
+        format!("sdb.run={instance_id}"),
+        "--label".into(),
+        "sdb.role=ref-sql".into(),
+        "--name".into(),
+        name.to_string(),
+        "--network".into(),
+        net.to_string(),
+        "--network-alias".into(),
+        "ref-sql".into(),
+        "--memory=2g".into(),
+        "--cpus=2.0".into(),
+    ];
+    args.extend(cpuset_args(&crate::grading::session_cpuset()));
+    args.extend([
+        "--pids-limit=256".into(),
+        "-v".into(),
+        mount.to_string(),
+        "-p".into(),
+        format!("127.0.0.1:{port}:5480"),
+        EGRESS_PROXY_IMAGE.to_string(),
+        "python3".into(),
+        "-u".into(),
+        "/srv/sql_server.py".into(),
+        "--port".into(),
+        "5480".into(),
+        "--data".into(),
+        "/tmp".into(),
+    ]);
+    args
+}
+
 pub struct SandboxManager {
     pub instance_id: String,
     pub needs_cleanup: AtomicBool,
@@ -960,40 +1006,14 @@ impl SandboxManager {
             .map_err(|e| anyhow!("write ref-sql script: {e}"))?;
         let mount = format!("{}:/srv:ro", script_dir.display());
 
-        let fast = crate::grading::fast_cpuset();
         let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=ref-sql",
-                "--name",
+            .args(reference_sql_args(
+                &self.instance_id,
                 &name,
-                "--network",
                 &net,
-                "--network-alias",
-                "ref-sql",
-                "--memory=2g",
-                "--cpus=2.0",
-                "--cpuset-cpus",
-                &fast,
-                "--pids-limit=256",
-                "-v",
                 &mount,
-                "-p",
-                &format!("127.0.0.1:{}:5480", port),
-                EGRESS_PROXY_IMAGE,
-                "python3",
-                "-u",
-                "/srv/sql_server.py",
-                "--port",
-                "5480",
-                "--data",
-                "/tmp",
-            ])
+                port,
+            ))
             .output()
             .map_err(|e| anyhow!("reference sql spawn failed: {e}"))?;
         if !out.status.success() {
