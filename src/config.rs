@@ -81,6 +81,10 @@ pub enum CampaignAction {
         /// requires --chain and a reason.
         #[arg(long)]
         refork: Option<String>,
+        /// R48: worker lane 0-7. Every port the cell binds is
+        /// `worker_port(base, worker)`; lanes 1-7 never touch worker 0's.
+        #[arg(long, default_value_t = 0)]
+        worker: u8,
     },
 }
 
