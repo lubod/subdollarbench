@@ -9467,7 +9467,12 @@ main()
         let text = render(&score);
         assert!(text.contains("perf score"), "{text}");
         assert_eq!(score.workloads.len(), 5, "{text}");
-        let value = score.score.expect("the reference must score");
+        let value = score.score.unwrap_or_else(|| {
+            panic!(
+                "the reference must score: error {:?}; {:?}",
+                score.error, score.workloads
+            )
+        });
         assert!((value - 1.0).abs() <= 0.1, "score {value:.3}\n{text}");
         let _ = fs::remove_dir_all(&dir);
     }

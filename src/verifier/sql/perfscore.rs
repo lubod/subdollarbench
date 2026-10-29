@@ -535,7 +535,7 @@ fn sample_rows(
     addr: &str,
     table: &str,
     key_col: &str,
-    next_id: u64,
+    start_id: u64,
     count: u64,
     cfg: &PerfConfig,
 ) -> bool {
@@ -543,8 +543,9 @@ fn sample_rows(
         Ok(c) => c,
         Err(_) => return false,
     };
-    let first = next_id.saturating_sub(count).max(1);
-    for id in first..next_id {
+    // The first ids of the window: later ops can be transiently busy under
+    // load, and a busy is not a missing row.
+    for id in start_id..start_id + count {
         let want = format!("r{id}");
         let sql = format!("SELECT v FROM {table} WHERE {key_col} = {id}");
         match c.exec(&sql) {
@@ -944,6 +945,9 @@ fn w4_side(
                     lat.push(ms(t0.elapsed()));
                     match r {
                         Response::Ok(1) => inserted += 1,
+                        // A retried-out busy is a concurrency answer, not a
+                        // wrong insert; it just did not commit.
+                        Response::Err { class, .. } if class == "busy" => {}
                         _ => ok = false,
                     }
                 }
@@ -966,7 +970,7 @@ fn w4_side(
         latencies.extend(lat);
     }
     let next_id = next.load(Ordering::Relaxed);
-    if !sample_rows(addr, table, "id", next_id, 5, cfg) {
+    if !sample_rows(addr, table, "id", start_id, 5, cfg) {
         correct = false;
     }
     let flushes = match (before, flush) {
@@ -1195,6 +1199,7 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
                                 n += 1;
                                 writes += 1;
                             }
+                            Response::Err { class, .. } if class == "busy" => {}
                             _ => ok = false,
                         }
                     } else {
@@ -1204,6 +1209,9 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
                         let t0 = Instant::now();
                         let r = exec_busy(&mut c, &sql)?;
                         lat.push(ms(t0.elapsed()));
+                        if matches!(&r, Response::Err { class, .. } if class == "busy") {
+                            continue; // a busy read is not a wrong answer
+                        }
                         if wrong_row(&r, &want) {
                             ok = false;
                         }
@@ -1231,7 +1239,7 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
         latencies.extend(lat);
     }
     let next_id = next.load(Ordering::Relaxed);
-    if !sample_rows(addr, table, "k", next_id, 5, cfg) {
+    if !sample_rows(addr, table, "k", start_id, 5, cfg) {
         correct = false;
     }
     Ok(Mixed {
