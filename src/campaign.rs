@@ -6125,23 +6125,24 @@ mod tests {
             correct: true,
             numbers: Default::default(),
             note: None,
+            harness_fault: false,
         }]);
         rollup.set_perf(perf.clone());
-        assert_eq!(rollup.perf.as_ref().map(|p| p.score), Some(perf.score));
+        assert_eq!(rollup.perf.as_ref().and_then(|p| p.score), perf.score);
         assert_eq!(
             rollup
                 .career
                 .as_ref()
                 .and_then(|c| c.perf.as_ref())
-                .map(|p| p.score),
-            Some(perf.score)
+                .and_then(|p| p.score),
+            perf.score
         );
         assert_eq!(rollup.total_cost_usd, cost, "perf must not spend");
         let json = serde_json::to_value(&rollup).unwrap();
         assert!(json["perf"]["score"].is_number());
         assert!(json["career"]["perf"]["score"].is_number());
         let back: CampaignRollup = serde_json::from_value(json).unwrap();
-        assert_eq!(back.perf.map(|p| p.score), Some(perf.score));
+        assert_eq!(back.perf.and_then(|p| p.score), perf.score);
     }
 
     /// R45 F3: the rendered ticket-0 contract names every workload, the

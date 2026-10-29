@@ -24,8 +24,9 @@ use subdollarbench::verifier::sql::perfscore::{self, PerfConfig, PerfScore};
 
 /// R45: score the phase's final workspace. The perf run is harness time:
 /// it never spends the candidate's budget and is not part of the wall cap.
-/// A harness-side failure floors the phase instead of turning the cell into
-/// a non-result; points stay primary.
+/// A harness-side failure leaves no perf score (the tie-break skips it);
+/// the points ladder and the cell are unaffected. A candidate failure is
+/// already a floored block from `run_workspace`.
 async fn phase_perf(workdir: PathBuf, phase: u32) -> PerfScore {
     let result = tokio::task::spawn_blocking(move || {
         perfscore::run_workspace(&workdir, phase, &PerfConfig::default())
@@ -34,12 +35,12 @@ async fn phase_perf(workdir: PathBuf, phase: u32) -> PerfScore {
     match result {
         Ok(Ok(score)) => score,
         Ok(Err(e)) => {
-            eprintln!("[PERF] phase {phase}: {e:#}; the phase scores at the floor");
-            PerfScore::floored(phase, format!("{e:#}"))
+            eprintln!("[PERF] phase {phase}: harness fault: {e:#}; no perf score");
+            PerfScore::harness_fault(phase, format!("{e:#}"))
         }
         Err(e) => {
-            eprintln!("[PERF] phase {phase}: perf task failed: {e}; the phase scores at the floor");
-            PerfScore::floored(phase, format!("perf task failed: {e}"))
+            eprintln!("[PERF] phase {phase}: perf task failed: {e}; no perf score");
+            PerfScore::harness_fault(phase, format!("perf task failed: {e}"))
         }
     }
 }
@@ -792,14 +793,22 @@ pub async fn run(
     if lc.spec.task == "sql" {
         if let Some(phase) = phase_spec.as_ref().map(|p| p.id) {
             let perf = phase_perf(workdir.clone(), phase).await;
-            let mut line = format!("[PERF] phase {phase} score {:.3}", perf.score);
-            for w in &perf.workloads {
-                line.push_str(&format!(
-                    " {} {:.3}{}",
-                    w.id,
-                    w.ratio,
-                    if w.correct { "" } else { " (wrong)" }
-                ));
+            let mut line = match perf.score {
+                Some(value) => format!("[PERF] phase {phase} score {value:.3}"),
+                None => format!(
+                    "[PERF] phase {phase} harness fault: {}",
+                    perf.error.as_deref().unwrap_or("no score")
+                ),
+            };
+            if perf.score.is_some() {
+                for w in &perf.workloads {
+                    line.push_str(&format!(
+                        " {} {:.3}{}",
+                        w.id,
+                        w.ratio,
+                        if w.correct { "" } else { " (wrong)" }
+                    ));
+                }
             }
             println!("{line}");
             append_live_log(&cdir, &line);
@@ -1391,10 +1400,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let perf = phase_perf(dir.clone(), 1).await;
         assert_eq!(perf.workloads.len(), 2, "phase 1 runs W1 and W4");
+        let value = perf.score.expect("a candidate start failure floors");
         assert!(
-            (perf.score - 0.1).abs() < 1e-12,
-            "a failed perf run floors: {}",
-            perf.score
+            (value - 0.1).abs() < 1e-12,
+            "a failed perf run floors: {value}"
         );
         assert!(perf.error.is_some(), "the harness reason is recorded");
         let _ = std::fs::remove_dir_all(&dir);

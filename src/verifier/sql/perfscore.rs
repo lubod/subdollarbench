@@ -56,12 +56,24 @@ pub struct WorkloadResult {
     /// Why a side failed (transport, deadline, wrong answer count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// True when the harness (the reference or our setup), not the
+    /// candidate, failed. The block then has no score at all.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub harness_fault: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PerfScore {
     pub workloads: Vec<WorkloadResult>,
-    pub score: f64,
+    /// `Some` only when the candidate was measured. A harness failure
+    /// leaves no score, so the points tie-break skips the block instead of
+    /// reading a floor that belongs to us, not the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
     /// A harness-side failure (the reference or the setup), for the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -69,6 +81,7 @@ pub struct PerfScore {
 
 impl PerfScore {
     pub fn from_workloads(workloads: Vec<WorkloadResult>) -> Self {
+        let harness_fault = workloads.iter().any(|w| w.harness_fault);
         let ratios: Vec<f64> = workloads
             .iter()
             .map(|w| {
@@ -79,7 +92,11 @@ impl PerfScore {
                 }
             })
             .collect();
-        let score = geometric_mean(&ratios).unwrap_or(WRONG_FLOOR);
+        let score = if harness_fault {
+            None
+        } else {
+            Some(geometric_mean(&ratios).unwrap_or(WRONG_FLOOR))
+        };
         Self {
             workloads,
             score,
@@ -87,13 +104,23 @@ impl PerfScore {
         }
     }
 
-    /// A phase whose perf run could not start still gets an honest,
-    /// floored score: the points ladder stays primary and the cell is not
-    /// turned into a non-result by a harness-side perf failure.
+    /// The candidate failed to build, start, answer or be correct: the
+    /// workload floors and the block still has a score.
     pub fn floored(phase: u32, error: impl Into<String>) -> Self {
         let workloads = workloads_for_phase(phase)
             .iter()
             .map(|id| flawed(id, "perf run did not start"))
+            .collect();
+        let mut out = Self::from_workloads(workloads);
+        out.error = Some(error.into());
+        out
+    }
+
+    /// The harness (reference or setup) failed: no candidate score.
+    pub fn harness_fault(phase: u32, error: impl Into<String>) -> Self {
+        let workloads = workloads_for_phase(phase)
+            .iter()
+            .map(|id| harness_flawed(id, "harness fault"))
             .collect();
         let mut out = Self::from_workloads(workloads);
         out.error = Some(error.into());
@@ -272,6 +299,14 @@ pub fn run_pair(
                 Some(format!("unknown workload {other}")),
             ),
         };
+        let fault = workload.harness_fault;
+        if fault {
+            if error.is_none() {
+                error = workload.note.clone().or(harness_error);
+            }
+            workloads.push(workload);
+            break;
+        }
         if error.is_none() {
             error = harness_error;
         }
@@ -331,7 +366,15 @@ fn flawed(id: &str, note: impl Into<String>) -> WorkloadResult {
         correct: false,
         numbers: BTreeMap::new(),
         note: Some(note.into()),
+        harness_fault: false,
     }
+}
+
+/// The harness failed for this workload: no candidate score.
+fn harness_flawed(id: &str, note: impl Into<String>) -> WorkloadResult {
+    let mut out = flawed(id, note);
+    out.harness_fault = true;
+    out
 }
 
 fn result_with(
@@ -352,6 +395,7 @@ fn result_with(
         correct,
         numbers,
         note,
+        harness_fault: false,
     }
 }
 
@@ -493,7 +537,9 @@ struct PairedRound {
     candidate: Vec<f64>,
     /// Per-query reference/candidate latency ratios.
     ratios: Vec<f64>,
-    correct: bool,
+    /// The reference's answers are the harness's responsibility.
+    reference_correct: bool,
+    candidate_correct: bool,
 }
 
 /// Run one round of a latency workload against both servers with the two
@@ -519,7 +565,8 @@ where
         reference: Vec::with_capacity(count),
         candidate: Vec::with_capacity(count),
         ratios: Vec::with_capacity(count),
-        correct: true,
+        reference_correct: true,
+        candidate_correct: true,
     };
     for i in 0..count {
         if Instant::now() >= deadline {
@@ -535,7 +582,8 @@ where
             let (rt, rr) = timed(&mut r, &sql).map_err(|e| format!("reference: {e}"))?;
             (rt, rr, ct, cr)
         };
-        out.correct &= check(i, &rr) & check(i, &cr);
+        out.reference_correct &= check(i, &rr);
+        out.candidate_correct &= check(i, &cr);
         out.reference.push(rt);
         out.candidate.push(ct);
         if ct > 0.0 {
@@ -564,7 +612,8 @@ where
     G: FnMut(usize, &Response) -> bool,
 {
     if let Err(e) = setup(reference_addr) {
-        return (flawed(id, format!("reference setup: {e}")), Some(e));
+        let note = format!("reference setup: {e}");
+        return (harness_flawed(id, &note), Some(note));
     }
     if let Err(e) = setup(candidate_addr) {
         return (flawed(id, format!("candidate setup: {e}")), None);
@@ -585,9 +634,13 @@ where
             &mut sql_for,
             &mut check,
         ) {
+            Ok(v) if !v.reference_correct => {
+                let note = format!("the reference answered wrong in {id}");
+                return (harness_flawed(id, &note), Some(note));
+            }
             Ok(v) => v,
             Err(e) if e.starts_with("reference:") => {
-                return (flawed(id, e.clone()), Some(e));
+                return (harness_flawed(id, e.clone()), Some(e));
             }
             Err(e) => {
                 correct = false;
@@ -595,7 +648,7 @@ where
                 break;
             }
         };
-        correct &= out.correct;
+        correct &= out.candidate_correct;
         ref_lat.extend(out.reference);
         cand_lat.extend(out.candidate);
         ratios.extend(out.ratios);
@@ -821,7 +874,8 @@ fn run_w4(
     cfg: &PerfConfig,
 ) -> (WorkloadResult, Option<String>) {
     if let Err(e) = prepare_empty(reference_addr, table, cfg) {
-        return (flawed("W4", format!("reference setup: {e}")), Some(e));
+        let note = format!("reference setup: {e}");
+        return (harness_flawed("W4", &note), Some(note));
     }
     if let Err(e) = prepare_empty(candidate_addr, table, cfg) {
         return (flawed("W4", format!("candidate setup: {e}")), None);
@@ -840,14 +894,19 @@ fn run_w4(
     for _ in 0..cfg.rounds {
         let mut round_ref = [0.0f64; 2];
         let mut round_cand = [0.0f64; 2];
-        let mut round_ok = true;
         for (idx, clients) in [1usize, 8].into_iter().enumerate() {
             let r = match w4_side(reference_addr, table, clients, ref_next, cfg) {
                 Ok(v) => v,
-                Err(e) => return (flawed("W4", format!("reference: {e}")), Some(e)),
+                Err(e) => {
+                    let note = format!("reference: {e}");
+                    return (harness_flawed("W4", &note), Some(note));
+                }
             };
             ref_next = r.next_id;
-            round_ok &= r.correct;
+            if !r.correct {
+                let note = "the reference insert check failed".to_string();
+                return (harness_flawed("W4", &note), Some(note));
+            }
             round_ref[idx] = throughput_of(&r);
             let mut ref_lat = r.latencies;
             ref99s.push(percentile(&mut ref_lat, 0.99));
@@ -860,15 +919,15 @@ fn run_w4(
                 }
             };
             cand_next = c.next_id;
-            round_ok &= c.correct;
+            if !c.correct {
+                correct = false;
+                note = Some("the candidate insert check failed".into());
+                break;
+            }
             round_cand[idx] = throughput_of(&c);
             let mut cand_lat = c.latencies;
             cand99s.push(percentile(&mut cand_lat, 0.99));
         }
-        if !round_ok && note.is_none() {
-            note = Some("a side returned a wrong insert count".into());
-        }
-        correct &= round_ok;
         if round_ref[0] > 0.0 && round_ref[1] > 0.0 && round_cand[0] > 0.0 && round_cand[1] > 0.0 {
             let r = (ratio(round_ref[0], round_cand[0], true)
                 * ratio(round_ref[1], round_cand[1], true))
@@ -1018,7 +1077,8 @@ fn run_w5(
     cfg: &PerfConfig,
 ) -> (WorkloadResult, Option<String>) {
     if let Err(e) = prepare_kv(reference_addr, table, cfg.rows_w5, cfg) {
-        return (flawed("W5", format!("reference setup: {e}")), Some(e));
+        let note = format!("reference setup: {e}");
+        return (harness_flawed("W5", &note), Some(note));
     }
     if let Err(e) = prepare_kv(candidate_addr, table, cfg.rows_w5, cfg) {
         return (flawed("W5", format!("candidate setup: {e}")), None);
@@ -1047,8 +1107,15 @@ fn run_w5(
         }
         let r = match w5_side(reference_addr, table, ref_next, cfg) {
             Ok(v) => v,
-            Err(e) => return (flawed("W5", format!("reference: {e}")), Some(e)),
+            Err(e) => {
+                let note = format!("reference: {e}");
+                return (harness_flawed("W5", &note), Some(note));
+            }
         };
+        if !r.correct {
+            let note = "the reference mixed-workload check failed".to_string();
+            return (harness_flawed("W5", &note), Some(note));
+        }
         ref_next = r.next_id;
         ref_writes += r.writes;
         let c = match w5_side(candidate_addr, table, cand_next, cfg) {
@@ -1061,13 +1128,17 @@ fn run_w5(
         };
         cand_next = c.next_id;
         cand_writes += c.writes;
+        if !c.correct {
+            correct = false;
+            note = Some("the candidate mixed-workload check failed".into());
+            break;
+        }
         let mut rl = r.latencies.clone();
         let mut cl = c.latencies.clone();
         let ref99 = percentile(&mut rl, 0.99);
         let cand99 = percentile(&mut cl, 0.99);
         let ref_tp = r.ops as f64 / r.elapsed;
         let cand_tp = c.ops as f64 / c.elapsed;
-        correct &= r.correct && c.correct;
         // W5 scores throughput; p99 is published but not scored (the
         // reference's own p99 moves with checkpoint timing).
         if ref_tp > 0.0 && cand_tp > 0.0 {
@@ -1149,10 +1220,15 @@ pub fn run_workspace(workspace: &Path, phase: u32, cfg: &PerfConfig) -> anyhow::
         .canonicalize()
         .with_context(|| format!("workspace {}", workspace.display()))?;
     if !workspace.join("start.sh").exists() && !workspace.join("Dockerfile").exists() {
-        anyhow::bail!(
-            "workspace {} has no start.sh or Dockerfile",
-            workspace.display()
-        );
+        // The workspace is the candidate; a missing entrypoint is its
+        // failure, so the phase floors instead of losing its score.
+        return Ok(PerfScore::floored(
+            phase,
+            format!(
+                "workspace {} has no start.sh or Dockerfile",
+                workspace.display()
+            ),
+        ));
     }
     let nonce = nonce();
     let root = std::env::temp_dir().join(format!("sdb-perf-{}-{nonce:x}", std::process::id()));
@@ -1176,27 +1252,39 @@ pub fn run_workspace(workspace: &Path, phase: u32, cfg: &PerfConfig) -> anyhow::
         .manager()
         .start_candidate_in_docker_with(&ref_ws, ref_port, &sql_extras(&ref_data, ref_port))
         .context("start the reference container")?;
-    cand_guard
-        .manager()
-        .start_candidate_in_docker_with(&workspace, cand_port, &sql_extras(&cand_data, cand_port))
-        .context("start the candidate container")?;
+    if let Err(e) = cand_guard.manager().start_candidate_in_docker_with(
+        &workspace,
+        cand_port,
+        &sql_extras(&cand_data, cand_port),
+    ) {
+        return Ok(PerfScore::floored(
+            phase,
+            format!("candidate container: {e:#}"),
+        ));
+    }
     let ref_addr = format!("127.0.0.1:{ref_port}");
     let cand_addr = format!("127.0.0.1:{cand_port}");
     super::driver::wait_until_answering(&ref_addr, Duration::from_secs(30))
         .map_err(anyhow::Error::msg)
         .context("the reference did not answer")?;
-    super::driver::wait_until_answering(&cand_addr, Duration::from_secs(30))
-        .map_err(anyhow::Error::msg)
-        .context("the candidate did not answer")?;
+    if let Err(e) = super::driver::wait_until_answering(&cand_addr, Duration::from_secs(30)) {
+        return Ok(PerfScore::floored(
+            phase,
+            format!("the candidate did not answer: {e}"),
+        ));
+    }
     Ok(run_pair(&ref_addr, &cand_addr, phase, cfg))
 }
 
 /// The human line(s) for the CLI and the campaign log.
 pub fn render(score: &PerfScore) -> String {
-    let mut out = format!(
-        "perf score {:.3} (1.0 = the SQLite reference)\n",
-        score.score
-    );
+    let mut out = match score.score {
+        Some(value) => format!("perf score {value:.3} (1.0 = the SQLite reference)\n"),
+        None => format!(
+            "perf score: harness fault ({})\n",
+            score.error.as_deref().unwrap_or("no score")
+        ),
+    };
     for w in &score.workloads {
         out.push_str(&format!(
             "  {} {:10} ratio {:6.3}  correct {}\n",
@@ -1260,6 +1348,7 @@ mod tests {
                 correct: true,
                 numbers: BTreeMap::new(),
                 note: None,
+                harness_fault: false,
             },
             WorkloadResult {
                 id: "W4".into(),
@@ -1270,9 +1359,10 @@ mod tests {
                 correct: true,
                 numbers: BTreeMap::new(),
                 note: None,
+                harness_fault: false,
             },
         ]);
-        assert!((score.score - 2.0).abs() < 1e-12);
+        assert!((score.score.expect("a score") - 2.0).abs() < 1e-12);
         let wrong = PerfScore::from_workloads(vec![WorkloadResult {
             id: "W1".into(),
             metric: "latency".into(),
@@ -1282,8 +1372,9 @@ mod tests {
             correct: false,
             numbers: BTreeMap::new(),
             note: None,
+            harness_fault: false,
         }]);
-        assert!((wrong.score - WRONG_FLOOR).abs() < 1e-12);
+        assert!((wrong.score.expect("a floor score") - WRONG_FLOOR).abs() < 1e-12);
     }
 
     #[test]
@@ -1386,11 +1477,17 @@ mod tests {
         }
         if sql.contains("JOIN") {
             let mut out = String::from("ROWS 3\ng\tcount\tsum\n");
-            let n = if wrong { 1 } else { 50 };
-            for g in 0..n {
-                out.push_str(&format!("{g}\t1\t1\n"));
+            // The unit tests use the small config (100 b rows); the real
+            // reference is a separate process and never goes through here.
+            let rows = if wrong {
+                vec![(0i64, 1i64, 1i64)]
+            } else {
+                join_expected(100)
+            };
+            for (g, count, sum) in &rows {
+                out.push_str(&format!("{g}\t{count}\t{sum}\n"));
             }
-            out.push_str(&format!("END {n}"));
+            out.push_str(&format!("END {}", rows.len()));
             return out;
         }
         "ERR syntax fake".to_string()
@@ -1448,6 +1545,44 @@ mod tests {
         }
     }
 
+    /// R45-2: a reference that never answers is a harness failure, not a
+    /// candidate floor. The block carries no score at all.
+    #[test]
+    fn r45_r2_reference_failure_is_not_a_score() {
+        let candidate = fake_engine(Duration::ZERO, false);
+        let cfg = PerfConfig::small_for_tests();
+        let score = run_pair("127.0.0.1:1", &candidate.to_string(), 1, &cfg);
+        assert!(
+            score.score.is_none(),
+            "a dead reference must not score the candidate: {:?}",
+            score.score
+        );
+        let err = score.error.as_deref().unwrap_or("");
+        assert!(err.contains("reference"), "reason: {err}");
+        assert!(
+            score.workloads.iter().any(|w| w.harness_fault),
+            "the failed workload must say who failed: {:?}",
+            score.workloads
+        );
+    }
+
+    /// R45-2: a reference that answers wrong is our bug, not the
+    /// candidate's; it leaves no score.
+    #[test]
+    fn r45_r2_wrong_reference_is_not_a_score() {
+        let reference = fake_engine(Duration::ZERO, true);
+        let candidate = fake_engine(Duration::ZERO, false);
+        let cfg = PerfConfig::small_for_tests();
+        let score = run_pair(&reference.to_string(), &candidate.to_string(), 3, &cfg);
+        assert!(
+            score.score.is_none(),
+            "a wrong reference must not score the candidate: {:?}",
+            score.score
+        );
+        let err = score.error.as_deref().unwrap_or("");
+        assert!(err.contains("reference"), "reason: {err}");
+    }
+
     /// A fast engine that answers one wrong value per workload scores the
     /// floor on every workload, whatever its speed.
     #[test]
@@ -1460,10 +1595,9 @@ mod tests {
         for w in &score.workloads {
             assert!(!w.correct, "{} was graded correct", w.id);
         }
-        assert!(
-            (score.score - WRONG_FLOOR).abs() < 1e-12,
-            "score {:.3}",
-            score.score
-        );
+        let value = score
+            .score
+            .expect("a wrong candidate still gets a floored score");
+        assert!((value - WRONG_FLOOR).abs() < 1e-12, "score {value:.3}");
     }
 }
