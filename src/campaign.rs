@@ -2480,9 +2480,14 @@ impl CampaignRollup {
     /// board's tie-break); each phase keeps its own block in its own
     /// campaign.json.
     pub fn set_perf(&mut self, perf: crate::verifier::sql::perfscore::PerfScore) {
+        // R49 F4 (R45-6): a harness-fault block (no score) stays on the
+        // phase, but the career keeps its latest scored phase.
+        let scored = perf.score.is_some();
         self.perf = Some(perf.clone());
-        if let Some(career) = self.career.as_mut() {
-            career.perf = Some(perf);
+        if scored {
+            if let Some(career) = self.career.as_mut() {
+                career.perf = Some(perf);
+            }
         }
     }
 
@@ -3245,17 +3250,11 @@ where
         let prev = career.cloned().unwrap_or_default();
         let mut cells = prev.cells.clone();
         cells.push(opts.campaign_id.clone());
-        let perf = match (prev.perf.clone(), rollup.perf.clone()) {
-            (Some(a), Some(b)) => {
-                let mut w = a.workloads;
-                w.extend(b.workloads);
-                Some(crate::verifier::sql::perfscore::PerfScore::from_workloads(
-                    w,
-                ))
-            }
-            (Some(a), None) => Some(a),
-            (None, b) => b,
-        };
+        // R49 F4 (R45-3): this phase's perf is set after the ladder; the
+        // career carries the previous phase's block unchanged. (The old
+        // concatenation never ran and would have averaged duplicate
+        // W1/W4 entries when it did.)
+        let perf = prev.perf.clone();
         rollup.career = Some(CareerRollup {
             points: prev.points + rollup.points,
             total_cost_usd: prev.total_cost_usd + total_cost,
@@ -6145,6 +6144,50 @@ mod tests {
         assert_eq!(back.perf.and_then(|p| p.score), perf.score);
     }
 
+    /// R49 F4 (R45-3/R45-6): a scored phase 2 followed by a harness-fault
+    /// phase 3 keeps phase 2's score on the career; phase 3 keeps its own
+    /// scoreless block.
+    #[test]
+    fn r49_f4_career_keeps_last_scored_perf() {
+        use crate::verifier::sql::perfscore::{PerfScore, WorkloadResult};
+        let mut rollup = chain_rollup(1, true);
+        let scored = PerfScore::from_workloads(vec![WorkloadResult {
+            id: "W1".into(),
+            metric: "latency".into(),
+            reference: 2.0,
+            candidate: 1.0,
+            ratio: 2.0,
+            correct: true,
+            numbers: Default::default(),
+            note: None,
+            harness_fault: false,
+        }]);
+        rollup.set_perf(scored.clone());
+        assert_eq!(
+            rollup
+                .career
+                .as_ref()
+                .and_then(|c| c.perf.as_ref())
+                .and_then(|p| p.score),
+            Some(2.0)
+        );
+        let fault = PerfScore::harness_fault(3, "the reference died");
+        rollup.set_perf(fault.clone());
+        assert!(
+            rollup.perf.as_ref().unwrap().score.is_none(),
+            "the phase keeps its scoreless block"
+        );
+        assert_eq!(
+            rollup
+                .career
+                .as_ref()
+                .and_then(|c| c.perf.as_ref())
+                .and_then(|p| p.score),
+            Some(2.0),
+            "the career keeps the last scored phase"
+        );
+    }
+
     /// R45 F3: the rendered ticket-0 contract names every workload, the
     /// sandbox limits and the formula; the later phase-openers repeat what
     /// that phase adds.
@@ -6167,6 +6210,7 @@ mod tests {
             "geometric mean",
             "[0.1, 100]",
             "wrong answer",
+            "flush",
             "Phase 1 measures W1 and W4",
         ] {
             assert!(text.contains(needle), "ticket 0 missing {needle:?}");
@@ -6182,11 +6226,11 @@ mod tests {
         }
     }
 
-    /// R45 F4: the `.43` perf-score bump breaks the chain from a `.42`
-    /// phase; a `.43` phase chains normally.
+    /// R45 F4 (kept current by round 49): a `.42` phase never chains into
+    /// the current rules; a same-version phase does.
     #[test]
     fn r45_f4_no_chain_across_the_bump() {
-        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.43");
+        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.44");
         let state = phase1_state();
         let mut prev = chain_rollup(1, true);
         prev.rules_version = "2026-10-19.42".to_string();
@@ -6203,7 +6247,7 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ran rules 2026-10-19.42"), "{msg}");
-        assert!(msg.contains("not 2026-10-19.43"), "{msg}");
+        assert!(msg.contains("not 2026-10-19.44"), "{msg}");
         validate_chain(
             &chain_rollup(1, true),
             Some(&state),
@@ -6214,7 +6258,42 @@ mod tests {
             crate::report::rules::RULES_VERSION,
             None,
         )
-        .expect("a .43 phase chains onto a .43 phase");
+        .expect("a current-version phase chains");
+    }
+
+    /// R49 F5: the `.44` W4/durability bump breaks the chain from a `.43`
+    /// phase; a `.44` phase chains normally.
+    #[test]
+    fn r49_f5_no_chain_across_the_bump() {
+        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.44");
+        let state = phase1_state();
+        let mut prev = chain_rollup(1, true);
+        prev.rules_version = "2026-10-19.43".to_string();
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
+        assert!(msg.contains("not 2026-10-19.44"), "{msg}");
+        validate_chain(
+            &chain_rollup(1, true),
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+        )
+        .expect("a .44 phase chains onto a .44 phase");
     }
 
     #[test]
