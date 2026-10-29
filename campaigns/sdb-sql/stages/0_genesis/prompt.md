@@ -87,6 +87,36 @@ committed rows, and sends garbage bytes, an unterminated line and a 2 MiB
 line: none of them may kill the server, and a fresh connection must
 still answer afterwards.
 
+## Performance (rules `.43`)
+
+Correctness is graded ticket by ticket. Speed is a **second axis** next to
+points: points sort first, and a tie in points is broken by the perf
+score. It is measured at the end of every phase on that phase's final
+server; the perf run is harness time and never spends your budget or
+counts toward the wall cap.
+
+Your server and the SQLite reference run the same workload, alternating
+rounds, each in a container with **2 CPUs and 2 GiB**. The reference is
+`1.0`.
+
+| ID | Workload | Size | Metric |
+|---|---|---|---|
+| W1 | point lookup by key, 1 client | 100k rows | p50 (p99 reported) |
+| W2 | range + `ORDER BY ... LIMIT`, 1 client | 100k rows | p50 |
+| W3 | two-table join + `GROUP BY` | 50k x 5k rows | p50 |
+| W4 | durable autocommit single-row `INSERT`, 1 and 8 clients | 2 s | commits/s |
+| W5 | mixed 80/20 read/write, 16 clients | 30 s | throughput (p99 reported) |
+
+For each workload `r` is `reference / candidate` for latency and
+`candidate / reference` for throughput, clipped to `[0.1, 100]`; W4
+combines its 1-client and 8-client rates with a geometric mean. The perf
+score is the geometric mean of the `r` values for the phase's workloads
+(`1.0` = the reference, `2.0` = twice as fast). A wrong answer scores
+that workload at the floor (`0.1`), so speed never buys a wrong result.
+
+Phase 1 measures W1 and W4; phase 2 adds W3; phase 3 adds W2 and W5;
+phase 4 runs all five. The sizes and the method are fixed.
+
 ## Constraints
 
 - **Standard library only.** No SQLite/DuckDB/Postgres bindings or
