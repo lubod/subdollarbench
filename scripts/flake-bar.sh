@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # R27 F5: resumable flake bar for the live SQL ladder proofs.
 #
-# Usage: scripts/flake-bar.sh [--passes K] [--only <test>] [--self-test]
+# Usage: scripts/flake-bar.sh [--passes K] [--only <test>] [--load L] [--self-test]
 #
 # The record is <git-common-dir>/sdb-gates/flake-<key>.txt. Each finished
 # test run appends one line immediately, so an interrupted chunk is kept;
@@ -22,6 +22,7 @@ flake_key() {
 passes=1
 only=""
 self_test=0
+load=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --passes)
@@ -32,12 +33,18 @@ while [[ $# -gt 0 ]]; do
             only="$2"; shift 2 ;;
         --self-test)
             self_test=1; shift ;;
+        --load)
+            [[ $# -ge 2 ]] || { echo "[flake] --load needs a value" >&2; exit 2; }
+            load="$2"; shift 2 ;;
         *)
             echo "[flake] unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 [[ "$passes" =~ ^[0-9]+$ ]] && [[ "$passes" -gt 0 ]] || {
     echo "[flake] --passes must be a positive integer" >&2; exit 2
+}
+[[ "$load" =~ ^[0-9]+$ ]] || {
+    echo "[flake] --load must be a non-negative integer" >&2; exit 2
 }
 
 # The bar keeps every ladder proof (the old list) and adds the r45 live
@@ -131,6 +138,8 @@ run_chunk() {
 }
 
 if [[ "$self_test" -eq 1 ]]; then
+    # R48 F3: the load helper's own self-test runs with the bar's.
+    scripts/flake-load.sh self-test
     # R45-1: the bar is the union of every ladder proof and the r45 live
     # proofs; it must not shrink to the SQL_PERF_LIVE skip list.
     mapfile -t bar_tests < <(tests_from_source)
@@ -264,11 +273,14 @@ commit="$(git rev-parse --short=12 HEAD)"
 key="$(flake_key "$(git rev-parse --show-toplevel)" HEAD)"
 dir="$(git rev-parse --path-format=absolute --git-common-dir)/sdb-gates"
 mkdir -p "$dir"
-record="$dir/flake-$key.txt"
+load_suffix=""
+[[ "$load" -gt 0 ]] && load_suffix="-load$load"
+record="$dir/flake-$key$load_suffix.txt"
 if [[ ! -f "$record" ]]; then
     {
         echo "commit:  $(git rev-parse HEAD)"
-        echo "key:     flake-$key"
+        echo "key:     flake-$key$load_suffix"
+        echo "load:    $load"
         echo "branch:  $(git rev-parse --abbrev-ref HEAD)"
         echo "subject: $(git log -1 --format=%s)"
         echo "started: $(date -u +%FT%TZ)"
@@ -277,7 +289,18 @@ else
     echo "resumed: $(date -u +%FT%TZ) commit $commit (passes requested: $passes)" >> "$record"
 fi
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+load_key=""
+cleanup() {
+    if [[ -n "$load_key" ]]; then
+        scripts/flake-load.sh stop "$load_key" || true
+    fi
+    rm -f "$log"
+}
+trap cleanup EXIT INT TERM
+if [[ "$load" -gt 0 ]]; then
+    load_key="bar-$key-$$"
+    scripts/flake-load.sh start "$load" "$load_key"
+fi
 
 failed=0
 run_chunk "$record" "$passes" "${run_tests[@]}"
