@@ -1118,6 +1118,9 @@ pub struct StageOutcome {
     /// ladder stops here and the cell is a non-result.
     #[serde(default)]
     pub harness_fault: Option<String>,
+    /// R48 F2: seconds this attempt waited for the host grading lock.
+    #[serde(default)]
+    pub grading_wait_s: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1157,6 +1160,9 @@ pub struct StageRecord {
     pub points: f64,
     pub run_id: String,
     pub git_commit: Option<String>,
+    /// R48 F2: seconds this ticket waited for the host grading lock.
+    #[serde(default)]
+    pub grading_wait_s: f64,
     pub git_stat: Option<String>,
     /// Every verification round of this attempt (initial + repairs), in
     /// order. Empty on records written before the field existed; the GUI
@@ -1932,6 +1938,9 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         sandbox_image: crate::sandbox::omp_updater::sandbox_image_id(),
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
+        worker: 0,
+        concurrent_cells: 1,
+        grading_wait_s: 0.0,
         points: 0.0,
         max_points: 0.0,
         // S3: `live.phase` is the activity ("agent", "verifying"); the
@@ -2366,6 +2375,10 @@ pub struct CareerRollup {
     pub perf: Option<crate::verifier::sql::perfscore::PerfScore>,
 }
 
+fn one_cell() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CampaignRollup {
     pub campaign_id: String,
@@ -2416,6 +2429,16 @@ pub struct CampaignRollup {
     /// Wall-clock cap in minutes (0 = uncapped).
     #[serde(default)]
     pub wall_min: u64,
+    /// R48 F1: the worker lane this cell ran on (0-7).
+    #[serde(default)]
+    pub worker: u8,
+    /// R48 F5: how many cells were running at once during this phase.
+    #[serde(default = "one_cell")]
+    pub concurrent_cells: u32,
+    /// R48 F2/F5: summed seconds spent waiting for the grading lock, not
+    /// charged to the wall cap (D2 a).
+    #[serde(default)]
+    pub grading_wait_s: f64,
     /// Difficulty-weighted points actually scored (tier x weight per pass).
     #[serde(default)]
     pub points: f64,
@@ -2529,6 +2552,20 @@ pub struct CampaignRunOptions {
     /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour);
     /// the ladder stops with `over_wall` when reached.
     pub wall_min: Option<u64>,
+}
+
+/// R48 F2 (D2 a): the wall cap is charged only for time spent working,
+/// not for time spent waiting for the grading lock.
+pub fn wall_exceeded(
+    elapsed: std::time::Duration,
+    wall_min: Option<u64>,
+    grading_wait_s: f64,
+) -> bool {
+    let wait = std::time::Duration::from_secs_f64(grading_wait_s.max(0.0));
+    let worked = elapsed.saturating_sub(wait);
+    wall_min
+        .map(|m| m > 0 && worked >= std::time::Duration::from_secs(m * 60))
+        .unwrap_or(false)
 }
 
 /// Run the ladder. `exec` performs one ticket (agent + verification) and
@@ -2785,6 +2822,9 @@ where
         sandbox_image: None,
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
+        worker: 0,
+        concurrent_cells: 1,
+        grading_wait_s: 0.0,
         points: 0.0,
         max_points: phase
             .map(|p| phase_max_points(p, &lc.spec.stages))
@@ -2874,6 +2914,7 @@ where
             let out = exec(&attempt)
                 .await
                 .with_context(|| format!("catch-up stage {} ({})", target, stage.title))?;
+            rollup.grading_wait_s += out.grading_wait_s;
             largest_call_usd = largest_call_usd.max(out.max_call_usd);
             let (regressed, severity) = detect_regressions(&best, &out.stage_results);
             for r in &out.stage_results {
@@ -2971,10 +3012,8 @@ where
             v.sort_by_key(|(id, _)| *id);
             v
         };
-        let over_wall_now = opts
-            .wall_min
-            .map(|m| m > 0 && wall_start.elapsed() >= std::time::Duration::from_secs(m * 60))
-            .unwrap_or(false);
+        let over_wall_now =
+            wall_exceeded(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
         if over_budget_now || floor_now || over_wall_now {
             rollup.over_budget |= over_budget_now;
             rollup.cap_reached |= floor_now && !over_budget_now;
@@ -3045,6 +3084,7 @@ where
         let out = exec(&attempt_full)
             .await
             .with_context(|| format!("stage {} ({})", stage.id, stage.title))?;
+        rollup.grading_wait_s += out.grading_wait_s;
         largest_call_usd = largest_call_usd.max(out.max_call_usd);
         let (regressed, regression_severity) = detect_regressions(&best, &out.stage_results);
         for r in &out.stage_results {
@@ -3141,6 +3181,7 @@ where
                 let out2 = exec(&attempt_lite)
                     .await
                     .with_context(|| format!("stage {} lite", stage.id))?;
+                rollup.grading_wait_s += out2.grading_wait_s;
                 largest_call_usd = largest_call_usd.max(out2.max_call_usd);
                 let (regressed2, severity2) = detect_regressions(&best, &out2.stage_results);
                 for r in &out2.stage_results {
@@ -3316,6 +3357,7 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         git_stat: None,
         rounds: Vec::new(),
         failure: None,
+        grading_wait_s: 0.0,
     }
 }
 
@@ -3385,6 +3427,7 @@ fn push_attempt_record(
         git_stat: out.git_stat.clone(),
         rounds: out.rounds.clone(),
         failure: out.failure.clone(),
+        grading_wait_s: out.grading_wait_s,
     });
 }
 
@@ -3855,6 +3898,9 @@ mod tests {
             sandbox_image: None,
             budget_usd: 0.0,
             wall_min: 0,
+            worker: 0,
+            concurrent_cells: 1,
+            grading_wait_s: 0.0,
             points: 0.0,
             max_points: 0.0,
             harness_fault: None,
@@ -3891,6 +3937,7 @@ mod tests {
             git_stat: None,
             rounds: vec![],
             failure: None,
+            grading_wait_s: 0.0,
         });
         rollup.stages.push(StageRecord {
             id: 8,
@@ -3916,6 +3963,7 @@ mod tests {
             git_stat: None,
             rounds: vec![],
             failure: None,
+            grading_wait_s: 0.0,
         });
         backfill_rounds(&mut rollup, &dir);
         let rounds = &rollup.stages[1].rounds;
@@ -4216,6 +4264,7 @@ mod tests {
                 detail: String::new(),
                 stderr_tail: None,
             }),
+            grading_wait_s: 0.0,
         };
         let mut rollup = CampaignRollup {
             campaign_id: "c".into(),
@@ -4239,6 +4288,9 @@ mod tests {
             sandbox_image: None,
             budget_usd: 0.25,
             wall_min: 30,
+            worker: 0,
+            concurrent_cells: 1,
+            grading_wait_s: 0.0,
             points: 1.0,
             max_points: 4.0,
             harness_fault: None,
@@ -4304,6 +4356,7 @@ mod tests {
             disqualified: false,
             git_commit: Some("abc1234".into()),
             git_stat: Some("1 file changed".into()),
+            grading_wait_s: 0.0,
         }
     }
 
@@ -5982,6 +6035,9 @@ mod tests {
             sandbox_image: None,
             budget_usd: 0.99,
             wall_min: 150,
+            worker: 0,
+            concurrent_cells: 1,
+            grading_wait_s: 0.0,
             points: 10.0,
             max_points: 10.0,
             phase: Some(phase),
@@ -6143,6 +6199,39 @@ mod tests {
         assert!(json["career"]["perf"]["score"].is_number());
         let back: CampaignRollup = serde_json::from_value(json).unwrap();
         assert_eq!(back.perf.and_then(|p| p.score), perf.score);
+    }
+
+    /// R48 F2 (D2 a): the grading-lock wait is recorded in the rollup and
+    /// subtracted from the wall cap.
+    #[test]
+    fn r48_f2_wait_is_recorded_not_charged() {
+        use std::time::Duration;
+        assert!(wall_exceeded(Duration::from_secs(300), Some(5), 0.0));
+        assert!(!wall_exceeded(Duration::from_secs(300), Some(5), 120.0));
+        assert!(!wall_exceeded(Duration::from_secs(300), Some(5), 300.0));
+        assert!(!wall_exceeded(Duration::from_secs(200), Some(5), 0.0));
+        let mut rollup = chain_rollup(1, true);
+        rollup.grading_wait_s = 120.0;
+        let v = serde_json::to_value(&rollup).unwrap();
+        assert_eq!(v["grading_wait_s"].as_f64(), Some(120.0));
+    }
+
+    /// R48 F5: a phase rollup says its lane, the lane count and the lock
+    /// wait it carried.
+    #[test]
+    fn r48_f5_rollup_says_how_it_ran() {
+        let mut rollup = chain_rollup(1, true);
+        rollup.worker = 3;
+        rollup.concurrent_cells = 3;
+        rollup.grading_wait_s = 42.5;
+        let v = serde_json::to_value(&rollup).unwrap();
+        assert_eq!(v["worker"], 3);
+        assert_eq!(v["concurrent_cells"], 3);
+        assert_eq!(v["grading_wait_s"].as_f64(), Some(42.5));
+        let back: CampaignRollup = serde_json::from_value(v).unwrap();
+        assert_eq!(back.worker, 3);
+        assert_eq!(back.concurrent_cells, 3);
+        assert_eq!(back.grading_wait_s, 42.5);
     }
 
     /// R45 F3: the rendered ticket-0 contract names every workload, the
@@ -6393,6 +6482,7 @@ mod tests {
                 detail: detail.into(),
                 stderr_tail: None,
             }),
+            grading_wait_s: 0.0,
         }
     }
 

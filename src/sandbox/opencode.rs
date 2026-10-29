@@ -508,6 +508,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .arg(&container_name)
                 .arg("--memory=3g")
                 .arg("--cpus=3.0")
+                .args(crate::grading::cpuset_args(
+                    &crate::grading::session_cpuset(),
+                ))
                 .arg("--pids-limit=512")
                 .arg("--cap-drop=ALL")
                 .arg("--security-opt=no-new-privileges")
