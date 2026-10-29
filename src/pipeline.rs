@@ -9333,10 +9333,11 @@ main()
         for w in &score.workloads {
             assert!(
                 (w.ratio - 1.0).abs() <= 0.1,
-                "{} ratio {:.3} (correct {}): {:?}",
+                "{} ratio {:.3} (correct {}) note {:?}: {:?}",
                 w.id,
                 w.ratio,
                 w.correct,
+                w.note,
                 w.numbers
             );
         }

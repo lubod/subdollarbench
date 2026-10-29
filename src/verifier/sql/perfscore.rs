@@ -425,23 +425,6 @@ fn connect(addr: &str, timeout: Duration) -> Result<TcpCandidate, String> {
     TcpCandidate::connect(addr, timeout)
 }
 
-/// R49: a `busy` is the dialect's transient concurrency answer, not a
-/// wrong result. W4/W5 run many clients against one writer; retry a few
-/// times before treating a busy as a failure.
-fn exec_busy(c: &mut TcpCandidate, sql: &str) -> Result<Response, String> {
-    let mut last = c.exec(sql)?;
-    for _ in 0..4 {
-        match &last {
-            Response::Err { class, .. } if class == "busy" => {
-                std::thread::sleep(Duration::from_millis(2));
-                last = c.exec(sql)?;
-            }
-            _ => break,
-        }
-    }
-    Ok(last)
-}
-
 fn create_table(c: &mut TcpCandidate, sql: &str) -> Result<(), String> {
     match c.exec(sql)? {
         Response::Ok(0) => Ok(()),
@@ -535,7 +518,7 @@ fn sample_rows(
     addr: &str,
     table: &str,
     key_col: &str,
-    start_id: u64,
+    next_id: u64,
     count: u64,
     cfg: &PerfConfig,
 ) -> bool {
@@ -543,14 +526,16 @@ fn sample_rows(
         Ok(c) => c,
         Err(_) => return false,
     };
-    // The first ids of the window: later ops can be transiently busy under
-    // load, and a busy is not a missing row.
-    for id in start_id..start_id + count {
+    let first = next_id.saturating_sub(count).max(1);
+    for id in first..next_id {
         let want = format!("r{id}");
         let sql = format!("SELECT v FROM {table} WHERE {key_col} = {id}");
         match c.exec(&sql) {
             Ok(r) if !wrong_row(&r, &want) => {}
-            _ => return false,
+            other => {
+                eprintln!("[sample] {key_col}={id} {other:?}");
+                return false;
+            }
         }
     }
     true
@@ -901,6 +886,8 @@ struct Throughput {
     next_id: u64,
     elapsed: f64,
     correct: bool,
+    /// The first non-OK answer, for the harness log (scoring unchanged).
+    bad: Option<String>,
     latencies: Vec<f64>,
     /// Flush requests during the 1-client window; None for the 8-client
     /// window and when no counter is injected.
@@ -941,14 +928,14 @@ fn w4_side(
                     let id = next.fetch_add(1, Ordering::Relaxed);
                     let sql = format!("INSERT INTO {table} VALUES ({id}, 'r{id}')");
                     let t0 = Instant::now();
-                    let r = exec_busy(&mut c, &sql)?;
+                    let r = c.exec(&sql)?;
                     lat.push(ms(t0.elapsed()));
                     match r {
                         Response::Ok(1) => inserted += 1,
-                        // A retried-out busy is a concurrency answer, not a
-                        // wrong insert; it just did not commit.
-                        Response::Err { class, .. } if class == "busy" => {}
-                        _ => ok = false,
+                        other => {
+                            ok = false;
+                            eprintln!("[W4] insert non-OK: {other:?}");
+                        }
                     }
                 }
                 Ok((inserted, ok, start.elapsed().as_secs_f64(), lat))
@@ -958,6 +945,7 @@ fn w4_side(
     barrier.wait();
     let mut inserted = 0u64;
     let mut correct = true;
+    let mut bad: Option<String> = None;
     let mut elapsed = 0.0f64;
     let mut latencies = Vec::new();
     for h in handles {
@@ -965,12 +953,15 @@ fn w4_side(
             .join()
             .map_err(|_| "insert client panicked".to_string())??;
         inserted += n;
+        if !ok && bad.is_none() {
+            bad = Some("insert client saw a non-OK answer".to_string());
+        }
         correct &= ok;
         elapsed = elapsed.max(t);
         latencies.extend(lat);
     }
     let next_id = next.load(Ordering::Relaxed);
-    if !sample_rows(addr, table, "id", start_id, 5, cfg) {
+    if !sample_rows(addr, table, "id", next_id, 5, cfg) {
         correct = false;
     }
     let flushes = match (before, flush) {
@@ -986,6 +977,7 @@ fn w4_side(
         next_id,
         elapsed: elapsed.max(1e-6),
         correct,
+        bad,
         latencies,
         flushes,
     })
@@ -1039,7 +1031,10 @@ fn run_w4(
             };
             ref_next = r.next_id;
             if !r.correct {
-                let note = "the reference insert check failed".to_string();
+                let note = format!(
+                    "the reference insert check failed: {}",
+                    r.bad.clone().unwrap_or_default()
+                );
                 return (harness_flawed("W4", &note), Some(note));
             }
             if clients == 1 {
@@ -1073,7 +1068,10 @@ fn run_w4(
             cand_next = c.next_id;
             if !c.correct {
                 correct = false;
-                note = Some("the candidate insert check failed".into());
+                note = Some(format!(
+                    "the candidate insert check failed: {}",
+                    c.bad.clone().unwrap_or_default()
+                ));
                 break;
             }
             if clients == 1 {
@@ -1158,6 +1156,8 @@ struct Mixed {
     next_id: u64,
     elapsed: f64,
     correct: bool,
+    /// The first non-OK answer, for the harness log (scoring unchanged).
+    bad: Option<String>,
     latencies: Vec<f64>,
 }
 
@@ -1192,28 +1192,28 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
                         let id = next.fetch_add(1, Ordering::Relaxed);
                         let sql = format!("INSERT INTO {table} VALUES ({id}, 'r{id}')");
                         let t0 = Instant::now();
-                        let r = exec_busy(&mut c, &sql)?;
+                        let r = c.exec(&sql)?;
                         lat.push(ms(t0.elapsed()));
                         match r {
                             Response::Ok(1) => {
                                 n += 1;
                                 writes += 1;
                             }
-                            Response::Err { class, .. } if class == "busy" => {}
-                            _ => ok = false,
+                            other => {
+                                ok = false;
+                                eprintln!("[W5] write non-OK: {other:?}");
+                            }
                         }
                     } else {
                         let k = i.wrapping_mul(7919) % rows;
                         let want = format!("r{k}");
                         let sql = format!("SELECT v FROM {table} WHERE k = {k}");
                         let t0 = Instant::now();
-                        let r = exec_busy(&mut c, &sql)?;
+                        let r = c.exec(&sql)?;
                         lat.push(ms(t0.elapsed()));
-                        if matches!(&r, Response::Err { class, .. } if class == "busy") {
-                            continue; // a busy read is not a wrong answer
-                        }
                         if wrong_row(&r, &want) {
                             ok = false;
+                            eprintln!("[W5] read wrong: {r:?}");
                         }
                         n += 1;
                     }
@@ -1226,6 +1226,7 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
     let mut total_ops = 0u64;
     let mut writes = 0u64;
     let mut correct = true;
+    let mut bad: Option<String> = None;
     let mut elapsed = 0.0f64;
     let mut latencies = Vec::new();
     for h in handles {
@@ -1234,12 +1235,15 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
             .map_err(|_| "mixed client panicked".to_string())??;
         total_ops += n;
         writes += w;
+        if !ok && bad.is_none() {
+            bad = Some("mixed client saw a non-OK answer".to_string());
+        }
         correct &= ok;
         elapsed = elapsed.max(t);
         latencies.extend(lat);
     }
     let next_id = next.load(Ordering::Relaxed);
-    if !sample_rows(addr, table, "k", start_id, 5, cfg) {
+    if !sample_rows(addr, table, "k", next_id, 5, cfg) {
         correct = false;
     }
     Ok(Mixed {
@@ -1248,6 +1252,7 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
         next_id,
         elapsed: elapsed.max(1e-6),
         correct,
+        bad,
         latencies,
     })
 }
@@ -1295,7 +1300,10 @@ fn run_w5(
             }
         };
         if !r.correct {
-            let note = "the reference mixed-workload check failed".to_string();
+            let note = format!(
+                "the reference mixed-workload check failed: {}",
+                r.bad.clone().unwrap_or_default()
+            );
             return (harness_flawed("W5", &note), Some(note));
         }
         ref_next = r.next_id;
@@ -1312,7 +1320,10 @@ fn run_w5(
         cand_writes += c.writes;
         if !c.correct {
             correct = false;
-            note = Some("the candidate mixed-workload check failed".into());
+            note = Some(format!(
+                "the candidate mixed-workload check failed: {}",
+                c.bad.clone().unwrap_or_default()
+            ));
             break;
         }
         let mut rl = r.latencies.clone();

@@ -816,7 +816,10 @@ def pg_send_result(f, kind):
 
 
 def pg_serve(sock, db_path):
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    # R49: W5 runs 16 clients on a disk-backed store; the default 5 s
+    # lock wait can answer busy during a disk stall. 20 s stays inside the
+    # client's 30 s statement timeout.
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=20.0)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=" + SYNC)
@@ -961,7 +964,8 @@ def pg_accept_loop(srv, db_path):
 
 def serve(sock, db_path):
     global CONNS_CURRENT, ROLE, ACK_MAX, SKIP_SYNC
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    # R49: see pg_serve; the W5 writer must wait through a disk stall.
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=20.0)
     with STATS_LOCK:
         STATS["connections_current"] += 1
         STATS["connections_total"] += 1
