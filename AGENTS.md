@@ -132,6 +132,12 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
   - Run them niced: `nice -n 10 cargo test`.
   - Docker-heavy tests can flake in parallel. Rerun a failure alone
     before calling it real.
+  - **Two rounds at once** (operator, 2026-10-29: rounds 45 and 48):
+    only one `cargo test` runs on the host at a time. Tests bind fixed
+    host ports (round 37's port table), and `SQL_PERF_LIVE` works only
+    inside one process. Wrap every test run and gate in the shared lock:
+    `flock "$(git rev-parse --git-common-dir)/sdb-gates/cargo-test.lock" nice -n 10 cargo test ...`
+    (or `... scripts/gate.sh`). Waiting on the lock is expected.
   - **A new test must be seen failing** (rounds 37, 44: tests that could
     never fail, or never pass).
     - Before `ready`, run each test that an acceptance box names once

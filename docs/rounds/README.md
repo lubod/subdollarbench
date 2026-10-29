@@ -32,7 +32,7 @@ from `TEMPLATE.md`.
 | [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | merged `a3a4e19` |
 | [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | open: **next** (operator 2026-10-29; the `.42` grid is stopped) |
 | [46](46.md) | Price the grid models: luna, mimo-v2.6-flash, qwen3.8-flash (graded: `src/cost`) | merged `e44705f` |
-| [48](48.md) | Careers in parallel lanes: `--worker`, a grading lock, a load bar, `scripts/grid.sh` (graded: full gate + bar) | draft (after publishing, before the v2 grid) |
+| [48](48.md) | Careers in parallel lanes: `--worker`, a grading lock, a load bar, `scripts/grid.sh` (graded: full gate + bar) | open (alongside 45; operator 2026-10-29) |
 
 **Status values:**
 
