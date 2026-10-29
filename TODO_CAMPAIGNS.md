@@ -141,6 +141,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        performance and latency"; publish `.42` first): round 45 (draft),
        rules `.43`, a new bar and a new grid. Round 47 shows it on the
        board.
+       Round 48 (draft, operator 2026-10-29 "ok plan it") runs the v2
+       grid's careers in parallel lanes: about 28 h for 15 careers with
+       3 lanes, instead of about 82 h.
     6. **Opened during the grid** (operator, 2026-10-28: "work on next
        rounds ... without waiting"; the fast gate may run next to a
        cell, AGENTS.md): 39 (GUI) and 41 (CLI and API, plus R38-1)
