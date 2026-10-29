@@ -28,9 +28,9 @@ from `TEMPLATE.md`.
 | [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | draft (after the grid) |
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | merged `17d09eb` |
 | [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | merged `b28674d` |
-| [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | open |
+| [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | open (after 45) |
 | [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | merged `a3a4e19` |
-| [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | open |
+| [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | open: **next** (operator 2026-10-29; the `.42` grid is stopped) |
 | [46](46.md) | Price the grid models: luna, mimo-v2.6-flash, qwen3.8-flash (graded: `src/cost`) | merged `e44705f` |
 | [48](48.md) | Careers in parallel lanes: `--worker`, a grading lock, a load bar, `scripts/grid.sh` (graded: full gate + bar) | draft (after publishing, before the v2 grid) |
 

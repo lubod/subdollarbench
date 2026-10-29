@@ -136,6 +136,11 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
        muse-spark phase 1, stopped by the reviewer on "stop it") stay
        unpublished. Tiered prices: open
        question Q8.
+       **Stopped again, 2026-10-29** (operator: "ok stop it and fix it"):
+       the restarted grid's first cell (deepseek career 1, phase 1) wrote
+       Python again, as every model has; stopped at ticket 5 (6/10, about
+       $0.17). The `.42` grid is not published. Round 45 (the perf score,
+       rules `.43`) goes first; the grid starts again on `.43`.
     4. **Variance check, then publish.**
     5. **v2, the perf score** (operator, 2026-10-28: "double down on
        performance and latency"; publish `.42` first): round 45 (draft),
