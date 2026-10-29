@@ -9349,6 +9349,109 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// R49 F2 (live): a reference with `synchronous=OFF` as the candidate
+    /// floors W4 on the real device flush counter, while the FULL
+    /// reference passes its own check and the phase keeps a score.
+    #[test]
+    fn r49_f2_unsynced_candidate_floors_live() {
+        // The lock line is first so scripts/live-proofs.sh names this test,
+        // not the helper fns below it.
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        use crate::verifier::sql::perfscore::{
+            run_pair_with_flush, DeviceFlushCounter, PerfConfig,
+        };
+        use std::process::{Command, Stdio};
+        struct RefProc(std::process::Child);
+        impl Drop for RefProc {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        fn free_port() -> u16 {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        }
+        fn start(
+            script: &std::path::Path,
+            port: u16,
+            data: &std::path::Path,
+            sync: &str,
+        ) -> RefProc {
+            let child = Command::new("python3")
+                .arg("-u")
+                .arg(script)
+                .args(["--port", &port.to_string(), "--data"])
+                .arg(data)
+                .env("SDB_SQL_SYNCHRONOUS", sync)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("start the reference");
+            let proc = RefProc(child);
+            crate::verifier::sql::driver::wait_until_answering(
+                &format!("127.0.0.1:{port}"),
+                std::time::Duration::from_secs(10),
+            )
+            .expect("the reference answers");
+            proc
+        }
+        let dir = covtest_dir("perfunsync");
+        let ws = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&ws, 5480).unwrap();
+        let ref_data = dir.join("ref-data");
+        let cand_data = dir.join("cand-data");
+        fs::create_dir_all(&ref_data).unwrap();
+        fs::create_dir_all(&cand_data).unwrap();
+        let ref_port = free_port();
+        let cand_port = free_port();
+        let script = ws.join("sql_server.py");
+        let _ref = start(&script, ref_port, &ref_data, "FULL");
+        let _cand = start(&script, cand_port, &cand_data, "OFF");
+        let ref_flush = DeviceFlushCounter::for_dir(&ref_data).expect("reference flush counter");
+        let cand_flush = DeviceFlushCounter::for_dir(&cand_data).expect("candidate flush counter");
+        let cfg = PerfConfig {
+            rounds: 2,
+            rows_w1: 1_000,
+            lookups: 20,
+            w4_seconds: 0.5,
+            timeout: std::time::Duration::from_secs(15),
+            workload_deadline: std::time::Duration::from_secs(60),
+            ..PerfConfig::small_for_tests()
+        };
+        let score = run_pair_with_flush(
+            &format!("127.0.0.1:{ref_port}"),
+            &format!("127.0.0.1:{cand_port}"),
+            1,
+            &cfg,
+            Some(&ref_flush),
+            Some(&cand_flush),
+        );
+        let w4 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W4")
+            .expect("phase 1 runs W4");
+        assert!(
+            !w4.correct,
+            "synchronous=OFF must floor W4: {:?}",
+            w4.numbers
+        );
+        assert!(
+            w4.note.as_deref().unwrap_or("").contains("not durable"),
+            "{:?}",
+            w4.note
+        );
+        assert!(
+            score.score.is_some(),
+            "the candidate floor keeps the phase scored: {:?}",
+            score.error
+        );
+    }
+
     /// R45 F5 acceptance (live): the CLI path measures a finished
     /// workspace and prints a score of 1.0 ± 0.1. The small config keeps
     /// the phase-4 shape (all five workloads) without the 30 s W5.

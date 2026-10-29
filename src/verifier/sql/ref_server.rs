@@ -140,6 +140,11 @@ STATS = {
 # Ticket 18: hostile input and limits. A password is optional (the
 # differential suites run without one); the limits apply always.
 PASSWORD = os.environ.get("SDB_SQL_PASSWORD", "")
+# R49: the W4 flush live test runs one reference with synchronous=OFF as the
+# unsynced candidate. The normal reference is FULL (one fsync per commit).
+SYNC = os.environ.get("SDB_SQL_SYNCHRONOUS", "FULL").upper()
+if SYNC not in ("OFF", "NORMAL", "FULL", "EXTRA"):
+    SYNC = "FULL"
 MAX_STMT = 16 * 1024 * 1024
 MAX_DEPTH = 10000
 MAX_CONNS = 256
@@ -814,7 +819,7 @@ def pg_serve(sock, db_path):
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA synchronous=" + SYNC)
     f = sock.makefile("rwb")
     try:
         hdr = f.read(8)
@@ -966,7 +971,7 @@ def serve(sock, db_path):
     # keeps the hot tail in <db>-wal, whose torn tail SQLite discards
     # frame by frame.
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA synchronous=" + SYNC)
     f = sock.makefile("rwb")
     try:
         if PASSWORD:

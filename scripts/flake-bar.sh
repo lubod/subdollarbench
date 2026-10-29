@@ -40,13 +40,13 @@ done
     echo "[flake] --passes must be a positive integer" >&2; exit 2
 }
 
-# The bar keeps every ladder proof (the old list) and adds the r45 live
-# proofs. The fast-gate skip list is scripts/live-proofs.sh, which is the
-# SQL_PERF_LIVE holders only; the bar must not shrink to that list.
+# The bar keeps every ladder proof (the old list) and adds the r45/r49
+# live proofs. The fast-gate skip list is scripts/live-proofs.sh, which is
+# the SQL_PERF_LIVE holders only; the bar must not shrink to that list.
 tests_from_source() {
     {
         grep -oE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs
-        grep -oE 'fn r45_[a-z0-9_]*' src/pipeline.rs
+        grep -oE 'fn r4[59]_[a-z0-9_]*' src/pipeline.rs
     } | sed 's/^fn //' | sort -u
 }
 
@@ -139,12 +139,13 @@ if [[ "$self_test" -eq 1 ]]; then
             || { echo "[flake] bar list missing $t"; exit 1; }
     done < <(grep -oE 'fn test_pipeline_eval_only_sql_[a-z0-9_]*_live' src/pipeline.rs \
         | sed 's/^fn //' | sort -u)
-    for t in r45_f1_reference_scores_one r45_f5_perfscore_cli; do
+    for t in r45_f1_reference_scores_one r45_f5_perfscore_cli \
+        r49_f2_unsynced_candidate_floors_live; do
         printf '%s\n' "${bar_tests[@]}" | grep -qx "$t" \
             || { echo "[flake] bar list missing $t"; exit 1; }
     done
-    [[ ${#bar_tests[@]} -eq 27 ]] \
-        || { echo "[flake] bar list has ${#bar_tests[@]} tests, expected 27"; exit 1; }
+    [[ ${#bar_tests[@]} -eq 28 ]] \
+        || { echo "[flake] bar list has ${#bar_tests[@]} tests, expected 28"; exit 1; }
 
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
