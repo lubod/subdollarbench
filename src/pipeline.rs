@@ -9318,6 +9318,60 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// R45 F1 acceptance (live): the reference against itself scores
+    /// 1.0 ± 0.1 on every workload over 5 alternating rounds. Both sides
+    /// run in the sandbox (2 CPUs, 2 GiB) through the production runner.
+    #[test]
+    fn r45_f1_reference_scores_one() {
+        use crate::verifier::sql::perfscore::{run_workspace, PerfConfig};
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = covtest_dir("perfref");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, 5480).unwrap();
+        let score = run_workspace(&workdir, 4, &PerfConfig::default())
+            .expect("the reference workspace must start and score");
+        for w in &score.workloads {
+            assert!(
+                (w.ratio - 1.0).abs() <= 0.1,
+                "{} ratio {:.3} (correct {}): {:?}",
+                w.id,
+                w.ratio,
+                w.correct,
+                w.numbers
+            );
+        }
+        assert!(
+            (score.score - 1.0).abs() <= 0.1,
+            "score {:.3}: {:?}",
+            score.score,
+            score.workloads
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R45 F5 acceptance (live): the CLI path measures a finished
+    /// workspace and prints a score of 1.0 ± 0.1. The small config keeps
+    /// the phase-4 shape (all five workloads) without the 30 s W5.
+    #[test]
+    fn r45_f5_perfscore_cli() {
+        use crate::verifier::sql::perfscore::{cli_with, render, PerfConfig};
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = covtest_dir("perfcli");
+        let workdir = dir.join("workspace");
+        crate::verifier::sql::ref_server::write_reference(&workdir, 5480).unwrap();
+        let score = cli_with(&workdir, &PerfConfig::fixture_for_tests())
+            .expect("the reference workspace must start and score");
+        let text = render(&score);
+        assert!(text.contains("perf score"), "{text}");
+        assert_eq!(score.workloads.len(), 5, "{text}");
+        assert!(
+            (score.score - 1.0).abs() <= 0.1,
+            "score {:.3}\n{text}",
+            score.score
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// sdb-sql stage 4 live proof (eval-only, no model): the reference
     /// passes the cumulative suite through stage 4 — the differential
     /// script plus the persistence scenario, which restarts the candidate

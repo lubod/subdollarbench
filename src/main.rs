@@ -379,6 +379,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("doctor: all green");
         }
 
+        Commands::Perfscore { workspace, json } => {
+            subdollarbench::verifier::sql::perfscore::cli(&workspace, json)?;
+        }
+
         Commands::Tui { server, interval } => tui::run(server, interval).await?,
         Commands::Status { server, json } => main_queue::handle_status(server, json).await?,
 
@@ -638,6 +642,26 @@ mod tests {
             } => {
                 assert_eq!(phase, Some(2));
                 assert_eq!(chain.as_deref(), Some("campaign_prev"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// R45 F5: the CLI surface the reviewer runs on a finished workspace.
+    #[test]
+    fn r45_f5_perfscore_command_parses() {
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "perfscore",
+            "--workspace",
+            "/tmp/workspace",
+            "--json",
+        ])
+        .expect("perfscore --workspace must parse");
+        match cli.command {
+            Commands::Perfscore { workspace, json } => {
+                assert_eq!(workspace, "/tmp/workspace");
+                assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
         }

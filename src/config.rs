@@ -385,6 +385,18 @@ pub enum Commands {
         server: Option<String>,
     },
 
+    /// R45: score a finished sdb-sql workspace against the SQLite reference
+    /// (the perf axis; all five workloads, printed as 1.0 = the reference)
+    Perfscore {
+        /// Finished workspace with start.sh or a Dockerfile
+        #[arg(long)]
+        workspace: String,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// [maintain] Pre-flight checks: docker, images, API key, ports, leaks (read-only)
     Doctor,
 }
