@@ -26,6 +26,11 @@ The harness writes the rows through the protocol in batched transactions
 and throws the scratch store away afterwards; your real store is untouched.
 The cumulative suites still pass; this scenario runs after them.
 
+## Performance this phase
+
+The phase-end perf score runs all five workloads, **W1-W5**. The full
+contract is in ticket 0's section of `SPEC.md`.
+
 ## Constraints
 
 - Standard library only; no embedded SQL engines or parser libraries.

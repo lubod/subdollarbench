@@ -20,6 +20,41 @@ use subdollarbench::campaign::{
 use subdollarbench::config::{Harness, TaskType};
 use subdollarbench::pipeline::{BenchmarkConfig, BenchmarkPipeline, PipelineLogger};
 use subdollarbench::report::RunArchiver;
+use subdollarbench::verifier::sql::perfscore::{self, PerfConfig, PerfScore};
+
+/// R45: score the phase's final workspace. The perf run is harness time:
+/// it never spends the candidate's budget and is not part of the wall cap.
+/// A harness-side failure leaves no perf score (the tie-break skips it);
+/// the points ladder and the cell are unaffected. A candidate failure is
+/// already a floored block from `run_workspace`.
+async fn phase_perf(workdir: PathBuf, phase: u32) -> PerfScore {
+    let result = tokio::task::spawn_blocking(move || {
+        perfscore::run_workspace(&workdir, phase, &PerfConfig::default())
+    })
+    .await;
+    match result {
+        Ok(Ok(score)) => score,
+        Ok(Err(e)) => {
+            eprintln!("[PERF] phase {phase}: harness fault: {e:#}; no perf score");
+            PerfScore::harness_fault(phase, format!("{e:#}"))
+        }
+        Err(e) => {
+            eprintln!("[PERF] phase {phase}: perf task failed: {e}; no perf score");
+            PerfScore::harness_fault(phase, format!("perf task failed: {e}"))
+        }
+    }
+}
+
+fn append_live_log(cdir: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cdir.join("live.log"))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
 
 /// Tee logger: live output for the operator + a buffered stage console +
 /// an append-only `live.log` the GUI tails while the campaign runs.
@@ -753,6 +788,37 @@ pub async fn run(
         write_ladder_state(&cdir, st);
     }
 
+    // R45 D1: the perf score is measured at the end of every phase, on
+    // that phase's final server, after the points ladder is settled.
+    if lc.spec.task == "sql" {
+        if let Some(phase) = phase_spec.as_ref().map(|p| p.id) {
+            let perf = phase_perf(workdir.clone(), phase).await;
+            let mut line = match perf.score {
+                Some(value) => format!("[PERF] phase {phase} score {value:.3}"),
+                None => format!(
+                    "[PERF] phase {phase} harness fault: {}",
+                    perf.error.as_deref().unwrap_or("no score")
+                ),
+            };
+            if perf.score.is_some() {
+                for w in &perf.workloads {
+                    line.push_str(&format!(
+                        " {} {:.3}{}",
+                        w.id,
+                        w.ratio,
+                        if w.correct { "" } else { " (wrong)" }
+                    ));
+                }
+            }
+            println!("{line}");
+            append_live_log(&cdir, &line);
+            rollup.set_perf(perf);
+            // The perf run is part of the phase's record; its finish time
+            // includes it even though its minutes are harness time.
+            rollup.finished_at = chrono::Utc::now().to_rfc3339();
+        }
+    }
+
     rollup.refork = refork_info.clone();
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
@@ -1326,6 +1392,23 @@ mod tests {
     use super::*;
     use subdollarbench::campaign::{CampaignRollup, StageRecord};
 
+    /// R45: a workspace that cannot start is a floored perf block, not a
+    /// failed cell; the harness reason is kept for the log.
+    #[tokio::test]
+    async fn r45_phase_perf_floors_without_a_workspace() {
+        let dir = tmp("phase_perf_floor");
+        std::fs::create_dir_all(&dir).unwrap();
+        let perf = phase_perf(dir.clone(), 1).await;
+        assert_eq!(perf.workloads.len(), 2, "phase 1 runs W1 and W4");
+        let value = perf.score.expect("a candidate start failure floors");
+        assert!(
+            (value - 0.1).abs() < 1e-12,
+            "a failed perf run floors: {value}"
+        );
+        assert!(perf.error.is_some(), "the harness reason is recorded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn tmp(tag: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("test_main_campaign_{}_{}", tag, std::process::id()));
@@ -1391,6 +1474,7 @@ mod tests {
             phase: None,
             chain_from: None,
             career: None,
+            perf: None,
             ladder_state: None,
             campaign_id: "campaign_fixture".to_string(),
             name: "fixture".to_string(),

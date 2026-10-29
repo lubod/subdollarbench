@@ -32,6 +32,12 @@ with a total `ORDER BY` on the key, and `HAVING` predicates over
 probes (`GROUP BY zz_nocol`, `SUM(zz_gone)`, an aggregate in `WHERE`, an
 aggregate as the `GROUP BY` key). Every answer must match the reference's.
 
+## Performance this phase
+
+The phase-end perf score adds **W3** (two-table join + `GROUP BY`, 50k x
+5k rows); W1 and W4 still run. The full contract is in ticket 0's section
+of `SPEC.md`.
+
 ## Constraints
 
 - Standard library only; no embedded SQL engines or parser libraries.

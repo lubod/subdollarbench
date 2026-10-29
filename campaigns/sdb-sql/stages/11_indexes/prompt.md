@@ -44,6 +44,13 @@ an index on a missing table, an index on a missing column, and dropping a
 missing index. Every answer must match the reference's, and the perf gate
 above runs once all stages pass.
 
+## Performance this phase
+
+The phase-end perf score adds **W2** (range + `ORDER BY ... LIMIT`) and
+**W5** (mixed 80/20 read/write, 16 clients, 30 s); W1, W3 and W4 still
+run. The index gate above is separate and stays pass/fail. The full
+contract is in ticket 0's section of `SPEC.md`.
+
 ## Constraints
 
 - Standard library only; no embedded SQL engines or parser libraries.

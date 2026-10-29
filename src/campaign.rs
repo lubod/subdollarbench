@@ -982,6 +982,7 @@ pub fn career_from(prev: &CampaignRollup) -> CareerRollup {
         points: prev.points,
         total_cost_usd: prev.total_cost_usd,
         cells: vec![prev.campaign_id.clone()],
+        perf: prev.perf.clone(),
     })
 }
 
@@ -1946,6 +1947,7 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
             .or_else(|| v["chain_from"].as_str())
             .map(str::to_string),
         career: None,
+        perf: None,
         refork: if v["live"]["refork"].is_null() {
             None
         } else {
@@ -2359,6 +2361,9 @@ pub struct CareerRollup {
     pub points: f64,
     pub total_cost_usd: f64,
     pub cells: Vec<String>,
+    /// R45: the perf score for this career, once a phase provided one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf: Option<crate::verifier::sql::perfscore::PerfScore>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2426,6 +2431,9 @@ pub struct CampaignRollup {
     /// Career totals across the chain (points, spend and cell ids).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub career: Option<CareerRollup>,
+    /// R45: the perf score measured on this phase's final server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf: Option<crate::verifier::sql::perfscore::PerfScore>,
     /// R1: a deliberate fork of an already-used chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refork: Option<ReforkInfo>,
@@ -2467,6 +2475,17 @@ fn snapshot_state(
 }
 
 impl CampaignRollup {
+    /// R45: store the phase's perf block and carry it into the career
+    /// block. The latest phase's score is the career's current perf (the
+    /// board's tie-break); each phase keeps its own block in its own
+    /// campaign.json.
+    pub fn set_perf(&mut self, perf: crate::verifier::sql::perfscore::PerfScore) {
+        self.perf = Some(perf.clone());
+        if let Some(career) = self.career.as_mut() {
+            career.perf = Some(perf);
+        }
+    }
+
     /// The headline: regression-free tickets per dollar.
     pub fn tickets_per_dollar(&self) -> Option<f64> {
         if self.total_cost_usd > 0.0 {
@@ -2773,6 +2792,7 @@ where
         phase: phase.map(|p| p.id),
         chain_from: chain_from.map(str::to_string),
         career: None,
+        perf: None,
         ladder_state: None,
         harness_fault: None,
         refork: None,
@@ -3225,10 +3245,22 @@ where
         let prev = career.cloned().unwrap_or_default();
         let mut cells = prev.cells.clone();
         cells.push(opts.campaign_id.clone());
+        let perf = match (prev.perf.clone(), rollup.perf.clone()) {
+            (Some(a), Some(b)) => {
+                let mut w = a.workloads;
+                w.extend(b.workloads);
+                Some(crate::verifier::sql::perfscore::PerfScore::from_workloads(
+                    w,
+                ))
+            }
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
         rollup.career = Some(CareerRollup {
             points: prev.points + rollup.points,
             total_cost_usd: prev.total_cost_usd + total_cost,
             cells,
+            perf,
         });
     }
     rollup.finished_at = chrono::Utc::now().to_rfc3339();
@@ -3829,6 +3861,7 @@ mod tests {
             phase: None,
             chain_from: None,
             career: None,
+            perf: None,
             ladder_state: None,
             refork: None,
         };
@@ -4212,6 +4245,7 @@ mod tests {
             phase: None,
             chain_from: None,
             career: None,
+            perf: None,
             ladder_state: None,
             refork: None,
         };
@@ -5956,7 +5990,9 @@ mod tests {
                 points: 10.0,
                 total_cost_usd: 0.5,
                 cells: vec!["prev".into()],
+                perf: None,
             }),
+            perf: None,
             ladder_state: None,
             harness_fault: None,
             refork: None,
@@ -6073,6 +6109,114 @@ mod tests {
         st
     }
 
+    /// R45 F2: a phase rollup and its career rollup carry the perf block,
+    /// and the perf run never touches the candidate's spend.
+    #[test]
+    fn r45_f2_rollup_carries_perf() {
+        use crate::verifier::sql::perfscore::{PerfScore, WorkloadResult};
+        let mut rollup = chain_rollup(1, true);
+        let cost = rollup.total_cost_usd;
+        let perf = PerfScore::from_workloads(vec![WorkloadResult {
+            id: "W1".into(),
+            metric: "latency".into(),
+            reference: 2.0,
+            candidate: 1.0,
+            ratio: 2.0,
+            correct: true,
+            numbers: Default::default(),
+            note: None,
+            harness_fault: false,
+        }]);
+        rollup.set_perf(perf.clone());
+        assert_eq!(rollup.perf.as_ref().and_then(|p| p.score), perf.score);
+        assert_eq!(
+            rollup
+                .career
+                .as_ref()
+                .and_then(|c| c.perf.as_ref())
+                .and_then(|p| p.score),
+            perf.score
+        );
+        assert_eq!(rollup.total_cost_usd, cost, "perf must not spend");
+        let json = serde_json::to_value(&rollup).unwrap();
+        assert!(json["perf"]["score"].is_number());
+        assert!(json["career"]["perf"]["score"].is_number());
+        let back: CampaignRollup = serde_json::from_value(json).unwrap();
+        assert_eq!(back.perf.and_then(|p| p.score), perf.score);
+    }
+
+    /// R45 F3: the rendered ticket-0 contract names every workload, the
+    /// sandbox limits and the formula; the later phase-openers repeat what
+    /// that phase adds.
+    #[test]
+    fn r45_f3_prompt_names_the_perf_score() {
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let stage = lc.spec.stages.iter().find(|s| s.id == 0).unwrap();
+        let text = lc
+            .render_spec_md(stage, &lc.prompt_path(stage), &[])
+            .expect("the ticket-0 SPEC renders");
+        for needle in [
+            "## Performance",
+            "W1",
+            "W2",
+            "W3",
+            "W4",
+            "W5",
+            "2 CPUs",
+            "2 GiB",
+            "geometric mean",
+            "[0.1, 100]",
+            "wrong answer",
+            "Phase 1 measures W1 and W4",
+        ] {
+            assert!(text.contains(needle), "ticket 0 missing {needle:?}");
+        }
+        for (id, needle) in [
+            (7, "adds **W3**"),
+            (11, "adds **W2**"),
+            (16, "all five workloads"),
+        ] {
+            let st = lc.spec.stages.iter().find(|s| s.id == id).unwrap();
+            let t = std::fs::read_to_string(lc.prompt_path(st)).unwrap();
+            assert!(t.contains(needle), "ticket {id} missing {needle:?}");
+        }
+    }
+
+    /// R45 F4: the `.43` perf-score bump breaks the chain from a `.42`
+    /// phase; a `.43` phase chains normally.
+    #[test]
+    fn r45_f4_no_chain_across_the_bump() {
+        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.43");
+        let state = phase1_state();
+        let mut prev = chain_rollup(1, true);
+        prev.rules_version = "2026-10-19.42".to_string();
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ran rules 2026-10-19.42"), "{msg}");
+        assert!(msg.contains("not 2026-10-19.43"), "{msg}");
+        validate_chain(
+            &chain_rollup(1, true),
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+        )
+        .expect("a .43 phase chains onto a .43 phase");
+    }
+
     #[test]
     fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         let state = phase1_state();
@@ -6176,6 +6320,7 @@ mod tests {
                 points: 10.0,
                 total_cost_usd: 0.5,
                 cells: vec!["prev".into()],
+                perf: None,
             }),
             |attempt| {
                 seen.borrow_mut().push(attempt.stage.id);
