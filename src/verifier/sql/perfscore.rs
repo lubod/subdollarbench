@@ -184,7 +184,7 @@ fn metric_of(id: &str) -> &'static str {
 }
 
 /// Human contract shown in the prompt and help.
-pub const CONTRACT: &str = "Performance is a second axis next to points: points sort first, and a tie in points is broken by the perf score. At the end of every phase the harness runs the same workloads against your server and the SQLite reference, alternating rounds, each in a container with 2 CPUs and 2 GiB. W1 point lookup by key, 1 client, 100k rows (p50 and p99); W2 range + ORDER BY LIMIT, 1 client, 100k rows (p50); W3 two-table join + GROUP BY, 50k x 5k rows (p50); W4 durable autocommit single-row INSERT, 1 and 8 clients (commits/s); W5 mixed 80/20 read/write, 16 clients, 30 s (throughput and p99). Per-workload r is reference/candidate for latency and candidate/reference for throughput, clipped to [0.1, 100]. W1 scores point-lookup latency (the median paired p50 ratio; p99 is reported); W4 combines its 1-client and 8-client rates with a geometric mean; W5 scores throughput (p99 is reported). The perf score is the geometric mean of the r values over the phase's workloads (1.0 = the reference, 2.0 = twice as fast). A wrong answer scores that workload at the floor (0.1), so speed never buys a wrong result. The perf run is harness time: it never spends the candidate budget and does not count toward the wall cap. Phase 1 measures W1 and W4; phase 2 adds W3; phase 3 adds W2 and W5; phase 4 runs all five.";
+pub const CONTRACT: &str = "Performance is a second axis next to points: points sort first, and a tie in points is broken by the perf score. At the end of every phase the harness runs the same workloads against your server and the SQLite reference, alternating rounds, each in a container with 2 CPUs and 2 GiB. W1 point lookup by key, 1 client, 100k rows (p50 and p99); W2 range + ORDER BY LIMIT, 1 client, 100k rows (p50); W3 two-table join + GROUP BY, 50k x 5k rows (p50); W4 durable autocommit single-row INSERT, 1 and 8 clients (commits/s; durable means each acknowledged commit is on disk before OK, and the harness floors W4 if the 1-client window shows fewer disk flushes than commits); W5 mixed 80/20 read/write, 16 clients, 30 s (throughput and p99). Per-workload r is reference/candidate for latency and candidate/reference for throughput, clipped to [0.1, 100]. W1 scores point-lookup latency (the median paired p50 ratio; p99 is reported); W4 combines its 1-client and 8-client rates with a geometric mean; W5 scores throughput (p99 is reported). The perf score is the geometric mean of the r values over the phase's workloads (1.0 = the reference, 2.0 = twice as fast). A wrong answer scores that workload at the floor (0.1), so speed never buys a wrong result. The perf run is harness time: it never spends the candidate budget and does not count toward the wall cap. Phase 1 measures W1 and W4; phase 2 adds W3; phase 3 adds W2 and W5; phase 4 runs all five.";
 
 /// Sizes and durations. The default is the published contract; tests use
 /// [`PerfConfig::small_for_tests`].
@@ -283,6 +283,21 @@ pub fn run_pair(
     phase: u32,
     cfg: &PerfConfig,
 ) -> PerfScore {
+    run_pair_with_flush(reference_addr, candidate_addr, phase, cfg, None, None)
+}
+
+/// [`run_pair`] with the device flush counters for W4 (round 49 F2). The
+/// counters are snapshotted around each side's 1-client window; a wrong
+/// reference or an unreadable counter is a harness fault, a candidate with
+/// fewer flushes than commits floors W4.
+pub fn run_pair_with_flush(
+    reference_addr: &str,
+    candidate_addr: &str,
+    phase: u32,
+    cfg: &PerfConfig,
+    reference_flush: Option<&dyn FlushCounter>,
+    candidate_flush: Option<&dyn FlushCounter>,
+) -> PerfScore {
     let nonce = nonce();
     let mut workloads = Vec::new();
     let mut error: Option<String> = None;
@@ -292,7 +307,14 @@ pub fn run_pair(
             "W1" => run_w1(reference_addr, candidate_addr, &prefix, cfg),
             "W2" => run_w2(reference_addr, candidate_addr, &prefix, cfg),
             "W3" => run_w3(reference_addr, candidate_addr, &prefix, cfg),
-            "W4" => run_w4(reference_addr, candidate_addr, &prefix, cfg),
+            "W4" => run_w4(
+                reference_addr,
+                candidate_addr,
+                &prefix,
+                cfg,
+                reference_flush,
+                candidate_flush,
+            ),
             "W5" => run_w5(reference_addr, candidate_addr, &prefix, cfg),
             other => (
                 flawed(other, "unknown workload"),
@@ -401,6 +423,23 @@ fn result_with(
 
 fn connect(addr: &str, timeout: Duration) -> Result<TcpCandidate, String> {
     TcpCandidate::connect(addr, timeout)
+}
+
+/// R49: a `busy` is the dialect's transient concurrency answer, not a
+/// wrong result. W4/W5 run many clients against one writer; retry a few
+/// times before treating a busy as a failure.
+fn exec_busy(c: &mut TcpCandidate, sql: &str) -> Result<Response, String> {
+    let mut last = c.exec(sql)?;
+    for _ in 0..4 {
+        match &last {
+            Response::Err { class, .. } if class == "busy" => {
+                std::thread::sleep(Duration::from_millis(2));
+                last = c.exec(sql)?;
+            }
+            _ => break,
+        }
+    }
+    Ok(last)
 }
 
 fn create_table(c: &mut TcpCandidate, sql: &str) -> Result<(), String> {
@@ -787,12 +826,84 @@ fn run_w3(
 
 // ---------------------------------------------------------------- W4
 
+/// R49 F2: the device's completed flush-request counter (sysfs field 16).
+/// The unit tests inject a deterministic source; a real run reads the
+/// data dir's backing disk.
+pub trait FlushCounter: Send + Sync {
+    fn flushes(&self) -> Result<u64, String>;
+}
+
+/// The sysfs sources for a data dir. The direct `st_dev` counter can stay
+/// at zero under LVM/dm while the physical disk counts the flushes, so the
+/// disk(s) under the device are the primary sources; the direct stat is
+/// the fallback. `flushes` returns the largest readable cumulative value;
+/// the W4 window compares two snapshots, and other host activity only
+/// adds flushes (the spec's 0.9 threshold tolerates it).
+pub struct DeviceFlushCounter {
+    paths: Vec<PathBuf>,
+}
+
+fn stat_flushes(path: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.split_whitespace().nth(15)?.parse().ok()
+}
+
+impl DeviceFlushCounter {
+    pub fn for_dir(dir: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+        let dev = std::fs::metadata(dir)
+            .map_err(|e| format!("stat {}: {e}", dir.display()))?
+            .dev();
+        let (major, minor) = (libc::major(dev), libc::minor(dev));
+        let link = PathBuf::from(format!("/sys/dev/block/{major}:{minor}"));
+        let mut paths = Vec::new();
+        if let Ok(real) = std::fs::canonicalize(&link) {
+            // A partition's parent is the whole disk; an LVM/dm device's
+            // slaves are partitions whose parent is the disk.
+            if let Some(parent) = real.parent() {
+                paths.push(parent.join("stat"));
+            }
+            if let Ok(entries) = std::fs::read_dir(real.join("slaves")) {
+                for e in entries.flatten() {
+                    if let Ok(slave) = std::fs::canonicalize(e.path()) {
+                        if let Some(parent) = slave.parent() {
+                            paths.push(parent.join("stat"));
+                        }
+                        paths.push(slave.join("stat"));
+                    }
+                }
+            }
+        }
+        paths.push(link.join("stat"));
+        paths.retain(|p| p.exists());
+        if paths.is_empty() {
+            return Err(format!("no sysfs flush counter for {major}:{minor}"));
+        }
+        Ok(Self { paths })
+    }
+}
+
+impl FlushCounter for DeviceFlushCounter {
+    fn flushes(&self) -> Result<u64, String> {
+        let mut best: Option<u64> = None;
+        for path in &self.paths {
+            if let Some(v) = stat_flushes(path) {
+                best = Some(best.map_or(v, |b| b.max(v)));
+            }
+        }
+        best.ok_or_else(|| "no readable flush counter".to_string())
+    }
+}
+
 struct Throughput {
     inserted: u64,
     next_id: u64,
     elapsed: f64,
     correct: bool,
     latencies: Vec<f64>,
+    /// Flush requests during the 1-client window; None for the 8-client
+    /// window and when no counter is injected.
+    flushes: Option<u64>,
 }
 
 fn w4_side(
@@ -801,7 +912,11 @@ fn w4_side(
     clients: usize,
     start_id: u64,
     cfg: &PerfConfig,
+    flush: Option<&dyn FlushCounter>,
 ) -> Result<Throughput, String> {
+    let before = flush
+        .map(|f| f.flushes().map_err(|e| format!("flush: {e}")))
+        .transpose()?;
     let barrier = Arc::new(Barrier::new(clients + 1));
     let next = Arc::new(AtomicU64::new(start_id));
     let run_for = Duration::from_secs_f64(cfg.w4_seconds);
@@ -825,7 +940,7 @@ fn w4_side(
                     let id = next.fetch_add(1, Ordering::Relaxed);
                     let sql = format!("INSERT INTO {table} VALUES ({id}, 'r{id}')");
                     let t0 = Instant::now();
-                    let r = c.exec(&sql)?;
+                    let r = exec_busy(&mut c, &sql)?;
                     lat.push(ms(t0.elapsed()));
                     match r {
                         Response::Ok(1) => inserted += 1,
@@ -854,12 +969,21 @@ fn w4_side(
     if !sample_rows(addr, table, "id", next_id, 5, cfg) {
         correct = false;
     }
+    let flushes = match (before, flush) {
+        (Some(before), Some(f)) => Some(
+            f.flushes()
+                .map_err(|e| format!("flush: {e}"))?
+                .saturating_sub(before),
+        ),
+        _ => None,
+    };
     Ok(Throughput {
         inserted,
         next_id,
         elapsed: elapsed.max(1e-6),
         correct,
         latencies,
+        flushes,
     })
 }
 
@@ -872,6 +996,8 @@ fn run_w4(
     candidate_addr: &str,
     table: &str,
     cfg: &PerfConfig,
+    reference_flush: Option<&dyn FlushCounter>,
+    candidate_flush: Option<&dyn FlushCounter>,
 ) -> (WorkloadResult, Option<String>) {
     if let Err(e) = prepare_empty(reference_addr, table, cfg) {
         let note = format!("reference setup: {e}");
@@ -891,11 +1017,16 @@ fn run_w4(
     let mut note = None;
     let mut ref_next = 1u64;
     let mut cand_next = 1u64;
+    let mut ref1_flushes = None;
+    let mut cand1_flushes = None;
+    let mut ref1_commits = None;
+    let mut cand1_commits = None;
     for _ in 0..cfg.rounds {
         let mut round_ref = [0.0f64; 2];
         let mut round_cand = [0.0f64; 2];
         for (idx, clients) in [1usize, 8].into_iter().enumerate() {
-            let r = match w4_side(reference_addr, table, clients, ref_next, cfg) {
+            let ref_flush = if clients == 1 { reference_flush } else { None };
+            let r = match w4_side(reference_addr, table, clients, ref_next, cfg, ref_flush) {
                 Ok(v) => v,
                 Err(e) => {
                     let note = format!("reference: {e}");
@@ -907,11 +1038,28 @@ fn run_w4(
                 let note = "the reference insert check failed".to_string();
                 return (harness_flawed("W4", &note), Some(note));
             }
+            if clients == 1 {
+                ref1_flushes = r.flushes;
+                ref1_commits = Some(r.inserted);
+                if let Some(flushes) = r.flushes {
+                    if r.inserted > 0 && (flushes as f64) < 0.9 * r.inserted as f64 {
+                        let note = format!(
+                            "the reference is not durable: {flushes} flushes for {} commits",
+                            r.inserted
+                        );
+                        return (harness_flawed("W4", &note), Some(note));
+                    }
+                }
+            }
             round_ref[idx] = throughput_of(&r);
             let mut ref_lat = r.latencies;
             ref99s.push(percentile(&mut ref_lat, 0.99));
-            let c = match w4_side(candidate_addr, table, clients, cand_next, cfg) {
+            let cand_flush = if clients == 1 { candidate_flush } else { None };
+            let c = match w4_side(candidate_addr, table, clients, cand_next, cfg, cand_flush) {
                 Ok(v) => v,
+                Err(e) if e.starts_with("flush:") => {
+                    return (harness_flawed("W4", e.clone()), Some(e));
+                }
                 Err(e) => {
                     correct = false;
                     note = Some(format!("candidate: {e}"));
@@ -923,6 +1071,20 @@ fn run_w4(
                 correct = false;
                 note = Some("the candidate insert check failed".into());
                 break;
+            }
+            if clients == 1 {
+                cand1_flushes = c.flushes;
+                cand1_commits = Some(c.inserted);
+                if let Some(flushes) = c.flushes {
+                    if c.inserted > 0 && (flushes as f64) < 0.9 * c.inserted as f64 {
+                        correct = false;
+                        note = Some(format!(
+                            "not durable: {flushes} flushes for {} commits",
+                            c.inserted
+                        ));
+                        break;
+                    }
+                }
             }
             round_cand[idx] = throughput_of(&c);
             let mut cand_lat = c.latencies;
@@ -958,6 +1120,18 @@ fn run_w4(
     numbers.insert("reference_8_clients_per_s".into(), round6(ref8));
     numbers.insert("candidate_1_client_per_s".into(), round6(cand1));
     numbers.insert("candidate_8_clients_per_s".into(), round6(cand8));
+    if let Some(v) = ref1_commits {
+        numbers.insert("reference_1_client_commits".into(), v as f64);
+    }
+    if let Some(v) = cand1_commits {
+        numbers.insert("candidate_1_client_commits".into(), v as f64);
+    }
+    if let Some(v) = ref1_flushes {
+        numbers.insert("reference_1_client_flushes".into(), v as f64);
+    }
+    if let Some(v) = cand1_flushes {
+        numbers.insert("candidate_1_client_flushes".into(), v as f64);
+    }
     (
         result_with(
             "W4",
@@ -1014,7 +1188,7 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
                         let id = next.fetch_add(1, Ordering::Relaxed);
                         let sql = format!("INSERT INTO {table} VALUES ({id}, 'r{id}')");
                         let t0 = Instant::now();
-                        let r = c.exec(&sql)?;
+                        let r = exec_busy(&mut c, &sql)?;
                         lat.push(ms(t0.elapsed()));
                         match r {
                             Response::Ok(1) => {
@@ -1028,7 +1202,7 @@ fn w5_side(addr: &str, table: &str, start_id: u64, cfg: &PerfConfig) -> Result<M
                         let want = format!("r{k}");
                         let sql = format!("SELECT v FROM {table} WHERE k = {k}");
                         let t0 = Instant::now();
-                        let r = c.exec(&sql)?;
+                        let r = exec_busy(&mut c, &sql)?;
                         lat.push(ms(t0.elapsed()));
                         if wrong_row(&r, &want) {
                             ok = false;
@@ -1209,10 +1383,41 @@ impl Drop for Cleanup {
     }
 }
 
+/// The default perf data root: `<runs>/.perf` (the runs disk, never /tmp).
+pub fn perf_root() -> PathBuf {
+    crate::report::archive::RunArchiver::resolve_runs_dir().join(".perf")
+}
+
+/// R49 F1: tmpfs and ramfs make `fsync` free, so W4 would measure memory.
+/// The magic values are Linux's `TMPFS_MAGIC` and `RAMFS_MAGIC`.
+fn is_memory_fs(path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statfs(c.as_ptr(), &mut st) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let f_type = st.f_type as u64;
+    Ok(f_type == 0x0102_1994 || f_type == 0x8584_58f6)
+}
+
 /// Start the reference and `workspace` in the sandbox (2 CPUs, 2 GiB),
 /// run `phase`'s workloads and stop both. The caller owns the bench lock.
 /// This is the F5 entrypoint and the phase-end runner.
 pub fn run_workspace(workspace: &Path, phase: u32, cfg: &PerfConfig) -> anyhow::Result<PerfScore> {
+    run_workspace_at(workspace, phase, cfg, &perf_root())
+}
+
+/// [`run_workspace`] with an explicit data root, so tests can inject a
+/// memory filesystem without touching the real runs directory.
+pub fn run_workspace_at(
+    workspace: &Path,
+    phase: u32,
+    cfg: &PerfConfig,
+    root: &Path,
+) -> anyhow::Result<PerfScore> {
     use crate::sandbox::docker::{RunGuard, SandboxManager};
     use anyhow::Context;
 
@@ -1230,14 +1435,44 @@ pub fn run_workspace(workspace: &Path, phase: u32, cfg: &PerfConfig) -> anyhow::
             ),
         ));
     }
+    std::fs::create_dir_all(root).context("create the perf data root")?;
+    if is_memory_fs(root)? {
+        return Ok(PerfScore::harness_fault(
+            phase,
+            format!(
+                "perf data root {} is in memory (tmpfs/ramfs); W4 needs a disk",
+                root.display()
+            ),
+        ));
+    }
     let nonce = nonce();
-    let root = std::env::temp_dir().join(format!("sdb-perf-{}-{nonce:x}", std::process::id()));
-    let ref_ws = root.join("reference");
-    let ref_data = root.join("ref-data");
-    let cand_data = root.join("cand-data");
-    let _cleanup = Cleanup(root.clone());
+    let run_root = root.join(format!("{}-{nonce:x}", std::process::id()));
+    let ref_ws = run_root.join("reference");
+    let ref_data = run_root.join("ref-data");
+    let cand_data = run_root.join("cand-data");
+    let _cleanup = Cleanup(run_root.clone());
     std::fs::create_dir_all(&ref_data).context("create the reference data dir")?;
     std::fs::create_dir_all(&cand_data).context("create the candidate data dir")?;
+    // R49 F2: the flush counter is read from the data dir's backing disk.
+    // An unreadable counter is a harness fault, not a candidate score.
+    let ref_flush = match DeviceFlushCounter::for_dir(&ref_data) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(PerfScore::harness_fault(
+                phase,
+                format!("reference flush counter: {e}"),
+            ))
+        }
+    };
+    let cand_flush = match DeviceFlushCounter::for_dir(&cand_data) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(PerfScore::harness_fault(
+                phase,
+                format!("candidate flush counter: {e}"),
+            ))
+        }
+    };
     let ref_port = free_port().context("reserve the reference port")?;
     let cand_port = free_port().context("reserve the candidate port")?;
     super::ref_server::write_reference(&ref_ws, ref_port).context("write the reference server")?;
@@ -1273,7 +1508,14 @@ pub fn run_workspace(workspace: &Path, phase: u32, cfg: &PerfConfig) -> anyhow::
             format!("the candidate did not answer: {e}"),
         ));
     }
-    Ok(run_pair(&ref_addr, &cand_addr, phase, cfg))
+    Ok(run_pair_with_flush(
+        &ref_addr,
+        &cand_addr,
+        phase,
+        cfg,
+        Some(&ref_flush),
+        Some(&cand_flush),
+    ))
 }
 
 /// The human line(s) for the CLI and the campaign log.
@@ -1543,6 +1785,121 @@ mod tests {
                 w.numbers
             );
         }
+    }
+
+    /// R49 F2: a deterministic flush source for the W4 tests. The first
+    /// snapshot is 0; every later one is `after`.
+    struct StepFlush {
+        after: u64,
+        calls: AtomicU64,
+    }
+
+    impl StepFlush {
+        fn new(after: u64) -> Self {
+            Self {
+                after,
+                calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl FlushCounter for StepFlush {
+        fn flushes(&self) -> Result<u64, String> {
+            Ok(if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                0
+            } else {
+                self.after
+            })
+        }
+    }
+
+    struct BrokenFlush;
+
+    impl FlushCounter for BrokenFlush {
+        fn flushes(&self) -> Result<u64, String> {
+            Err("no counter on this host".to_string())
+        }
+    }
+
+    /// R49 F2: a candidate with fewer flushes than 0.9 x its acknowledged
+    /// 1-client commits floors W4; the reference passing keeps the phase
+    /// scored.
+    #[test]
+    fn r49_f2_flush_check_floors_unsynced() {
+        let reference = fake_engine(Duration::ZERO, false);
+        let candidate = fake_engine(Duration::ZERO, false);
+        let cfg = PerfConfig::small_for_tests();
+        let ref_flush = StepFlush::new(10_000_000);
+        let cand_flush = StepFlush::new(1);
+        let score = run_pair_with_flush(
+            &reference.to_string(),
+            &candidate.to_string(),
+            1,
+            &cfg,
+            Some(&ref_flush),
+            Some(&cand_flush),
+        );
+        let w4 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W4")
+            .expect("phase 1 runs W4");
+        assert!(!w4.correct, "the unsynced candidate must not pass W4");
+        let note = w4.note.as_deref().unwrap_or("");
+        assert!(note.contains("not durable"), "{note}");
+        assert!(
+            score.score.is_some(),
+            "a candidate floor keeps the phase scored"
+        );
+    }
+
+    /// R49 F2: an unreadable counter is a harness fault, not a floor.
+    #[test]
+    fn r49_f2_unreadable_counter_is_harness_fault() {
+        let reference = fake_engine(Duration::ZERO, false);
+        let candidate = fake_engine(Duration::ZERO, false);
+        let cfg = PerfConfig::small_for_tests();
+        let score = run_pair_with_flush(
+            &reference.to_string(),
+            &candidate.to_string(),
+            1,
+            &cfg,
+            Some(&BrokenFlush),
+            Some(&StepFlush::new(10_000_000)),
+        );
+        assert!(
+            score.score.is_none(),
+            "an unreadable counter must give no score: {:?}",
+            score.score
+        );
+        let err = score.error.as_deref().unwrap_or("");
+        assert!(err.contains("flush"), "{err}");
+    }
+
+    /// R49 F1: a perf data root on tmpfs/ramfs is a harness fault (no
+    /// score), because `fsync` would be free and W4 would measure memory.
+    #[test]
+    fn r49_f1_perf_data_not_in_memory() {
+        let shm = std::path::PathBuf::from("/dev/shm").join(format!(
+            "sdb-perf-mem-{}-{}",
+            std::process::id(),
+            nonce()
+        ));
+        let ws = std::env::temp_dir().join(format!("sdb-perf-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("start.sh"), "#!/bin/sh\n").unwrap();
+        let score = run_workspace_at(&ws, 4, &PerfConfig::small_for_tests(), &shm)
+            .expect("the memory check must not need Docker");
+        assert!(
+            score.score.is_none(),
+            "a tmpfs data root must not score: {:?}",
+            score.score
+        );
+        let err = score.error.as_deref().unwrap_or("");
+        assert!(err.contains("memory"), "{err}");
+        let _ = std::fs::remove_dir_all(&shm);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// R45-2: a reference that never answers is a harness failure, not a
