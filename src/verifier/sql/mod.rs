@@ -23,6 +23,7 @@ pub mod memory;
 pub mod observability;
 pub mod oracle;
 pub mod perf;
+pub mod perfscore;
 pub mod pgwire;
 pub mod ref_server;
 pub mod replication;
