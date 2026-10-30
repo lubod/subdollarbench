@@ -378,17 +378,20 @@ if [[ "$phase" -gt 1 && "$chain" != "fake-c$career-$model-p$((phase - 1))" ]]; t
     exit 1
 fi
 printf '%s\t%s\t%s\t%s\n' "$career" "$model" "$phase" "$chain" >> "${SDB_GRID_TRACE:?}"
-if [[ "${SDB_FAKE_SLEEP_ID:-}" == "$id" ]]; then
+if [[ "${SDB_FAKE_SLEEP_ALL:-0}" == "1" || "${SDB_FAKE_SLEEP_ID:-}" == "$id" ]]; then
     sleep "${SDB_FAKE_SLEEP:-0.3}"
 fi
 stop=0
 [[ "${SDB_FAKE_STOP_ID:-}" == "$id" ]] && stop=1
-python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" <<'PY'
+res_phase="${SDB_FAKE_RESULT_PHASE:-$phase}"
+res_chain="${SDB_FAKE_RESULT_CHAIN-$chain}"
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" <<'PY'
 import json, sys
-out, cid, phase, worker, chain, stop, cost = sys.argv[1:8]
+out, cid, phase, worker, chain, stop, cost, res_phase, res_chain = sys.argv[1:10]
 json.dump({
     "campaign_id": cid,
-    "phase": int(phase),
+    "phase": int(res_phase),
+    "chain_from": res_chain,
     "worker": int(worker),
     "chain": chain,
     "cost_usd": float(cost),
@@ -457,35 +460,37 @@ EOF
     [[ "$bad" -eq 0 ]] || { echo "$bad phase(s) started after the STOP"; exit 1; }
     unset SDB_FAKE_STOP_ID SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP
 
-    # 3) R48-1: the cap counts running phases. Three lanes at 0.99 with a
-    # $3.00 cap reserve 2.97 and never record more than $3.00.
+    # 3) R48-1: the cap counts running phases. Three lanes at $0.99 with
+    # a $2.00 cap and an empty ledger: the first two reserve $0.99 each
+    # (1.98 <= 2.00) and sleep 1 s; the third would need 2.97, so it stops
+    # before starting. Exactly two rows land, total $1.98. The old
+    # spent-only check started all three and recorded $2.97.
     scenario="$dir/three"
     mkdir -p "$scenario"
     printf '%s\n' c1 c2 c3 > "$scenario/careers.txt"
     CAREERS_FILE="$scenario/careers.txt"
     LANES=3
-    CAP=3.0
+    CAP=2.0
     PHASE_BUDGET=0.99
     LEDGER="$scenario/ledger.tsv"
     HOLD="$scenario/hold"
     STOP="$scenario/stop"
     SDB_GRID_TRACE="$scenario/trace.tsv"
     SDB_FAKE_COST=0.99
-    export SDB_GRID_TRACE SDB_FAKE_COST
-    # R48-1: $2.50 already spent; three lanes each reserve $0.99, so no
-    # phase may start (2.50 + 0.99 = 3.49 > 3.00). The old spent-only
-    # check would start all three and record 5.47.
-    printf 'career	model	phase	worker	campaign_id	points	cost_usd	stop	ts\n' > "$LEDGER"
-    printf '0\tc1\t0\t1\tfake-prior\t10\t2.5\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
+    SDB_FAKE_SLEEP_ALL=1
+    SDB_FAKE_SLEEP=1
+    export SDB_GRID_TRACE SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$LEDGER"
     load_careers "$CAREERS_FILE"
     run_grid
-    [[ -f "$STOP" ]] || { echo "the cap did not write STOP"; exit 1; }
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 2 ]] || { echo "cap run: expected 2 rows, got $rows"; exit 1; }
     total="$(ledger_total)"
-    awk -v t="$total" 'BEGIN { exit !(t <= 3.0 + 0.000001) }' || {
-        echo "the cap recorded $total > 3.00"; exit 1; }
-    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 1 ]] || {
-        echo "cap run: expected only the prior row, got $(($(wc -l < "$LEDGER") - 1))"; exit 1; }
-    unset SDB_FAKE_COST
+    awk -v t="$total" 'BEGIN { exit !(t > 1.979999 && t < 1.980001) }' || {
+        echo "cap run: expected 1.98, got $total"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "the cap did not write STOP"; exit 1; }
+    unset SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
+    export -n SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP 2>/dev/null || true
 
     # 4) R48-2: resume skips ok phases and chains from the career's own
     # last id; two careers of the same model stay separate.
