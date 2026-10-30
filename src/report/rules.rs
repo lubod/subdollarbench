@@ -20,7 +20,10 @@ mod graded_hash;
 ///   fault), the harness reads the backing disk's flush-request counter
 ///   during the 1-client W4 window, and a candidate with fewer flushes
 ///   than 0.9 x its acknowledged commits floors W4. The ticket-0 contract
-///   says what "durable" means. R45-3/R45-6: the career keeps its latest
+///   says what "durable" means. The reference (also the agent's `ref-sql`)
+///   waits up to 20 s for a SQLite lock instead of 5 s, so a disk stall
+///   in W5 doesn't make it answer `busy` (R49-1; R49-4 named it here).
+///   R45-3/R45-6: the career keeps its latest
 ///   scored perf block, and a scoreless (harness-fault) phase does not
 ///   replace it. Score impact: points and the cap are unchanged; a server
 ///   that skips `fsync` no longer gets W4's throughput credit. Careers
