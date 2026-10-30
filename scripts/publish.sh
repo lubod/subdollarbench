@@ -52,6 +52,24 @@ bar_record() {
     fi
 }
 
+# R51 F2 (R44-10): the binary owns the secret list. In a self-test or a
+# fresh checkout without a release build, build the debug binary once.
+secret_scan_bin() {
+    if [[ -n "${SDB_BIN:-}" && -x "$SDB_BIN" ]]; then
+        printf '%s' "$SDB_BIN"
+        return 0
+    fi
+    if [[ -x "$PWD/target/release/subdollarbench" ]]; then
+        printf '%s' "$PWD/target/release/subdollarbench"
+        return 0
+    fi
+    if cargo build --quiet --bin subdollarbench >/dev/null 2>&1; then
+        printf '%s' "$PWD/target/debug/subdollarbench"
+        return 0
+    fi
+    return 1
+}
+
 validate_export() {
     local dir="$1" bar="$2" rc=0
     [[ -s "$dir/index.html" ]] || { echo "[publish] refusal: index.html missing" >&2; return 1; }
@@ -85,23 +103,19 @@ PY
         echo "[publish] refusal: flake record has no RESULT: PASS" >&2
         return 1
     }
-    if grep -RInE \
-        -e 'sk-or-v1-[A-Za-z0-9_-]+' \
-        -e 'sk-proj-[A-Za-z0-9_-]+' \
-        -e 'sk-ant-[A-Za-z0-9_-]+' \
-        -e 'sk-[A-Za-z0-9_-]{8,}' \
-        -e 'hf_[A-Za-z0-9_-]{16,}' \
-        -e 'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]+' \
-        -e '(api_key|auth_token|access_token|token)[[:space:]]*[:=][[:space:]]*[^[:space:]]+' \
-        -e '[A-Za-z0-9_]*(KEY|SECRET)[[:space:]]*=[[:space:]]*[^[:space:]]+' \
-        -e '--api-key([[:space:]]+|=)[^[:space:]]+' \
-        "$dir" >/tmp/sdb-publish-secret-scan.$$ 2>&1; then
+    local scanner out
+    scanner="$(secret_scan_bin)" || {
+        echo "[publish] refusal: no binary for the secret scan" >&2
+        return 1
+    }
+    out="$(mktemp)"
+    if ! "$scanner" portal --secret-scan "$dir" >"$out" 2>&1; then
         echo "[publish] refusal: secret scan found a match" >&2
-        sed -n '1,8p' /tmp/sdb-publish-secret-scan.$$ >&2
-        rm -f /tmp/sdb-publish-secret-scan.$$
+        sed -n '1,8p' "$out" >&2
+        rm -f "$out"
         return 1
     fi
-    rm -f /tmp/sdb-publish-secret-scan.$$
+    rm -f "$out"
     return "$rc"
 }
 
@@ -178,13 +192,25 @@ PY
     fi
     echo '[self-test] missing bar refused'
 
-    secret="$root/secret"
-    cp -a "$good" "$secret"
-    printf 'planted sk-or-v1-abcdefghijklmnop\n' > "$secret/note.txt"
-    if validate_export "$secret" "$bar" >/dev/null 2>&1; then
-        echo '[self-test] planted secret was accepted' >&2; exit 1
-    fi
-    echo '[self-test] planted sk-or string refused'
+    while IFS='|' read -r planted value; do
+        secret="$root/secret"
+        rm -rf "$secret"
+        cp -a "$good" "$secret"
+        printf '%s\n' "$planted" > "$secret/note.txt"
+        rc=0
+        out="$(validate_export "$secret" "$bar" 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] planted secret was accepted: $planted" >&2; exit 1
+        }
+        case "$out" in
+            *"$value"*) echo '[self-test] the scan printed the secret value' >&2; exit 1 ;;
+        esac
+    done <<'EOF'
+sk-or-v1-abcdefghijklmnop|abcdefghijklmnop
+authorization: bearer bearerabc123XYZ|bearerabc123XYZ
+OPENROUTER_API_KEY=sk-live-value|sk-live-value
+EOF
+    echo '[self-test] planted secrets refused without values'
 
     # R44-9: the export writes the marker; an unmarked target refuses a
     # push and is left untouched.
