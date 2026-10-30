@@ -2361,6 +2361,30 @@ impl PortalExporter {
 mod tests {
     use super::*;
 
+    /// R47 F5: a real career records one fingerprint per ticket manifest.
+    /// These board fixtures predate the manifest files; stamp their first
+    /// ticket so a current-rules cell is a ranked career, not a silent
+    /// fingerprint-less row.
+    fn stage0() -> serde_json::Value {
+        serde_json::json!({
+            "id": 0, "title": "t0", "type": "genesis", "passed": true,
+            "pass_rate": 100.0, "passed_stages": 1, "total_stages": 1,
+            "regressed": [], "regression_severity": 0,
+            "effective_cost_usd": 0.01, "status": "passed",
+            "run_id": "run0", "variant": "full"
+        })
+    }
+
+    fn stamp(cell_dir: &Path, rules: &str) {
+        let d = cell_dir.join("s0_full");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("manifest.json"),
+            serde_json::json!({"run_id": "run0", "rules_version": rules}).to_string(),
+        )
+        .unwrap();
+    }
+
     /// Only a real model verdict may render red. An `infra_error` run is a
     /// harness fault; publishing it as a failure is the exact confusion the
     /// status exists to prevent. Same for a dead or killed agent.
@@ -2760,6 +2784,7 @@ mod tests {
             if state == "done" {
                 fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
             }
+            stamp(&d, rules);
         };
         cell(
             "campaign_sdb-sql_m1_20261017",
@@ -2885,10 +2910,11 @@ mod tests {
             html.find(m)
                 .unwrap_or_else(|| panic!("missing {m}: {html}"))
         };
-        // Current rules first: m2 (12 points), m1 (10), the running m5 (0);
-        // the stale 20-point m3 groups below them.
-        assert!(pos("m2") < pos("m1"), "points order: {html}");
-        assert!(pos("m1") < pos("m5"), "current before stale: {html}");
+        // Current rules first: m1 (10 points), then m2 (two careers; the
+        // conservative even median is the worse one, 8), then the running
+        // m5 (0); the stale 20-point m3 groups below them.
+        assert!(pos("m1") < pos("m2"), "points order: {html}");
+        assert!(pos("m2") < pos("m5"), "current before stale: {html}");
         assert!(pos("m5") < pos("m3"), "stale rules grouped last: {html}");
         assert!(!html.contains("m4"), "poisoned cell leaked: {html}");
         assert!(
@@ -2907,12 +2933,12 @@ mod tests {
             "repeat careers collapse: {html}"
         );
         assert!(
-            pos("m2") < pos("m2b") && pos("m2b") < pos("m1"),
-            "the duplicate career folds under its best: {html}"
+            pos("m1") < pos("m2") && pos("m2") < pos("m2b"),
+            "the duplicate career folds under its model row: {html}"
         );
         assert!(
-            html.contains("median 12.0"),
-            "the model row is the lower median career: {html}"
+            html.contains("median 8.0"),
+            "the model row is the worse middle career: {html}"
         );
         assert!(
             pos("older rule sets") < pos("m3"),
@@ -2947,7 +2973,7 @@ mod tests {
                 "task": "sql",
                 "started_at": "2026-10-18T00:00:00Z",
                 "finished_at": "2026-10-18T00:30:00Z",
-                "stages": [],
+                "stages": [stage0()],
                 "reached": 1,
                 "regression_free_tickets": 1,
                 "points": points,
@@ -2958,6 +2984,7 @@ mod tests {
                 "over_wall": false
             });
             fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+            stamp(&d, rules);
         };
         cell("campaign_sdb-sql_a_20261018", "m", 12.0, RULES_VERSION);
         cell("campaign_sdb-sql_b_20261018", "m", 9.0, "2026-10-16.12");
@@ -3027,7 +3054,7 @@ mod tests {
                 "task": "sql",
                 "started_at": "2026-10-17T09:00:00Z",
                 "finished_at": "2026-10-17T10:00:00Z",
-                "stages": [],
+                "stages": [stage0()],
                 "reached": 1,
                 "regression_free_tickets": 1,
                 "points": 1.0,
@@ -3048,6 +3075,7 @@ mod tests {
             )
             .unwrap();
             fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+            stamp(&d, crate::report::rules::RULES_VERSION);
         };
         cell(
             "campaign_sdb-sql_dead_20261017",
@@ -3444,11 +3472,12 @@ mod tests {
             "campaign_id": id, "name": "sdb-sql", "model": "flag-model",
             "harness": "omp", "effort": "high", "task": "sql",
             "started_at": "2026-10-18T00:00:00Z", "finished_at": "2026-10-18T00:30:00Z",
-            "stages": [], "reached": 0, "regression_free_tickets": 1, "points": 1.0,
+            "stages": [stage0()], "reached": 0, "regression_free_tickets": 1, "points": 1.0,
             "max_points": 26.0, "rules_version": crate::report::rules::RULES_VERSION,
             "total_cost_usd": 0.1, "over_budget": false, "over_wall": false
         });
         fs::write(d.join("campaign.json"), rollup.to_string()).unwrap();
+        stamp(&d, crate::report::rules::RULES_VERSION);
         let board = || {
             PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
                 .unwrap();
