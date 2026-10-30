@@ -819,12 +819,13 @@ pub trait FlushCounter: Send + Sync {
     fn flushes(&self) -> Result<u64, String>;
 }
 
-/// The sysfs sources for a data dir. The direct `st_dev` counter can stay
+/// The sysfs source for a data dir. The direct `st_dev` counter can stay
 /// at zero under LVM/dm while the physical disk counts the flushes, so the
-/// disk(s) under the device are the primary sources; the direct stat is
-/// the fallback. `flushes` returns the largest readable cumulative value;
-/// the W4 window compares two snapshots, and other host activity only
-/// adds flushes (the spec's 0.9 threshold tolerates it).
+/// device is resolved to its whole disk(s). One disk is the only honest
+/// source for a window: on a striped or RAID set the largest field at each
+/// snapshot can come from a different disk, so `for_dir` refuses more than
+/// one. The direct stat is used only when no whole disk is under it.
+#[derive(Debug)]
 pub struct DeviceFlushCounter {
     paths: Vec<PathBuf>,
 }
@@ -834,50 +835,87 @@ fn stat_flushes(path: &Path) -> Option<u64> {
     text.split_whitespace().nth(15)?.parse().ok()
 }
 
+/// The whole-disk `stat` paths under a sysfs device. A partition's parent
+/// is the disk; a dm/md device's `slaves/` are resolved recursively; a
+/// whole disk has its own `stat`.
+fn whole_disks(real: &Path) -> Vec<PathBuf> {
+    let slaves = real.join("slaves");
+    if let Ok(entries) = std::fs::read_dir(&slaves) {
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            if let Ok(slave) = std::fs::canonicalize(e.path()) {
+                out.extend(whole_disks(&slave));
+            }
+        }
+        if !out.is_empty() {
+            out.sort();
+            out.dedup();
+            return out;
+        }
+    }
+    if let Some(parent) = real.parent() {
+        let stat = parent.join("stat");
+        if stat.exists() {
+            return vec![stat];
+        }
+    }
+    let stat = real.join("stat");
+    stat.exists().then_some(stat).into_iter().collect()
+}
+
 impl DeviceFlushCounter {
     pub fn for_dir(dir: &Path) -> Result<Self, String> {
+        Self::for_dir_at(dir, Path::new("/sys"))
+    }
+
+    /// R50 F5: the sysfs root is injectable so a test builds a fake tree.
+    pub(crate) fn for_dir_at(dir: &Path, sysfs: &Path) -> Result<Self, String> {
         use std::os::unix::fs::MetadataExt;
         let dev = std::fs::metadata(dir)
             .map_err(|e| format!("stat {}: {e}", dir.display()))?
             .dev();
         let (major, minor) = (libc::major(dev), libc::minor(dev));
-        let link = PathBuf::from(format!("/sys/dev/block/{major}:{minor}"));
-        let mut paths = Vec::new();
+        let link = sysfs.join(format!("dev/block/{major}:{minor}"));
+        let mut disks = Vec::new();
         if let Ok(real) = std::fs::canonicalize(&link) {
-            // A partition's parent is the whole disk; an LVM/dm device's
-            // slaves are partitions whose parent is the disk.
-            if let Some(parent) = real.parent() {
-                paths.push(parent.join("stat"));
-            }
-            if let Ok(entries) = std::fs::read_dir(real.join("slaves")) {
-                for e in entries.flatten() {
-                    if let Ok(slave) = std::fs::canonicalize(e.path()) {
-                        if let Some(parent) = slave.parent() {
-                            paths.push(parent.join("stat"));
-                        }
-                        paths.push(slave.join("stat"));
-                    }
-                }
-            }
+            disks = whole_disks(&real);
         }
-        paths.push(link.join("stat"));
-        paths.retain(|p| p.exists());
-        if paths.is_empty() {
+        disks.sort();
+        disks.dedup();
+        if disks.is_empty() {
+            // No whole disk under the direct st_dev: its own stat is the
+            // only source (the old fallback, kept for odd sysfs layouts).
+            let direct = link.join("stat");
+            if stat_flushes(&direct).is_some() {
+                return Ok(Self {
+                    paths: vec![direct],
+                });
+            }
             return Err(format!("no sysfs flush counter for {major}:{minor}"));
         }
-        Ok(Self { paths })
+        if disks.len() > 1 {
+            return Err(format!(
+                "the data dir spans {} disks ({}); a flush window needs one",
+                disks.len(),
+                disks
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(Self { paths: disks })
     }
 }
 
 impl FlushCounter for DeviceFlushCounter {
     fn flushes(&self) -> Result<u64, String> {
-        let mut best: Option<u64> = None;
-        for path in &self.paths {
-            if let Some(v) = stat_flushes(path) {
-                best = Some(best.map_or(v, |b| b.max(v)));
-            }
+        match self.paths.as_slice() {
+            [path] => stat_flushes(path)
+                .ok_or_else(|| format!("no readable flush counter at {}", path.display())),
+            [] => Err("no readable flush counter".to_string()),
+            paths => Err(format!("the data dir spans {} disks", paths.len())),
         }
-        best.ok_or_else(|| "no readable flush counter".to_string())
     }
 }
 
@@ -1816,6 +1854,49 @@ mod tests {
                 w.numbers
             );
         }
+    }
+
+    /// R50 F5: one whole disk is read; a device over two disks is refused.
+    #[cfg(unix)]
+    #[test]
+    fn r50_f5_flush_counter_one_disk() {
+        use std::os::unix::fs::MetadataExt;
+        fn stat16(v: u64) -> String {
+            format!("{} {v}\n", "0 ".repeat(15))
+        }
+        let base =
+            std::env::temp_dir().join(format!("sdb-flush-{}-{}", std::process::id(), nonce()));
+        let _ = std::fs::remove_dir_all(&base);
+        let data = base.join("data");
+        let sysfs = base.join("sysfs");
+        std::fs::create_dir_all(&data).unwrap();
+        let dev = std::fs::metadata(&data).unwrap().dev();
+        let (major, minor) = (libc::major(dev), libc::minor(dev));
+        let block = sysfs.join("devices/block");
+        let dm = sysfs.join("devices/virtual/block/dm-0");
+        std::fs::create_dir_all(dm.join("slaves")).unwrap();
+        std::fs::create_dir_all(block.join("sda/sda1")).unwrap();
+        std::fs::write(block.join("sda/stat"), stat16(4242)).unwrap();
+        std::fs::write(dm.join("stat"), stat16(7)).unwrap();
+        std::os::unix::fs::symlink(block.join("sda/sda1"), dm.join("slaves/sda1")).unwrap();
+        std::fs::create_dir_all(sysfs.join("dev/block")).unwrap();
+        std::os::unix::fs::symlink(&dm, sysfs.join(format!("dev/block/{major}:{minor}"))).unwrap();
+
+        let one = DeviceFlushCounter::for_dir_at(&data, &sysfs).expect("one disk");
+        assert_eq!(
+            one.flushes().unwrap(),
+            4242,
+            "the disk's field 16, not dm's"
+        );
+
+        std::fs::create_dir_all(block.join("sdb/sdb1")).unwrap();
+        std::fs::write(block.join("sdb/stat"), stat16(99)).unwrap();
+        std::os::unix::fs::symlink(block.join("sdb/sdb1"), dm.join("slaves/sdb1")).unwrap();
+        let err = DeviceFlushCounter::for_dir_at(&data, &sysfs)
+            .expect_err("two disks must refuse")
+            .to_string();
+        assert!(err.contains("spans 2 disks"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// R49 F2: a deterministic flush source for the W4 tests. The first
