@@ -105,13 +105,38 @@ PY
     return "$rc"
 }
 
+# R44-9: a mistyped target must never be wiped by --delete. The target
+# carries a marker the export writes too, so a normal --delete keeps it.
+target_marker() {
+    local target="$1"
+    if [[ "$target" == *:* && "$target" != /* ]]; then
+        local host="${target%%:*}" path="${target#*:}"
+        ssh -o BatchMode=yes "$host" "test -f $(printf '%q' "$path")/.sdb-publish" 2>/dev/null
+    else
+        [[ -f "$target/.sdb-publish" ]]
+    fi
+}
+
 deploy() {
     local dir="$1" target="$2" how="$3"
     if [[ "$how" == "push" ]]; then
+        if ! target_marker "$target"; then
+            echo "[publish] refusal: the target has no .sdb-publish marker; refusing to rsync --delete there" >&2
+            echo "[publish] create it first: ssh <host> 'touch <path>/.sdb-publish' (local: touch <dir>/.sdb-publish)" >&2
+            return 1
+        fi
         rsync -a --delete "$dir/" "$target"
     else
-        echo "[publish] dry run (rsync -n):"
-        rsync -an --delete --itemize-changes "$dir/" "$target"
+        local listing
+        listing="$(rsync -an --delete --itemize-changes "$dir/" "$target")"
+        printf '[publish] dry run (rsync -n):\n%s\n' "$listing"
+        # A file in the export's own set is never deleted; any *deleting
+        # line is therefore outside it and means the target is not ours.
+        if grep -q '^\*deleting[[:space:]]' <<<"$listing"; then
+            echo "[publish] refusal: the target holds files this export would delete:" >&2
+            grep '^\*deleting[[:space:]]' <<<"$listing" >&2
+            return 1
+        fi
     fi
 }
 
@@ -161,16 +186,35 @@ PY
     fi
     echo '[self-test] planted sk-or string refused'
 
-    deploy "$good" "$target" dry
+    # R44-9: the export writes the marker; an unmarked target refuses a
+    # push and is left untouched.
+    printf 'sdb-publish\n' > "$good/.sdb-publish"
+    if deploy "$good" "$target" push >/dev/null 2>&1; then
+        echo '[self-test] an unmarked target was pushed' >&2; exit 1
+    fi
     [[ -z "$(find "$target" -mindepth 1 -print -quit)" ]] || {
-        echo '[self-test] dry run copied files' >&2; exit 1
+        echo '[self-test] a refused push wrote to the target' >&2; exit 1
     }
-    echo '[self-test] dry run copied nothing'
+    echo '[self-test] unmarked target refused'
+    printf 'sdb-publish\n' > "$target/.sdb-publish"
     deploy "$good" "$target" push
-    [[ -f "$target/index.html" && -f "$target/results.html" ]] || {
-        echo '[self-test] --yes did not copy' >&2; exit 1
+    [[ -f "$target/index.html" && -f "$target/results.html" && -f "$target/.sdb-publish" ]] || {
+        echo '[self-test] --yes did not copy (or removed the marker)' >&2; exit 1
     }
-    echo '[self-test] --yes copied'
+    echo '[self-test] marked target pushed'
+    printf 'stray\n' > "$target/stray.txt"
+    rc=0
+    if out="$(deploy "$good" "$target" dry 2>&1)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    [[ "$rc" -ne 0 ]] || { echo '[self-test] stray target file was accepted' >&2; exit 1; }
+    grep -q '\*deleting[[:space:]][[:space:]]*stray.txt' <<<"$out" || {
+        echo '[self-test] dry run did not list the stray deletion' >&2; exit 1
+    }
+    [[ -f "$target/stray.txt" ]] || { echo '[self-test] dry run deleted' >&2; exit 1; }
+    echo '[self-test] stray target file listed and refused'
     echo '[self-test] PASS'
     exit 0
 fi
@@ -185,6 +229,7 @@ export="$(mktemp -d /tmp/sdb-publish.XXXXXX)"
 trap 'rm -rf "$export"' EXIT
 runs="${SDB_RUNS_DIR:-$PWD/runs}"
 "$bin" portal --runs-dir "$runs" --out "$export" >/dev/null
+printf 'sdb-publish\n' > "$export/.sdb-publish"
 bar="$(bar_record)"
 validate_export "$export" "$bar" || exit 1
 echo "[publish] export checks passed"
