@@ -1304,15 +1304,34 @@ fn render_results(cells: &[CareerCell]) -> String {
 
 pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
     let cells = careers(runs_dir);
+    let ranked: Vec<&CareerCell> = cells
+        .iter()
+        .filter(|c| c.finished && c.key.current_rules)
+        .collect();
+    // R47 F5 (R44-13): every ranked career must carry exactly one recorded
+    // fingerprint. A career with none used to add nothing to the set and
+    // pass silently when the others agreed; one with two faces the same
+    // "mixed" problem as two careers with different stamps. Refuse and name
+    // the career before writing any output.
+    for c in &ranked {
+        match c.fingerprints.len() {
+            1 => {}
+            0 => anyhow::bail!(
+                "ranked career {} has no recorded rules fingerprint; refusing to export",
+                c.campaign_id
+            ),
+            n => anyhow::bail!(
+                "ranked career {} has {n} recorded rules fingerprints ({}); refusing to export",
+                c.campaign_id,
+                c.fingerprints.join(", ")
+            ),
+        }
+    }
     let out_dir = Path::new(out);
     fs::create_dir_all(out_dir)
         .with_context(|| format!("create portal dir {}", out_dir.display()))?;
     fs::write(out_dir.join("index.html"), render_board(&cells))?;
     fs::write(out_dir.join("results.html"), render_results(&cells))?;
-    let ranked: Vec<&CareerCell> = cells
-        .iter()
-        .filter(|c| c.finished && c.key.current_rules)
-        .collect();
     let mut ranked_rules: Vec<&str> = ranked.iter().map(|c| c.rules.as_str()).collect();
     ranked_rules.sort();
     ranked_rules.dedup();
@@ -1897,6 +1916,44 @@ mod tests {
         );
         assert!(html.contains("sha256:test-image"), "{html}");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R47 F5 (R44-13): a ranked career must carry exactly one recorded
+    /// fingerprint. None, or more than one, refuses the export by name.
+    #[test]
+    fn r47_f5_career_without_fingerprint_refused() {
+        let (base, runs, out) = fixture("r47nofp");
+        career_with_stamp(&runs, "ok1", "m1", [1.0; 4], [0.01; 4], "fp-one");
+        career_with_stamp(&runs, "ok2", "m2", [2.0; 4], [0.01; 4], "fp-one");
+        career_with_stamp(&runs, "nofp", "m3", [3.0; 4], [0.01; 4], "");
+        let err = export(runs.to_str().unwrap(), out.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("campaign_nofp_p4"),
+            "the refusal names the career: {err}"
+        );
+        assert!(err.contains("no recorded rules fingerprint"), "{err}");
+        assert!(
+            !out.join("index.html").exists(),
+            "a refused export writes nothing"
+        );
+
+        // A career with two distinct stamps is refused for the same reason.
+        let (base2, runs2, out2) = fixture("r47twofp");
+        career_with_stamp(&runs2, "mixed", "m", [1.0; 4], [0.01; 4], "fp-one");
+        career_with_stamp(&runs2, "ok", "m2", [2.0; 4], [0.01; 4], "fp-one");
+        let manifest = runs2.join("campaign_mixed_p2/s7_full/manifest.json");
+        let mut v: Value = serde_json::from_str(&read(&manifest)).unwrap();
+        v["rules_version"] = serde_json::json!("fp-two");
+        fs::write(&manifest, v.to_string()).unwrap();
+        let err = export(runs2.to_str().unwrap(), out2.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("campaign_mixed_p4"), "{err}");
+        assert!(err.contains("2 recorded rules fingerprints"), "{err}");
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R47 F4 (R44-7): a refork supersedes the named successor and its

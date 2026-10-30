@@ -141,6 +141,7 @@ pub fn set_campaign_flag(
     Ok(on)
 }
 
+#[derive(Debug)]
 pub struct PortalSummary {
     pub run_count: usize,
     pub out_dir: PathBuf,
