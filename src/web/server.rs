@@ -4832,6 +4832,59 @@ global.fetch = async (url) => {
         let _ = fs::remove_dir_all(gone);
     }
 
+    /// R47 F2: the API carries the phase's perf block and the career's
+    /// latest one, and the GUI board has the Perf column and the Run view's
+    /// per-workload block.
+    #[tokio::test]
+    async fn r47_f2_api_carries_perf() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let name = format!("campaign_sdb-sql_r47perf_{}", std::process::id());
+        let dir = runs.join(&name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let perf = serde_json::json!({
+            "workloads": [{
+                "id": "W1", "metric": "latency", "reference": 1.0,
+                "candidate": 0.5, "ratio": 2.0, "correct": true
+            }],
+            "score": 2.0
+        });
+        let rollup = serde_json::json!({
+            "campaign_id": name, "name": "sdb-sql", "model": "m",
+            "harness": "omp", "effort": "high", "task": "sql",
+            "started_at": "2026-10-30T00:00:00Z",
+            "finished_at": "2026-10-30T01:00:00Z", "stages": [],
+            "reached": 0, "regression_free_tickets": 0, "points": 1.0,
+            "max_points": 76.0, "rules_version": crate::report::rules::RULES_VERSION,
+            "total_cost_usd": 0.01, "over_budget": false, "cap_reached": false,
+            "over_wall": false,
+            "perf": perf,
+            "career": {"points": 1.0, "total_cost_usd": 0.01, "cells": [name], "perf": perf}
+        });
+        fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+
+        let Json(cells) = get_campaigns().await;
+        let row = cells
+            .iter()
+            .find(|c| c["id"].as_str() == Some(name.as_str()))
+            .unwrap_or_else(|| panic!("the perf cell must render: {cells:?}"));
+        assert_eq!(row["rollup"]["perf"]["score"], 2.0);
+        assert_eq!(row["rollup"]["career"]["perf"]["score"], 2.0);
+        assert_eq!(row["board_key"]["perf"], 2.0);
+
+        let gui = include_str!("index.html");
+        assert!(
+            gui.contains("<th style=\"text-align:right;width:70px;\">Perf</th>"),
+            "the GUI board has no Perf column"
+        );
+        assert!(
+            gui.contains("function perfBlock(perf)"),
+            "Run view perf block"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// Round-13: the console board applies the same hide/poison rule as the
     /// portal exporter (a poisoned cell is not a measurement anywhere).
     #[tokio::test]

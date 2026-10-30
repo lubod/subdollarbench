@@ -40,6 +40,10 @@ pub struct CareerCell {
     pub sandbox_image: Option<String>,
     /// Full rules fingerprints recorded by this career's ticket manifests.
     pub fingerprints: Vec<String>,
+    /// R47 F2: the career's latest measured perf block, or the phase's own
+    /// for a cell with no career. The board shows its score and hovers the
+    /// per-workload ratios.
+    pub perf: Option<crate::verifier::sql::perfscore::PerfScore>,
     pub cost: f64,
     pub over_budget: bool,
     pub cap_reached: bool,
@@ -376,6 +380,10 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         .filter(|r| r.passed && r.regressed.is_empty())
         .count() as u32;
     let parsed = leaf.parsed.as_ref();
+    let perf = parsed.and_then(|r| match &r.career {
+        Some(c) => c.perf.clone(),
+        None => r.perf.clone(),
+    });
     let points = parsed
         .and_then(|r| r.career.as_ref().map(|c| c.points))
         .or_else(|| parsed.map(|r| r.points))
@@ -467,6 +475,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
             .and_then(|r| r.sandbox_image.clone())
             .or_else(|| leaf.rollup["sandbox_image"].as_str().map(str::to_string)),
         fingerprints,
+        perf,
         cost,
         over_budget: leaf.rollup["over_budget"].as_bool().unwrap_or(false),
         cap_reached: leaf.rollup["cap_reached"].as_bool().unwrap_or(false),
@@ -714,6 +723,48 @@ fn rules_of(c: &CareerCell) -> String {
     text
 }
 
+/// R47 F2: the board's Perf cell. A score reads `1.32×`; a career with no
+/// perf block reads `—`. The title lists every workload and flags a floored
+/// one (a wrong answer or a non-durable write, not a speed result).
+fn perf_cell(c: &CareerCell) -> String {
+    let Some(perf) = &c.perf else {
+        return "—".to_string();
+    };
+    let title = esc(&perf_tooltip(perf));
+    match perf.score {
+        Some(score) => format!("<span title=\"{title}\">{score:.2}×</span>"),
+        None => format!("<span title=\"{title}\">—</span>"),
+    }
+}
+
+fn perf_tooltip(perf: &crate::verifier::sql::perfscore::PerfScore) -> String {
+    let mut parts: Vec<String> = perf
+        .workloads
+        .iter()
+        .map(|w| {
+            let mut line = format!(
+                "{}: ref {:.3} · candidate {:.3} · {:.2}×",
+                w.id, w.reference, w.candidate, w.ratio
+            );
+            if !w.correct {
+                line.push_str(" · floored (wrong answer, not durable)");
+            }
+            if let Some(note) = &w.note {
+                line.push_str(&format!(" · {note}"));
+            }
+            line
+        })
+        .collect();
+    if let Some(err) = &perf.error {
+        parts.push(format!("harness: {err}"));
+    }
+    if parts.is_empty() {
+        "no perf workloads recorded".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
 fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -724,7 +775,7 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         format!("career-row {extra_class}")
     };
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{} · effort {}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{} · effort {}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         esc(&c.campaign_id),
         esc(&c.model),
         esc(&c.effort),
@@ -735,6 +786,7 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         c.points,
         c.max_points as u32,
         rules_of(c),
+        perf_cell(c),
         c.cost,
         ppd_of(c),
         rpd_of(c),
@@ -760,7 +812,7 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         );
     }
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{} · effort {} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{} · effort {} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         g.rank_label(),
         esc(&g.model),
         more,
@@ -775,6 +827,7 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         med.points,
         med.max_points as u32,
         rules_of(med),
+        perf_cell(med),
         med.cost,
         ppd_of(med),
         rpd_of(med),
@@ -795,7 +848,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     for g in &groups {
         if !g.current && !old_divider {
             rows.push_str(
-                "<tr class=\"divider\"><td colspan=\"10\">older rule sets (incomparable)</td></tr>",
+                "<tr class=\"divider\"><td colspan=\"11\">older rule sets (incomparable)</td></tr>",
             );
             old_divider = true;
         }
@@ -803,7 +856,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     }
     if !unfinished.is_empty() {
         rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"10\">unfinished careers (not ranked)</td></tr>",
+            "<tr class=\"divider\"><td colspan=\"11\">unfinished careers (not ranked)</td></tr>",
         );
         for c in unfinished {
             let label = match (c.phase, c.phase_total) {
@@ -819,7 +872,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — sdb-sql campaign careers</title><style>");
     h.push_str(include_str!("portal_board.css"));
     h.push_str("</style></head><body><main>");
-    h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign careers</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database checked statement by statement against SQLite. A model ranks by its median career; careers rank by difficulty-weighted points, then points per dollar.</div></div><div class=\"right\"><a href=\"results.html\">📈 Results</a>");
+    h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign careers</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database checked statement by statement against SQLite. A model ranks by its median career; careers rank by difficulty-weighted points, then the perf score on a tie, then points per dollar.</div></div><div class=\"right\"><a href=\"results.html\">📈 Results</a>");
     h.push_str(&format!(
         "<div class=\"mut\">Updated {}</div></div></header>",
         esc(&now)
@@ -832,16 +885,16 @@ fn render_board(cells: &[CareerCell]) -> String {
         "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{finished_count}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{best_points:.1}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
         groups.iter().filter(|g| g.current).count()
     ));
-    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th>Reached</th><th>Reg-free</th><th>Points</th><th>Spend</th><th>Pts / $</th><th>Reg-free / $</th><th>State</th><th>Updated</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th>Reached</th><th>Reg-free</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th>Reg-free / $</th><th>State</th><th>Updated</th></tr></thead><tbody>");
     if rows.is_empty() {
-        h.push_str("<tr><td colspan=\"10\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
+        h.push_str("<tr><td colspan=\"11\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
         h.push_str(&rows);
     }
     h.push_str("</tbody></table>");
     h.push_str(legend_html());
     h.push_str("</div>");
-    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score; <b>Pts / $</b> divides by effective spend. Model rows use the median career, not a new formula.</li><li><b>Ties</b>: adjacent models are a rank group (<code>2=</code>) when the worse model's best career is at least as good as the better model's worst, by the shared board order. Ties never block publishing.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Older rule sets are incomparable and sit below the board.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
+    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf cell for each workload's reference, candidate, ratio and any floor.</li><li><b>Ties</b>: adjacent models are a rank group (<code>2=</code>) when the worse model's best career is at least as good as the better model's worst, by the shared board order (points, then perf, then points per dollar). Ties never block publishing.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Older rule sets are incomparable and sit below the board.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
     h.push_str("</main></body></html>");
     h
 }
@@ -1442,6 +1495,21 @@ mod tests {
         }
     }
 
+    /// R47 F2: attach a perf block to a career's leaf (the career block
+    /// carries the latest scored phase, as the runner writes it).
+    fn set_career_perf(runs: &Path, prefix: &str, score: f64, workloads: Value) {
+        let path = runs.join(format!("campaign_{prefix}_p4/campaign.json"));
+        let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+        let perf = serde_json::json!({"workloads": workloads, "score": score});
+        v["perf"] = perf.clone();
+        v["career"]["perf"] = perf;
+        fs::write(&path, v.to_string()).unwrap();
+        let spath = runs.join(format!("campaign_{prefix}_p4/status.json"));
+        let mut sv: Value = serde_json::from_str(&read(&spath)).unwrap();
+        sv["rollup"] = v;
+        fs::write(&spath, sv.to_string()).unwrap();
+    }
+
     fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!(
             "{name}-{}-{}",
@@ -1793,6 +1861,47 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R47 F2: a career with a perf block shows a Perf column and its
+    /// score; one without shows an em dash. The hover names each workload
+    /// and flags a floored one; the methodology names the tie-break.
+    #[test]
+    fn r47_f2_perf_column() {
+        let (base, runs, out) = fixture("r47perf");
+        career(&runs, "perf", "perf-model", [1.0; 4], [0.01; 4]);
+        set_career_perf(
+            &runs,
+            "perf",
+            1.32,
+            serde_json::json!([
+                {"id": "W1", "metric": "latency", "reference": 1.0, "candidate": 0.76, "ratio": 1.32, "correct": true},
+                {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 40.0, "ratio": 0.4, "correct": false, "note": "not durable"}
+            ]),
+        );
+        career(&runs, "plain", "plain-model", [1.0; 4], [0.01; 4]);
+        let cells = careers(runs.to_str().unwrap());
+        let perf = cells.iter().find(|c| c.model == "perf-model").unwrap();
+        assert_eq!(perf.perf.as_ref().and_then(|p| p.score), Some(1.32));
+        assert_eq!(perf.key.perf, Some(1.32));
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(html.contains("<th>Perf</th>"), "{html}");
+        assert!(html.contains("1.32×"), "{html}");
+        assert!(html.contains("W1: ref 1.000"), "{html}");
+        assert!(html.contains("candidate 0.760"), "{html}");
+        assert!(
+            html.contains("floored (wrong answer, not durable)"),
+            "{html}"
+        );
+        let plain = &html[pos(&html, "plain-model")..];
+        let row = &plain[..plain.find("</tr>").unwrap()];
+        assert!(row.contains(">—<"), "a career with no perf shows —: {row}");
+        assert!(
+            html.contains("Performance section") && html.contains("score decides"),
+            "methodology must name the perf tie-break: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn r41_f3_portal_is_the_sql_board() {
         let (base, runs, out) = fixture("r41portal");
