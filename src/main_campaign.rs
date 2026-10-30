@@ -28,6 +28,22 @@ use subdollarbench::verifier::sql::perfscore::{self, PerfConfig, PerfScore};
 /// the points ladder and the cell are unaffected. A candidate failure is
 /// already a floored block from `run_workspace`.
 async fn phase_perf(workdir: PathBuf, phase: u32) -> PerfScore {
+    // R48 F2: round 45 merged first, so this round (second) puts the perf
+    // run inside the same host grading lock and fast-core set. The wait is
+    // before the measurement and outside the wall cap.
+    let path = subdollarbench::grading::lock_path();
+    let _lock =
+        match tokio::task::spawn_blocking(move || subdollarbench::grading::acquire(&path)).await {
+            Ok(Ok(lock)) => lock,
+            Ok(Err(e)) => {
+                eprintln!("[PERF] phase {phase}: harness fault: grading lock: {e}");
+                return PerfScore::harness_fault(phase, format!("grading lock: {e}"));
+            }
+            Err(e) => {
+                eprintln!("[PERF] phase {phase}: harness fault: grading lock task: {e}");
+                return PerfScore::harness_fault(phase, format!("grading lock task: {e}"));
+            }
+        };
     let result = tokio::task::spawn_blocking(move || {
         perfscore::run_workspace(&workdir, phase, &PerfConfig::default())
     })
@@ -432,22 +448,26 @@ pub async fn run(
     phase: Option<u32>,
     chain: Option<String>,
     refork: Option<String>,
+    worker: u8,
 ) -> Result<()> {
+    if worker > 7 {
+        anyhow::bail!("--worker must be 0-7 (got {worker})");
+    }
     let lc = campaign::load_campaign(&name).context("load campaign")?;
     // R23 D3: dollars are the denominator; a paid launch without a list
     // price has no dollar bound. Eval-only runs do not spend.
     campaign::require_model_list_price(&model, eval_only)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    // Foreground campaigns use the canonical worker-0 ports (6379/6380/…);
-    // a live engine wave holds them. Fail fast instead of colliding.
+    // Foreground campaigns use this worker's ports (base + 100*worker);
+    // a live engine wave holds worker 0's. Fail fast instead of colliding.
     if let Ok(v) = subdollarbench::remote::get_json("http://127.0.0.1:3000", "/api/status").await {
         if v.get("is_running")
             .and_then(|b| b.as_bool())
             .unwrap_or(false)
         {
             anyhow::bail!(
-                "engine is running a wave; campaigns run foreground on worker-0 ports — \
+                "engine is running a wave; campaigns run foreground on worker ports — \
                  stop the wave first (`subdollarbench stop`) or run campaigns from an idle engine"
             );
         }
@@ -742,6 +762,7 @@ pub async fn run(
                     &campaign_id,
                     &model,
                     &effort,
+                    worker,
                     harness,
                     api_key,
                     timeout_min,
@@ -820,6 +841,13 @@ pub async fn run(
     }
 
     rollup.refork = refork_info.clone();
+    // R48 F1/F5: how this phase ran. `concurrent_cells` is the driver's
+    // lane count (SDB_CONCURRENT_CELLS, default 1); `worker` is the lane.
+    rollup.worker = worker;
+    rollup.concurrent_cells = std::env::var("SDB_CONCURRENT_CELLS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
@@ -929,6 +957,7 @@ async fn run_one_stage(
     campaign_id: &str,
     model: &str,
     effort: &str,
+    worker: u8,
     harness: Harness,
     api_key: Option<String>,
     timeout_min: u64,
@@ -1120,7 +1149,7 @@ async fn run_one_stage(
         save_results: false,
         review_model: None,
         batch_reference: None,
-        worker: 0,
+        worker,
         feedback_rounds: stage.feedback_rounds,
         campaign_stage: Some(CampaignStageConfig {
             campaign: lc.spec.name.clone(),
@@ -1294,6 +1323,7 @@ async fn run_one_stage(
         rounds,
         failure,
         harness_fault: output.harness_fault.clone(),
+        grading_wait_s: output.grading_wait_s,
     })
 }
 
@@ -1454,6 +1484,7 @@ mod tests {
             git_stat: None,
             rounds: Vec::new(),
             failure: None,
+            grading_wait_s: 0.0,
         }
     }
 
@@ -1492,6 +1523,9 @@ mod tests {
             cap_reached: false,
             budget_usd: 0.0,
             wall_min: 0,
+            worker: 0,
+            concurrent_cells: 1,
+            grading_wait_s: 0.0,
             harness_fault: None,
             refork: None,
         }
@@ -1765,6 +1799,7 @@ mod tests {
             "campaign_fixture",
             "model",
             "low",
+            0,
             Harness::Omp,
             None,
             5,
@@ -1911,6 +1946,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         )
         .await
         .unwrap_err();
