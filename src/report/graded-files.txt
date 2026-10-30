@@ -14,7 +14,6 @@ file src/campaign.rs
 file src/scoring.rs
 file src/report/leaderboard.rs
 file src/bench/mod.rs
-file src/bench/batch_ref.rs
 file extensions/bench-policy.js
 dir src/verifier
 dir src/prompts

@@ -1208,15 +1208,7 @@ mod tests {
 
     fn all_live_tasks() -> Vec<crate::config::TaskType> {
         use crate::config::TaskType;
-        vec![
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Pdf,
-            TaskType::Proxy,
-            TaskType::Pubsub,
-            TaskType::Wal,
-            TaskType::Binproto,
-        ]
+        vec![TaskType::Sql]
     }
 
     #[test]

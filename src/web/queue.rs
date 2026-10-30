@@ -850,55 +850,12 @@ pub async fn run_extension_batch(
     log_buf: &Arc<RwLock<Vec<String>>>,
     current_run: &Arc<RwLock<Option<ActiveRunInfo>>>,
     cancel: &Arc<AtomicBool>,
-    batch_log: &(dyn Fn(&str) + Sync),
+    _batch_log: &(dyn Fn(&str) + Sync),
     spec: ExtBatchSpec,
     worker: u8,
     worker_bufs: &Arc<RwLock<std::collections::HashMap<u8, Vec<String>>>>,
     worker_runs: &Arc<RwLock<std::collections::HashMap<u8, ActiveRunInfo>>>,
 ) -> ExtBatchOut {
-    let ext_batch_ref = if spec.count > 1 {
-        // Per-bracket id: the extension's pre must pair with ITS post, not
-        // the initial bracket's pre (regime-change the bracket exists to
-        // catch). `_ext<N>` brackets vs `_trial<N>` trial dirs below:
-        // distinct suffix spaces for brackets vs trials.
-        let bracket_id = format!("{}_ext{}", spec.parent_run_id, spec.start_idx);
-        match crate::bench::batch_ref::BatchRef::start_on_worker(
-            &spec.task,
-            &spec.parent_run_id,
-            batch_log,
-            worker,
-            Some(&bracket_id),
-        )
-        .await
-        {
-            Ok(b) => b,
-            Err(e) => {
-                // Pdf has no live-ref fallback: FATAL (loud) instead of
-                // warn-and-None (which would silently return pdf to unscored).
-                // Other tasks keep the live-ref fallback.
-                if spec.task == TaskType::Pdf {
-                    let msg = format!("[BATCH-REF] FATAL pdf batch ref: {}; failing batch.", e);
-                    send_status(tx, log_buf, msg.clone());
-                    batch_log(&msg);
-                    return ExtBatchOut {
-                        results: vec![],
-                        passing: 0,
-                        errors: 0,
-                        drift: None,
-                        billing_tripped: false,
-                    };
-                }
-                send_status(
-                    tx,
-                    log_buf,
-                    format!("[BATCH-REF] setup failed ({}); trials use live refs.", e),
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
     let mut results = Vec::new();
     let mut passing = 0usize;
     let mut errors = 0u32;
@@ -963,7 +920,6 @@ pub async fn run_extension_batch(
             run_id: Some(run_id.clone()),
             save_results: spec.save_results,
             review_model: spec.review_model.clone(),
-            batch_reference: ext_batch_ref.as_ref().map(|b| b.reference()),
             worker,
             feedback_rounds: spec.feedback_rounds,
             campaign_stage: None,
@@ -1003,15 +959,11 @@ pub async fn run_extension_batch(
             }
         }
     }
-    let drift = match ext_batch_ref {
-        Some(b) => Some(b.finish(batch_log).await.drift),
-        None => None,
-    };
     ExtBatchOut {
         results,
         passing,
         errors,
-        drift,
+        drift: None,
         billing_tripped,
     }
 }
@@ -1454,66 +1406,8 @@ pub async fn execute_run_body(
     };
     // Batch reference: one shared denominator for all trials.
     // Fallback is live per-trial measurement inside the pipeline.
-    let batch_ref = if total_trials > 1 || stop_on_pass {
-        let task_type_pre = match req.task.as_str() {
-            "redis" => TaskType::Redis,
-            "http" => TaskType::Http,
-            "pdf" => TaskType::Pdf,
-            "wal" => TaskType::Wal,
-            "proxy" => TaskType::Proxy,
-            "pubsub" => TaskType::Pubsub,
-            "binproto" => TaskType::Binproto,
-            _ => TaskType::Redis,
-        };
-        match crate::bench::batch_ref::BatchRef::start_on_worker(
-            &task_type_pre,
-            &parent_run_id,
-            &batch_log,
-            worker,
-            None,
-        )
-        .await
-        {
-            Ok(b) => b,
-            Err(e) => {
-                // Pdf has no live-ref fallback: FATAL (loud). Other tasks
-                // keep warn-and-None with live per-trial refs.
-                if task_type_pre == TaskType::Pdf {
-                    let msg = format!(
-                        "[BATCH-REF] FATAL pdf batch ref: {}; failing cell (no silent unscored fallback).",
-                        e
-                    );
-                    batch_log(&msg);
-                    send_status(&tx, &run_log_buf, msg.clone());
-                    // Mirror the normal exit (DONE block below): no parent
-                    // row is produced, so the drain gate WILL fail on count
-                    // until the cell is re-run. That is the loudness: never
-                    // "fix" the gate instead of the ref.
-                    if let Ok(mut cur_lock) = state.current_run.write() {
-                        *cur_lock = None;
-                    }
-                    state.cancel_flags.lock().unwrap().remove(&parent_run_id);
-                    release_slot(&state, worker);
-                    if let Some(qid) = queue_id.clone() {
-                        park_refused(
-                            &state,
-                            &qid,
-                            &format!("pdf batch reference unavailable ({msg})"),
-                        );
-                    }
-                    pump_queue(&state);
-                    return;
-                }
-                batch_log(&format!(
-                    "[BATCH-REF] setup failed ({}); trials use live refs.",
-                    e
-                ));
-                None
-            }
-        }
-    } else {
-        None
-    };
+
+    let mut any_drift = false;
 
     let mut trial_idx = 1;
     while trial_idx <= total_trials {
@@ -1600,17 +1494,7 @@ pub async fn execute_run_body(
             req.max_turns, trial_idx, total_trials
         ));
 
-        let task_type = match req.task.as_str() {
-            "redis" => TaskType::Redis,
-            "http" => TaskType::Http,
-            "pdf" => TaskType::Pdf,
-            "wal" => TaskType::Wal,
-            "proxy" => TaskType::Proxy,
-            "pubsub" => TaskType::Pubsub,
-            "binproto" => TaskType::Binproto,
-            _ => TaskType::Redis,
-        };
-
+        let task_type = TaskType::Sql;
         let work_path = workdir_for_run(&run_id);
 
         let pipe_config = BenchmarkConfig {
@@ -1627,7 +1511,6 @@ pub async fn execute_run_body(
             run_id: Some(run_id.clone()),
             save_results: req.save_results.unwrap_or(true),
             review_model: req.review_model.clone(),
-            batch_reference: batch_ref.as_ref().map(|b| b.reference()),
             worker,
             feedback_rounds: req.feedback_rounds.unwrap_or(0),
             campaign_stage: None,
@@ -1923,10 +1806,6 @@ pub async fn execute_run_body(
     // batches mint separate BatchRefs, so OR-accumulate drift across all of
     // them. (Gate: initial bracket drifted but extensions clean — the merge
     // kept only the last drift and scored off a known-bad denominator.)
-    let mut any_drift = match batch_ref {
-        Some(b) => b.finish(&batch_log).await.drift,
-        None => false,
-    };
     any_drift = any_drift || auto_drift;
 
     let mut merged_opt = if (total_trials > 1 || stop_on_pass || subrun_results.len() > 1)
@@ -1977,16 +1856,7 @@ pub async fn execute_run_body(
     if req.extend_if_unstable && total_trials >= 2 && !dead_cell && !stop_on_pass {
         let max_total = req.max_trials.max(total_trials);
         let effort_setting = req.effort.clone().unwrap_or_else(|| "high".to_string());
-        let task_type_ext = match req.task.as_str() {
-            "redis" => TaskType::Redis,
-            "http" => TaskType::Http,
-            "pdf" => TaskType::Pdf,
-            "wal" => TaskType::Wal,
-            "proxy" => TaskType::Proxy,
-            "pubsub" => TaskType::Pubsub,
-            "binproto" => TaskType::Binproto,
-            _ => TaskType::Redis,
-        };
+        let task_type_ext = TaskType::Sql;
         while total_trials < max_total {
             let merged = match merged_opt {
                 Some(m) => m,
@@ -3054,7 +2924,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true));
         let spec = ExtBatchSpec {
             model: "m".to_string(),
-            task: TaskType::Wal,
+            task: TaskType::Sql,
             effort: "low".to_string(),
             harness: "omp".to_string(),
             max_turns: 1,
@@ -3098,7 +2968,7 @@ mod tests {
         // count == 0: no loop body, clean empty result (setup-refusal shape).
         let spec0 = ExtBatchSpec {
             model: "m".to_string(),
-            task: TaskType::Wal,
+            task: TaskType::Sql,
             effort: "low".to_string(),
             harness: "omp".to_string(),
             max_turns: 1,

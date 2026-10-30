@@ -420,16 +420,6 @@ pub enum SandboxCommands {
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskType {
-    Redis,
-    Http,
-    Pdf,
-    Wal,
-    Proxy,
-    Pubsub,
-    Binproto,
-    /// Job queue broker (leases / ack / nack / retries / DLQ). The campaign
-    /// is its primary home; the single-shot suite is the same 9 stages.
-    Queue,
     /// Differential SQL database (docs/PROPOSAL-sdb-sql.md). The campaign
     /// is its only home: 21 ladder tickets, verified differentially against
     /// an in-process SQLite oracle.
@@ -438,50 +428,18 @@ pub enum TaskType {
 
 impl TaskType {
     pub fn total_stages(&self) -> u32 {
-        match self {
-            TaskType::Redis => 6,
-            TaskType::Http => 5,
-            TaskType::Pdf => 6,
-            TaskType::Wal => 5,
-            TaskType::Proxy => 5,
-            TaskType::Pubsub => 4,
-            TaskType::Binproto => 5,
-            TaskType::Queue => 9,
-            // The full sdb-sql ladder (tickets 0-20); the campaign is its
-            // only home, so the single-shot count is the whole ladder.
-            TaskType::Sql => 21,
-        }
+        // The full sdb-sql ladder (tickets 0-20); the campaign is its
+        // only home, so the single-shot count is the whole ladder.
+        21
     }
 
     pub fn default_port(&self) -> u16 {
-        match self {
-            TaskType::Redis => 6379,
-            TaskType::Http => 8080,
-            TaskType::Pdf => 8090,
-            TaskType::Wal => 6390,
-            TaskType::Proxy => 8091,
-            TaskType::Pubsub => 8092,
-            TaskType::Binproto => 6395,
-            TaskType::Queue => 6385,
-            TaskType::Sql => 5480,
-        }
+        5480
     }
 
-    /// Name-to-task mapping. Unknown names (including the removed `dns`
-    /// task) are `None`.
+    /// Name-to-task mapping. Unknown names are `None`.
     pub fn from_name(s: &str) -> Option<Self> {
-        Some(match s.to_lowercase().as_str() {
-            "redis" => Self::Redis,
-            "http" => Self::Http,
-            "pdf" => Self::Pdf,
-            "wal" => Self::Wal,
-            "proxy" => Self::Proxy,
-            "pubsub" => Self::Pubsub,
-            "binproto" => Self::Binproto,
-            "queue" => Self::Queue,
-            "sql" => Self::Sql,
-            _ => return None,
-        })
+        (s.to_lowercase() == "sql").then_some(Self::Sql)
     }
 
     /// Single entry point for turning a task name into a `TaskType`.
@@ -497,17 +455,7 @@ impl TaskType {
 
 impl std::fmt::Display for TaskType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TaskType::Redis => write!(f, "redis"),
-            TaskType::Http => write!(f, "http"),
-            TaskType::Pdf => write!(f, "pdf"),
-            TaskType::Wal => write!(f, "wal"),
-            TaskType::Proxy => write!(f, "proxy"),
-            TaskType::Pubsub => write!(f, "pubsub"),
-            TaskType::Binproto => write!(f, "binproto"),
-            TaskType::Queue => write!(f, "queue"),
-            TaskType::Sql => write!(f, "sql"),
-        }
+        write!(f, "sql")
     }
 }
 
@@ -744,107 +692,24 @@ mod tests {
     }
 
     #[test]
-    fn test_all_task_prompts_template_cleanly_per_worker() {
-        // Every graded prompt, every worker: no stale canonical port may
-        // survive outside alias contexts. An alias line may keep base
-        // digits (fixed in-network ports); anything else is a prompt
-        // contradiction that sends the model to the wrong port.
-        use TaskType;
-        let alias_pat =
-            ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
-        for task in [
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Pdf,
-            TaskType::Proxy,
-            TaskType::Pubsub,
-            TaskType::Wal,
-            TaskType::Binproto,
-            TaskType::Queue,
+    fn test_task_type_is_sql_only() {
+        assert_eq!(TaskType::parse("sql").unwrap(), TaskType::Sql);
+        for retired in [
+            "redis", "http", "pdf", "wal", "proxy", "pubsub", "binproto", "queue", "dns",
         ] {
-            let path = get_repo_root()
-                .join("tasks")
-                .join(task.to_string())
-                .join("prompt.md");
-            let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            let base = task.default_port().to_string();
-            let base_pat =
-                ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base))).unwrap();
-            for worker in [1u8, 2, 3] {
-                let out = template_ports_for_worker(&content, task.default_port(), worker);
-                for line in out.lines() {
-                    if base_pat.is_match(line) && !alias_pat.is_match(line) {
-                        panic!(
-                            "stale canonical port {base} on non-alias line (task {task}, worker {worker}): {line}"
-                        );
-                    }
-                }
-            }
+            assert!(TaskType::parse(retired).is_err(), "{retired} must be gone");
+            assert!(
+                TaskType::from_name(retired).is_none(),
+                "{retired} must be gone"
+            );
         }
-    }
-
-    /// The dns task was removed 2026-10-05 (data archived): its name no
-    /// longer parses, and every live task parses to itself.
-    #[test]
-    fn test_removed_dns_task_does_not_parse() {
-        let err = TaskType::parse("dns").unwrap_err().to_string();
-        assert!(
-            err.contains("unknown task"),
-            "expected an unknown-task error, got: {err}"
-        );
-        assert!(TaskType::from_name("dns").is_none());
-
-        for t in ["redis", "http", "pdf", "wal", "proxy", "pubsub", "binproto"] {
-            assert!(TaskType::parse(t).is_ok(), "{t} should be runnable");
-        }
-        assert!(TaskType::parse("nope").is_err());
-    }
-
-    /// Every `TaskType` Display name must round-trip through `parse`.
-    #[test]
-    fn test_every_task_parses_to_itself() {
-        for t in [
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Pdf,
-            TaskType::Wal,
-            TaskType::Proxy,
-            TaskType::Pubsub,
-            TaskType::Binproto,
-        ] {
-            let name = t.to_string();
-            assert_eq!(TaskType::parse(&name).unwrap(), t, "{name} should parse");
-        }
-    }
-
-    #[test]
-    fn test_task_type_display_and_serde() {
-        assert_eq!(format!("{}", TaskType::Redis), "redis");
-        assert_eq!(format!("{}", TaskType::Http), "http");
-        assert_eq!(format!("{}", TaskType::Pdf), "pdf");
-
-        assert_eq!(TaskType::Redis.total_stages(), 6);
-        assert_eq!(TaskType::Http.total_stages(), 5);
-        assert_eq!(TaskType::Pdf.total_stages(), 6);
-        assert_eq!(TaskType::Wal.total_stages(), 5);
-        assert_eq!(TaskType::Proxy.total_stages(), 5);
-        assert_eq!(TaskType::Pubsub.total_stages(), 4);
-        assert_eq!(TaskType::Binproto.total_stages(), 5);
-
-        assert_eq!(TaskType::Redis.default_port(), 6379);
-        assert_eq!(TaskType::Http.default_port(), 8080);
-        assert_eq!(TaskType::Binproto.default_port(), 6395);
-
-        let json_redis = serde_json::to_string(&TaskType::Redis).unwrap();
-        assert_eq!(json_redis, "\"redis\"");
-        let de_redis: TaskType = serde_json::from_str(&json_redis).unwrap();
-        assert_eq!(de_redis, TaskType::Redis);
-
-        let json_http = serde_json::to_string(&TaskType::Http).unwrap();
-        assert_eq!(json_http, "\"http\"");
-        let de_http: TaskType = serde_json::from_str(&json_http).unwrap();
-        assert_eq!(de_http, TaskType::Http);
+        assert_eq!(format!("{}", TaskType::Sql), "sql");
+        assert_eq!(TaskType::Sql.total_stages(), 21);
+        assert_eq!(TaskType::Sql.default_port(), 5480);
+        let json = serde_json::to_string(&TaskType::Sql).unwrap();
+        assert_eq!(json, "\"sql\"");
+        let de: TaskType = serde_json::from_str(&json).unwrap();
+        assert_eq!(de, TaskType::Sql);
     }
 
     #[test]

@@ -1,5 +1,3 @@
-pub mod batch_ref;
-
 use crate::sandbox::docker::{BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE};
 
 use anyhow::{anyhow, Result};

@@ -1148,7 +1148,6 @@ async fn run_one_stage(
         // A ticket is not a single-shot board row.
         save_results: false,
         review_model: None,
-        batch_reference: None,
         worker,
         feedback_rounds: stage.feedback_rounds,
         campaign_stage: Some(CampaignStageConfig {
