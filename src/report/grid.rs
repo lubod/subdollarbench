@@ -1206,6 +1206,31 @@ fn render_results(cells: &[CareerCell]) -> String {
     } else {
         format!("{harness} / {effort}")
     };
+    // R51 F5 (Q8 a): the snapshot date and the ranked models' overrides.
+    let mut ranked_models: Vec<&str> = current.iter().map(|c| c.model.as_str()).collect();
+    ranked_models.sort();
+    ranked_models.dedup();
+    let overrides = ranked_models
+        .iter()
+        .map(|m| {
+            let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
+            if detail.is_empty() {
+                format!("{} — none", esc(m))
+            } else {
+                format!("{} — {}", esc(m), esc(detail))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let prices = format!(
+        "base rates per call (snapshot {}); overrides: {}",
+        esc(crate::cost::calculator::price_snapshot_as_of()),
+        if overrides.is_empty() {
+            "—"
+        } else {
+            &overrides
+        }
+    );
     let mut dates: Vec<&str> = current
         .iter()
         .flat_map(|c| [c.started.as_str(), c.finished_at.as_str()])
@@ -1296,7 +1321,7 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
     ));
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
+        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
         esc(rules),
         esc(&recorded_text),
         fingerprint_note,
@@ -1304,6 +1329,7 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(image),
         esc(&harness_effort),
         CAREER_CAP_USD,
+        prices,
         esc(&fmt_grid_time(first)),
         esc(&fmt_grid_time(last)),
         caps
@@ -2179,6 +2205,37 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R51 F5 (Q8 a): the results page names the snapshot date, says costs
+    /// are base rates, and lists each ranked model's override.
+    #[test]
+    fn r51_f5_prices_row() {
+        let (base, runs, out) = fixture("r51prices");
+        for (prefix, model) in [
+            ("haiku", "anthropic/claude-haiku-5.5"),
+            ("luna", "openai/gpt-6-luna"),
+            ("deepseek", "deepseek/deepseek-v4.1-flash-1017"),
+            ("mimo", "xiaomi/mimo-v2.6-flash"),
+            ("qwen", "qwen/qwen3.8-flash"),
+        ] {
+            career(&runs, prefix, model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("<th>Prices</th>"), "{html}");
+        assert!(html.contains("2026-10-28"), "{html}");
+        assert!(html.contains("base rates per call"), "{html}");
+        for needle in [
+            "5× the prompt rate above 100k prompt tokens",
+            "2× above 272k prompt tokens",
+            "2× in weekday peak hours",
+            "xiaomi/mimo-v2.6-flash — none",
+            "qwen/qwen3.8-flash — none",
+        ] {
+            assert!(html.contains(needle), "missing {needle:?}: {html}");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R51 F4 (R44-14): the grid dates run from the earliest phase start
     /// of any ranked career to the latest finish, to the minute.
     #[test]
