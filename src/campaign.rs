@@ -2487,6 +2487,9 @@ pub struct CampaignRollup {
     pub name: String,
     pub model: String,
     pub harness: String,
+    /// R51 F3: an old/partial rollup may not record effort; it stays empty,
+    /// never defaulted to "high".
+    #[serde(default)]
     pub effort: String,
     pub task: String,
     pub started_at: String,

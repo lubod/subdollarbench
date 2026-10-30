@@ -500,7 +500,10 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         cells: cells.iter().map(|c| c.name.clone()).collect(),
         model: leaf.rollup["model"].as_str().unwrap_or("?").to_string(),
         harness: leaf.rollup["harness"].as_str().unwrap_or("?").to_string(),
-        effort: leaf.rollup["effort"].as_str().unwrap_or("high").to_string(),
+        // R51 F3 (R44-10): an unknown effort stays empty; the board, the
+        // results page and the Run view show nothing there, and grouping
+        // keeps it apart from a real "high".
+        effort: leaf.rollup["effort"].as_str().unwrap_or("").to_string(),
         phase: leaf.phase,
         phase_total,
         finished,
@@ -814,6 +817,16 @@ fn perf_tooltip(perf: &crate::verifier::sql::perfscore::PerfScore) -> String {
     }
 }
 
+/// R51 F3: the effort fragment, omitted entirely when the cell did not
+/// record one (never defaulted to "high").
+fn effort_note(effort: &str) -> String {
+    if effort.is_empty() {
+        String::new()
+    } else {
+        format!(" · effort {}", esc(effort))
+    }
+}
+
 fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -824,10 +837,10 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         format!("career-row {extra_class}")
     };
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{} · effort {}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{}{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         esc(&c.campaign_id),
         esc(&c.model),
-        esc(&c.effort),
+        effort_note(&c.effort),
         flags_of(c),
         strip_html(&c.ladder),
         reached_of(c),
@@ -861,12 +874,12 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         );
     }
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{} · effort {} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{}{} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         g.rank_label(),
         esc(&g.model),
         more,
         esc(&g.harness),
-        esc(&g.effort),
+        effort_note(&g.effort),
         best.points,
         med.points,
         worst.points,
@@ -1172,6 +1185,11 @@ fn render_results(cells: &[CareerCell]) -> String {
         v.dedup();
         v.join(", ")
     };
+    let harness_effort = if effort.is_empty() {
+        harness.clone()
+    } else {
+        format!("{harness} / {effort}")
+    };
     let mut dates: Vec<&str> = current
         .iter()
         .flat_map(|c| [c.started.as_str(), c.finished_at.as_str()])
@@ -1262,14 +1280,13 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
     ));
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{} / {}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
+        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
         esc(rules),
         esc(&recorded_text),
         fingerprint_note,
         esc(crate::report::rules::sqlite_version()),
         esc(image),
-        esc(&harness),
-        esc(&effort),
+        esc(&harness_effort),
         CAREER_CAP_USD,
         esc(first),
         esc(last),
@@ -1588,6 +1605,27 @@ mod tests {
         let mut sv: Value = serde_json::from_str(&read(&spath)).unwrap();
         sv["rollup"] = v;
         fs::write(&spath, sv.to_string()).unwrap();
+    }
+
+    /// R51 F3: rewrite (or remove) a phase's effort in both files.
+    fn set_effort(runs: &Path, prefix: &str, phase: u32, effort: Option<&str>) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            match effort {
+                Some(e) => rollup["effort"] = serde_json::json!(e),
+                None => {
+                    rollup.as_object_mut().unwrap().remove("effort");
+                }
+            }
+            fs::write(path, v.to_string()).unwrap();
+        }
     }
 
     fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -2108,6 +2146,31 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R51 F3 (R44-10): a rollup without effort renders no "high" and
+    /// groups apart from a real high-effort career.
+    #[test]
+    fn r51_f3_unknown_effort_blank() {
+        let (base, runs, out) = fixture("r51effort");
+        career(&runs, "none", "effort-model", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            set_effort(&runs, "none", phase, None);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(
+            !html.contains("effort high") && !html.contains("high ·"),
+            "an unknown effort must render nothing: {html}"
+        );
+        career(&runs, "high", "effort-model", [1.0; 4], [0.01; 4]);
+        let cells = careers(runs.to_str().unwrap());
+        let groups = model_groups(&cells);
+        let efforts: Vec<&str> = groups.iter().map(|g| g.effort.as_str()).collect();
+        assert!(efforts.contains(&""), "unknown effort group: {efforts:?}");
+        assert!(efforts.contains(&"high"), "high effort group: {efforts:?}");
+        assert_eq!(efforts.len(), 2, "same model, two efforts: {efforts:?}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R47 F2: a career with a perf block shows a Perf column and its
     /// score; one without shows an em dash. The hover names each workload
     /// and flags a floored one; the methodology names the tie-break.
