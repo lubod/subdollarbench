@@ -426,6 +426,11 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
             live: false,
             current_rules: campaign::is_current_rules(&rules),
             points,
+            perf: leaf
+                .rollup
+                .pointer("/career/perf/score")
+                .or_else(|| leaf.rollup.pointer("/perf/score"))
+                .and_then(Value::as_f64),
             per_dollar: (cost > 0.0).then(|| points / cost),
             cost,
         });

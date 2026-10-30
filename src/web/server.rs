@@ -1747,6 +1747,7 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 live: false,
                 current_rules: false,
                 points: 0.0,
+                perf: None,
                 per_dollar: None,
                 cost: 0.0,
             })
