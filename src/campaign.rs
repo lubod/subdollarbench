@@ -4472,75 +4472,6 @@ mod tests {
         lc
     }
 
-    #[test]
-    fn test_real_sdb_kv_spec_validates() {
-        let lc = load_campaign("sdb-kv").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-kv");
-        assert!(lc.spec.stages.len() >= 4);
-        assert_eq!(lc.spec.stages[0].id, 0);
-    }
-
-    #[test]
-    fn test_real_sdb_edge_spec_validates() {
-        let lc = load_campaign("sdb-edge").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-edge");
-        assert_eq!(lc.spec.task, "proxy");
-        assert_eq!(lc.spec.stages.len(), 7);
-        assert_eq!(lc.spec.stages[0].id, 0);
-        for stage in &lc.spec.stages {
-            assert!(
-                !stage.acceptance.proxy_stages.is_empty(),
-                "ticket {} has no proxy acceptance",
-                stage.id
-            );
-            assert!(
-                stage
-                    .acceptance
-                    .proxy_stages
-                    .iter()
-                    .all(|id| (1..=9).contains(id)),
-                "ticket {} acceptance out of the proxy suite",
-                stage.id
-            );
-        }
-        // Acceptance scopes grow with the ladder.
-        assert_eq!(lc.spec.stages[0].acceptance.proxy_stages, vec![1]);
-        assert_eq!(
-            lc.spec.stages[6].acceptance.proxy_stages,
-            vec![1, 2, 3, 4, 6, 7, 8, 9]
-        );
-    }
-
-    #[test]
-    fn test_real_sdb_queue_spec_validates() {
-        let lc = load_campaign("sdb-queue").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-queue");
-        assert_eq!(lc.spec.task, "queue");
-        assert_eq!(lc.spec.stages.len(), 9);
-        assert_eq!(lc.spec.stages[0].id, 0);
-        for stage in &lc.spec.stages {
-            assert!(
-                !stage.acceptance.queue_stages.is_empty(),
-                "ticket {} has no queue acceptance",
-                stage.id
-            );
-            assert!(
-                stage
-                    .acceptance
-                    .queue_stages
-                    .iter()
-                    .all(|id| (1..=9).contains(id)),
-                "ticket {} acceptance out of the queue suite",
-                stage.id
-            );
-        }
-        assert_eq!(lc.spec.stages[0].acceptance.queue_stages, vec![1]);
-        assert_eq!(
-            lc.spec.stages[8].acceptance.queue_stages,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
-        );
-    }
-
     /// Tickets 12-15 landed (2026-10-19): concurrency (scenario-only, lite),
     /// schema change (differential), observability (scenario-only) and the
     /// tests/CI gate (scenario-only, lite). Pins each stage's spec and the
@@ -5206,36 +5137,6 @@ mod tests {
         // 15 (39 -> 44), 16 (44 -> 50), 17 (50 -> 56), 18 (56 -> 62),
         // 19 (62 -> 69), 20 (69 -> 76).
         assert_eq!(crate::campaign::max_points(&lc.spec.stages), 76.0);
-    }
-
-    #[test]
-    fn test_real_sdb_http_spec_validates() {
-        let lc = load_campaign("sdb-http").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-http");
-        assert_eq!(lc.spec.task, "http");
-        assert_eq!(lc.spec.stages.len(), 8);
-        assert_eq!(lc.spec.stages[0].id, 0);
-        for stage in &lc.spec.stages {
-            assert!(
-                !stage.acceptance.http_stages.is_empty(),
-                "ticket {} has no http acceptance",
-                stage.id
-            );
-            assert!(
-                stage
-                    .acceptance
-                    .http_stages
-                    .iter()
-                    .all(|id| (1..=10).contains(id)),
-                "ticket {} acceptance out of the http suite",
-                stage.id
-            );
-        }
-        assert_eq!(lc.spec.stages[0].acceptance.http_stages, vec![1, 2]);
-        assert_eq!(
-            lc.spec.stages[7].acceptance.http_stages,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        );
     }
 
     #[test]

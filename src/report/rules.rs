@@ -1234,8 +1234,7 @@ mod tests {
             "src/prompts/session_budget.txt",
             "src/prompts/omp_effective.md",
             "src/prompts/opencode_agents.md",
-            // Retired task inputs stay in the shared stamp.
-            "tasks/redis/prompt.md",
+            "tasks/sql/prompt.md",
         ] {
             assert!(
                 files.iter().any(|p| p == Path::new(rel)),

@@ -97,7 +97,7 @@ pub fn worker_count() -> usize {
 }
 
 /// Per-worker candidate port offset: base + worker*100 keeps every cell's
-/// ports disjoint (candidate, batch-ref, upstream pool).
+/// ports disjoint (candidate, reference, admin/dashboard).
 pub fn worker_port(base: u16, worker: u8) -> u16 {
     base.saturating_add(worker as u16 * 100)
 }
@@ -2897,7 +2897,7 @@ mod tests {
         state.cancel_requested.store(true, Ordering::SeqCst);
         let req = RunRequest {
             model: "m".to_string(),
-            task: "redis".to_string(),
+            task: "sql".to_string(),
             api_key: None,
             budget_usd: 1.0,
             max_turns: 1,

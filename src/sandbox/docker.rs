@@ -5,11 +5,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
-/// Pinned reference images (content-addressed). Floating tags let upstream
-/// rebuilds silently move the denominator: a digest change is a declared new
-/// measurement regime, not silent drift. Re-pin quarterly or on CVE fixes.
-pub const REF_REDIS_IMAGE: &str = "docker.io/library/redis@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576";
-
 /// Egress allowlist for the per-run allowlist forward proxy. The agent NEEDS
 /// openrouter (model API) + language registries (builds). github.com is
 /// deliberately allowed (frameworks live in git; the tradeoff is documented
@@ -52,7 +47,6 @@ pub fn egress_filter_enabled() -> bool {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
-pub const REF_NGINX_IMAGE: &str = "docker.io/library/nginx@sha256:17ad11d84df6c69e327c0894125f712ec1f1de627b5e5ed7e12ca2ed8cd5daf8";
 
 /// Host allowlist check (mirrors extensions/egress_proxy.py).
 pub fn egress_allowed(host: &str) -> bool {
@@ -64,39 +58,6 @@ pub fn egress_allowed(host: &str) -> bool {
     EGRESS_ALLOWLIST
         .iter()
         .any(|a| h == *a || h.ends_with(&format!(".{}", a)))
-}
-/// PDF reference: canonical extractor (extensions/pdf_reference.py).
-/// Pinned by image-ID digest (content-addressed; no registry needed):
-/// rebuild with `docker build -t pdf-ref:local .` in a dir containing the
-/// Dockerfile + server.py, then `docker inspect pdf-ref:local --format {{.Id}}`.
-/// A rebuild that changes behavior yields a new ID -> new regime label by
-/// construction (regime_of keys on this string). Record the ID + source hash
-/// in wave-freezes.log at each rebuild (REF_INTRO_PDF_* lines).
-pub const REF_PDF_IMAGE: &str =
-    "pdf-ref@sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
-/// Bare image ID that actually runs (verified: `pdf-ref@sha256:<id>`
-/// attempts a registry pull and fails locally; bare `sha256:<id>` runs).
-/// Rebuild the tag, then `docker inspect pdf-ref:local --format {{.Id}}`.
-/// A behavior-changing rebuild MUST update BOTH consts to the new ID
-/// (label keeps name@digest shape for regime_of; run keeps bare ID).
-/// Verified: identical source rebuilds yield the same ID twice.
-pub const REF_PDF_RUN_IMAGE: &str =
-    "sha256:1a950e870ddbe44aad6415472763d1ec5a00c47f0a672504041fa3379f06422f";
-/// Benchmark *client* images are pinned too: the client binary is half the
-/// measurement apparatus.
-pub const BENCH_REDIS_CLIENT_IMAGE: &str = REF_REDIS_IMAGE;
-pub const BENCH_WRK_IMAGE: &str = "docker.io/williamyeh/wrk@sha256:78adc0d9d51a99e6759e702a08d03eaece81c890ffcc9790ef9e5b199d54f091";
-/// Fixed upstream ports for the proxy task (also baked into tasks/proxy/prompt.md).
-pub const PROXY_UPSTREAM_PORTS: [u16; 3] = [8101, 8102, 8103];
-
-/// Reference image for a task name ("redis"/"http"/"pdf"), if it has one.
-pub fn ref_image_for_task(task: &str) -> Option<&'static str> {
-    match task {
-        "redis" => Some(REF_REDIS_IMAGE),
-        "http" => Some(REF_NGINX_IMAGE),
-        "pdf" => Some(REF_PDF_IMAGE),
-        _ => None,
-    }
 }
 
 /// R48 F2: the Docker arguments for a CPU set. Empty when `set` is empty.
@@ -275,7 +236,7 @@ impl SandboxManager {
                 "--pids-limit=32",
                 "--entrypoint",
                 "tail",
-                REF_REDIS_IMAGE,
+                EGRESS_PROXY_IMAGE,
                 "-f",
                 "/dev/null",
             ])
@@ -699,18 +660,6 @@ impl SandboxManager {
             .output();
     }
 
-    pub fn ref_redis_name(&self) -> String {
-        format!("subdollar-ref-redis-{}", self.instance_id)
-    }
-
-    pub fn ref_http_name(&self) -> String {
-        format!("subdollar-ref-http-{}", self.instance_id)
-    }
-
-    pub fn ref_pdf_name(&self) -> String {
-        format!("subdollar-ref-pdf-{}", self.instance_id)
-    }
-
     pub fn ref_sql_name(&self) -> String {
         format!("subdollar-ref-sql-{}", self.instance_id)
     }
@@ -720,34 +669,22 @@ impl SandboxManager {
     /// run network, so while verifying, every reference is detached from it
     /// — a candidate must not be able to proxy to `ref-*` and fake its way
     /// through stages. The agent keeps them during development and the
-    /// bench re-attaches them (it measures by alias).
+    /// verification can re-attach them by alias.
     pub fn detach_references(&self) {
         let net = self.network_name();
-        for name in [
-            self.ref_redis_name(),
-            self.ref_http_name(),
-            self.ref_pdf_name(),
-            self.ref_sql_name(),
-        ] {
-            let _ = Command::new("docker")
-                .args(["network", "disconnect", &net, &name])
-                .output();
-        }
+        let name = self.ref_sql_name();
+        let _ = Command::new("docker")
+            .args(["network", "disconnect", &net, &name])
+            .output();
     }
 
     /// Re-attach references under their stable aliases (idempotent).
     pub fn reattach_references(&self) {
         let net = self.network_name();
-        for (name, alias) in [
-            (self.ref_redis_name(), "ref-redis"),
-            (self.ref_http_name(), "ref-http"),
-            (self.ref_pdf_name(), "ref-pdf"),
-            (self.ref_sql_name(), "ref-sql"),
-        ] {
-            let _ = Command::new("docker")
-                .args(["network", "connect", "--alias", alias, &net, &name])
-                .output();
-        }
+        let name = self.ref_sql_name();
+        let _ = Command::new("docker")
+            .args(["network", "connect", "--alias", "ref-sql", &net, &name])
+            .output();
     }
 
     pub fn network_name(&self) -> String {
@@ -758,7 +695,7 @@ impl SandboxManager {
     /// network this manager creates carries `sdb.run=<instance_id>` (+ a
     /// `sdb.role`), so the reaper selects by label filter instead of
     /// name-grep: names collide across parents sharing a timestamp, labels
-    /// do not. `sdb.role` is informational (candidate/ref-redis/.../batchref)
+    /// do not. `sdb.role` is informational (candidate/ref-sql/.../batchref)
     /// except in `reap_run`, which never touches `batchref` from a trial.
     pub fn label_args(&self, role: &str) -> Vec<String> {
         vec![
@@ -779,8 +716,8 @@ impl SandboxManager {
 
     /// Idempotently create this run's private Docker network.
     ///
-    /// Reference containers join it under stable aliases (`ref-redis`,
-    /// `ref-http`) and the OMP agent container is attached to it,
+    /// Reference containers join it under a stable alias (`ref-sql`) and
+    /// the OMP agent container is attached to it,
     /// so the agent can probe ground truth by hostname while remaining
     /// isolated from host-network services.
     /// Process-wide mutex serializing Docker network create/prune.
@@ -917,54 +854,6 @@ impl SandboxManager {
         Err(anyhow!("docker network {net} not inspectable after create"))
     }
 
-    pub fn start_reference_redis(&self, port: u16) -> Result<()> {
-        let name = self.ref_redis_name();
-        let net = self.network_name();
-        self.ensure_network()?;
-        info!(
-            "Starting ground-truth reference Redis in Docker on port {} ({}, alias ref-redis on {})",
-            port, name, net
-        );
-        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-
-        let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=ref-redis",
-                "--name",
-                &name,
-                "--network",
-                &net,
-                "--network-alias",
-                "ref-redis",
-                "--memory=2g",
-                "--cpus=2.0",
-                "--pids-limit=256",
-                "-p",
-                &format!("127.0.0.1:{}:6379", port),
-                REF_REDIS_IMAGE,
-            ])
-            .output()
-            .map_err(|e| anyhow!("reference redis spawn failed: {e}"))?;
-        // Never swallow: a failed bind (e.g. a leaked container holds the
-        // port) used to look like a healthy run whose ref was silently
-        // missing — the measurement then failed later with a misleading
-        // "Could not connect to ref-redis" (live incident 2026-10-14).
-        if !out.status.success() {
-            return Err(anyhow!(
-                "reference redis failed to start on host port {port}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-
-        Ok(())
-    }
-
     /// The sdb-sql reference: a Python `sqlite3` adapter speaking the
     /// text protocol, on the run network as `ref-sql`. The agent compares
     /// semantics against it during development; verification detaches it
@@ -1022,52 +911,6 @@ impl SandboxManager {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        Ok(())
-    }
-
-    pub fn start_reference_http(&self, port: u16) -> Result<()> {
-        let name = self.ref_http_name();
-        let net = self.network_name();
-        self.ensure_network()?;
-        info!(
-            "Starting reference Nginx in Docker on port {} ({}, alias ref-http on {})",
-            port, name, net
-        );
-        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-
-        let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=ref-http",
-                "--name",
-                &name,
-                "--network",
-                &net,
-                "--network-alias",
-                "ref-http",
-                "--memory=2g",
-                "--cpus=2.0",
-                "--pids-limit=256",
-                "-p",
-                &format!("127.0.0.1:{}:80", port),
-                REF_NGINX_IMAGE,
-            ])
-            .output()
-            .map_err(|e| anyhow!("reference nginx spawn failed: {e}"))?;
-        // Same rule as the redis reference: a silent non-start must fail
-        // loud (see the 2026-10-14 leaked-container incident).
-        if !out.status.success() {
-            return Err(anyhow!(
-                "reference nginx failed to start on host port {port}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-
         Ok(())
     }
 
@@ -1173,137 +1016,8 @@ impl SandboxManager {
         Ok(())
     }
 
-    /// Is upstream container `idx` present and running? The pool's host
-    /// publishes are a harness convenience (verifier fixture markers have
-    /// byte-identical in-process fallbacks); the containers themselves are
-    /// what candidates dial, so pool health is a container-state question.
-    pub fn upstream_container_running(&self, idx: u8) -> bool {
-        let out = Command::new("docker")
-            .args([
-                "inspect",
-                "--format",
-                "{{.State.Running}}",
-                &self.upstream_name(idx),
-            ])
-            .output();
-        matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-    }
-
-    pub fn upstream_name(&self, idx: u8) -> String {
-        format!("subdollar-upstream{}-{}", idx, self.instance_id)
-    }
-
-    fn upstream_marker_path(&self, idx: u8) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "subdollar-upstream-{}-{}.html",
-            self.instance_id, idx
-        ))
-    }
-
-    /// Start nginx upstreams with distinct marker bodies for the proxy task.
-    /// Marker files live in tempdir (never in the candidate workspace).
-    pub fn start_upstream_pool(&self, ports: &[u16]) -> Result<()> {
-        let net = self.network_name();
-        self.ensure_network()?;
-        for (i, port) in ports.iter().enumerate() {
-            let idx = (i + 1) as u8;
-            self.start_upstream_on(idx, *port, &net)?;
-        }
-        Ok(())
-    }
-    pub fn start_upstream(&self, idx: u8, port: u16) -> Result<()> {
-        let net = self.network_name();
-        self.ensure_network()?;
-        self.start_upstream_on(idx, port, &net)
-    }
-
-    /// Marker body served by upstream containers (`upstream-N marker`).
-    /// Canonical source shared with the proxy verifier's in-process stubs:
-    /// both must serve byte-identical bodies or marker attribution breaks.
-    pub fn upstream_marker_body(idx: u8) -> String {
-        format!("upstream-{} marker\n", idx)
-    }
-
-    /// R37 F2: `docker run -d` only means the container exists. Wait until
-    /// the upstream actually serves its marker (bounded), so the pool is
-    /// usable the moment `start_upstream_pool` returns.
-    fn wait_for_upstream(idx: u8, port: u16, timeout: std::time::Duration) -> Result<()> {
-        use std::io::{Read, Write};
-        let marker = Self::upstream_marker_body(idx);
-        let deadline = std::time::Instant::now() + timeout;
-        let mut last: Option<String>;
-        loop {
-            match std::net::TcpStream::connect(("127.0.0.1", port)) {
-                Ok(mut stream) => {
-                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
-                    let _ = stream.write_all(
-                        b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-                    );
-                    let mut body = String::new();
-                    if stream.read_to_string(&mut body).is_ok() && body.contains(&marker) {
-                        return Ok(());
-                    }
-                    last = Some("response did not contain the marker".to_string());
-                }
-                Err(e) => last = Some(e.to_string()),
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(anyhow!(
-                    "upstream {idx} on port {port} did not become ready within {}s: {}",
-                    timeout.as_secs(),
-                    last.as_deref().unwrap_or("no response")
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-
-    fn start_upstream_on(&self, idx: u8, port: u16, net: &str) -> Result<()> {
-        let name = self.upstream_name(idx);
-        fs::write(
-            self.upstream_marker_path(idx),
-            Self::upstream_marker_body(idx),
-        )?;
-        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-        let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                &format!("sdb.role=upstream{}", idx),
-                "--name",
-                &name,
-                "--network",
-                net,
-                "--network-alias",
-                &format!("upstream{}", idx),
-                "--memory=512m",
-                "--cpus=1.0",
-                "-p",
-                &format!("127.0.0.1:{}:80", port),
-                "-v",
-                &format!(
-                    "{}:/usr/share/nginx/html/index.html:ro",
-                    self.upstream_marker_path(idx).display()
-                ),
-                REF_NGINX_IMAGE,
-            ])
-            .output()?;
-        if out.status.success() {
-            Self::wait_for_upstream(idx, port, std::time::Duration::from_secs(30))
-        } else {
-            Err(anyhow!(
-                "upstream {} start failed: {}",
-                idx,
-                String::from_utf8_lossy(&out.stderr)
-            ))
-        }
-    }
-
     /// Attach the candidate container to the run network so it can dial
-    /// run-scoped aliases (proxy upstreams). Candidates launch on the default
+    /// run-scoped aliases. Candidates launch on the default
     /// bridge (no --network flag), where neither 127.0.0.1-published ports
     /// (own loopback) nor run-net aliases resolve.
     pub fn connect_candidate_to_network(&self) -> Result<()> {
@@ -1312,12 +1026,8 @@ impl SandboxManager {
                 "network",
                 "connect",
                 "--alias",
-                // The bench client reaches the candidate by this alias on the
-                // run network, the same way it reaches `ref-redis`. Measuring
-                // both over one network path is what makes the ratio mean
-                // anything: the candidate's primary network is bridge, so its
-                // 127.0.0.1-published port measures it over a different path
-                // than the reference, which starts on the run network.
+                // Candidates reach the reference by this alias on the run
+                // network (the SQL reference joins it at startup).
                 "candidate",
                 &self.network_name(),
                 &self.candidate_container_name(),
@@ -1333,124 +1043,6 @@ impl SandboxManager {
                 Err(anyhow!("network connect failed: {}", stderr))
             }
         }
-    }
-
-    pub fn stop_upstream(&self, idx: u8) -> Result<()> {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &self.upstream_name(idx)])
-            .output()?;
-        Ok(())
-    }
-
-    /// Build the PDF reference image from the in-repo canonical source.
-    /// Tag `pdf-ref:local` first (stable name for debugging), the digest
-    /// const governs what actually runs. Fails loudly on build errors.
-    fn build_pdf_reference_image() -> Result<()> {
-        let script = crate::config::get_repo_root().join("extensions/pdf_reference.py");
-        let dir = std::env::temp_dir().join("subdollar-pdfref-build");
-        let _ = fs::create_dir_all(&dir);
-        fs::copy(&script, dir.join("server.py"))?;
-        fs::write(
-            dir.join("Dockerfile"),
-            "FROM docker.io/library/python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS base\nWORKDIR /srv\nCOPY server.py /srv/server.py\nEXPOSE 8090\nCMD [\"python3\", \"/srv/server.py\"]\n",
-        )?;
-        let out = Command::new("docker")
-            .args(["build", "-t", "pdf-ref:local"])
-            .arg(&dir)
-            .output()?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "pdf reference image build failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-        Ok(())
-    }
-
-    /// Start the canonical PDF extractor reference (REF_PDF_IMAGE) on the
-    /// run network under alias `ref-pdf`, host-published for measurement.
-    /// The agent keeps its black-box oracle; batch calibration measures the
-    /// same container via the host port.
-    pub fn start_reference_pdf(&self, port: u16) -> Result<()> {
-        let name = self.ref_pdf_name();
-        let net = self.network_name();
-        self.ensure_network()?;
-        info!(
-            "Starting reference PDF extractor in Docker on port {} ({}, alias ref-pdf on {})",
-            port, name, net
-        );
-        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-        // Dual-attached, and the order matters.
-        //
-        // Primary network is the default bridge, so the `-p` mapping is created
-        // and works: the PDF client is the in-process `PdfVerifier`, which
-        // dials 127.0.0.1 from the harness process on the host. It cannot
-        // resolve a container-internal alias at all, so unlike redis/http
-        // there is no run-network route that would serve it.
-        //
-        // Then attach the run network under the `ref-pdf` alias, which is how
-        // the agent reaches its black-box oracle.
-        //
-        // Starting on the run network instead would fail outright under egress
-        // enforcement: docker silently drops `-p` on an `--internal` network
-        // (`docker inspect` reports {"8090/tcp":null}), and attaching a second
-        // network afterwards cannot resurrect an already-null port binding.
-        let run_args = [
-            "run",
-            "-d",
-            "--rm",
-            "--label",
-            &format!("sdb.run={}", self.instance_id),
-            "--label",
-            "sdb.role=ref-pdf",
-            "--name",
-            &name,
-            "--network",
-            "bridge",
-            "--memory=512m",
-            "--cpus=1.0",
-            "-p",
-            &format!("127.0.0.1:{port}:8090"),
-            REF_PDF_RUN_IMAGE,
-        ];
-        let out = Command::new("docker").args(run_args).output()?;
-        if out.status.success() {
-            let attach = Command::new("docker")
-                .args(["network", "connect", "--alias", "ref-pdf", &net, &name])
-                .output()?;
-            if !attach.status.success() {
-                let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-                return Err(anyhow!(
-                    "pdf reference started but could not join the run network {}: {}",
-                    net,
-                    String::from_utf8_lossy(&attach.stderr)
-                ));
-            }
-        }
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            // Fresh-checkout bootstrap: image missing -> build from the
-            // in-repo source, then FAIL LOUDLY (no retry with the pinned
-            // digest: fresh builds get new config timestamps -> new ID, so
-            // the retry could never succeed). The operator updates both
-            // REF_PDF_* consts to the reported ID and rebuilds.
-            // Fails LOUDLY: batch_ref propagates pdf errors (no silent
-            // unscored fallback; see start_on_worker pdf arm).
-            if stderr.contains("No such image") || stderr.contains("not found") {
-                Self::build_pdf_reference_image()?;
-                let id = Command::new("docker")
-                    .args(["inspect", "pdf-ref:local", "--format", "{{.Id}}"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
-                return Err(anyhow!(
-                    "pdf reference image missing; rebuilt pdf-ref:local as {} — update REF_PDF_IMAGE/REF_PDF_RUN_IMAGE consts to this ID and rebuild the binary",
-                    id
-                ));
-            }
-            return Err(anyhow!("pdf reference start failed: {}", stderr));
-        }
-        Ok(())
     }
 
     fn find_go_main_recursive(dir: &Path) -> Option<PathBuf> {
@@ -2244,17 +1836,11 @@ impl SandboxManager {
         let mut names = vec![
             self.candidate_container_name(),
             self.anchor_container_name(),
-            self.ref_redis_name(),
-            self.ref_http_name(),
-            self.ref_pdf_name(),
             self.ref_sql_name(),
             self.egress_proxy_name(),
             self.agent_container_name(),
             format!("subdollar-omp-agent-{}", std::process::id()),
         ];
-        for idx in 1..=8u8 {
-            names.push(self.upstream_name(idx));
-        }
         names.extend(self.ha_node_names());
         names
     }
@@ -2513,12 +2099,6 @@ impl SandboxManager {
         // creating-then-attaching (parallel ghost-run race). remove_network
         // refuses attached endpoints anyway; the age check covers the
         // not-yet-attached window.
-        // File cleanup is unconditional: the gated network rm above must
-        // never swallow these (a kept live/young network still leaves
-        // stale upstream files otherwise).
-        for idx in 1..=8u8 {
-            let _ = fs::remove_file(self.upstream_marker_path(idx));
-        }
         if !Self::network_in_use_or_young(&net) {
             Self::remove_network_retrying(&net);
         }
@@ -2585,9 +2165,6 @@ impl Drop for RunGuard {
 
 impl RunGuard {
     fn prune_files(m: &SandboxManager) {
-        for idx in 1..=8u8 {
-            let _ = fs::remove_file(m.upstream_marker_path(idx));
-        }
         // The sdb-sql reference staging copy for this instance (finding 9).
         let _ = fs::remove_dir_all(
             std::env::temp_dir().join(format!("subdollar-ref-sql-src-{}", m.instance_id)),
@@ -2882,57 +2459,6 @@ mod tests {
         sm.cleanup();
         let logs = sm.get_candidate_logs();
         assert!(!logs.is_empty());
-    }
-
-    #[test]
-    fn test_start_and_cleanup_reference_containers() {
-        let sm = SandboxManager::with_id("test-ref");
-        let _guard = RunGuard::new(SandboxManager::with_id("test-ref"));
-        let res_redis = sm.start_reference_redis(free_port());
-        assert!(res_redis.is_ok());
-        let res_http = sm.start_reference_http(free_port());
-        assert!(res_http.is_ok());
-        sm.cleanup();
-    }
-
-    #[test]
-    fn test_run_network_reference_alias_reachable() {
-        let sm = SandboxManager::with_id("net-alias-test");
-        let _guard = RunGuard::new(SandboxManager::with_id("net-alias-test"));
-        sm.cleanup();
-        assert!(sm.ensure_network().is_ok());
-        // Idempotent: second create must not fail
-        assert!(sm.ensure_network().is_ok());
-        assert!(sm.start_reference_redis(free_port()).is_ok());
-        // Give the reference a moment to accept connections
-        std::thread::sleep(std::time::Duration::from_millis(2500));
-
-        let net = sm.network_name();
-        let out = Command::new("docker")
-            .args([
-                "run",
-                "--rm",
-                "--network",
-                &net,
-                BENCH_REDIS_CLIENT_IMAGE,
-                "redis-cli",
-                "-h",
-                "ref-redis",
-                "-p",
-                "6379",
-                "ping",
-            ])
-            .output();
-        sm.cleanup();
-
-        let stdout = out
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-        assert!(
-            stdout.contains("PONG"),
-            "expected PONG via ref-redis network alias, got: {:?}",
-            stdout
-        );
     }
 
     /// The sdb-sql reference must answer the text protocol through its
@@ -3475,18 +3001,17 @@ while True:
     }
 
     #[test]
-    fn test_owned_names_cover_pdf_egress_upstreams() {
+    fn test_owned_names_cover_sql_egress_and_agent() {
         let sm = SandboxManager::with_id("parent_20261002_120000_trial2");
         let names = sm.owned_container_names();
-        // Previously leaked: nothing named the pdf ref, the egress
-        // sidecar, or the proxy upstreams, so trial cleanup left them
-        // running (97 leaked corefiles proved the file side; the
-        // container side was the missing ref-pdf/upstream/egress rms).
+        // Round 43 retired the pdf ref and the upstream pool; the SQL
+        // reference, the egress sidecar and the agent must still be named
+        // so trial cleanup reaps them.
         for want in [
-            "subdollar-ref-pdf-parent_20261002_120000_trial2",
+            "subdollar-ref-sql-parent_20261002_120000_trial2",
             "subdollar-egress-parent_20261002_120000_trial2",
-            "subdollar-upstream1-parent_20261002_120000_trial2",
-            "subdollar-upstream8-parent_20261002_120000_trial2",
+            "subdollar-candidate-parent_20261002_120000_trial2",
+            "subdollar-anchor-parent_20261002_120000_trial2",
             "subdollar-agent-nonexistent-should-not-matter",
         ] {
             if want.contains("nonexistent") {
@@ -3649,15 +3174,10 @@ while True:
         // trial 2's live candidate. The narrowed alternation fires on the
         // exact id only — never the `_batchref` sibling (BatchRef::finish
         // owns that share; trial N's exit murdered the bracket through it).
-        let pat = |id: &str| {
-            format!(
-                "^subdollar-(candidate|ref-redis|ref-http|ref-pdf|omp-agent|egress|upstream[1-8])-{}($)",
-                id
-            )
-        };
+        let pat = |id: &str| format!("^subdollar-(candidate|ref-sql|omp-agent|egress)-{}($)", id);
         let re = ::regex::Regex::new(&pat("parent_20261002_120000_trial2")).unwrap();
         assert!(re.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
-        assert!(!re.is_match("subdollar-ref-pdf-parent_20261002_120000_batchref"));
+        assert!(!re.is_match("subdollar-ref-sql-parent_20261002_120000_batchref"));
         assert!(!re.is_match("subdollar-candidate-parent_20261002_120000_trial22"));
     }
 }
@@ -3694,18 +3214,6 @@ mod live_docker_cov_tests {
                 return p;
             }
         }
-    }
-
-    /// R37 F2: a port that never serves gives a named error within the
-    /// bounded readiness window.
-    #[test]
-    fn r37_f2_upstream_timeout_names_upstream_and_port() {
-        let port = free_port();
-        let err = SandboxManager::wait_for_upstream(3, port, std::time::Duration::from_millis(150))
-            .expect_err("an unused port must time out");
-        let msg = err.to_string();
-        assert!(msg.contains("upstream 3"), "{msg}");
-        assert!(msg.contains(&port.to_string()), "{msg}");
     }
 
     fn free_ports(n: usize) -> Vec<u16> {
@@ -3745,27 +3253,6 @@ mod live_docker_cov_tests {
         o.status.success() && String::from_utf8_lossy(&o.stdout).contains(net)
     }
 
-    /// Host-published HTTP GET with retry (nginx startup is async).
-    fn http_get(port: u16) -> String {
-        use std::io::{Read, Write};
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-                let _ = s.write_all(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                if !buf.is_empty() {
-                    return buf;
-                }
-            }
-            if std::time::Instant::now() > deadline {
-                return String::new();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-    }
-
     /// Panic-safe teardown for exactly one instance id: label-filtered
     /// reaping (own label value only) plus the exact names this instance can
     /// have created, its own network, and its marker files. Deliberately not
@@ -3795,9 +3282,6 @@ mod live_docker_cov_tests {
             args.extend(names);
             let _ = Command::new("docker").args(&args).output();
             SandboxManager::remove_network_retrying(&sm.network_name());
-            for idx in 1..=8u8 {
-                let _ = fs::remove_file(sm.upstream_marker_path(idx));
-            }
         }
     }
 
@@ -3998,7 +3482,7 @@ mod live_docker_cov_tests {
         let sm = SandboxManager::with_id(&id);
         sm.cleanup();
         assert!(sm.ensure_network().is_ok());
-        assert!(sm.start_reference_redis(free_port()).is_ok());
+        assert!(sm.start_reference_sql(free_port()).is_ok());
 
         // A probe container on the run network resolves the alias…
         let ws = std::env::temp_dir().join(format!("covtest-refdetach-ws-{}", std::process::id()));
@@ -4031,21 +3515,21 @@ mod live_docker_cov_tests {
                 sm.candidate_container_name().as_str(),
                 "python3",
                 "-c",
-                "import socket; socket.create_connection(('ref-redis', 6379), 2)",
+                "import socket; socket.create_connection(('ref-sql', 5480), 2)",
             ]);
             out.status.success()
         };
         let _ = &candidate;
-        assert!(probe(&sm), "ref-redis must resolve while the agent works");
+        assert!(probe(&sm), "ref-sql must resolve while the agent works");
 
         sm.detach_references();
         assert!(
             !probe(&sm),
-            "ref-redis must be unreachable during verification"
+            "ref-sql must be unreachable during verification"
         );
 
         sm.reattach_references();
-        assert!(probe(&sm), "ref-redis must come back for the bench");
+        assert!(probe(&sm), "ref-sql must come back for the bench");
 
         sm.cleanup();
         let _ = fs::remove_dir_all(&ws);
@@ -4193,85 +3677,6 @@ mod live_docker_cov_tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
-    /// A leaked binder on the host port must make the reference launch fail
-    /// loudly (Err), never look like a healthy run whose ref is missing.
-    #[test]
-    fn live_test_reference_containers_fail_loud_on_occupied_port() {
-        let id = id_for("ref-occupied");
-        let _cleanup = InstanceCleanup::new_guard(&id);
-        let sm = SandboxManager::with_id(&id);
-        sm.cleanup();
-        // Hold the port for the whole test: docker's `-p` bind must lose.
-        let listener = TcpListener::bind("127.0.0.1:0").expect("hold port");
-        let port = listener.local_addr().expect("local addr").port();
-        assert!(port > 20000, "live port ranges stay below 10000");
-        assert!(sm.start_reference_redis(port).is_err());
-        assert!(sm.start_reference_http(port).is_err());
-        assert!(sm.start_reference_pdf(port).is_err());
-        assert!(!exists(&sm.ref_redis_name()));
-        assert!(!exists(&sm.ref_http_name()));
-        assert!(!exists(&sm.ref_pdf_name()));
-        drop(listener);
-        sm.cleanup();
-    }
-
-    /// PDF reference success path: starts on the default bridge (so `-p`
-    /// works) and then joins the run network under `ref-pdf`.
-    #[test]
-    fn live_test_reference_pdf_starts_dual_attached() {
-        // R37 F3: the runner does not build the host-local pdf-ref image.
-        // Skip explicitly there; the bench host still runs the assertions.
-        let forced_missing = std::env::var("SDB_TEST_PDF_IMAGE_MISSING").as_deref() == Ok("1");
-        let image_present = !forced_missing
-            && docker(&["image", "inspect", REF_PDF_RUN_IMAGE])
-                .status
-                .success();
-        if !image_present {
-            eprintln!(
-                "[SKIP] live_test_reference_pdf_starts_dual_attached: REF_PDF_RUN_IMAGE is not available"
-            );
-            return;
-        }
-        let id = id_for("ref-pdf");
-        let _cleanup = InstanceCleanup::new_guard(&id);
-        let sm = SandboxManager::with_id(&id);
-        sm.cleanup();
-        let port = free_port();
-        assert!(sm.start_reference_pdf(port).is_ok());
-        let name = sm.ref_pdf_name();
-        assert!(running(&name));
-        let nets = docker(&[
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Networks}}",
-            &name,
-        ]);
-        let nets = String::from_utf8_lossy(&nets.stdout);
-        assert!(
-            nets.contains("bridge"),
-            "primary net must be bridge: {nets}"
-        );
-        assert!(
-            nets.contains(&sm.network_name()),
-            "pdf ref must join its run net: {nets}"
-        );
-        let ports = docker(&[
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Ports}}",
-            &name,
-        ]);
-        assert!(
-            String::from_utf8_lossy(&ports.stdout).contains("8090/tcp")
-                && String::from_utf8_lossy(&ports.stdout).contains(&port.to_string()),
-            "host port mapping must survive the dual attach: {}",
-            String::from_utf8_lossy(&ports.stdout)
-        );
-        sm.cleanup();
-        assert!(!exists(&name));
-        SandboxManager::remove_network_retrying(&sm.network_name());
-    }
-
     /// Three-node HA: leader/replica launch args, dashboard port on node 1
     /// only, kill (crash) keeps the container, respawn re-points replicaof,
     /// stop removes the cluster.
@@ -4369,33 +3774,6 @@ mod live_docker_cov_tests {
         sm.cleanup();
         SandboxManager::remove_network_retrying(&net);
         let _ = fs::remove_dir_all(&ws);
-    }
-
-    /// Upstream pool: distinct marker bodies served on published ports, and
-    /// stop removes each container.
-    #[test]
-    fn live_test_upstream_pool_serves_markers_and_stops() {
-        let id = id_for("upstreams");
-        let _cleanup = InstanceCleanup::new_guard(&id);
-        let sm = SandboxManager::with_id(&id);
-        sm.cleanup();
-        let ports = free_ports(3);
-        assert!(sm.start_upstream_pool(&ports[..2]).is_ok());
-        assert!(sm.start_upstream(3, ports[2]).is_ok());
-        for (i, port) in ports.iter().enumerate() {
-            let idx = (i + 1) as u8;
-            let body = http_get(*port);
-            assert!(
-                body.contains(&SandboxManager::upstream_marker_body(idx)),
-                "upstream{idx} marker mismatch: {body}"
-            );
-        }
-        for idx in 1..=3u8 {
-            assert!(sm.stop_upstream(idx).is_ok());
-            assert!(!exists(&sm.upstream_name(idx)));
-        }
-        sm.cleanup();
-        SandboxManager::remove_network_retrying(&sm.network_name());
     }
 
     /// Egress sidecar: starts, disarms the ephemeral handle's Drop (the run
@@ -4521,16 +3899,6 @@ mod live_docker_cov_tests {
             SandboxManager::canonical_workdir_for(missing),
             std::env::temp_dir().join("covtest-definitely-missing-dir")
         );
-    }
-
-    /// Reference image mapping for each task, incl. tasks without one.
-    #[test]
-    fn test_ref_image_for_task_mapping() {
-        assert_eq!(ref_image_for_task("redis"), Some(REF_REDIS_IMAGE));
-        assert_eq!(ref_image_for_task("http"), Some(REF_NGINX_IMAGE));
-        assert_eq!(ref_image_for_task("pdf"), Some(REF_PDF_IMAGE));
-        assert_eq!(ref_image_for_task("wal"), None);
-        assert_eq!(ref_image_for_task(""), None);
     }
 
     impl InstanceCleanup {

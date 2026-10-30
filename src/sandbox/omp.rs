@@ -3335,20 +3335,6 @@ mod tests {
     }
 
     #[test]
-    fn test_task_guidance_prompt_sniffing() {
-        let (port, cmd, snippet) = OmpRunner::task_guidance(None, "Build a PDF extractor service");
-        assert_eq!(port, 8090);
-        assert!(cmd.contains("8090"));
-        assert!(snippet.contains("PDF"));
-        let (port, cmd, _) = OmpRunner::task_guidance(None, "implement a redis clone");
-        assert_eq!(port, 6379);
-        assert!(cmd.contains("redis-cli"));
-        let (port, cmd, _) = OmpRunner::task_guidance(None, "build a hello world server");
-        assert_eq!(port, 8080);
-        assert!(cmd.contains("8080"));
-    }
-
-    #[test]
     fn test_extract_latest_session_stats_rejects_missing_file() {
         assert!(OmpRunner::extract_latest_session_stats(Some(Path::new(
             "/nonexistent/covtest-session.jsonl"

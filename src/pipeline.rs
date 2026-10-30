@@ -14,8 +14,6 @@ use crate::report::judge::RunJudge;
 use crate::report::leaderboard::{BenchmarkRunResult, LeaderboardManager};
 use crate::sandbox::docker::{RunGuard, SandboxManager};
 
-/// Upstream pool ports for a worker (base pool + worker*100 offset).
-
 /// The harness-owned data directory for an sdb-sql candidate. In a
 /// campaign it is a sibling of the workspace (the campaign directory), so
 /// it survives candidate restarts and stage rollbacks and the harness can
@@ -337,11 +335,6 @@ fn crash_ladder(
     Ok(())
 }
 
-/// `wait_for_port` only proves the socket accepts; under a loaded host the
-/// application may not serve yet, and the next request then dies on a reset
-/// (the http stages 9/10 restart flaked exactly so on 2026-10-16). Probe
-/// like the pre-verification setup does.
-
 /// One raw `GET /` probe against a candidate: true when any HTTP response
 /// arrives (any status). A socket that accepts but never answers (a slow
 /// startup self-test, a wedged accept loop) does not count as ready.
@@ -457,8 +450,6 @@ fn is_zero_output_non_result(eval_only: bool, total_tokens: u64, workspace_files
     !eval_only && total_tokens == 0 && workspace_files == 0
 }
 
-/// CI-stage wall-clock cap for one `./test.sh` run.
-
 /// Last `n` bytes of tool output, never splitting a UTF-8 char.
 fn output_tail(s: &str, n: usize) -> String {
     let t = s.trim();
@@ -527,16 +518,6 @@ fn parse_self_coverage(text: &str) -> Option<f64> {
     }
     None
 }
-
-/// Stage 9 (tests & CI): the ticket ships `./test.sh`; this checks it does
-/// what a CI gate is for:
-///   1. green + deterministic: two offline runs, exit 0, bounded time;
-///   2. coverage >= 80%: Go measured by the harness
-///      (`go test -coverprofile` + `go tool cover -func`); other languages
-///      read a self-reported `coverage.txt` line ("coverage: NN.N%");
-///   3. sensitivity: reverting the stage-1 (expiry) diff in a scratch copy
-///      must make `./test.sh` FAIL — a suite that stays green without the
-///      feature is decoration, not tests.
 
 /// The lite variants a suite grades at: every earlier lite pass from the
 /// ladder, plus this attempt's lite profile at the ticket being graded
@@ -1298,10 +1279,6 @@ impl BenchmarkPipeline {
                         "[SETUP] Server on port {} is online! Proceeding to verifier.",
                         port
                     ));
-                    // Readiness grace (proxy/http): a candidate that binds
-                    // early but serves late (slow startup self-test) must
-                    // not eat the verifier's single first request. Bounded
-                    // so a genuinely dead server is graded as-is.
                 } else {
                     logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
                 }
@@ -2788,7 +2765,7 @@ impl BenchmarkPipeline {
         // 1b. Create the run's private Docker network (reference aliases + agent attach)
         match sandbox.ensure_network() {
             Ok(()) => logger.log(&format!(
-                "[SETUP] Private run network '{}' ready (reference aliases: ref-redis / ref-http)",
+                "[SETUP] Private run network '{}' ready (reference alias: ref-sql)",
                 sandbox.network_name()
             )),
             Err(e) => {
@@ -2878,8 +2855,8 @@ impl BenchmarkPipeline {
         // port; worker>0 cells substitute their offset port so agents build on
         // the ports their containers actually publish. Worker 0 is verbatim.
         // Targeted rule: skip lines mentioning in-network aliases
-        // (ref-redis/ref-http/upstreamN — fixed ports inside the run
-        // network, identical for every worker). Rewrite only candidate-local
+        // (`ref-*` — fixed ports inside the run network, identical for
+        // every worker). Rewrite only candidate-local
         // references (localhost, 0.0.0.0, -p, bare port mentions) with word
         // boundaries so coincidental digit runs never match.
         let prompt_content = if config.worker == 0 {
@@ -3666,12 +3643,8 @@ impl BenchmarkPipeline {
             // Anchored rows only: an unanchored row must stay "legacy" even
             // after its task gains a reference image; otherwise regime_of
             // implies comparable ratios where throughput_score is None.
-            ref_image: if reference_throughput.is_some() {
-                crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
-                    .map(|s| s.to_string())
-            } else {
-                None
-            },
+            // R43: sdb-sql measures its perf score, not a reference image.
+            ref_image: None,
             // Recorded so a reader can tell an enforced run from an open one
             // without trusting the archive tooling. A run with egress_enforced
             // false (or absent, from before this field) made no isolation claim.
@@ -3784,12 +3757,8 @@ impl BenchmarkPipeline {
             ref_drift: None,
             // Same anchored-only gate as the manifest above: regime_of must
             // never show a digest on a row with no anchored denominator.
-            ref_image: if reference_throughput.is_some() {
-                crate::sandbox::docker::ref_image_for_task(&config.task.to_string())
-                    .map(|s| s.to_string())
-            } else {
-                None
-            },
+            // R43: sdb-sql measures its perf score, not a reference image.
+            ref_image: None,
             prompt_tokens,
             cached_tokens,
             completion_tokens,
@@ -4135,6 +4104,44 @@ mod tests {
         assert_eq!(worker_port(8101, 2), 8301);
     }
 
+    /// R43 F2 (R37-8): the task comes from the test's own `worker_port`
+    /// call, not its name. Only the candidate/reference ports identify a
+    /// task; the shared admin/dashboard/proxy-pool ports do not.
+    fn task_from_worker_port(src: &str) -> Option<TaskType> {
+        let mut rest = src;
+        while let Some(i) = rest.find("worker_port(") {
+            let after = &rest[i + "worker_port(".len()..];
+            let arg = after.split(',').next().unwrap_or("").trim();
+            if matches!(arg, "TaskType::Sql.default_port()" | "5480" | "5481") {
+                return Some(TaskType::Sql);
+            }
+            rest = after;
+        }
+        None
+    }
+
+    #[test]
+    fn r43_f2_port_table_reads_task_type() {
+        // Misnamed `proxy`, but its own worker_port line says Sql.
+        let src = r#"
+            fn r99_proxy_misnamed() {
+                let w = 8u8;
+                let _ = worker_port(TaskType::Sql.default_port(), w);
+            }
+        "#;
+        assert_eq!(task_from_worker_port(src), Some(TaskType::Sql));
+        // The name alone proves nothing.
+        assert_eq!(
+            task_from_worker_port("fn r99_proxy_misnamed() { let _ = 1; }"),
+            None
+        );
+        // A shared port is not a task port either.
+        assert_eq!(
+            task_from_worker_port("fn t() { let _ = worker_port(8090, 8); }"),
+            None
+        );
+    }
+
     /// R37 F1: for every pipeline test, compute every host port it can
     /// bind and reject two concurrent tests sharing one. Tests serialized
     /// by SQL_PERF_LIVE may share with each other.
@@ -4145,8 +4152,32 @@ mod tests {
         let mut current = String::new();
         let mut entries: Vec<(String, u8)> = Vec::new();
         let mut serialized: HashSet<String> = HashSet::new();
-        for line in source.lines() {
-            let line = line.trim();
+        // R43 F2: the whole body of every module-level fn, so the task can
+        // be read from its worker_port call below (module-level fns are
+        // indented four spaces; a test's inner helpers are deeper).
+        let mut bodies: HashMap<String, String> = HashMap::new();
+        let mut body_name: Option<String> = None;
+        let mut body = String::new();
+        for raw in source.lines() {
+            let module_fn = raw.starts_with("    fn ")
+                || raw.starts_with("    async fn ")
+                || raw.starts_with("    pub fn ")
+                || raw.starts_with("    pub async fn ");
+            if module_fn {
+                if let Some(n) = body_name.take() {
+                    bodies.insert(n, std::mem::take(&mut body));
+                }
+                let t = raw.trim_start();
+                let t = t.strip_prefix("pub ").unwrap_or(t);
+                let t = t.strip_prefix("async ").unwrap_or(t);
+                let t = t.strip_prefix("fn ").unwrap_or(t);
+                body_name = Some(t.split('(').next().unwrap_or("").trim().to_string());
+            }
+            if body_name.is_some() {
+                body.push_str(raw);
+                body.push('\n');
+            }
+            let line = raw.trim();
             // Build the markers so scripts/live-proofs.sh's awk does not
             // mistake this source for a test holding the lock.
             let async_prefix = "async".to_string() + " fn ";
@@ -4172,11 +4203,13 @@ mod tests {
                 }
             }
         }
+        if let Some(n) = body_name {
+            bodies.insert(n, body);
+        }
         assert!(
-            entries.len() >= 41,
+            entries.len() >= 31,
             "worker table lost entries: {entries:?}"
         );
-        let task = |_name: &str| TaskType::Sql;
         let mut owners: HashMap<u16, String> = HashMap::new();
         let mut max_port = 0u16;
         for (name, worker) in &entries {
@@ -4184,7 +4217,13 @@ mod tests {
                 *worker >= 8,
                 "{name} uses worker {worker}; workers 0..7 are live cell slots"
             );
-            let task_kind = task(name);
+            // R43 F2 (R37-8): read the task from the test's own worker_port
+            // call. With sdb-sql the only task, a body that binds only
+            // shared ports still grades as Sql.
+            let task_kind = bodies
+                .get(name)
+                .and_then(|src| task_from_worker_port(src))
+                .unwrap_or(TaskType::Sql);
             let base = task_kind.default_port();
             // A test binds its own task's reference, plus the shared admin,
             // dashboard, HA and proxy-pool ports. A campaign only starts the
@@ -4268,55 +4307,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         TestDir(dir)
     }
-
-    /// Minimal RESP candidate: raw sockets + a thread per connection, so
-    /// PING/ECHO/SET/GET/DEL/EXISTS pass stages 1-2 (and the advisory
-    /// robustness probes), while the deliberately missing TTL/INCR/PUBSUB
-    /// commands keep stages 3-5 red. That keeps pass_rate < 100%, so the
-    /// pipeline skips the bench while still building the full manifest.
-
-    /// Stage-2 live fixture: RESP on `argv[1]` + SDB1 v2 admin on 6395,
-    /// one shared store whose values live in an append log under
-    /// SDB_DATA_DIR (offset index in memory), idle-gated compaction to
-    /// <= 3x live bytes, SIGKILL-safe (flush per write, partial tail
-    /// dropped on replay). Implements exactly what stages 14-16 grade.
-
-    /// Write the stage-2 mock candidate into `dir`, RESP on `port`.
-
-    /// Proxy-campaign live fixture: a minimal reverse proxy that forwards
-    /// `GET /` to `upstream1:80` (the run-network nginx pool) with valid
-    /// HTTP/1.1 framing. Clears stage 1 and exercises the sdb-edge path.
-
-    /// Write the proxy mock into `dir`, listening on `port`.
-
-    /// sdb-edge reference candidate (live ladder proof): a stdlib-only
-    /// reverse proxy with round-robin over the three upstream aliases,
-    /// upstream timeouts + retry (hung-upstream failover), active health
-    /// probes and `GET /status`, a TTL cache (`SDB_PROXY_CACHE_TTL`,
-    /// `X-Cache`/`Age`), and request limits (8KiB head -> 431, >1MiB
-    /// declared body -> 413, slow-loris reclaimed in ~3s). Env override
-    /// `SDB_EDGE_UPSTREAMS` points it at local stubs for development.
-
-    /// Write the sdb-edge reference proxy into `dir`, listening on `port`.
-
-    /// sdb-queue reference broker (live ladder proof): stdlib-only job
-    /// queue with connection-owned visibility leases, nacks/delays,
-    /// dead-lettering after 3 attempts (inspection reads do not count),
-    /// redrive, per-queue STATS, delayed enqueue, and an append-only
-    /// fsync-before-ack log under `./data` (torn tails dropped on
-    /// replay). Env override `SDB_QUEUE_DATA` points it elsewhere for
-    /// local development.
-
-    /// Write the sdb-queue reference broker into `dir`, listening on `port`.
-
-    /// sdb-http reference file server (live ladder proof): stdlib-only
-    /// HTTP/1.1 server with keep-alive, echo/user-agent endpoints, a
-    /// file store under `./data/files`, byte ranges (incl. suffix/open
-    /// and 416), ETag/Last-Modified validators with strict conditional
-    /// semantics, gzip negotiation, chunked + `Expect: 100-continue`
-    /// uploads with a 16MiB declared-body cap, a 8KiB head cap, path
-    /// traversal rejection and a ~3s stalled-head reclaim. Env override
-    /// `SDB_HTTP_BASE` points the store elsewhere for local development.
 
     /// A deliberately broken sdb-sql candidate (review finding 2's fixture):
     /// it speaks the protocol and answers every statement `OK 0`, so the
@@ -4720,7 +4710,7 @@ main()
         assert!(prompt.contains("[PASS] Stage 1: PING / PONG"));
         assert!(prompt.contains("[FAIL] Stage 2: SET / GET"));
         assert!(prompt.contains("Diagnostic details: expected +OK, got -ERR"));
-        assert!(prompt.contains("server started on port 6379"));
+        assert!(prompt.contains("server started on port 5480"));
         assert!(prompt.contains("Directives for Surgical Bug Fixing:"));
         assert!(prompt.contains("DO NOT wipe your workspace"));
     }
@@ -4809,11 +4799,6 @@ main()
         assert!(!p.contains("line 19"));
     }
 
-    /// Full REAL pipeline drive with no model: eval-only Redis on a mock
-    /// RESP candidate that clears stages 1-2 and deliberately fails 3-5.
-    /// Asserts the verdict/manifest shape of a partially-passing trial and
-    /// that the bench is skipped below 100%.
-
     /// Empty workspace: no start.sh/Dockerfile -> verification is skipped,
     /// no container is built, and the verdict stays a (0%, 6-stage) trial.
     #[tokio::test]
@@ -4871,48 +4856,6 @@ main()
         cleanup_covtest_network("dq");
         let _ = fs::remove_dir_all(&workdir);
     }
-
-    /// `docker run -p` cannot bind a port the host already holds -> the
-    /// candidate container failure is classified as an infra error, not a
-    /// 0% model verdict.
-
-    /// Runnable image, unusable entrypoint: `docker run` fails with
-    /// "no such file or directory", which is the model's packaging fault
-    /// (not infra). Driven through `run_verification` directly.
-
-    /// A cancel that lands while verification is running must surface as an
-    /// Err after the sandbox is cleaned up, never as a scored trial.
-
-    /// Campaign ticket with a partial acceptance subset: only stages 1-3
-    /// count toward the verdict, the destructive AOF stage is skipped, and
-    /// the manifest records the subset totals.
-
-    /// Stage-2 wave live proof (eval-only, no model): a disk-resident mock
-    /// candidate driven through the REAL pipeline for stages 14-16 —
-    /// host-bind restart under the 192MB cap, SIGKILL re-reads, the
-    /// footprint gate, and the SDB1 v2 admin channel end to end.
-
-    /// sdb-edge live smoke (eval-only, no model): a minimal forwarding
-    /// proxy + the run-network nginx pool, driven through the real pipeline
-    /// with acceptance [1]. Validates the proxy campaign path: task
-    /// adapter, upstream pool startup, acceptance-scoped verdict and the
-    /// stage-log contract.
-
-    /// sdb-edge FULL-ladder live proof (eval-only, no model): the
-    /// reference proxy (routing, retry, health surface, cache, limits)
-    /// driven through the real pipeline with acceptance [1,2,3,4,6,7,8,9]
-    /// — includes the docker-pause failover stages, the cache restart with
-    /// SDB_PROXY_CACHE_TTL, and the 128MB-capped limits stage.
-
-    /// sdb-queue FULL-ladder live proof (eval-only, no model): the
-    /// reference broker driven through the real pipeline with acceptance
-    /// [1..9] — including the durability half (prepare -> SIGKILL ->
-    /// restart -> verify) and the 128MB-capped hardening restart.
-
-    /// sdb-http FULL-ladder live proof (eval-only, no model): the
-    /// reference file server driven through the real pipeline with
-    /// acceptance [1..10] — including the 128MB-capped restart that runs
-    /// stages 9/10 (uploads + hardening).
 
     /// sdb-sql stages 0-3 live proof (eval-only, no model): the Python
     /// sqlite3 reference adapter (`verifier::sql::ref_server`) driven
