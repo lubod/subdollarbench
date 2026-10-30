@@ -1313,6 +1313,8 @@ pub struct PipelineOutput {
     /// R23 D1/D5: why the final agent session ended: dollars | turns | wall |
     /// ready | crash. None for eval-only runs.
     pub stop_reason: Option<String>,
+    /// R48 F2: seconds spent waiting for the host grading lock.
+    pub grading_wait_s: f64,
 }
 
 /// How an agent session that returned `Err` ended (round-14 N3): its partial
@@ -1424,6 +1426,8 @@ async fn publish_wal_probe(port: u16) -> anyhow::Result<usize> {
 #[derive(Debug, Clone)]
 pub struct VerificationOutcome {
     pub pass_rate: f64,
+    /// R48 F2: seconds this verification waited for the grading lock.
+    pub grading_wait_s: f64,
     pub passed_stages: u32,
     pub total_stages: u32,
     pub stage_results: Vec<crate::verifier::StageResult>,
@@ -1616,6 +1620,7 @@ impl BenchmarkPipeline {
             let mut extra_throughput: Option<f64> = None;
             let mut extra_robustness: Vec<crate::verifier::StageResult> = Vec::new();
             let mut infra_error = false;
+            let mut grading_wait_s = 0.0f64;
 
             // A campaign ticket is judged on its acceptance subset; the
             // early-return branches (disqualification, no runnable code)
@@ -1650,6 +1655,34 @@ impl BenchmarkPipeline {
                 }
                 (0.0, 0, accepted_total, Vec::new())
             } else {
+                // R48 F2: a graded SQL attempt holds the host-wide lock from
+                // the candidate start through the verdict (shrink included).
+                // The model's session and builds stay parallel. The wait is
+                // recorded and excluded from the wall cap (D2 a).
+                let _grading_lock = if matches!(task, TaskType::Sql) {
+                    let path = crate::grading::lock_path();
+                    match tokio::task::spawn_blocking(move || crate::grading::acquire(&path)).await
+                    {
+                        Ok(Ok(lock)) => {
+                            grading_wait_s = lock.wait.as_secs_f64();
+                            Some(lock)
+                        }
+                        // A lock we cannot take is a harness fault, never a
+                        // quiet unlocked grading run.
+                        Ok(Err(e)) => {
+                            logger.log(&format!("[INFRA] grading lock: {e}"));
+                            infra_error = true;
+                            None
+                        }
+                        Err(e) => {
+                            logger.log(&format!("[INFRA] grading lock task: {e}"));
+                            infra_error = true;
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 // Extra published ports, gated on the ticket's acceptance:
                 // 8090 for the dashboard stage (10), 6395 for the admin
                 // binary-protocol stage (16). Publishing an unneeded port
@@ -1669,6 +1702,9 @@ impl BenchmarkPipeline {
                 };
                 let mut sql_data: Option<PathBuf> = None;
                 if matches!(task, TaskType::Sql) {
+                    // R48 F2: graded containers get the fast cores; the
+                    // agent's sandbox runs on the session set.
+                    extras.cpuset = Some(crate::grading::fast_cpuset());
                     // The launch contract becomes real: the harness passes
                     // --port/--data and owns the data directory.
                     let data = sql_data_dir(workdir, accepted.is_some());
@@ -4715,6 +4751,7 @@ impl BenchmarkPipeline {
                 disqualified,
                 disqualification_reason,
                 infra_error,
+                grading_wait_s,
             }
         })
     }
@@ -5174,6 +5211,7 @@ impl BenchmarkPipeline {
         // References are only for the agent and the bench: detach them
         // while verifying so a candidate cannot proxy to `ref-*`.
         sandbox.detach_references();
+        let mut grading_wait_s = 0.0f64;
         let mut v_outcome = if agent_never_ran {
             // Round-13 R1: nothing the agent touched exists to grade; a
             // fault outcome carries no stage results.
@@ -5191,6 +5229,7 @@ impl BenchmarkPipeline {
                 disqualified: false,
                 disqualification_reason: None,
                 infra_error: true,
+                grading_wait_s: 0.0,
             }
         } else {
             Self::run_verification(
@@ -5219,6 +5258,7 @@ impl BenchmarkPipeline {
             )
             .await
         };
+        grading_wait_s += v_outcome.grading_wait_s;
         campaign_rounds.push(crate::report::archive::CampaignRound {
             round: 0,
             passed_stages: v_outcome.passed_stages,
@@ -5547,6 +5587,7 @@ impl BenchmarkPipeline {
                         break;
                     } else {
                         v_outcome = next_outcome;
+                        grading_wait_s += v_outcome.grading_wait_s;
                     }
                 }
             }
@@ -6288,6 +6329,7 @@ impl BenchmarkPipeline {
             harness_fault,
             max_call_usd: omp_stats.max_call_usd,
             stop_reason,
+            grading_wait_s,
         })
     }
 }
@@ -6424,6 +6466,31 @@ mod tests {
             "score mismatch; log:\n{}",
             logger.text()
         );
+    }
+
+    /// R48 F1: two SQL workers never share a host port. This extends
+    /// round 37's table to the live worker slots 0-7: candidate 5480,
+    /// reference 5481, the admin/dashboard ports and the proxy pool all
+    /// move by 100 per worker.
+    #[test]
+    fn r48_f1_two_workers_share_no_port() {
+        use crate::web::server::worker_port;
+        use std::collections::HashSet;
+        let ports = |w: u8| -> HashSet<u16> {
+            [5480, 5481, 6395, 8090, 8101, 8102, 8103]
+                .into_iter()
+                .map(|base| worker_port(base, w))
+                .collect()
+        };
+        for (a, b) in [(0u8, 1u8), (1, 2), (2, 3), (3, 4), (6, 7)] {
+            assert!(
+                ports(a).is_disjoint(&ports(b)),
+                "workers {a} and {b} share a host port"
+            );
+        }
+        assert_eq!(worker_port(5480, 2), 5680);
+        assert_eq!(worker_port(5481, 2), 5681);
+        assert_eq!(worker_port(8101, 2), 8301);
     }
 
     /// R37 F1: for every pipeline test, compute every host port it can

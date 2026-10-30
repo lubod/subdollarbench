@@ -316,6 +316,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 phase,
                 chain,
                 refork,
+                worker,
             } => {
                 main_campaign::run(
                     name,
@@ -331,6 +332,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     phase,
                     chain,
                     refork,
+                    worker,
                 )
                 .await?
             }
@@ -645,6 +647,35 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    /// R48 F1: `campaign run --worker 3` reaches the CLI and every SQL
+    /// port moves to base + 300 (candidate, reference, proxy pool).
+    #[test]
+    fn r48_f1_worker_flag_sets_ports() {
+        use subdollarbench::config::{CampaignAction, TaskType};
+        use subdollarbench::web::server::worker_port;
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "campaign",
+            "run",
+            "--name",
+            "sdb-sql",
+            "--model",
+            "m",
+            "--worker",
+            "3",
+        ])
+        .expect("campaign run --worker must parse");
+        match cli.command {
+            Commands::Campaign {
+                action: CampaignAction::Run { worker, .. },
+            } => assert_eq!(worker, 3),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert_eq!(worker_port(TaskType::Sql.default_port(), 3), 5780);
+        assert_eq!(worker_port(5481, 3), 5781);
+        assert_eq!(worker_port(8101, 3), 8401);
     }
 
     /// R45 F5: the CLI surface the reviewer runs on a finished workspace.
@@ -1266,6 +1297,7 @@ mod tests {
                     phase: None,
                     chain: None,
                     refork: None,
+                    worker: 0,
                 },
             },
         })

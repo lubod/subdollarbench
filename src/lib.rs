@@ -2,6 +2,7 @@ pub mod bench;
 pub mod campaign;
 pub mod config;
 pub mod cost;
+pub mod grading;
 pub mod pipeline;
 pub mod remote;
 pub mod report;

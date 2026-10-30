@@ -99,6 +99,61 @@ pub fn ref_image_for_task(task: &str) -> Option<&'static str> {
     }
 }
 
+/// R48 F2: the Docker arguments for a CPU set. Empty when `set` is empty.
+pub fn cpuset_args(set: &str) -> Vec<String> {
+    if set.is_empty() {
+        Vec::new()
+    } else {
+        vec!["--cpuset-cpus".to_string(), set.to_string()]
+    }
+}
+
+/// R48 F2/R48-3: the agent's development reference (`ref-sql`) runs on the
+/// session cores, not the fast grading set. It is alive during the model's
+/// session, so it must not share the graded candidates' cores.
+pub fn reference_sql_args(
+    instance_id: &str,
+    name: &str,
+    net: &str,
+    mount: &str,
+    port: u16,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-d".into(),
+        "--rm".into(),
+        "--label".into(),
+        format!("sdb.run={instance_id}"),
+        "--label".into(),
+        "sdb.role=ref-sql".into(),
+        "--name".into(),
+        name.to_string(),
+        "--network".into(),
+        net.to_string(),
+        "--network-alias".into(),
+        "ref-sql".into(),
+        "--memory=2g".into(),
+        "--cpus=2.0".into(),
+    ];
+    args.extend(cpuset_args(&crate::grading::session_cpuset()));
+    args.extend([
+        "--pids-limit=256".into(),
+        "-v".into(),
+        mount.to_string(),
+        "-p".into(),
+        format!("127.0.0.1:{port}:5480"),
+        EGRESS_PROXY_IMAGE.to_string(),
+        "python3".into(),
+        "-u".into(),
+        "/srv/sql_server.py".into(),
+        "--port".into(),
+        "5480".into(),
+        "--data".into(),
+        "/tmp".into(),
+    ]);
+    args
+}
+
 pub struct SandboxManager {
     pub instance_id: String,
     pub needs_cleanup: AtomicBool,
@@ -121,6 +176,9 @@ pub struct CandidateRunExtras {
     /// The security stage runs the candidate under 64MB so an oversized
     /// protocol frame must be rejected *before* allocating it.
     pub memory: Option<String>,
+    /// R48 F2: the CPU set the graded container is pinned to. None leaves
+    /// Docker's scheduler free (tests and older callers).
+    pub cpuset: Option<String>,
     /// Host bind mounts `(host_path, container_path)`. The disk-resident /
     /// compaction stages bind a host scratch dir to `/data` (with
     /// SDB_DATA_DIR=/data) so the harness can measure the on-disk footprint
@@ -949,36 +1007,13 @@ impl SandboxManager {
         let mount = format!("{}:/srv:ro", script_dir.display());
 
         let out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=ref-sql",
-                "--name",
+            .args(reference_sql_args(
+                &self.instance_id,
                 &name,
-                "--network",
                 &net,
-                "--network-alias",
-                "ref-sql",
-                "--memory=2g",
-                "--cpus=2.0",
-                "--pids-limit=256",
-                "-v",
                 &mount,
-                "-p",
-                &format!("127.0.0.1:{}:5480", port),
-                EGRESS_PROXY_IMAGE,
-                "python3",
-                "-u",
-                "/srv/sql_server.py",
-                "--port",
-                "5480",
-                "--data",
-                "/tmp",
-            ])
+                port,
+            ))
             .output()
             .map_err(|e| anyhow!("reference sql spawn failed: {e}"))?;
         if !out.status.success() {
@@ -1676,6 +1711,7 @@ impl SandboxManager {
                 env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
                 ports: Vec::new(),
                 memory: None,
+                cpuset: None,
                 binds: Vec::new(),
                 launch_args: Vec::new(),
                 pids_limit: None,
@@ -1709,6 +1745,9 @@ impl SandboxManager {
 
     fn candidate_extras_args(extras: &CandidateRunExtras) -> Vec<String> {
         let mut out = Vec::new();
+        if let Some(set) = &extras.cpuset {
+            out.extend(cpuset_args(set));
+        }
         for t in &extras.tmpfs {
             out.push("--tmpfs".to_string());
             out.push(t.clone());
@@ -2660,6 +2699,7 @@ mod tests {
             env: vec![("SDB_DATA_DIR".to_string(), "/data".to_string())],
             ports: vec![8090],
             memory: Some("64m".to_string()),
+            cpuset: None,
             binds: vec![("/tmp/host-data".to_string(), "/data".to_string())],
             launch_args: Vec::new(),
             pids_limit: None,
@@ -2670,6 +2710,10 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-p", "127.0.0.1:8090:8090"]));
         // Disk-residency/compaction stages bind a host dir for footprint reads.
         assert!(args.windows(2).any(|w| w == ["-v", "/tmp/host-data:/data"]));
+        let mut pinned = extras.clone();
+        pinned.cpuset = Some("0-3".to_string());
+        let args = SandboxManager::candidate_extras_args(&pinned);
+        assert!(args.windows(2).any(|w| w == ["--cpuset-cpus", "0-3"]));
         let none = CandidateRunExtras::default();
         assert!(SandboxManager::candidate_extras_args(&none).is_empty());
     }
@@ -3971,6 +4015,7 @@ mod live_docker_cov_tests {
             env: Vec::new(),
             ports: Vec::new(),
             memory: None,
+            cpuset: None,
             binds: Vec::new(),
             launch_args: Vec::new(),
             pids_limit: None,
@@ -4049,6 +4094,7 @@ mod live_docker_cov_tests {
             ],
             ports: vec![extra_port],
             memory: Some("128m".to_string()),
+            cpuset: None,
             launch_args: Vec::new(),
             binds: vec![(
                 bind_host.to_string_lossy().to_string(),

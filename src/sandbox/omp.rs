@@ -558,6 +558,9 @@ impl OmpRunner {
             .arg(&container_name)
             .arg("--memory=3g")
             .arg("--cpus=3.0")
+            .args(crate::grading::cpuset_args(
+                &crate::grading::session_cpuset(),
+            ))
             .arg("--pids-limit=512")
             // Drop all Linux capabilities: the agent compiles and runs
             // untrusted model code. No pcap, no raw sockets, no mounts.

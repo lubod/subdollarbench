@@ -1185,7 +1185,13 @@ fn free_port() -> std::io::Result<u16> {
 }
 
 fn sql_extras(data: &Path, port: u16) -> crate::sandbox::docker::CandidateRunExtras {
-    let mut extras = crate::sandbox::docker::CandidateRunExtras::default();
+    // R48 F2: the perf run is a graded measurement too; it holds the
+    // host lock (the caller) and runs on the fast cores.
+    let fast = crate::grading::fast_cpuset();
+    let mut extras = crate::sandbox::docker::CandidateRunExtras {
+        cpuset: (!fast.is_empty()).then_some(fast),
+        ..Default::default()
+    };
     extras
         .binds
         .push((data.display().to_string(), "/sdb-data".to_string()));
