@@ -118,7 +118,8 @@ log, out, worker, phase, chain = sys.argv[1:6]
 text = open(log, errors="replace").read()
 d = {
     "campaign_id": "",
-    "phase": int(phase),
+    "phase": None,
+    "chain_from": None,
     "worker": int(worker),
     "chain": chain,
     "cost_usd": 0.0,
@@ -138,6 +139,10 @@ if m:
         r = json.load(open(path))
         d.update(
             campaign_id=os.path.basename(os.path.dirname(path)),
+            # R48-4: the rollup says what ran; the request only says what was
+            # asked for. grid.sh compares the two.
+            phase=r.get("phase"),
+            chain_from=r.get("chain_from"),
             cost_usd=float(r.get("total_cost_usd") or 0.0),
             points=float(r.get("points") or 0.0),
             over_budget=bool(r.get("over_budget")),

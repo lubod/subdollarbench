@@ -24,6 +24,14 @@ for arg in "$@"; do
     esac
 done
 
+# R48-5: a full gate is a long test. Hold the shared long-test lock for
+# the whole run, so the grid's preflight refuses to start a phase next to
+# it. `--fast` and plain unit tests stay allowed while a cell runs.
+if [[ $fast -eq 0 ]]; then
+    . scripts/long-test-lock.sh
+    hold_long_test_lock
+fi
+
 dirty=0
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     if [[ $allow_dirty != 1 ]]; then

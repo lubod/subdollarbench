@@ -405,9 +405,31 @@ fn result_with(
     candidate: f64,
     ratio: f64,
     correct: bool,
-    numbers: BTreeMap<String, f64>,
+    mut numbers: BTreeMap<String, f64>,
     note: Option<String>,
 ) -> WorkloadResult {
+    // R50 F7: a floored workload stores the floor as its ratio (the score
+    // already did this in `from_workloads`) and keeps the measured ratio
+    // under `raw_ratio`. The note always says why it floored: a wrong
+    // answer, a deadline (a correct but slow server), or the transport.
+    let (ratio, note) = if correct {
+        (ratio, note)
+    } else {
+        if ratio.is_finite() && ratio > 0.0 {
+            numbers.insert("raw_ratio".into(), round6(ratio));
+        }
+        let note = match note {
+            Some(n) if n.contains("workload deadline after") => {
+                let tail = n.split("workload deadline after").nth(1).unwrap_or("");
+                Some(format!(
+                    "too slow: the workload deadline passed after{tail}"
+                ))
+            }
+            Some(n) => Some(n),
+            None => Some("the candidate answered wrong".to_string()),
+        };
+        (WRONG_FLOOR, note)
+    };
     WorkloadResult {
         id: id.to_string(),
         metric: metric_of(id).to_string(),
@@ -565,6 +587,8 @@ struct PairedRound {
     /// The reference's answers are the harness's responsibility.
     reference_correct: bool,
     candidate_correct: bool,
+    /// R50 F7: the first query the candidate answered wrong, for the note.
+    candidate_first_bad: Option<usize>,
 }
 
 /// Run one round of a latency workload against both servers with the two
@@ -592,6 +616,7 @@ where
         ratios: Vec::with_capacity(count),
         reference_correct: true,
         candidate_correct: true,
+        candidate_first_bad: None,
     };
     for i in 0..count {
         if Instant::now() >= deadline {
@@ -608,7 +633,12 @@ where
             (rt, rr, ct, cr)
         };
         out.reference_correct &= check(i, &rr);
-        out.candidate_correct &= check(i, &cr);
+        if !check(i, &cr) {
+            out.candidate_correct = false;
+            if out.candidate_first_bad.is_none() {
+                out.candidate_first_bad = Some(i);
+            }
+        }
         out.reference.push(rt);
         out.candidate.push(ct);
         if ct > 0.0 {
@@ -673,6 +703,12 @@ where
                 break;
             }
         };
+        if !out.candidate_correct && note.is_none() {
+            note = Some(format!(
+                "the candidate answered wrong (query {})",
+                out.candidate_first_bad.unwrap_or(0)
+            ));
+        }
         correct &= out.candidate_correct;
         ref_lat.extend(out.reference);
         cand_lat.extend(out.candidate);
@@ -819,12 +855,13 @@ pub trait FlushCounter: Send + Sync {
     fn flushes(&self) -> Result<u64, String>;
 }
 
-/// The sysfs sources for a data dir. The direct `st_dev` counter can stay
+/// The sysfs source for a data dir. The direct `st_dev` counter can stay
 /// at zero under LVM/dm while the physical disk counts the flushes, so the
-/// disk(s) under the device are the primary sources; the direct stat is
-/// the fallback. `flushes` returns the largest readable cumulative value;
-/// the W4 window compares two snapshots, and other host activity only
-/// adds flushes (the spec's 0.9 threshold tolerates it).
+/// device is resolved to its whole disk(s). One disk is the only honest
+/// source for a window: on a striped or RAID set the largest field at each
+/// snapshot can come from a different disk, so `for_dir` refuses more than
+/// one. The direct stat is used only when no whole disk is under it.
+#[derive(Debug)]
 pub struct DeviceFlushCounter {
     paths: Vec<PathBuf>,
 }
@@ -834,50 +871,87 @@ fn stat_flushes(path: &Path) -> Option<u64> {
     text.split_whitespace().nth(15)?.parse().ok()
 }
 
+/// The whole-disk `stat` paths under a sysfs device. A partition's parent
+/// is the disk; a dm/md device's `slaves/` are resolved recursively; a
+/// whole disk has its own `stat`.
+fn whole_disks(real: &Path) -> Vec<PathBuf> {
+    let slaves = real.join("slaves");
+    if let Ok(entries) = std::fs::read_dir(&slaves) {
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            if let Ok(slave) = std::fs::canonicalize(e.path()) {
+                out.extend(whole_disks(&slave));
+            }
+        }
+        if !out.is_empty() {
+            out.sort();
+            out.dedup();
+            return out;
+        }
+    }
+    if let Some(parent) = real.parent() {
+        let stat = parent.join("stat");
+        if stat.exists() {
+            return vec![stat];
+        }
+    }
+    let stat = real.join("stat");
+    stat.exists().then_some(stat).into_iter().collect()
+}
+
 impl DeviceFlushCounter {
     pub fn for_dir(dir: &Path) -> Result<Self, String> {
+        Self::for_dir_at(dir, Path::new("/sys"))
+    }
+
+    /// R50 F5: the sysfs root is injectable so a test builds a fake tree.
+    pub(crate) fn for_dir_at(dir: &Path, sysfs: &Path) -> Result<Self, String> {
         use std::os::unix::fs::MetadataExt;
         let dev = std::fs::metadata(dir)
             .map_err(|e| format!("stat {}: {e}", dir.display()))?
             .dev();
         let (major, minor) = (libc::major(dev), libc::minor(dev));
-        let link = PathBuf::from(format!("/sys/dev/block/{major}:{minor}"));
-        let mut paths = Vec::new();
+        let link = sysfs.join(format!("dev/block/{major}:{minor}"));
+        let mut disks = Vec::new();
         if let Ok(real) = std::fs::canonicalize(&link) {
-            // A partition's parent is the whole disk; an LVM/dm device's
-            // slaves are partitions whose parent is the disk.
-            if let Some(parent) = real.parent() {
-                paths.push(parent.join("stat"));
-            }
-            if let Ok(entries) = std::fs::read_dir(real.join("slaves")) {
-                for e in entries.flatten() {
-                    if let Ok(slave) = std::fs::canonicalize(e.path()) {
-                        if let Some(parent) = slave.parent() {
-                            paths.push(parent.join("stat"));
-                        }
-                        paths.push(slave.join("stat"));
-                    }
-                }
-            }
+            disks = whole_disks(&real);
         }
-        paths.push(link.join("stat"));
-        paths.retain(|p| p.exists());
-        if paths.is_empty() {
+        disks.sort();
+        disks.dedup();
+        if disks.is_empty() {
+            // No whole disk under the direct st_dev: its own stat is the
+            // only source (the old fallback, kept for odd sysfs layouts).
+            let direct = link.join("stat");
+            if stat_flushes(&direct).is_some() {
+                return Ok(Self {
+                    paths: vec![direct],
+                });
+            }
             return Err(format!("no sysfs flush counter for {major}:{minor}"));
         }
-        Ok(Self { paths })
+        if disks.len() > 1 {
+            return Err(format!(
+                "the data dir spans {} disks ({}); a flush window needs one",
+                disks.len(),
+                disks
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(Self { paths: disks })
     }
 }
 
 impl FlushCounter for DeviceFlushCounter {
     fn flushes(&self) -> Result<u64, String> {
-        let mut best: Option<u64> = None;
-        for path in &self.paths {
-            if let Some(v) = stat_flushes(path) {
-                best = Some(best.map_or(v, |b| b.max(v)));
-            }
+        match self.paths.as_slice() {
+            [path] => stat_flushes(path)
+                .ok_or_else(|| format!("no readable flush counter at {}", path.display())),
+            [] => Err("no readable flush counter".to_string()),
+            paths => Err(format!("the data dir spans {} disks", paths.len())),
         }
-        best.ok_or_else(|| "no readable flush counter".to_string())
     }
 }
 
@@ -1667,13 +1741,24 @@ mod tests {
     }
 
     fn fake_engine(delay: Duration, wrong: bool) -> std::net::SocketAddr {
+        fake_engine_counted(delay, wrong, None)
+    }
+
+    /// R50 F6: the fake engine can expose its acknowledged inserts, so a
+    /// flush counter can be driven by the real commits.
+    fn fake_engine_counted(
+        delay: Duration,
+        wrong: bool,
+        inserts: Option<Arc<AtomicU64>>,
+    ) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let store = Arc::new(Mutex::new(FakeStore::default()));
         std::thread::spawn(move || {
             for sock in listener.incoming().flatten() {
                 let store = store.clone();
-                std::thread::spawn(move || serve_fake(sock, store, delay, wrong));
+                let inserts = inserts.clone();
+                std::thread::spawn(move || serve_fake(sock, store, delay, wrong, inserts));
             }
         });
         addr
@@ -1766,7 +1851,13 @@ mod tests {
         "ERR syntax fake".to_string()
     }
 
-    fn serve_fake(sock: TcpStream, store: Arc<Mutex<FakeStore>>, delay: Duration, wrong: bool) {
+    fn serve_fake(
+        sock: TcpStream,
+        store: Arc<Mutex<FakeStore>>,
+        delay: Duration,
+        wrong: bool,
+        inserts: Option<Arc<AtomicU64>>,
+    ) {
         sock.set_nodelay(true).unwrap();
         let mut reader = BufReader::new(sock.try_clone().unwrap());
         let mut writer = sock;
@@ -1784,6 +1875,11 @@ mod tests {
                 let mut s = store.lock().unwrap();
                 answer_fake(&mut s, sql, wrong)
             };
+            if let Some(n) = &inserts {
+                if sql.starts_with("INSERT INTO ") && reply.starts_with("OK ") {
+                    n.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             if writer
                 .write_all(reply.as_bytes())
                 .and_then(|()| writer.write_all(b"\n"))
@@ -1818,6 +1914,49 @@ mod tests {
         }
     }
 
+    /// R50 F5: one whole disk is read; a device over two disks is refused.
+    #[cfg(unix)]
+    #[test]
+    fn r50_f5_flush_counter_one_disk() {
+        use std::os::unix::fs::MetadataExt;
+        fn stat16(v: u64) -> String {
+            format!("{} {v}\n", "0 ".repeat(15))
+        }
+        let base =
+            std::env::temp_dir().join(format!("sdb-flush-{}-{}", std::process::id(), nonce()));
+        let _ = std::fs::remove_dir_all(&base);
+        let data = base.join("data");
+        let sysfs = base.join("sysfs");
+        std::fs::create_dir_all(&data).unwrap();
+        let dev = std::fs::metadata(&data).unwrap().dev();
+        let (major, minor) = (libc::major(dev), libc::minor(dev));
+        let block = sysfs.join("devices/block");
+        let dm = sysfs.join("devices/virtual/block/dm-0");
+        std::fs::create_dir_all(dm.join("slaves")).unwrap();
+        std::fs::create_dir_all(block.join("sda/sda1")).unwrap();
+        std::fs::write(block.join("sda/stat"), stat16(4242)).unwrap();
+        std::fs::write(dm.join("stat"), stat16(7)).unwrap();
+        std::os::unix::fs::symlink(block.join("sda/sda1"), dm.join("slaves/sda1")).unwrap();
+        std::fs::create_dir_all(sysfs.join("dev/block")).unwrap();
+        std::os::unix::fs::symlink(&dm, sysfs.join(format!("dev/block/{major}:{minor}"))).unwrap();
+
+        let one = DeviceFlushCounter::for_dir_at(&data, &sysfs).expect("one disk");
+        assert_eq!(
+            one.flushes().unwrap(),
+            4242,
+            "the disk's field 16, not dm's"
+        );
+
+        std::fs::create_dir_all(block.join("sdb/sdb1")).unwrap();
+        std::fs::write(block.join("sdb/stat"), stat16(99)).unwrap();
+        std::os::unix::fs::symlink(block.join("sdb/sdb1"), dm.join("slaves/sdb1")).unwrap();
+        let err = DeviceFlushCounter::for_dir_at(&data, &sysfs)
+            .expect_err("two disks must refuse")
+            .to_string();
+        assert!(err.contains("spans 2 disks"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// R49 F2: a deterministic flush source for the W4 tests. The first
     /// snapshot is 0; every later one is `after`.
     struct StepFlush {
@@ -1842,6 +1981,58 @@ mod tests {
                 self.after
             })
         }
+    }
+
+    /// R50 F6: a flush counter fed by the fake engine's acknowledged
+    /// inserts, one per side.
+    struct EngineFlush(Arc<AtomicU64>);
+
+    impl FlushCounter for EngineFlush {
+        fn flushes(&self) -> Result<u64, String> {
+            Ok(self.0.load(Ordering::Relaxed))
+        }
+    }
+
+    /// R49-3: both sides durable over two rounds means every 1-client
+    /// window's delta tracks its own commits; W4 is correct and the phase
+    /// keeps a score. StepFlush failed here because its second window read
+    /// zero.
+    #[test]
+    fn r50_f6_durable_pair_two_rounds() {
+        let ref_inserts = Arc::new(AtomicU64::new(0));
+        let cand_inserts = Arc::new(AtomicU64::new(0));
+        let reference = fake_engine_counted(Duration::ZERO, false, Some(ref_inserts.clone()));
+        let candidate = fake_engine_counted(Duration::ZERO, false, Some(cand_inserts.clone()));
+        let cfg = PerfConfig {
+            rounds: 2,
+            ..PerfConfig::small_for_tests()
+        };
+        let score = run_pair_with_flush(
+            &reference.to_string(),
+            &candidate.to_string(),
+            1,
+            &cfg,
+            Some(&EngineFlush(ref_inserts)),
+            Some(&EngineFlush(cand_inserts)),
+        );
+        let w4 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W4")
+            .expect("phase 1 runs W4");
+        assert!(w4.correct, "the durable pair must pass W4: {:?}", w4.note);
+        assert!(
+            w4.numbers
+                .get("candidate_1_client_commits")
+                .copied()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            score.score.is_some(),
+            "a durable pair keeps the phase scored: {:?}",
+            score.error
+        );
     }
 
     struct BrokenFlush;
@@ -1969,6 +2160,73 @@ mod tests {
         );
         let err = score.error.as_deref().unwrap_or("");
         assert!(err.contains("reference"), "reason: {err}");
+    }
+
+    /// R50 F7 (R49-3's neighbour): a fast but wrong W3 stores the floor as
+    /// its ratio, keeps the measured ratio under `raw_ratio`, and says the
+    /// answer was wrong. The score is the same as before the change
+    /// (`from_workloads` already floored on `correct`).
+    #[test]
+    fn r50_f7_wrong_workload_stores_the_floor() {
+        let reference = fake_engine(Duration::from_millis(1), false);
+        let candidate = fake_engine(Duration::ZERO, true);
+        let cfg = PerfConfig::small_for_tests();
+        let score = run_pair(&reference.to_string(), &candidate.to_string(), 3, &cfg);
+        let w3 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W3")
+            .expect("phase 3 runs W3");
+        assert!(!w3.correct, "a wrong answer must floor W3");
+        assert_eq!(w3.ratio, WRONG_FLOOR, "the stored ratio is the floor");
+        let raw = w3
+            .numbers
+            .get("raw_ratio")
+            .copied()
+            .expect("the measured ratio is kept");
+        assert!(raw > 1.0, "raw_ratio {raw} must be the measured ratio");
+        let note = w3.note.as_deref().unwrap_or("");
+        assert!(
+            note.contains("answered wrong") && note.contains("query"),
+            "note: {note}"
+        );
+        // Same score as the pre-change block: from_workloads floors a wrong
+        // workload whatever ratio the field holds.
+        let mut before = score.workloads.clone();
+        for w in &mut before {
+            if let Some(v) = w.numbers.get("raw_ratio") {
+                w.ratio = *v;
+            }
+        }
+        assert_eq!(PerfScore::from_workloads(before).score, score.score);
+    }
+
+    /// R50 F7: a right but too-slow candidate gets the deadline note, not a
+    /// wrong-answer one.
+    #[test]
+    fn r50_f7_deadline_note_says_slow() {
+        let reference = fake_engine(Duration::ZERO, false);
+        let candidate = fake_engine(Duration::from_millis(5), false);
+        let cfg = PerfConfig {
+            rounds: 1,
+            lookups: 1000,
+            workload_deadline: Duration::from_millis(50),
+            ..PerfConfig::small_for_tests()
+        };
+        let score = run_pair(&reference.to_string(), &candidate.to_string(), 3, &cfg);
+        let w1 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W1")
+            .expect("phase 1 runs W1");
+        assert!(!w1.correct, "the deadline must floor W1");
+        let note = w1.note.as_deref().unwrap_or("");
+        assert!(
+            note.starts_with("too slow:"),
+            "the note says the server was slow: {note}"
+        );
+        assert!(note.contains("deadline"), "{note}");
+        assert!(!note.contains("answered wrong"), "{note}");
     }
 
     /// A fast engine that answers one wrong value per workload scores the

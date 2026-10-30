@@ -29,6 +29,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/long-test-lock.sh"
 RUNS="${SDB_RUNS_DIR:-$ROOT/runs}"
 LANES=1
 CAREERS_FILE=""
@@ -143,6 +144,16 @@ port_busy() {
 preflight() {
     local worker="$1"
     if [[ "${SDB_GRID_SKIP_PREFLIGHT:-0}" == "1" ]]; then
+        return 0
+    fi
+    # R48-5: no phase starts next to a full gate or a flake bar.
+    if long_test_lock_busy; then
+        log "preflight: a long test (full gate or flake bar) holds the long-test lock"
+        return 1
+    fi
+    # The self-test checks the lock alone; the tree, record and ports need
+    # the real repo/ledger.
+    if [[ "${SDB_GRID_PREFLIGHT_TEST:-0}" == "1" ]]; then
         return 0
     fi
     if [[ -n "$(cd "$ROOT" && git status --porcelain --untracked-files=no)" ]]; then
@@ -273,15 +284,19 @@ run_lane() {
             rc=0
             run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" || rc=$?
             id="$(result_get "$result" campaign_id)"
-            local got_phase points cost stop
+            local got_phase got_chain points cost stop
             got_phase="$(result_get "$result" phase)"
+            got_chain="$(result_get "$result" chain_from)"
             points="$(result_get "$result" points)"
             cost="$(result_get "$result" cost_usd)"
             stop="ok"
             if (( rc != 0 )); then
                 stop="cell exit $rc"
             elif [[ "$got_phase" != "$phase" ]]; then
-                stop="phase $got_phase"
+                # R48-4: the rollup's phase, not the request's, decides.
+                stop="phase ${got_phase:-null}"
+            elif [[ "$got_chain" != "$chain" ]]; then
+                stop="chain ${got_chain:-null}"
             elif [[ "$(result_true "$result" harness_fault)" == "1" ]]; then
                 stop="harness fault"
             elif [[ "$(result_true "$result" infra_error)" == "1" ]]; then
@@ -316,6 +331,19 @@ run_lane() {
 run_grid() {
     RUNNING_DIR="${LEDGER}.running"
     mkdir -p "$(dirname "$LEDGER")"
+    # R48-7: the ledger's career column is the line index in the careers
+    # file. Freeze that file next to the ledger on the first start; a later
+    # start with a different file would give the same index to another
+    # career, so refuse before any phase.
+    local careers_copy="${LEDGER}.careers"
+    if [[ -f "$careers_copy" ]]; then
+        if ! cmp -s "$CAREERS_FILE" "$careers_copy"; then
+            log "careers file changed since this grid started ($careers_copy); start a new grid with a new --ledger"
+            return 1
+        fi
+    else
+        cp "$CAREERS_FILE" "$careers_copy"
+    fi
     rm -rf "$RUNNING_DIR"
     mkdir -p "$RUNNING_DIR"
     rm -f "$STOP"
@@ -363,17 +391,20 @@ if [[ "$phase" -gt 1 && "$chain" != "fake-c$career-$model-p$((phase - 1))" ]]; t
     exit 1
 fi
 printf '%s\t%s\t%s\t%s\n' "$career" "$model" "$phase" "$chain" >> "${SDB_GRID_TRACE:?}"
-if [[ "${SDB_FAKE_SLEEP_ID:-}" == "$id" ]]; then
+if [[ "${SDB_FAKE_SLEEP_ALL:-0}" == "1" || "${SDB_FAKE_SLEEP_ID:-}" == "$id" ]]; then
     sleep "${SDB_FAKE_SLEEP:-0.3}"
 fi
 stop=0
 [[ "${SDB_FAKE_STOP_ID:-}" == "$id" ]] && stop=1
-python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" <<'PY'
+res_phase="${SDB_FAKE_RESULT_PHASE:-$phase}"
+res_chain="${SDB_FAKE_RESULT_CHAIN-$chain}"
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" <<'PY'
 import json, sys
-out, cid, phase, worker, chain, stop, cost = sys.argv[1:8]
+out, cid, phase, worker, chain, stop, cost, res_phase, res_chain = sys.argv[1:10]
 json.dump({
     "campaign_id": cid,
-    "phase": int(phase),
+    "phase": int(res_phase),
+    "chain_from": res_chain,
     "worker": int(worker),
     "chain": chain,
     "cost_usd": float(cost),
@@ -442,35 +473,37 @@ EOF
     [[ "$bad" -eq 0 ]] || { echo "$bad phase(s) started after the STOP"; exit 1; }
     unset SDB_FAKE_STOP_ID SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP
 
-    # 3) R48-1: the cap counts running phases. Three lanes at 0.99 with a
-    # $3.00 cap reserve 2.97 and never record more than $3.00.
+    # 3) R48-1: the cap counts running phases. Three lanes at $0.99 with
+    # a $2.00 cap and an empty ledger: the first two reserve $0.99 each
+    # (1.98 <= 2.00) and sleep 1 s; the third would need 2.97, so it stops
+    # before starting. Exactly two rows land, total $1.98. The old
+    # spent-only check started all three and recorded $2.97.
     scenario="$dir/three"
     mkdir -p "$scenario"
     printf '%s\n' c1 c2 c3 > "$scenario/careers.txt"
     CAREERS_FILE="$scenario/careers.txt"
     LANES=3
-    CAP=3.0
+    CAP=2.0
     PHASE_BUDGET=0.99
     LEDGER="$scenario/ledger.tsv"
     HOLD="$scenario/hold"
     STOP="$scenario/stop"
     SDB_GRID_TRACE="$scenario/trace.tsv"
     SDB_FAKE_COST=0.99
-    export SDB_GRID_TRACE SDB_FAKE_COST
-    # R48-1: $2.50 already spent; three lanes each reserve $0.99, so no
-    # phase may start (2.50 + 0.99 = 3.49 > 3.00). The old spent-only
-    # check would start all three and record 5.47.
-    printf 'career	model	phase	worker	campaign_id	points	cost_usd	stop	ts\n' > "$LEDGER"
-    printf '0\tc1\t0\t1\tfake-prior\t10\t2.5\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
+    SDB_FAKE_SLEEP_ALL=1
+    SDB_FAKE_SLEEP=1
+    export SDB_GRID_TRACE SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$LEDGER"
     load_careers "$CAREERS_FILE"
     run_grid
-    [[ -f "$STOP" ]] || { echo "the cap did not write STOP"; exit 1; }
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 2 ]] || { echo "cap run: expected 2 rows, got $rows"; exit 1; }
     total="$(ledger_total)"
-    awk -v t="$total" 'BEGIN { exit !(t <= 3.0 + 0.000001) }' || {
-        echo "the cap recorded $total > 3.00"; exit 1; }
-    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 1 ]] || {
-        echo "cap run: expected only the prior row, got $(($(wc -l < "$LEDGER") - 1))"; exit 1; }
-    unset SDB_FAKE_COST
+    awk -v t="$total" 'BEGIN { exit !(t > 1.979999 && t < 1.980001) }' || {
+        echo "cap run: expected 1.98, got $total"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "the cap did not write STOP"; exit 1; }
+    unset SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
+    export -n SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP 2>/dev/null || true
 
     # 4) R48-2: resume skips ok phases and chains from the career's own
     # last id; two careers of the same model stay separate.
@@ -524,6 +557,105 @@ EOF
     [[ "$got" == "1 2 3 4 " ]] || { echo "career 0 did not resume: $got"; exit 1; }
     got="$(awk -F'\t' 'NR > 1 && $1 == 1 { printf "%s ", $3 }' "$LEDGER")"
     [[ "$got" == "1 2 " ]] || { echo "the blocked career 1 ran: $got"; exit 1; }
+
+    # 6) R48-4: the result's rollup phase, not the request, decides. A
+    # phase-1 request whose rollup says phase 2 stops the grid and records
+    # the reason in the ledger.
+    scenario="$dir/six"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    SDB_FAKE_RESULT_PHASE=2
+    export SDB_FAKE_RESULT_PHASE
+    load_careers "$CAREERS_FILE"
+    run_grid || true
+    got="$(awk -F'\t' 'NR > 1 { s = $8 } END { print s }' "$LEDGER")"
+    [[ "$got" == "phase 2" ]] || { echo "phase mismatch stop: '$got'"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "phase mismatch did not STOP"; exit 1; }
+    unset SDB_FAKE_RESULT_PHASE
+    export -n SDB_FAKE_RESULT_PHASE 2>/dev/null || true
+
+    # 7) R48-4: a rollup chain_from that differs from the chain passed stops
+    # the grid too.
+    scenario="$dir/seven"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    SDB_FAKE_RESULT_CHAIN=bogus
+    export SDB_FAKE_RESULT_CHAIN
+    load_careers "$CAREERS_FILE"
+    run_grid || true
+    got="$(awk -F'\t' 'NR > 1 { s = $8 } END { print s }' "$LEDGER")"
+    [[ "$got" == "chain bogus" ]] || { echo "chain mismatch stop: '$got'"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "chain mismatch did not STOP"; exit 1; }
+    unset SDB_FAKE_RESULT_CHAIN
+
+    # 8) R48-5: preflight refuses while a long test holds the lock and
+    # passes once it is released. SDB_GRID_PREFLIGHT_TEST keeps the
+    # tree/record/port checks out of this scenario.
+    scenario="$dir/eight"
+    mkdir -p "$scenario"
+    lock="$scenario/long-test.lock"
+    (
+        . "$ROOT/scripts/long-test-lock.sh"
+        SDB_LONG_TEST_LOCK="$lock" hold_long_test_lock
+        sleep 5
+    ) &
+    holder=$!
+    sleep 0.2
+    if ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=1 SDB_LONG_TEST_LOCK="$lock"; preflight 1 ); then
+        echo "preflight passed while the long-test lock was held"
+        kill "$holder" 2>/dev/null || true
+        exit 1
+    fi
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    if ! ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=1 SDB_LONG_TEST_LOCK="$lock"; preflight 1 ); then
+        echo "preflight failed while the long-test lock was free"
+        exit 1
+    fi
+
+    # 9) R48-7: the careers file is frozen with the ledger. A restart with
+    # an edited file refuses and records no row; restoring it resumes.
+    scenario="$dir/nine"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 c2 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=2
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    load_careers "$CAREERS_FILE"
+    run_grid
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 8 ]] || { echo "frozen run: expected 8 rows, got $rows"; exit 1; }
+    printf '%s\n' c1 c3 > "$scenario/careers.txt"
+    rc=0
+    run_grid || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "an edited careers file was accepted (rc=$rc)"; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 8 ]] || {
+        echo "an edited careers file recorded a row"; exit 1; }
+    printf '%s\n' c1 c2 > "$scenario/careers.txt"
+    run_grid
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 8 ]] || {
+        echo "a matching restart recorded a row"; exit 1; }
 
     echo "RESULT: PASS (grid self-test)"
 }
