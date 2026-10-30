@@ -29,6 +29,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/long-test-lock.sh"
 RUNS="${SDB_RUNS_DIR:-$ROOT/runs}"
 LANES=1
 CAREERS_FILE=""
@@ -143,6 +144,16 @@ port_busy() {
 preflight() {
     local worker="$1"
     if [[ "${SDB_GRID_SKIP_PREFLIGHT:-0}" == "1" ]]; then
+        return 0
+    fi
+    # R48-5: no phase starts next to a full gate or a flake bar.
+    if long_test_lock_busy; then
+        log "preflight: a long test (full gate or flake bar) holds the long-test lock"
+        return 1
+    fi
+    # The self-test checks the lock alone; the tree, record and ports need
+    # the real repo/ledger.
+    if [[ "${SDB_GRID_PREFLIGHT_TEST:-0}" == "1" ]]; then
         return 0
     fi
     if [[ -n "$(cd "$ROOT" && git status --porcelain --untracked-files=no)" ]]; then

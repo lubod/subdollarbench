@@ -9,6 +9,8 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
+. scripts/long-test-lock.sh
+
 # R27-3/R28 F2: the record is keyed by graded content, not by commit, so
 # a docs-only commit keeps the same resumable record. The paths are the
 # same list scripts/gate.sh reads.
@@ -249,6 +251,27 @@ if [[ "$self_test" -eq 1 ]]; then
     git -C "$repo" commit -qm four
     key4=$(flake_key "$repo" HEAD)
     [[ "$key3" != "$key4" ]] || { echo "graded edit kept the key"; exit 1; }
+    # R48-5: the bar's lock holder blocks the probe, and releases on exit.
+    lock="$dir/long-test.lock"
+    (
+        . scripts/long-test-lock.sh
+        SDB_LONG_TEST_LOCK="$lock" hold_long_test_lock
+        sleep 5
+    ) &
+    holder=$!
+    sleep 0.2
+    if ! SDB_LONG_TEST_LOCK="$lock" long_test_lock_busy; then
+        echo "a running bar's long-test lock was not seen"
+        kill "$holder" 2>/dev/null || true
+        exit 1
+    fi
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    if SDB_LONG_TEST_LOCK="$lock" long_test_lock_busy; then
+        echo "the released long-test lock is still held"
+        exit 1
+    fi
+
     echo "RESULT: PASS (self-test, key=$key1)"
     exit 0
 fi
@@ -258,6 +281,9 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     echo "[flake] FATAL: uncommitted changes; commit first" >&2
     exit 1
 fi
+
+# R48-5: bar runs are long tests; hold the shared lock for the whole run.
+hold_long_test_lock
 
 mapfile -t all_tests < <(tests_from_source)
 [[ ${#all_tests[@]} -gt 0 ]] || { echo "[flake] no live SQL proofs found" >&2; exit 1; }
