@@ -1910,10 +1910,94 @@ pub struct LadderEntry {
     pub cause: Option<String>,
 }
 
+/// R36-3: the Board used to run `docker image inspect` for every live cell
+/// on every request. The cell's own status (written at launch and mirrored
+/// from each rollup) is the primary source; a finished ticket's manifest is
+/// the second. Only a cell with neither falls back to one process-wide
+/// cached `sandbox_image_id()`, refreshed at most once a minute. So the
+/// async handler never runs the subprocess per request, and it never shows
+/// today's image when the run recorded its own.
+fn live_cell_image(campaign_id: &str, v: &serde_json::Value, runs_dir: &Path) -> Option<String> {
+    if let Some(img) = v
+        .pointer("/live/sandbox_image")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            v.pointer("/rollup/sandbox_image")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| v.get("sandbox_image").and_then(serde_json::Value::as_str))
+    {
+        return Some(img.to_string());
+    }
+    // A cell that already archived a ticket carries the image in its
+    // manifest (`s<id>_<variant>/manifest.json`). Read them in name order so
+    // the first ticket's image wins, as the rollup does.
+    let clean = Path::new(campaign_id)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(campaign_id);
+    if let Ok(entries) = std::fs::read_dir(runs_dir.join(clean)) {
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            let Ok(text) = std::fs::read_to_string(dir.join("manifest.json")) else {
+                continue;
+            };
+            if let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(img) = m.get("sandbox_image").and_then(|i| i.as_str()) {
+                    return Some(img.to_string());
+                }
+            }
+        }
+    }
+    cached_sandbox_image_id()
+}
+
+/// One process-wide cache for the Board's fallback image lookup. `None`
+/// means no lookup yet (or its 60 s freshness window passed).
+static SANDBOX_IMAGE_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    std::sync::Mutex::new(None);
+/// Test seam: how many `docker image inspect` calls the fallback made.
+static SANDBOX_IMAGE_INSPECTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn cached_sandbox_image_id() -> Option<String> {
+    let mut cache = SANDBOX_IMAGE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((at, id)) = cache.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return id.clone();
+        }
+    }
+    SANDBOX_IMAGE_INSPECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = crate::sandbox::omp_updater::sandbox_image_id();
+    *cache = Some((std::time::Instant::now(), id.clone()));
+    id
+}
+
 /// A rollup-shaped stub for a running cell that has no rollup yet (its
 /// first ticket is still in flight; round-8 finding 8). The live block the
 /// runner writes carries the model, harness, effort and budgets.
 pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRollup {
+    live_rollup_stub_at(
+        campaign_id,
+        v,
+        &crate::report::archive::RunArchiver::resolve_runs_dir(),
+    )
+}
+
+/// R36-3: the testable form of the stub. `runs_dir` is where the cell's
+/// per-ticket manifests live; a test points it at a fixture.
+fn live_rollup_stub_at(
+    campaign_id: &str,
+    v: &serde_json::Value,
+    runs_dir: &Path,
+) -> CampaignRollup {
     let live = &v["live"];
     let s = |k: &str, fb: &str| live[k].as_str().unwrap_or(fb).to_string();
     CampaignRollup {
@@ -1935,7 +2019,7 @@ pub fn live_rollup_stub(campaign_id: &str, v: &serde_json::Value) -> CampaignRol
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
-        sandbox_image: crate::sandbox::omp_updater::sandbox_image_id(),
+        sandbox_image: live_cell_image(campaign_id, v, runs_dir),
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         worker: 0,
@@ -2738,7 +2822,7 @@ where
     F: FnMut(&StageAttempt<'_>) -> Fut,
     Fut: std::future::Future<Output = Result<StageOutcome>>,
 {
-    run_campaign_ctx(lc, opts, None, None, None, None, exec, on_stage).await
+    run_campaign_ctx(lc, opts, None, None, None, None, None, exec, on_stage).await
 }
 
 /// Career-phase run (P1): the ladder is filtered to `phase`, the state comes
@@ -2758,7 +2842,43 @@ where
     F: FnMut(&StageAttempt<'_>) -> Fut,
     Fut: std::future::Future<Output = Result<StageOutcome>>,
 {
-    run_campaign_ctx(lc, opts, phase, chain, chain_from, career, exec, on_stage).await
+    run_campaign_phase_on_image(
+        lc, opts, phase, chain, chain_from, career, None, exec, on_stage,
+    )
+    .await
+}
+
+/// R37-5: the same phase run, seeded with the image the chain cell ran on.
+/// A later ticket on a different image then turns the rollup `mixed` (see
+/// `push_attempt_record`), and `validate_chain` refuses to continue it.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_campaign_phase_on_image<F, Fut>(
+    lc: &LoadedCampaign,
+    opts: &CampaignRunOptions,
+    phase: Option<&PhaseSpec>,
+    chain: Option<&LadderState>,
+    chain_from: Option<&str>,
+    career: Option<&CareerRollup>,
+    chain_image: Option<&str>,
+    exec: F,
+    on_stage: Option<&dyn Fn(&CampaignRollup)>,
+) -> Result<CampaignRollup>
+where
+    F: FnMut(&StageAttempt<'_>) -> Fut,
+    Fut: std::future::Future<Output = Result<StageOutcome>>,
+{
+    run_campaign_ctx(
+        lc,
+        opts,
+        phase,
+        chain,
+        chain_from,
+        career,
+        chain_image,
+        exec,
+        on_stage,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2769,6 +2889,7 @@ async fn run_campaign_ctx<F, Fut>(
     chain: Option<&LadderState>,
     chain_from: Option<&str>,
     career: Option<&CareerRollup>,
+    chain_image: Option<&str>,
     mut exec: F,
     on_stage: Option<&dyn Fn(&CampaignRollup)>,
 ) -> Result<CampaignRollup>
@@ -2824,7 +2945,7 @@ where
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
-        sandbox_image: None,
+        sandbox_image: chain_image.map(str::to_string),
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         worker: 0,
@@ -4472,75 +4593,6 @@ mod tests {
         lc
     }
 
-    #[test]
-    fn test_real_sdb_kv_spec_validates() {
-        let lc = load_campaign("sdb-kv").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-kv");
-        assert!(lc.spec.stages.len() >= 4);
-        assert_eq!(lc.spec.stages[0].id, 0);
-    }
-
-    #[test]
-    fn test_real_sdb_edge_spec_validates() {
-        let lc = load_campaign("sdb-edge").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-edge");
-        assert_eq!(lc.spec.task, "proxy");
-        assert_eq!(lc.spec.stages.len(), 7);
-        assert_eq!(lc.spec.stages[0].id, 0);
-        for stage in &lc.spec.stages {
-            assert!(
-                !stage.acceptance.proxy_stages.is_empty(),
-                "ticket {} has no proxy acceptance",
-                stage.id
-            );
-            assert!(
-                stage
-                    .acceptance
-                    .proxy_stages
-                    .iter()
-                    .all(|id| (1..=9).contains(id)),
-                "ticket {} acceptance out of the proxy suite",
-                stage.id
-            );
-        }
-        // Acceptance scopes grow with the ladder.
-        assert_eq!(lc.spec.stages[0].acceptance.proxy_stages, vec![1]);
-        assert_eq!(
-            lc.spec.stages[6].acceptance.proxy_stages,
-            vec![1, 2, 3, 4, 6, 7, 8, 9]
-        );
-    }
-
-    #[test]
-    fn test_real_sdb_queue_spec_validates() {
-        let lc = load_campaign("sdb-queue").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-queue");
-        assert_eq!(lc.spec.task, "queue");
-        assert_eq!(lc.spec.stages.len(), 9);
-        assert_eq!(lc.spec.stages[0].id, 0);
-        for stage in &lc.spec.stages {
-            assert!(
-                !stage.acceptance.queue_stages.is_empty(),
-                "ticket {} has no queue acceptance",
-                stage.id
-            );
-            assert!(
-                stage
-                    .acceptance
-                    .queue_stages
-                    .iter()
-                    .all(|id| (1..=9).contains(id)),
-                "ticket {} acceptance out of the queue suite",
-                stage.id
-            );
-        }
-        assert_eq!(lc.spec.stages[0].acceptance.queue_stages, vec![1]);
-        assert_eq!(
-            lc.spec.stages[8].acceptance.queue_stages,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
-        );
-    }
-
     /// Tickets 12-15 landed (2026-10-19): concurrency (scenario-only, lite),
     /// schema change (differential), observability (scenario-only) and the
     /// tests/CI gate (scenario-only, lite). Pins each stage's spec and the
@@ -4586,6 +4638,8 @@ mod tests {
         assert_eq!(rollup.stages[0].stop_reason.as_deref(), Some("dollars"));
     }
 
+    /// R23 D2: the remaining pool is split across the runnable tickets by
+    /// tier weight; a zero pool (or zero weights) allocates nothing.
     #[test]
     fn r23_d2_pool_budget_splits_by_tier() {
         assert!((pool_budget(0.9, 2.0, 6.0) - 0.3).abs() < 1e-9);
@@ -4709,6 +4763,59 @@ mod tests {
             "high",
             crate::report::rules::RULES_VERSION,
             Some("sha256:first"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("mixed"), "{err}");
+    }
+
+    /// R37-5: a chained phase starts from the previous phase's image, so a
+    /// first ticket on a different image records `mixed`, and the next
+    /// phase is refused.
+    #[tokio::test]
+    async fn r43_f3_chained_mixed_image() {
+        let lc = fixture_campaign();
+        let opts = CampaignRunOptions {
+            campaign_id: "r43f3mixed".into(),
+            model: "m".into(),
+            harness: "omp".into(),
+            effort: "high".into(),
+            budget_usd: CELL_BUDGET_USD,
+            wall_min: None,
+        };
+        let state = LadderState::default();
+        let rollup = run_campaign_phase_on_image(
+            &lc,
+            &opts,
+            None,
+            Some(&state),
+            Some("prev"),
+            None,
+            Some("sha256:image-a"),
+            |_attempt| {
+                let mut o = outcome(true, &[(0, true)]);
+                o.sandbox_image = Some("sha256:image-b".into());
+                async move { Ok(o) }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rollup.sandbox_image.as_deref(),
+            Some("mixed"),
+            "a chained rollup seeds A; its first ticket on B makes it mixed"
+        );
+        let mut prev = rollup;
+        prev.phase = Some(1);
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            Some("sha256:image-b"),
         )
         .unwrap_err();
         assert!(err.to_string().contains("mixed"), "{err}");
@@ -5206,36 +5313,6 @@ mod tests {
         // 15 (39 -> 44), 16 (44 -> 50), 17 (50 -> 56), 18 (56 -> 62),
         // 19 (62 -> 69), 20 (69 -> 76).
         assert_eq!(crate::campaign::max_points(&lc.spec.stages), 76.0);
-    }
-
-    #[test]
-    fn test_real_sdb_http_spec_validates() {
-        let lc = load_campaign("sdb-http").expect("bundled campaign must load");
-        assert_eq!(lc.spec.name, "sdb-http");
-        assert_eq!(lc.spec.task, "http");
-        assert_eq!(lc.spec.stages.len(), 8);
-        assert_eq!(lc.spec.stages[0].id, 0);
-        for stage in &lc.spec.stages {
-            assert!(
-                !stage.acceptance.http_stages.is_empty(),
-                "ticket {} has no http acceptance",
-                stage.id
-            );
-            assert!(
-                stage
-                    .acceptance
-                    .http_stages
-                    .iter()
-                    .all(|id| (1..=10).contains(id)),
-                "ticket {} acceptance out of the http suite",
-                stage.id
-            );
-        }
-        assert_eq!(lc.spec.stages[0].acceptance.http_stages, vec![1, 2]);
-        assert_eq!(
-            lc.spec.stages[7].acceptance.http_stages,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        );
     }
 
     #[test]
@@ -6198,6 +6275,133 @@ mod tests {
         assert!(json["career"]["perf"]["score"].is_number());
         let back: CampaignRollup = serde_json::from_value(json).unwrap();
         assert_eq!(back.perf.and_then(|p| p.score), perf.score);
+    }
+
+    /// R43 F1: the candidate-visible view (the 21 rendered SPEC.md files
+    /// plus the sandbox policy, the single-run SQL task prompt and the
+    /// agent prompt files) is byte-identical to 2cbea35. The expected
+    /// SHA-256 values were recorded by running this same renderer on
+    /// 2cbea35 (the pre-deletion master), where the raw files and
+    /// `render_spec_md` were unchanged; the deletion round does not touch
+    /// them.
+    #[test]
+    fn r43_f1_candidate_view_unchanged() {
+        use sha2::{Digest, Sha256};
+        let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+        let mut outcomes: Vec<(u32, LadderOutcome)> = Vec::new();
+        let mut actual: Vec<String> = Vec::new();
+        for stage in &lc.spec.stages {
+            let text = lc
+                .render_spec_md(stage, &lc.prompt_path(stage), &outcomes)
+                .expect("the SPEC renders");
+            actual.push(format!("{:x}", Sha256::digest(text.as_bytes())));
+            outcomes.push((stage.id, LadderOutcome::Full));
+        }
+        let root = crate::config::get_repo_root();
+        for rel in ["extensions/bench-policy.js", "tasks/sql/prompt.md"] {
+            let bytes = std::fs::read(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            actual.push(format!("{:x}", Sha256::digest(&bytes)));
+        }
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("src/prompts"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        let mut h = Sha256::new();
+        for p in files {
+            h.update(p.file_name().unwrap().to_string_lossy().as_bytes());
+            h.update([0]);
+            h.update(std::fs::read(&p).unwrap());
+        }
+        actual.push(format!("{:x}", h.finalize()));
+        let expected: Vec<&str> = vec![
+            "2aa4b2071ebbf7964fe3473c088614d1e55d0949bb6c3adab8c9f97a07ef0130",
+            "dfeab661f07a21de492cf230b21abbd9a8f13237a08691148e39378264aaa319",
+            "fc0b7a86addb8b044241e4190f13e1e00fa714122c3d2c44bfc7614e05e36082",
+            "599d0b2604dff20b0ab9a8c1894ab7979d9708c2dcfcc87aba51d0628fad3777",
+            "af59b17d0bfd1b8cb203f7eec211f772ba8e89f4d61253da2ab1cd6b2640ad79",
+            "0af5ef606946bd71f61c79c1200cb62e6fd4db3b2d31a4ed62e9f94bcee04a35",
+            "0e54e193ae7c44276e1b9aa5ed19698c5000efb89e86720e5699dd8bb6f0715d",
+            "b98365478c0d41d9924f92adcd2a40c68b03852ece368cbce8963341e7260975",
+            "28bdd84e7433e877cda1a3600fe7b099bfe10956f1f2ef4443e0fa18725c4eee",
+            "fb55d4ca84ed8eb9f50a555c03f8e016a5226bda98188551ac3721577fe1edb5",
+            "370396b5004db43974ca4a1ab32d27e8f347e4aa867d771eca57654fce8e3b52",
+            "af02bfa6591d19be7f92616a6dca9c8618909b5c63995d0ae2d19471fa40bc90",
+            "455ddb2c7ee798f84366e61cda273c0d1f479fa0158b03fa461efa8f6285ebd1",
+            "9247f706f0e31a401cdff64fd47224d5408471b4d3b09dc5767afd1ee52e098d",
+            "81a888d76bb5e8020e3553511e584677cf2d7b17621ecedb21c9f3ee4ef231e3",
+            "25d7a04238f15039353307162b8e8019ff908634cc6fa4670eea642fc67d2f8c",
+            "b4b9624a4c743a8b9511f0cdb1c68b1d29d637450d7a611a8739f8a40e3eddca",
+            "fa97240be1b7c29bbbfb15e851beccd8a34498cdc0a97765c0afdc5061e150d8",
+            "701a8032c1916d1f7060fb220bcf1c48389422636fa65e2ee7a07244d6e198ac",
+            "bebd820d7353a19e64c8be6f609d8ae5561ccc3a3e82d469182e0d3a54fc036b",
+            "f1b075923b284348f7150bb467c1cd7fb8b2c98a8aaa0fef0c7f615d73d5f021",
+            "f00669b1c73447c62d748a27c9a92c8ab01be0d5b63fceda23292fc6a01b59b6",
+            "7a5f2c36a2b44a27f0bb892519f89cd98750e1fb11dc3c7ff4fb7398fad2f567",
+            "2b3c28db6e2f7250fdbea58271659407da102675c9d8448f0f86491030484b04",
+        ];
+        let actual_refs: Vec<&str> = actual.iter().map(String::as_str).collect();
+        assert_eq!(
+            actual_refs, expected,
+            "candidate view changed; actual {actual:?}"
+        );
+    }
+
+    /// R36-3: ten Board requests for a live cell run `docker image inspect`
+    /// at most once. The cell's own status image is used with no inspect; a
+    /// finished ticket's manifest is the second source; only a cell with
+    /// neither pays one cached inspect for all ten requests.
+    #[test]
+    fn r43_f3_board_no_inspect_per_request() {
+        use std::sync::atomic::Ordering;
+        let runs = tmp_dir("stubimage");
+        let inspects = || SANDBOX_IMAGE_INSPECTS.load(Ordering::Relaxed);
+        let reset = || {
+            *SANDBOX_IMAGE_CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        };
+
+        // The cell's own status carries the run's image.
+        reset();
+        let before = inspects();
+        let v = serde_json::json!({"live": {"sandbox_image": "sha256:run-image"}});
+        for _ in 0..10 {
+            let stub = live_rollup_stub_at("campaign_stub_status", &v, &runs);
+            assert_eq!(stub.sandbox_image.as_deref(), Some("sha256:run-image"));
+        }
+        assert_eq!(inspects() - before, 0, "status image must not inspect");
+
+        // A finished ticket's manifest carries it when the status predates
+        // the field.
+        let cell = runs.join("campaign_stub_manifest");
+        std::fs::create_dir_all(cell.join("s0_full")).unwrap();
+        std::fs::write(
+            cell.join("s0_full/manifest.json"),
+            serde_json::json!({"sandbox_image": "sha256:manifest-image"}).to_string(),
+        )
+        .unwrap();
+        let before = inspects();
+        for _ in 0..10 {
+            let stub = live_rollup_stub_at("campaign_stub_manifest", &serde_json::json!({}), &runs);
+            assert_eq!(stub.sandbox_image.as_deref(), Some("sha256:manifest-image"));
+        }
+        assert_eq!(inspects() - before, 0, "manifest image must not inspect");
+
+        // Neither source: one cache fill serves all ten requests.
+        reset();
+        let before = inspects();
+        for _ in 0..10 {
+            let _ = live_rollup_stub_at(
+                "campaign_stub_none",
+                &serde_json::json!({"live": {}}),
+                &runs,
+            );
+        }
+        assert_eq!(inspects() - before, 1, "ten requests, one inspect");
+        let _ = std::fs::remove_dir_all(&runs);
     }
 
     /// R49 F4 (R45-3/R45-6): a scored phase 2 followed by a harness-fault

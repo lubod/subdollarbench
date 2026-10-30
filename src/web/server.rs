@@ -97,7 +97,7 @@ pub fn worker_count() -> usize {
 }
 
 /// Per-worker candidate port offset: base + worker*100 keeps every cell's
-/// ports disjoint (candidate, batch-ref, upstream pool).
+/// ports disjoint (candidate, reference, admin/dashboard).
 pub fn worker_port(base: u16, worker: u8) -> u16 {
     base.saturating_add(worker as u16 * 100)
 }
@@ -1593,6 +1593,16 @@ fn campaign_board_view(
     let had_rollup = parsed.is_some();
     let live = !had_rollup;
     let mut rollup = parsed.unwrap_or_else(|| crate::campaign::live_rollup_stub(campaign_id, v));
+    // R43 F5/D2: a row from a retired task (an archived sdb-kv cell) has no
+    // spec to render and no task to grade any more. Skip it with one line;
+    // the rest of the Board still answers.
+    if rollup.task != "sql" {
+        eprintln!(
+            "[BOARD] skipping {campaign_id}: task {:?} is retired",
+            rollup.task
+        );
+        return None;
+    }
     // R22-5: the Board list applies the same crash relabel as the detail
     // endpoint, including stages that already have recorded rounds.
     crate::campaign::relabel_graded_crashes(
@@ -1704,16 +1714,19 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 .unwrap_or(serde_json::Value::Null);
             // The full ladder (attempted and not) + the stop reason: one
             // derivation for the console and the board (gui-spec.md §5.3).
-            if let Some((ladder, stop, key, rollup_out, phases)) =
+            // R43 F5: no derivable view (a retired task, or no spec) means
+            // no row. `campaign_board_view` logs the retired-task case.
+            let Some((ladder, stop, key, rollup_out, phases)) =
                 campaign_board_view(&v, &mut specs, &name)
-            {
-                v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
-                v["phases"] = phases;
-                v["stop_reason"] = serde_json::json!(stop);
-                v["board_key"] = serde_json::to_value(key).unwrap_or_default();
-                if let Some(rollup) = rollup_out {
-                    v["rollup"] = serde_json::to_value(rollup).unwrap_or(serde_json::Value::Null);
-                }
+            else {
+                continue;
+            };
+            v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
+            v["phases"] = phases;
+            v["stop_reason"] = serde_json::json!(stop);
+            v["board_key"] = serde_json::to_value(key).unwrap_or_default();
+            if let Some(rollup) = rollup_out {
+                v["rollup"] = serde_json::to_value(rollup).unwrap_or(serde_json::Value::Null);
             }
             out.push(v);
         }
@@ -2897,7 +2910,7 @@ mod tests {
         state.cancel_requested.store(true, Ordering::SeqCst);
         let req = RunRequest {
             model: "m".to_string(),
-            task: "redis".to_string(),
+            task: "sql".to_string(),
             api_key: None,
             budget_usd: 1.0,
             max_turns: 1,
@@ -4698,6 +4711,125 @@ global.fetch = async (url) => {
     /// Serializes the two tests that exercise the campaign lock protocol:
     /// they share the isolated runs dir, so they must not overlap.
     static CAMPAIGN_LOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// R43 F5/D2: a `.41` sdb-sql cell (its campaign.json rollup and one
+    /// ticket manifest) still renders on the Board and in the Run detail.
+    /// Deserialization reads `task` as a plain string, so removing the
+    /// retired `TaskType` variants cannot break old rows.
+    #[tokio::test]
+    async fn r43_f5_old_sql_cell_renders() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let name = format!("campaign_sdb-sql_r43old_{}", std::process::id());
+        let dir = runs.join(&name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("s0_full")).unwrap();
+        let rollup = serde_json::json!({
+            "campaign_id": name, "name": "sdb-sql", "model": "m", "harness": "omp",
+            "effort": "high", "task": "sql", "started_at": "2026-10-19T00:00:00Z",
+            "finished_at": "2026-10-19T01:00:00Z",
+            "stages": [{
+                "id": 0, "title": "Genesis", "type": "genesis", "passed": true,
+                "pass_rate": 100.0, "passed_stages": 3, "total_stages": 3,
+                "regressed": [], "regression_severity": 0,
+                "effective_cost_usd": 0.01, "turns": 5, "duration_seconds": 60.0,
+                "status": "passed", "run_id": "s0", "git_commit": null, "git_stat": null
+            }],
+            "reached": 0, "regression_free_tickets": 1, "points": 1.0,
+            "max_points": 76.0, "rules_version": "2026-10-19.41",
+            "total_cost_usd": 0.01, "over_budget": false, "cap_reached": false,
+            "over_wall": false
+        });
+        fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+        fs::write(
+            dir.join("s0_full/manifest.json"),
+            serde_json::json!({
+                "run_id": "s0", "model": "m", "task": "sql", "status": "passed",
+                "language": "python", "started_at": "2026-10-19T00:00:00Z",
+                "completed_at": "2026-10-19T00:01:00Z", "duration_seconds": 60.0,
+                "pass_rate": 100.0, "passed_stages": 3, "total_stages": 3,
+                "stages": [],
+                "rounds": [{
+                    "round": 0, "passed_stages": 3, "total_stages": 3,
+                    "pass_rate": 100.0, "turns": 5
+                }],
+                "throughput_req_sec": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let Json(cells) = get_campaigns().await;
+        let row = cells
+            .iter()
+            .find(|c| c["id"].as_str() == Some(name.as_str()))
+            .unwrap_or_else(|| panic!("the old sdb-sql cell must render: {cells:?}"));
+        assert!(
+            row["ladder"].as_array().is_some_and(|l| !l.is_empty()),
+            "the Board renders the ladder: {row:?}"
+        );
+
+        let resp = get_campaign_detail(axum::extract::Path(name.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["rollup"]["task"], "sql");
+        assert_eq!(body["rollup"]["rules_version"], "2026-10-19.41");
+        assert_eq!(
+            body["rollup"]["stages"][0]["rounds"][0]["round"], 0,
+            "the detail backfills the ticket manifest's round: {body:?}"
+        );
+        assert_eq!(body["rollup"]["stages"][0]["rounds"][0]["derived"], true);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// R43 F5/D2: a row whose task no longer exists is skipped with one log
+    /// line, and the Board still answers for the rows that remain.
+    #[tokio::test]
+    async fn r43_f5_retired_task_row_skipped() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let cell = |name: &str, task: &str| {
+            let dir = runs.join(name);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("campaign.json"),
+                serde_json::json!({
+                    "campaign_id": name, "name": "sdb-sql", "model": "m",
+                    "harness": "omp", "effort": "high", "task": task,
+                    "started_at": "2026-10-19T00:00:00Z",
+                    "finished_at": "2026-10-19T01:00:00Z", "stages": [],
+                    "reached": 0, "regression_free_tickets": 0, "points": 0.0,
+                    "max_points": 76.0, "rules_version": "2026-10-19.41",
+                    "total_cost_usd": 0.01, "over_budget": false,
+                    "cap_reached": false, "over_wall": false
+                })
+                .to_string(),
+            )
+            .unwrap();
+            dir
+        };
+        let live = format!("campaign_sdb-sql_r43kept_{}", std::process::id());
+        let retired = format!("campaign_sdb-sql_r43redis_{}", std::process::id());
+        let kept = cell(&live, "sql");
+        let gone = cell(&retired, "redis");
+
+        let Json(cells) = get_campaigns().await;
+        let ids: Vec<&str> = cells.iter().filter_map(|c| c["id"].as_str()).collect();
+        assert!(
+            ids.contains(&live.as_str()),
+            "a live row still answers: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&retired.as_str()),
+            "the retired-task row is skipped: {ids:?}"
+        );
+        let _ = fs::remove_dir_all(kept);
+        let _ = fs::remove_dir_all(gone);
+    }
 
     /// Round-13: the console board applies the same hide/poison rule as the
     /// portal exporter (a poisoned cell is not a measurement anywhere).

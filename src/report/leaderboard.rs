@@ -1788,151 +1788,11 @@ impl LeaderboardManager {
 
         println!("\n{}", table);
     }
-
-    /// Two-way P@1-lower-bound table: model rows x effort columns, per task.
-    /// Answers whether the model ranking survives within-effort.
-    pub fn print_effort_matrix(results: &[BenchmarkRunResult]) {
-        use std::collections::BTreeSet;
-        let mut tasks: BTreeSet<String> = BTreeSet::new();
-        for r in results {
-            tasks.insert(r.task.clone());
-        }
-        for task in tasks {
-            let rows: Vec<&BenchmarkRunResult> =
-                results.iter().filter(|r| r.task == task).collect();
-            if rows.is_empty() {
-                continue;
-            }
-            let mut models: BTreeSet<String> = BTreeSet::new();
-            let mut efforts: BTreeSet<String> = BTreeSet::new();
-            for r in &rows {
-                models.insert(Self::short_model_name(&r.model).to_string());
-                efforts.insert(r.effort.clone().unwrap_or_else(|| "auto".to_string()));
-            }
-            println!("\n=== Effort x Model: {task} (P@1 lower bound / trials) ===");
-            let mut header = format!("{:>22}", "model");
-            for e in &efforts {
-                header.push_str(&format!(" | {:>16}", e));
-            }
-            println!("{header}");
-            for m in &models {
-                let mut line = format!("{:>22}", m);
-                for e in &efforts {
-                    let cell = rows
-                        .iter()
-                        .find(|r| {
-                            Self::short_model_name(&r.model) == m
-                                && r.effort.as_deref().unwrap_or("auto") == e
-                        })
-                        .map(|r| {
-                            let lo = r.pass_at_1_lo.unwrap_or(r.pass_at_1.unwrap_or(r.pass_rate));
-                            let n = r.total_trials.unwrap_or(r.subruns.len() as u32);
-                            match r.frontier_fraction {
-                                Some(f) => format!("{lo:.0} (n={n}, F{:.0}%)", f * 100.0),
-                                None => format!("{lo:.0} (n={n})"),
-                            }
-                        })
-                        .unwrap_or_else(|| "-".to_string());
-                    line.push_str(&format!(" | {:>16}", cell));
-                }
-                println!("{line}");
-            }
-        }
-    }
-
-    pub fn print_leaderboard_views(results: &[BenchmarkRunResult], task_filter: &str) {
-        let trimmed = task_filter.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
-            // Group distinct tasks preserving order
-            let mut tasks: Vec<String> = Vec::new();
-            for r in results {
-                if !tasks.contains(&r.task) {
-                    tasks.push(r.task.clone());
-                }
-            }
-
-            // Print per-task leaderboards first
-            for task in &tasks {
-                let task_results: Vec<BenchmarkRunResult> = results
-                    .iter()
-                    .filter(|r| r.task.eq_ignore_ascii_case(task))
-                    .cloned()
-                    .collect();
-
-                let title = match task.to_lowercase().as_str() {
-                    "redis" => "⚡ Task: In-Memory Redis Server Leaderboard",
-                    "http" => "🌐 Task: HTTP/1.1 Web Server Leaderboard",
-                    _ => &format!("Task: {} Leaderboard", task),
-                };
-                Self::print_table_with_title(title, &task_results, false);
-            }
-
-            // Quarantined tasks rank within-task only, never on the global board.
-            let global: Vec<BenchmarkRunResult> = results
-                .iter()
-                .filter(|r| !is_quarantined(&r.task))
-                .cloned()
-                .collect();
-            let skipped: Vec<String> = {
-                let mut t: Vec<String> = results
-                    .iter()
-                    .filter(|r| is_quarantined(&r.task))
-                    .map(|r| r.task.clone())
-                    .collect();
-                t.sort();
-                t.dedup();
-                t
-            };
-            if !skipped.is_empty() {
-                println!(
-                    "\n(Quarantined from global ranking pending verifier investigation: {} — see per-task board above.)\n",
-                    skipped.join(", ")
-                );
-            }
-            Self::print_table_with_title(
-                "🏆 Consolidated Global Leaderboard (All Tasks)",
-                &global,
-                false,
-            );
-        } else {
-            let task_results: Vec<BenchmarkRunResult> = results
-                .iter()
-                .filter(|r| r.task.eq_ignore_ascii_case(trimmed))
-                .cloned()
-                .collect();
-
-            if task_results.is_empty() {
-                println!("\nNo benchmark results found for task '{}'.\n", trimmed);
-            } else {
-                let title = match trimmed.to_lowercase().as_str() {
-                    "redis" => "⚡ Task: In-Memory Redis Server Leaderboard",
-                    "http" => "🌐 Task: HTTP/1.1 Web Server Leaderboard",
-                    _ => &format!("Task: {} Leaderboard", trimmed),
-                };
-                Self::print_table_with_title(title, &task_results, false);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::docker::{
-        BENCH_REDIS_CLIENT_IMAGE, BENCH_WRK_IMAGE, REF_NGINX_IMAGE, REF_REDIS_IMAGE,
-    };
-
-    #[test]
-    fn test_ref_images_pinned_by_digest() {
-        for img in [
-            REF_REDIS_IMAGE,
-            REF_NGINX_IMAGE,
-            BENCH_REDIS_CLIENT_IMAGE,
-            BENCH_WRK_IMAGE,
-        ] {
-            assert!(img.contains("@sha256:"), "unpinned image: {}", img);
-        }
-    }
 
     #[test]
     fn test_regime_of() {
@@ -1989,10 +1849,11 @@ mod tests {
         };
         assert_eq!(BenchmarkRunResult::regime_of(&base), "legacy");
         let mut pinned = base;
-        pinned.ref_image = Some(REF_REDIS_IMAGE.to_string());
+        let image = "docker.io/library/redis@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576";
+        pinned.ref_image = Some(image.to_string());
         assert_eq!(
             BenchmarkRunResult::regime_of(&pinned).as_str(),
-            &REF_REDIS_IMAGE["docker.io/library/redis@sha256:".len()..][..12]
+            &image["docker.io/library/redis@sha256:".len()..][..12]
         );
         pinned.ref_drift = Some(true);
         assert!(BenchmarkRunResult::regime_of(&pinned).ends_with("+drift"));
@@ -4405,64 +4266,6 @@ mod tests {
             LeaderboardManager::get_model_cli_meta("nobody/mystery"),
             ("🤖", Color::Cyan)
         );
-    }
-
-    #[test]
-    fn test_print_matrix_and_views_smoke() {
-        let mut r1 = cov_run("disp_a_trial1");
-        r1.model = "anthropic/claude-x".to_string();
-        r1.harness = Some("opencode".to_string());
-        r1.effort = Some("high".to_string());
-        r1.rules_version = Some("2026-09-30.1".to_string());
-        r1.ref_image = Some("img@sha256:abcdef012345".to_string());
-        r1.ref_drift = Some(true);
-        r1.throughput_req_sec = Some(5_000.0);
-        r1.reference_throughput_req_sec = Some(10_000.0);
-        r1.throughput_score = Some(2.5);
-        r1.frontier_fraction = Some(0.8);
-        r1.duration_seconds = Some(125.0);
-        r1.turns = Some(7);
-        r1.effective_cost_usd = Some(0.02);
-        r1.subruns = vec![cov_run("disp_a_trial1_sub")];
-        r1.total_trials = Some(1);
-        r1.pass_at_1 = Some(100.0);
-        r1.pass_at_1_lo = Some(70.0);
-        r1.pass_at_1_hi = Some(100.0);
-        r1.pass_at_k = Some(100.0);
-        r1.avg_pass_rate = Some(100.0);
-
-        let mut r2 = cov_run("disp_b");
-        r2.model = "qwen/qwen-x".to_string();
-        r2.task = "http".to_string();
-        r2.rules_version = Some("2026-09-27.2".to_string());
-        r2.pass_rate = 50.0;
-        r2.effective_cost_usd = Some(0.01);
-        r2.total_trials = Some(1);
-
-        let mut r3 = cov_run("disp_c");
-        r3.model = "local/llama.cpp".to_string();
-        r3.task = "wal".to_string();
-        r3.pass_rate = 20.0;
-        r3.pass_at_1 = Some(20.0);
-        r3.pass_at_1_lo = Some(5.0);
-        r3.frontier_fraction = Some(0.5);
-        r3.total_trials = Some(1);
-
-        let rows = vec![r1, r2, r3];
-        // Matrix path: per-task tables, effort fallback to "auto", frontier
-        // annotated and un-annotated cells.
-        LeaderboardManager::print_effort_matrix(&rows);
-        // All-tasks view: per-task titles + consolidated board; the redis
-        // title branch and the two-regime warning.
-        LeaderboardManager::print_leaderboard_views(&rows, "");
-        LeaderboardManager::print_leaderboard_views(&rows, "ALL");
-        LeaderboardManager::print_leaderboard_views(&rows, "redis");
-        LeaderboardManager::print_leaderboard_views(&rows, "HTTP");
-        // Unknown task prints the not-found branch.
-        LeaderboardManager::print_leaderboard_views(&rows, "does-not-exist");
-        // Archived mode strips ordinals and suppresses the regime warning.
-        LeaderboardManager::print_table_with_title("Archived record", &rows, true);
-        LeaderboardManager::print_table_with_title("Live mixed", &rows, false);
     }
 
     #[test]

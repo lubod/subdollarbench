@@ -387,7 +387,7 @@ exit 1
         }
         let cfg = crate::pipeline::BenchmarkConfig {
             model: "image-test".to_string(),
-            task: crate::config::TaskType::Redis,
+            task: crate::config::TaskType::Sql,
             effort: "low".to_string(),
             harness: crate::config::Harness::Omp,
             max_turns: 1,
@@ -399,7 +399,6 @@ exit 1
             run_id: Some("r36_image_test".to_string()),
             save_results: false,
             review_model: None,
-            batch_reference: None,
             worker: 0,
             feedback_rounds: 0,
             campaign_stage: None,

@@ -1234,8 +1234,7 @@ mod tests {
             "src/prompts/session_budget.txt",
             "src/prompts/omp_effective.md",
             "src/prompts/opencode_agents.md",
-            // Retired task inputs stay in the shared stamp.
-            "tasks/redis/prompt.md",
+            "tasks/sql/prompt.md",
         ] {
             assert!(
                 files.iter().any(|p| p == Path::new(rel)),
@@ -1315,6 +1314,42 @@ mod tests {
         let b = fingerprint_files(&root, &[rel]);
         assert_ne!(a, b, "a turn-rule edit must move the stamp");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R43 F4: the gate's and flake bar's scope list
+    /// (`scripts/graded-paths.txt`) covers every input the fingerprint
+    /// hashes (`graded-files.txt`), so an edit can never move the stamp
+    /// while the gate calls it non-graded.
+    #[test]
+    fn r43_f4_graded_lists_agree() {
+        let root = crate::config::get_repo_root();
+        let paths = fs::read_to_string(root.join("scripts/graded-paths.txt"))
+            .expect("scripts/graded-paths.txt is readable");
+        let bases: Vec<&str> = paths
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert!(!bases.is_empty(), "graded-paths.txt has no entries");
+        let mut checked = 0;
+        for line in GRADED_MANIFEST.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let rel = ["runtime-file", "runtime-dir", "file", "dir"]
+                .iter()
+                .find_map(|kind| line.strip_prefix(&format!("{kind} ")))
+                .unwrap_or_else(|| panic!("unrecognised graded entry {line:?}"));
+            checked += 1;
+            assert!(
+                bases
+                    .iter()
+                    .any(|b| rel == *b || rel.starts_with(&format!("{b}/"))),
+                "graded-files entry {rel:?} is not under any graded path: {bases:?}"
+            );
+        }
+        assert!(checked >= 10, "only {checked} graded entries parsed");
     }
 
     #[test]

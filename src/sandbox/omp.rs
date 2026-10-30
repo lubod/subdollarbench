@@ -2069,123 +2069,19 @@ impl OmpRunner {
     }
 
     pub fn task_guidance(
-        task: Option<crate::config::TaskType>,
-        prompt: &str,
+        _task: Option<crate::config::TaskType>,
+        _prompt: &str,
     ) -> (u16, &'static str, &'static str) {
-        match task {
-            Some(crate::config::TaskType::Pdf) => (
-                8090,
-                "curl -v http://localhost:8090/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Third-party PDF libraries (pypdf, pdfminer, fitz, lopdf, pdfcpu, etc.) and external CLI tools (pdftotext, mutool) are STRICTLY FORBIDDEN.
-- Build an RFC-compliant HTTP microservice on port 8090 using raw TCP sockets returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
-            ),
-            Some(crate::config::TaskType::Redis) => (
-                6379,
-                "redis-cli -p 6379 ping",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built Redis servers and client libraries are FORBIDDEN.
-- Build from raw TCP sockets on port 6379 parsing RESP wire format (`+PONG
-`, `:1
-`, `$len
-`)."#,
-            ),
-            Some(crate::config::TaskType::Http) => (
-                8080,
-                "curl -v http://localhost:8080/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Built-in HTTP modules and frameworks (`http.server`, `BaseHTTPRequestHandler`, `HTTPServer`, `net/http`, `flask`, `fastapi`, `express`) are STRICTLY FORBIDDEN and will result in automatic DISQUALIFICATION!
-- Python Raw Socket Skeleton:
-  ```python
-  import socket, os
-  os.makedirs('/tmp/files', exist_ok=True)
-  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-  s.bind(('0.0.0.0', 8080))
-  s.listen(128)
-  while True:
-      conn, addr = s.accept()
-      try:
-          data = conn.recv(4096).decode('utf-8', errors='ignore')
-          # Parse request and write HTTP response:
-          conn.sendall(b"HTTP/1.1 200 OK
-Content-Length: 0
-
-")
-      finally:
-          conn.close()
-  ```
-- Go: use `net.Listen("tcp", "0.0.0.0:8080")` and `net.Conn`. Do NOT use `net/http`.
-- Rust: use `std::net::TcpListener` or `tokio::net::TcpListener`."#,
-            ),
-            Some(crate::config::TaskType::Wal) => (
-                6390,
-                "printf 'PUB t hello\\n' | nc 127.0.0.1 6390",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built brokers (Kafka, NATS, Redis) are FORBIDDEN.
-- Build a durable append-only log on TCP 6390: PUB <topic> <payload> -> +OK <offset> (fsync before ack), SUB <topic> <offset> streams :<off> <payload> lines then +END. Persist under ./data and recover it after kill -9."#,
-            ),
-            Some(crate::config::TaskType::Proxy) => (
-                8091,
-                "curl http://upstream1/ ; curl -v http://localhost:8091/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Proxy frameworks/gateways (nginx, envoy, traefik libs) are FORBIDDEN; raw TCP sockets only.
-- Build an HTTP reverse proxy on 8091 over upstreams upstream1:80, upstream2:80, upstream3:80: round-robin, upstream keep-alive pooling, X-Forwarded-For injection, failover with zero dropped requests."#,
-            ),
-            Some(crate::config::TaskType::Pubsub) => (
-                8092,
-                "curl -v http://localhost:8092/",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- WebSocket libraries (ws, gorilla, tungstenite) are FORBIDDEN; raw TCP sockets only.
-- Build an RFC 6455 broker on 8092: SHA-1 handshake, masked TEXT frames SUB <channel> / PUB <channel> <msg>, broadcast fan-out, ping/pong."#,
-            ),
-            Some(crate::config::TaskType::Queue) => (
-                6385,
-                "printf 'ENQ q hello\nLEASE q 5000\n' | nc 127.0.0.1 6385",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Pre-built queue systems and job libraries (RabbitMQ, Redis, Kafka, NATS, nsq, celery, bullmq, sidekiq, RQ, etc.) are FORBIDDEN.
-- Build a job queue broker on TCP 6385 with LF-terminated commands: ENQ <queue> <payload> -> +OK <id> (fsync before ack), LEASE <queue> <lease_ms> -> +JOB <id> <attempts> <payload>|+NONE (visibility lease owned by the connection), ACK <id>/NACK <id> [delay_ms] -> +OK, 3 failed attempts -> <queue>.dead, REDRIVE <queue> <id>, +STATS counters, PING -> +PONG. Persist under ./data and recover after kill -9."#,
-            ),
-            Some(crate::config::TaskType::Sql) => (
-                5480,
-                "printf 'SELECT 1\n' | nc 127.0.0.1 5480",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources. This includes test and helper files: the scanner checks every file.
-- Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed.
-- Launch: `./start.sh --port <p> --data <dir>` must work (defaults: 5480, ./data). A Dockerfile gets those arguments only with `ENTRYPOINT`; a `CMD`-only image must read `SDB_PORT`/`SDB_DATA_DIR` or use the defaults.
-- Ground truth: a reference server speaking the same protocol runs at host `ref-sql`, port 5480 (`printf 'SELECT 1\n' | nc ref-sql 5480`). Compare against it while developing; it is not reachable while you are graded.
-- `SPEC.md` in the workspace holds the full contract so far (harness-owned, rewritten every ticket)."#,
-            ),
-            Some(crate::config::TaskType::Binproto) => (
-                6395,
-                "python3 -c \"import struct,zlib;print(zlib.crc32(b'x'))\"",
-                r#"ANTI-CHEAT REQUIREMENT (STRICT):
-- RPC frameworks (gRPC, Thrift, JSON-RPC libs) are FORBIDDEN; raw TCP sockets only.
-- Build an SDB1 binary RPC server on 6395: 16-byte BE header (magic SDB1, u16 seq, u8 opcode, u8 status-reserved-0, u32 len, u32 CRC32), opcodes PING/ECHO/PUT/GET/STREAM, CRC-mismatch -> ERR_BAD_CHECKSUM open, unknown op -> ERR_UNKNOWN_OP open, bad magic -> close."#,
-            ),
-            None => {
-                let prompt_lower = prompt.to_lowercase();
-                if prompt_lower.contains("pdf") {
-                    (
-                        8090,
-                        "curl -v http://localhost:8090/",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build an HTTP PDF microservice using raw TCP sockets on port 8090 returning HTTP 200 on GET / and extracting plain text from binary PDF payloads sent to POST /extract."#,
-                    )
-                } else if prompt_lower.contains("redis") {
-                    (
-                        6379,
-                        "redis-cli -p 6379 ping",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build from raw TCP sockets on port 6379 parsing RESP wire format."#,
-                    )
-                } else {
-                    (
-                        8080,
-                        "curl -v http://localhost:8080/",
-                        r#"ANTI-CHEAT REQUIREMENT (STRICT): Build using raw TCP sockets on port 8080."#,
-                    )
-                }
-            }
-        }
+        (
+            5480,
+            "printf 'SELECT 1\n' | nc 127.0.0.1 5480",
+            r#"ANTI-CHEAT REQUIREMENT (STRICT):
+        - Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources. This includes test and helper files: the scanner checks every file.
+        - Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed.
+        - Launch: `./start.sh --port <p> --data <dir>` must work (defaults: 5480, ./data). A Dockerfile gets those arguments only with `ENTRYPOINT`; a `CMD`-only image must read `SDB_PORT`/`SDB_DATA_DIR` or use the defaults.
+        - Ground truth: a reference server speaking the same protocol runs at host `ref-sql`, port 5480 (`printf 'SELECT 1\n' | nc ref-sql 5480`). Compare against it while developing; it is not reachable while you are graded.
+        - `SPEC.md` in the workspace holds the full contract so far (harness-owned, rewritten every ticket)."#,
+        )
     }
 }
 
@@ -2317,15 +2213,7 @@ mod tests {
 
     fn all_live_tasks() -> Vec<crate::config::TaskType> {
         use crate::config::TaskType;
-        vec![
-            TaskType::Redis,
-            TaskType::Http,
-            TaskType::Pdf,
-            TaskType::Proxy,
-            TaskType::Pubsub,
-            TaskType::Wal,
-            TaskType::Binproto,
-        ]
+        vec![TaskType::Sql]
     }
 
     #[test]
@@ -3444,20 +3332,6 @@ mod tests {
         // Missing session file is a silent no-op.
         OmpRunner::fallback_extract_files_from_session(&dir.join("nope.jsonl"), &wd);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_task_guidance_prompt_sniffing() {
-        let (port, cmd, snippet) = OmpRunner::task_guidance(None, "Build a PDF extractor service");
-        assert_eq!(port, 8090);
-        assert!(cmd.contains("8090"));
-        assert!(snippet.contains("PDF"));
-        let (port, cmd, _) = OmpRunner::task_guidance(None, "implement a redis clone");
-        assert_eq!(port, 6379);
-        assert!(cmd.contains("redis-cli"));
-        let (port, cmd, _) = OmpRunner::task_guidance(None, "build a hello world server");
-        assert_eq!(port, 8080);
-        assert!(cmd.contains("8080"));
     }
 
     #[test]

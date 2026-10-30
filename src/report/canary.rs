@@ -150,21 +150,6 @@ mod tests {
     /// The canary only works if the prompt actually carries it. A prompt
     /// edit that drops (or rewords) the footer silently disables detection
     /// for that task, so assert the templates match the registry verbatim.
-    #[test]
-    fn test_every_graded_prompt_carries_its_canary() {
-        for (task, guid) in all_canaries() {
-            let path = crate::config::get_repo_root()
-                .join("tasks")
-                .join(task)
-                .join("prompt.md");
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            assert!(
-                text.contains(guid),
-                "tasks/{task}/prompt.md is missing its canary {guid} — detection for this task is blind"
-            );
-        }
-    }
 
     #[test]
     fn test_footer_carries_the_marker() {

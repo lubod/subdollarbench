@@ -8,9 +8,12 @@ src/campaign.rs
 src/scoring.rs
 src/cost
 src/prompts
+src/bench
 src/report/rules.rs
 src/report/graded_hash.rs
+src/report/leaderboard.rs
 campaigns
+tasks
 build.rs
 src/report/graded-files.txt
 scripts/graded-paths.txt
