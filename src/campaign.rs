@@ -1917,7 +1917,12 @@ pub struct LadderEntry {
 /// cached `sandbox_image_id()`, refreshed at most once a minute. So the
 /// async handler never runs the subprocess per request, and it never shows
 /// today's image when the run recorded its own.
-fn live_cell_image(campaign_id: &str, v: &serde_json::Value, runs_dir: &Path) -> Option<String> {
+fn live_cell_image(
+    campaign_id: &str,
+    v: &serde_json::Value,
+    runs_dir: &Path,
+    fallback: &dyn Fn() -> Option<String>,
+) -> Option<String> {
     if let Some(img) = v
         .pointer("/live/sandbox_image")
         .and_then(serde_json::Value::as_str)
@@ -1954,30 +1959,46 @@ fn live_cell_image(campaign_id: &str, v: &serde_json::Value, runs_dir: &Path) ->
             }
         }
     }
-    cached_sandbox_image_id()
+    fallback()
 }
 
-/// One process-wide cache for the Board's fallback image lookup. `None`
-/// means no lookup yet (or its 60 s freshness window passed).
-static SANDBOX_IMAGE_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
-    std::sync::Mutex::new(None);
-/// Test seam: how many `docker image inspect` calls the fallback made.
-static SANDBOX_IMAGE_INSPECTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+/// One cache for the Board's fallback image lookup. `None` means no lookup
+/// yet (or its 60 s freshness window passed). R51 F7: the mutex is released
+/// before the lookup (a `docker` subprocess) and re-taken to store, so two
+/// threads on an empty cache inspect concurrently instead of serializing.
+struct ImageCache(std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>);
+
+impl ImageCache {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn resolve(&self, lookup: &dyn Fn() -> Option<String>) -> Option<String> {
+        if let Some((_, id)) = {
+            let cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .as_ref()
+                .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(60))
+                .cloned()
+        } {
+            return id;
+        }
+        let id = lookup();
+        let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some((std::time::Instant::now(), id.clone()));
+        id
+    }
+}
+
+/// The process-wide cache production uses.
+static SANDBOX_IMAGE_CACHE: ImageCache = ImageCache::new();
 
 fn cached_sandbox_image_id() -> Option<String> {
-    let mut cache = SANDBOX_IMAGE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some((at, id)) = cache.as_ref() {
-        if at.elapsed() < std::time::Duration::from_secs(60) {
-            return id.clone();
-        }
-    }
-    SANDBOX_IMAGE_INSPECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let id = crate::sandbox::omp_updater::sandbox_image_id();
-    *cache = Some((std::time::Instant::now(), id.clone()));
-    id
+    cached_sandbox_image_id_with(&crate::sandbox::omp_updater::sandbox_image_id)
+}
+
+fn cached_sandbox_image_id_with(lookup: &dyn Fn() -> Option<String>) -> Option<String> {
+    SANDBOX_IMAGE_CACHE.resolve(lookup)
 }
 
 /// A rollup-shaped stub for a running cell that has no rollup yet (its
@@ -1997,6 +2018,17 @@ fn live_rollup_stub_at(
     campaign_id: &str,
     v: &serde_json::Value,
     runs_dir: &Path,
+) -> CampaignRollup {
+    live_rollup_stub_at_with(campaign_id, v, runs_dir, &cached_sandbox_image_id)
+}
+
+/// R51 F7: the injected form. `fallback` resolves the image only when the
+/// cell's status and manifests have none.
+fn live_rollup_stub_at_with(
+    campaign_id: &str,
+    v: &serde_json::Value,
+    runs_dir: &Path,
+    fallback: &dyn Fn() -> Option<String>,
 ) -> CampaignRollup {
     let live = &v["live"];
     let s = |k: &str, fb: &str| live[k].as_str().unwrap_or(fb).to_string();
@@ -2020,7 +2052,7 @@ fn live_rollup_stub_at(
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
-        sandbox_image: live_cell_image(campaign_id, v, runs_dir),
+        sandbox_image: live_cell_image(campaign_id, v, runs_dir, fallback),
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         worker: 0,
@@ -6428,30 +6460,31 @@ mod tests {
         );
     }
 
-    /// R36-3: ten Board requests for a live cell run `docker image inspect`
-    /// at most once. The cell's own status image is used with no inspect; a
-    /// finished ticket's manifest is the second source; only a cell with
-    /// neither pays one cached inspect for all ten requests.
+    /// R36-3/R51 F7: ten Board requests for a live cell run the image
+    /// lookup at most once. The cell's status image and a finished ticket's
+    /// manifest are free; only a cell with neither calls the injected
+    /// fallback, through a local cache. No process-wide state.
     #[test]
     fn r43_f3_board_no_inspect_per_request() {
-        use std::sync::atomic::Ordering;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let runs = tmp_dir("stubimage");
-        let inspects = || SANDBOX_IMAGE_INSPECTS.load(Ordering::Relaxed);
-        let reset = || {
-            *SANDBOX_IMAGE_CACHE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+        let inspects = AtomicUsize::new(0);
+        let fallback = || {
+            inspects.fetch_add(1, Ordering::Relaxed);
+            Some("sha256:cached-image".to_string())
         };
 
         // The cell's own status carries the run's image.
-        reset();
-        let before = inspects();
         let v = serde_json::json!({"live": {"sandbox_image": "sha256:run-image"}});
         for _ in 0..10 {
-            let stub = live_rollup_stub_at("campaign_stub_status", &v, &runs);
+            let stub = live_rollup_stub_at_with("campaign_stub_status", &v, &runs, &fallback);
             assert_eq!(stub.sandbox_image.as_deref(), Some("sha256:run-image"));
         }
-        assert_eq!(inspects() - before, 0, "status image must not inspect");
+        assert_eq!(
+            inspects.load(Ordering::Relaxed),
+            0,
+            "status image must not inspect"
+        );
 
         // A finished ticket's manifest carries it when the status predates
         // the field.
@@ -6462,25 +6495,85 @@ mod tests {
             serde_json::json!({"sandbox_image": "sha256:manifest-image"}).to_string(),
         )
         .unwrap();
-        let before = inspects();
         for _ in 0..10 {
-            let stub = live_rollup_stub_at("campaign_stub_manifest", &serde_json::json!({}), &runs);
+            let stub = live_rollup_stub_at_with(
+                "campaign_stub_manifest",
+                &serde_json::json!({}),
+                &runs,
+                &fallback,
+            );
             assert_eq!(stub.sandbox_image.as_deref(), Some("sha256:manifest-image"));
         }
-        assert_eq!(inspects() - before, 0, "manifest image must not inspect");
+        assert_eq!(
+            inspects.load(Ordering::Relaxed),
+            0,
+            "manifest image must not inspect"
+        );
 
-        // Neither source: one cache fill serves all ten requests.
-        reset();
-        let before = inspects();
+        // Neither source: one local cache fill serves all ten requests.
+        let cache = ImageCache::new();
+        let calls = AtomicUsize::new(0);
+        let lookup = || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Some("sha256:slow".to_string())
+        };
+        let cached = || cache.resolve(&lookup);
         for _ in 0..10 {
-            let _ = live_rollup_stub_at(
+            let stub = live_rollup_stub_at_with(
                 "campaign_stub_none",
                 &serde_json::json!({"live": {}}),
                 &runs,
+                &cached,
             );
+            assert_eq!(stub.sandbox_image.as_deref(), Some("sha256:slow"));
         }
-        assert_eq!(inspects() - before, 1, "ten requests, one inspect");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "ten requests, one lookup");
         let _ = std::fs::remove_dir_all(&runs);
+    }
+
+    /// R51 F7: the cache mutex is not held across the lookup, so two threads
+    /// on an empty cache inspect concurrently; the value is kept after.
+    #[test]
+    fn r51_f7_cache_lock_not_held_across_inspect() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = ImageCache::new();
+        let calls = AtomicUsize::new(0);
+        let lookup = || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            Some("sha256:slow".to_string())
+        };
+        let start = std::time::Instant::now();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            let a = s.spawn(|| {
+                barrier.wait();
+                cache.resolve(&lookup)
+            });
+            let b = s.spawn(|| {
+                barrier.wait();
+                cache.resolve(&lookup)
+            });
+            assert_eq!(a.join().unwrap().as_deref(), Some("sha256:slow"));
+            assert_eq!(b.join().unwrap().as_deref(), Some("sha256:slow"));
+        });
+        let elapsed = start.elapsed();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "both threads must miss the empty cache; a held lock serializes them"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(450),
+            "the two lookups serialized: {elapsed:?}"
+        );
+        let before = calls.load(Ordering::Relaxed);
+        assert_eq!(cache.resolve(&lookup).as_deref(), Some("sha256:slow"));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            before,
+            "the cache did not keep the value"
+        );
     }
 
     /// R49 F4 (R45-3/R45-6): a scored phase 2 followed by a harness-fault
