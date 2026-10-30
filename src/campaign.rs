@@ -2005,7 +2005,8 @@ fn live_rollup_stub_at(
         name: s("campaign", "sdb-sql"),
         model: s("model", "?"),
         harness: s("harness", "omp"),
-        effort: s("effort", "high"),
+        // R51 F6 (R43-1): an unknown effort stays empty, never "high".
+        effort: s("effort", ""),
         task: "sql".to_string(),
         started_at: v["started_at"].as_str().unwrap_or("").to_string(),
         finished_at: String::new(),
