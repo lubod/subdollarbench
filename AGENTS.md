@@ -246,8 +246,8 @@ inside `.git`, so it is shared by every worktree and never committed.
 - test workers 8 and above only: 0-7 are the live cells' slots, and
   `r37_f1_worker_ports_do_not_collide` checks that no two tests share a
   host port (round 37);
-- Line coverage is gated at 83 % or more, measured on the active code
-  only: the retired verifiers are excluded (round 35).
+- Line coverage is gated at 84 % or more, measured on the active tree
+  (round 43 deleted the retired verifiers, so nothing is excluded).
 - The ratchet only goes up.
 
 ## Pointers
