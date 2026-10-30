@@ -128,6 +128,9 @@ A round's "done" record lives in its round file, not in `TODO_CAMPAIGNS.md`.
     sandbox image builds wait for a gap (`gap`, under "Operator
     shortcuts") or the end of the grid. When a round's next step needs
     a gap, the implementer says so in its notes and stops.
+- **Long tests come last** (operator, 2026-10-30; `docs/DECISIONS.md`
+  #22): the 20-pass flake bar, the load bar, the perf baseline and the
+  calibration career start only after every planned round has merged.
 - **Tests:**
   - Run them niced: `nice -n 10 cargo test`.
   - Docker-heavy tests can flake in parallel. Rerun a failure alone

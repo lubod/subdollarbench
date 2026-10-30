@@ -69,7 +69,7 @@ exemption.
 No scoring change; regenerate the portal's frontier section on the next
 drain. (Accepted by default; no answer needed.)
 
-## Q8. Tiered and time-of-day prices (open, 2026-10-28)
+## Q8. Tiered and time-of-day prices (decided 2026-10-30: (a), `DECISIONS.md` #22)
 
 The snapshot (`src/cost/model_prices.json`) prices every call at the
 model's base rate. The OpenRouter catalog now lists overrides: Haiku 5.5

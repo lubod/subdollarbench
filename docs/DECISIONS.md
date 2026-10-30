@@ -544,3 +544,19 @@ The benchmark answers "what does a dollar buy" (round 23):
   (`src/scoring.rs:174`).
 - **Bumps.** Rules bumps were free while sdb-sql was in development,
   until #20.
+
+## 22. Base rates, said on the page; all dev before the long tests (2026-10-30)
+
+- **Q8 (a).** The snapshot keeps pricing every call at the model's base
+  rate, with no rules bump. The results page says so and names each grid
+  model's overrides (Haiku 5.5: 5x the prompt rate above 100k prompt
+  tokens; gpt-6-luna: 2x above 272k; deepseek-v4.1-flash-1017: 2x in
+  weekday peak hours). The text goes in round 51.
+- **All development first.** The 20-pass bar, the load bar, the perf
+  baseline and the calibration career run only after every planned
+  round has merged (operator: "again i want to have all dev done before
+  long tests"). A graded change after a bar would need a new one. The
+  plan, all before the long tests: 43 (now), 50 (alongside 43), 47
+  (after 43), 51, and 52 (round 40 folds into it). Findings R41-3,
+  R41-4 and R42-4 close: AGENTS.md already asks for one item per commit
+  and for Spec questions first.
