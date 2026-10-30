@@ -586,7 +586,9 @@ pub fn model_groups(cells: &[CareerCell]) -> Vec<ModelGroup> {
         g.careers
             .sort_by(|a, b| campaign::board_order(&cells[*a].key, &cells[*b].key));
         g.best = g.careers[0];
-        g.median = g.careers[(g.careers.len() - 1) / 2];
+        // R44-8/R47 F3: with an even count, take the worse middle (the
+        // list is best-first), so the model row is conservative.
+        g.median = g.careers[g.careers.len() / 2];
         g.worst = *g.careers.last().unwrap();
     }
     groups.sort_by(|a, b| campaign::board_order(&cells[a.median].key, &cells[b.median].key));
@@ -1328,7 +1330,7 @@ pub fn variance_report(runs_dir: &str) -> Result<String> {
             ));
         } else {
             out.push_str(&format!(
-                "{} vs {}: ranked ({} worst {:.1} < {} best {:.1})\n",
+                "{} vs {}: ranked ({} worst {:.1} ≥ {} best {:.1})\n",
                 a.model, b.model, a.model, cells[a.worst].points, b.model, cells[b.best].points
             ));
         }
@@ -1835,6 +1837,50 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("sha256:test-image"), "{html}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R47 F3 (R44-6): a ranked pair reads in the ranking's direction:
+    /// the better model's worst is at least the worse model's best.
+    #[test]
+    fn r47_f3_variance_line_direction() {
+        let (base, runs, _out) = fixture("r47varline");
+        career(&runs, "a1", "a", [5.0; 4], [0.01; 4]);
+        career(&runs, "b1", "b", [2.5; 4], [0.01; 4]);
+        let report = variance_report(runs.to_str().unwrap()).unwrap();
+        assert!(
+            report.contains("a vs b: ranked (a worst 20.0 ≥ b best 10.0)"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("a worst 20.0 < b best 10.0"),
+            "the line reads backwards: {report}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R47 F3 (R44-8): with an even count the median is the worse middle;
+    /// with three careers it is the middle. The list is best-first.
+    #[test]
+    fn r47_f3_even_median_is_the_worse() {
+        let (base, runs, _out) = fixture("r47median");
+        career(&runs, "two-hi", "two", [5.0; 4], [0.01; 4]);
+        career(&runs, "two-lo", "two", [2.5; 4], [0.01; 4]);
+        career(&runs, "three-hi", "three", [7.5; 4], [0.01; 4]);
+        career(&runs, "three-mid", "three", [5.0; 4], [0.01; 4]);
+        career(&runs, "three-lo", "three", [2.5; 4], [0.01; 4]);
+        let cells = careers(runs.to_str().unwrap());
+        let groups = model_groups(&cells);
+        let two = groups.iter().find(|g| g.model == "two").unwrap();
+        assert_eq!(
+            cells[two.median].points, 10.0,
+            "2 careers: the worse middle is the median"
+        );
+        let three = groups.iter().find(|g| g.model == "three").unwrap();
+        assert_eq!(
+            cells[three.median].points, 20.0,
+            "3 careers: the middle is the median"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
