@@ -4807,18 +4807,21 @@ main()
         fs::create_dir_all(&workdir).unwrap();
         fs::write(workdir.join("notes.txt"), "no server here").unwrap();
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(
-            covtest_config(workdir.clone(), 91, "norun"),
-            logger.clone(),
-            None,
+        let out = expect_proof(
+            BenchmarkPipeline::execute(
+                covtest_config(workdir.clone(), 91, "norun"),
+                logger.clone(),
+                None,
+            ),
+            &logger,
+            "pipeline completes even without a candidate",
         )
-        .await
-        .expect("pipeline completes even without a candidate");
+        .await;
         assert_proof_ok(&out, &logger);
         assert!(!out.disqualified && !out.agent_failed);
         assert_eq!(out.manifest.status, "failed_tests");
         assert_eq!(out.manifest.pass_rate, 0.0);
-        assert_proof_score(&out, &logger, 0, 6);
+        assert_proof_score(&out, &logger, 0, 21);
         assert!(out.manifest.stages.is_empty());
         assert!(logger.contains("No runnable start.sh or Dockerfile found"));
         cleanup_covtest_network("norun");
@@ -4833,18 +4836,21 @@ main()
         fs::create_dir_all(&workdir).unwrap();
         fs::write(workdir.join("Dockerfile"), "FROM redis:alpine\n").unwrap();
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(
-            covtest_config(workdir.clone(), 92, "dq"),
-            logger.clone(),
-            None,
+        let out = expect_proof(
+            BenchmarkPipeline::execute(
+                covtest_config(workdir.clone(), 92, "dq"),
+                logger.clone(),
+                None,
+            ),
+            &logger,
+            "disqualified run still returns Ok",
         )
-        .await
-        .expect("disqualified run still returns Ok");
+        .await;
         assert!(out.disqualified);
         assert_proof_ok(&out, &logger);
         assert_eq!(out.manifest.status, "disqualified_cheat");
         assert_eq!(out.manifest.pass_rate, 0.0);
-        assert_proof_score(&out, &logger, 0, 6);
+        assert_proof_score(&out, &logger, 0, 21);
         assert_eq!(out.manifest.stages.len(), 1);
         assert_eq!(out.manifest.stages[0].stage, 0);
         assert!(out.manifest.stages[0]
@@ -4888,9 +4894,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("sdb-sql stages 0-3 must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "sdb-sql stages 0-3 must complete",
+        )
+        .await;
         assert!(
             !out.infra_error,
             "unexpected infra error: {:?}",
@@ -5109,9 +5118,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-4 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-4 fixture run must complete",
+        )
+        .await;
         assert!(
             !out.infra_error,
             "unexpected infra error: {:?}",
@@ -5163,9 +5175,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-5 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-5 fixture run must complete",
+        )
+        .await;
         assert!(
             !out.infra_error,
             "unexpected infra error: {:?}",
@@ -5217,9 +5232,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-5 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-5 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 5: Crash safety -> PASS",
@@ -5276,9 +5294,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-6 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-6 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 5: Crash safety -> PASS",
@@ -5333,9 +5354,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-7 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-7 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         assert!(
             logger.contains("Stage 7: Aggregates -> PASS"),
@@ -5405,9 +5429,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-14 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-14 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 14: Observability -> PASS",
@@ -5474,9 +5501,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-12 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-12 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 12: Concurrency and isolation -> PASS",
@@ -5539,9 +5569,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-12 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-12 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 12: Concurrency and isolation -> PASS",
@@ -5687,9 +5720,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-15 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-15 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 15: Tests and CI gate -> PASS",
@@ -5758,9 +5794,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-15 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-15 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 15: Tests and CI gate -> PASS",
@@ -5879,9 +5918,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-16 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-16 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 16: Larger than memory -> PASS",
@@ -5951,9 +5993,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-17 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-17 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 17: Incident: disk full -> PASS",
@@ -6099,9 +6144,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-19 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-19 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 19: Replication and failover -> PASS",
@@ -6171,9 +6219,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-19 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-19 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 19: Replication and failover -> PASS",
@@ -6244,9 +6295,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-20 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-20 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 20: PostgreSQL wire protocol -> PASS",
@@ -6316,9 +6370,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-20 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-20 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 20: PostgreSQL wire protocol -> PASS",
@@ -6383,9 +6440,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-13 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-13 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 13: Schema change -> PASS",
@@ -6439,9 +6499,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-11 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-11 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         // gui-spec.md §5.1: every verification round is recorded in the
         // manifest (the initial try here; eval-only runs have no repairs).
@@ -6501,9 +6564,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-10 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-10 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 10: Subqueries -> PASS",
@@ -6551,9 +6617,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-9 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-9 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 9: Constraints -> PASS",
@@ -6601,9 +6670,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-8 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-8 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 8: Joins -> PASS",
@@ -6650,9 +6722,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-11 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-11 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in ["Stage 11: Indexes + perf gate -> PASS", "[PERF] point p50"] {
             assert!(
@@ -6700,9 +6775,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-8 lite fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-8 lite fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in ["Stage 8: Joins -> PASS", "Stage 7: Aggregates -> PASS"] {
             assert!(
@@ -6746,9 +6824,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-7 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-7 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 7: Aggregates -> PASS",
@@ -6797,9 +6878,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the stage-6 fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the stage-6 fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         for needle in [
             "Stage 6: Transactions -> PASS",
@@ -6855,9 +6939,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the drift fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the drift fixture run must complete",
+        )
+        .await;
         assert_proof_ok(&out, &logger);
         assert!(
             logger.contains("[UPGRADE] sentinel from stage 4 FAILED"),
@@ -6909,9 +6996,12 @@ main()
             cap_headroom_usd: None,
         });
         let logger = Arc::new(RecordingLogger::default());
-        let out = BenchmarkPipeline::execute(config, logger.clone(), None)
-            .await
-            .expect("the shrink fixture run must complete");
+        let out = expect_proof(
+            BenchmarkPipeline::execute(config, logger.clone(), None),
+            &logger,
+            "the shrink fixture run must complete",
+        )
+        .await;
         assert!(
             !out.infra_error,
             "unexpected infra error: {:?}",

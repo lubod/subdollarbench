@@ -178,6 +178,10 @@ fn write_status(
             // R23 D5: the live status shows the remaining dollars.
             let cap = v["live"]["campaign_budget"].as_f64().unwrap_or(0.0);
             v["live"]["dollars_left"] = serde_json::json!((cap - r.total_cost_usd).max(0.0));
+            // R36-3: the Board's live stub reads the image the run recorded.
+            if let Some(img) = &r.sandbox_image {
+                v["live"]["sandbox_image"] = serde_json::json!(img);
+            }
         }
     });
 }
@@ -504,12 +508,16 @@ pub async fn run(
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let model_tag = model.replace(['/', ':'], "_");
     let campaign_id = format!("campaign_{}_{}_{}", lc.spec.name, model_tag, ts);
+    // R36-3: the Board's live stub reads this cell's own image from
+    // status.json. One inspect at launch (a CLI path) replaces one inspect
+    // per Board request.
+    let launch_image = subdollarbench::sandbox::omp_updater::sandbox_image_id();
     // One campaign at a time, CLI or GUI: the lock covers every path and
     // is released when this process ends (round-7 finding 1).
     let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id)
         .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
 
-    let (chain_state, chain_career) = if let Some(chain_id) = chain.as_deref() {
+    let (chain_state, chain_career, chain_image) = if let Some(chain_id) = chain.as_deref() {
         if chain_id.contains('/') || chain_id.contains("..") {
             anyhow::bail!("invalid --chain id {chain_id:?}");
         }
@@ -537,7 +545,6 @@ pub async fn run(
             .ok()
             .and_then(|t| serde_json::from_str::<campaign::LadderState>(&t).ok());
         let phase = phase.expect("a chain implies a phase");
-        let sandbox_image = subdollarbench::sandbox::omp_updater::sandbox_image_id();
         let mut state = campaign::validate_chain(
             &rollup,
             state.as_ref(),
@@ -546,7 +553,7 @@ pub async fn run(
             &harness.to_string(),
             &effort,
             subdollarbench::report::rules::RULES_VERSION,
-            sandbox_image.as_deref(),
+            launch_image.as_deref(),
         )?;
         if let Some(ps) = &phase_spec {
             state.hints = campaign::phase_hints(&rollup, &lc.spec, ps, &state);
@@ -560,9 +567,11 @@ pub async fn run(
             }
         }
         let career = campaign::career_from(&rollup);
-        (Some(state), Some(career))
+        // R37-5: a chained phase starts from the image its predecessor ran
+        // on, so a later ticket on a different image records `mixed`.
+        (Some(state), Some(career), rollup.sandbox_image.clone())
     } else {
-        (None, None)
+        (None, None, None)
     };
     let cdir = runs_dir.join(&campaign_id);
     std::fs::create_dir_all(&cdir)?;
@@ -583,6 +592,7 @@ pub async fn run(
             "campaign_budget": budget_usd,
             "campaign_spent": 0.0,
             "dollars_left": budget_usd,
+            "sandbox_image": launch_image,
             "career_phase": phase,
             "chain_from": chain,
             "refork": refork_info,
@@ -722,13 +732,14 @@ pub async fn run(
             }
         }
     };
-    let rollup = campaign::run_campaign_phase(
+    let rollup = campaign::run_campaign_phase_on_image(
         &lc,
         &opts,
         phase_spec.as_ref(),
         chain_state.as_ref(),
         chain.as_deref(),
         chain_career.as_ref(),
+        chain_image.as_deref(),
         |attempt| {
             let job = StageJob {
                 stage: attempt.stage.clone(),
@@ -1099,6 +1110,7 @@ async fn run_one_stage(
             "campaign_budget": budget_l,
             "campaign_spent": v["live"]["campaign_spent"].clone(),
             "dollars_left": dollars_left,
+            "sandbox_image": v["live"]["sandbox_image"].clone(),
             "ticket": stage.id,
             "title": stage.title,
             "type": stage.kind,
