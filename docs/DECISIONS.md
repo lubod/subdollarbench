@@ -560,3 +560,14 @@ The benchmark answers "what does a dollar buy" (round 23):
   (after 43), 51, and 52 (round 40 folds into it). Findings R41-3,
   R41-4 and R42-4 close: AGENTS.md already asks for one item per commit
   and for Spec questions first.
+- **The order after development** (operator, 2026-10-30, "smoke yes"):
+  1. every planned round merged;
+  2. the deploy;
+  3. the perf baseline (round 49, "After the merge");
+  4. one smoke phase-1 cell in 2 lanes with the test model, under
+     $0.50 each, not publishable;
+  5. fixes for anything 3 or 4 finds;
+  6. a push, so CI runs (round 43 F4);
+  7. the 20-pass bar and the load bar;
+  8. the calibration career;
+  9. the grid.
