@@ -116,6 +116,8 @@ struct RawCell {
     phase: Option<u32>,
     chain_from: Option<String>,
     career_cells: Vec<String>,
+    /// R47 F4: the successor this cell superseded, when it is a refork.
+    refork_of: Option<String>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -135,6 +137,25 @@ fn drop_lineage(dropped: &mut HashSet<String>, name: &str, rollup: &Value) {
     }
     if let Some(chain) = rollup["chain_from"].as_str() {
         dropped.insert(chain.to_string());
+    }
+}
+
+/// R47 F4: drop a superseded successor and every later phase chained from
+/// it. The refork's own branch is not a child of the superseded cell, so it
+/// survives; the superseded branch itself stays on disk for the Run view.
+fn drop_branch(dropped: &mut HashSet<String>, root: &str, by_name: &HashMap<String, &RawCell>) {
+    let mut stack = vec![root.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        dropped.insert(name.clone());
+        for c in by_name.values() {
+            if c.chain_from.as_deref() == Some(name.as_str()) {
+                stack.push(c.name.clone());
+            }
+        }
     }
 }
 
@@ -239,6 +260,23 @@ fn load_raw(runs_dir: &str) -> (Vec<RawCell>, HashSet<String>) {
                     .collect()
             })
             .unwrap_or_default();
+        let refork_of = rollup["refork"]["of"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                status
+                    .as_ref()
+                    .and_then(|t| t.pointer("/refork/of"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                status
+                    .as_ref()
+                    .and_then(|t| t.pointer("/live/refork/of"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
         out.push(RawCell {
             name,
             dir: e.path(),
@@ -249,7 +287,16 @@ fn load_raw(runs_dir: &str) -> (Vec<RawCell>, HashSet<String>) {
             phase,
             chain_from,
             career_cells,
+            refork_of,
         });
+    }
+    // R47 F4: a refork supersedes the successor it names and that branch's
+    // later phases. The public board keeps only the refork's branch; the
+    // Run view still serves the superseded cells.
+    let by_name: HashMap<String, &RawCell> = out.iter().map(|c| (c.name.clone(), c)).collect();
+    let roots: Vec<String> = out.iter().filter_map(|c| c.refork_of.clone()).collect();
+    for root in roots {
+        drop_branch(&mut dropped, &root, &by_name);
     }
     (out, dropped)
 }
@@ -1512,6 +1559,18 @@ mod tests {
         fs::write(&spath, sv.to_string()).unwrap();
     }
 
+    /// R47 F4: mark a cell as the refork that superseded `of`.
+    fn set_refork(runs: &Path, prefix: &str, phase: u32, of: &str) {
+        let path = runs.join(format!("campaign_{prefix}_p{phase}/campaign.json"));
+        let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+        v["refork"] = serde_json::json!({"of": of, "reason": "retry"});
+        fs::write(&path, v.to_string()).unwrap();
+        let spath = runs.join(format!("campaign_{prefix}_p{phase}/status.json"));
+        let mut sv: Value = serde_json::from_str(&read(&spath)).unwrap();
+        sv["rollup"] = v;
+        fs::write(&spath, sv.to_string()).unwrap();
+    }
+
     fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!(
             "{name}-{}-{}",
@@ -1837,6 +1896,91 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("sha256:test-image"), "{html}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R47 F4 (R44-7): a refork supersedes the named successor and its
+    /// later phases, so the board gives one career: the refork's.
+    #[test]
+    fn r47_f4_refork_supersedes() {
+        let (base, runs, _out) = fixture("r47refork");
+        // Predecessor.
+        write_phase(
+            &runs,
+            "rel",
+            "forked",
+            1,
+            None,
+            &["campaign_rel_p1".into()],
+            &[0, 1, 2, 3, 4, 5, 6],
+            1.0,
+            0.01,
+            "done",
+            1.0,
+            0.01,
+        );
+        // The superseded branch.
+        let mut old_cells = vec!["campaign_rel_p1".to_string()];
+        let mut old_prior = "campaign_rel_p1".to_string();
+        for (phase, ids, pts) in [
+            (2u32, vec![7, 8, 9, 10], 2.0),
+            (3, vec![11, 12, 13, 14, 15], 3.0),
+            (4, vec![16, 17, 18, 19, 20], 4.0),
+        ] {
+            let prefix = "relold";
+            old_cells.push(format!("campaign_{prefix}_p{phase}"));
+            write_phase(
+                &runs,
+                prefix,
+                "forked",
+                phase,
+                Some(&old_prior),
+                &old_cells,
+                &ids,
+                pts,
+                0.01,
+                "done",
+                1.0 + pts,
+                0.02,
+            );
+            old_prior = format!("campaign_{prefix}_p{phase}");
+        }
+        // The refork branch, naming the old phase-2 cell as superseded.
+        let mut new_cells = vec!["campaign_rel_p1".to_string()];
+        let mut new_prior = "campaign_rel_p1".to_string();
+        for (phase, ids, pts) in [
+            (2u32, vec![7, 8, 9, 10], 2.0),
+            (3, vec![11, 12, 13, 14, 15], 3.0),
+            (4, vec![16, 17, 18, 19, 20], 4.0),
+        ] {
+            let prefix = "relnew";
+            new_cells.push(format!("campaign_{prefix}_p{phase}"));
+            write_phase(
+                &runs,
+                prefix,
+                "forked",
+                phase,
+                Some(&new_prior),
+                &new_cells,
+                &ids,
+                pts,
+                0.01,
+                "done",
+                1.0 + pts,
+                0.02,
+            );
+            new_prior = format!("campaign_{prefix}_p{phase}");
+        }
+        set_refork(&runs, "relnew", 2, "campaign_relold_p2");
+        assert!(runs.join("campaign_relold_p4").is_dir(), "kept on disk");
+        let cells = careers(runs.to_str().unwrap());
+        assert_eq!(cells.len(), 1, "one career survives a refork: {cells:?}");
+        assert_eq!(cells[0].campaign_id, "campaign_relnew_p4");
+        assert!(
+            !cells[0].cells.iter().any(|c| c.contains("relold")),
+            "the superseded branch leaked into the career: {:?}",
+            cells[0].cells
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
