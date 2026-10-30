@@ -727,7 +727,13 @@ mod tests {
                 "task": "sql",
                 "started_at": "2026-10-18T00:00:00Z",
                 "finished_at": "2026-10-18T00:30:00Z",
-                "stages": [],
+                "stages": [{
+                    "id": 0, "title": "t0", "type": "genesis", "passed": true,
+                    "pass_rate": 100.0, "passed_stages": 1, "total_stages": 1,
+                    "regressed": [], "regression_severity": 0,
+                    "effective_cost_usd": 0.01, "status": "passed",
+                    "run_id": "run0", "variant": "full"
+                }],
                 "reached": 2,
                 "regression_free_tickets": 2,
                 "points": 3.0,
@@ -736,6 +742,18 @@ mod tests {
                 "total_cost_usd": 0.05,
                 "over_budget": false,
                 "over_wall": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // R47 F5: a ranked career carries its ticket fingerprint.
+        let stamp = cell.join("s0_full");
+        fs::create_dir_all(&stamp).unwrap();
+        fs::write(
+            stamp.join("manifest.json"),
+            serde_json::json!({
+                "run_id": "run0",
+                "rules_version": subdollarbench::report::rules::RULES_VERSION
             })
             .to_string(),
         )
