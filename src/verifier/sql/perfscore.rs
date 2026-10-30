@@ -1705,13 +1705,24 @@ mod tests {
     }
 
     fn fake_engine(delay: Duration, wrong: bool) -> std::net::SocketAddr {
+        fake_engine_counted(delay, wrong, None)
+    }
+
+    /// R50 F6: the fake engine can expose its acknowledged inserts, so a
+    /// flush counter can be driven by the real commits.
+    fn fake_engine_counted(
+        delay: Duration,
+        wrong: bool,
+        inserts: Option<Arc<AtomicU64>>,
+    ) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let store = Arc::new(Mutex::new(FakeStore::default()));
         std::thread::spawn(move || {
             for sock in listener.incoming().flatten() {
                 let store = store.clone();
-                std::thread::spawn(move || serve_fake(sock, store, delay, wrong));
+                let inserts = inserts.clone();
+                std::thread::spawn(move || serve_fake(sock, store, delay, wrong, inserts));
             }
         });
         addr
@@ -1804,7 +1815,13 @@ mod tests {
         "ERR syntax fake".to_string()
     }
 
-    fn serve_fake(sock: TcpStream, store: Arc<Mutex<FakeStore>>, delay: Duration, wrong: bool) {
+    fn serve_fake(
+        sock: TcpStream,
+        store: Arc<Mutex<FakeStore>>,
+        delay: Duration,
+        wrong: bool,
+        inserts: Option<Arc<AtomicU64>>,
+    ) {
         sock.set_nodelay(true).unwrap();
         let mut reader = BufReader::new(sock.try_clone().unwrap());
         let mut writer = sock;
@@ -1822,6 +1839,11 @@ mod tests {
                 let mut s = store.lock().unwrap();
                 answer_fake(&mut s, sql, wrong)
             };
+            if let Some(n) = &inserts {
+                if sql.starts_with("INSERT INTO ") && reply.starts_with("OK ") {
+                    n.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             if writer
                 .write_all(reply.as_bytes())
                 .and_then(|()| writer.write_all(b"\n"))
@@ -1923,6 +1945,58 @@ mod tests {
                 self.after
             })
         }
+    }
+
+    /// R50 F6: a flush counter fed by the fake engine's acknowledged
+    /// inserts, one per side.
+    struct EngineFlush(Arc<AtomicU64>);
+
+    impl FlushCounter for EngineFlush {
+        fn flushes(&self) -> Result<u64, String> {
+            Ok(self.0.load(Ordering::Relaxed))
+        }
+    }
+
+    /// R49-3: both sides durable over two rounds means every 1-client
+    /// window's delta tracks its own commits; W4 is correct and the phase
+    /// keeps a score. StepFlush failed here because its second window read
+    /// zero.
+    #[test]
+    fn r50_f6_durable_pair_two_rounds() {
+        let ref_inserts = Arc::new(AtomicU64::new(0));
+        let cand_inserts = Arc::new(AtomicU64::new(0));
+        let reference = fake_engine_counted(Duration::ZERO, false, Some(ref_inserts.clone()));
+        let candidate = fake_engine_counted(Duration::ZERO, false, Some(cand_inserts.clone()));
+        let cfg = PerfConfig {
+            rounds: 2,
+            ..PerfConfig::small_for_tests()
+        };
+        let score = run_pair_with_flush(
+            &reference.to_string(),
+            &candidate.to_string(),
+            1,
+            &cfg,
+            Some(&EngineFlush(ref_inserts)),
+            Some(&EngineFlush(cand_inserts)),
+        );
+        let w4 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W4")
+            .expect("phase 1 runs W4");
+        assert!(w4.correct, "the durable pair must pass W4: {:?}", w4.note);
+        assert!(
+            w4.numbers
+                .get("candidate_1_client_commits")
+                .copied()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            score.score.is_some(),
+            "a durable pair keeps the phase scored: {:?}",
+            score.error
+        );
     }
 
     struct BrokenFlush;
