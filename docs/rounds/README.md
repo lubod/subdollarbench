@@ -28,13 +28,13 @@ from `TEMPLATE.md`.
 | [40](40.md) | The CLI runs the official cell and says what it ran (no graded path) | folded into 52 (operator 2026-10-30) |
 | [41](41.md) | The CLI, the API and the portal serve only sdb-sql (no graded path) | merged `17d09eb` |
 | [42](42.md) | `subdollarbench tui`, a terminal console like htop (graded: `Cargo.lock`) | merged `b28674d` |
-| [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | open (next; operator 2026-10-30 "after 43": the bar and the grid wait for it) |
+| [43](43.md) | Delete the retired tasks; the graded findings (graded: full gate + bar) | merged `4e37c4a` |
 | [44](44.md) | Publish the grid: careers on the board, the results views, deploy (no graded path) | merged `a3a4e19` |
 | [45](45.md) | The perf score: workloads, score, contract, rules `.43` (v2 of the board) | merged `c84c5ea` |
 | [46](46.md) | Price the grid models: luna, mimo-v2.6-flash, qwen3.8-flash (graded: `src/cost`) | merged `e44705f` |
 | [48](48.md) | Careers in parallel lanes: `--worker`, a grading lock, a load bar, `scripts/grid.sh` (graded: full gate + bar) | merged `1b28eb0` |
 | [49](49.md) | W4 counts only durable commits: data on disk, a flush check, R45-3/R45-6, rules `.44` (graded: full gate + bar) | merged `bdffb77` |
-| [47](47.md) | The board v2: perf column and tie-break; R44-6/7/8/13 (graded: full gate) | open (after 43: branch from the tag, merge master once 43 is merged; operator 2026-10-30) |
+| [47](47.md) | The board v2: perf column and tie-break; R44-6/7/8/13 (graded: full gate) | open (43 merged: branch from the tag, then merge master; operator 2026-10-30) |
 | [50](50.md) | The grid driver and the flush counter: R48-4..7, R49-2, R49-3 (graded: full gate) | open (alongside 43; operator 2026-10-30) |
 | [51](51.md) | Publishing: a marked target, one secret list, the results page (R44-9, R44-10, R44-14, Q8 a) | open (operator 2026-10-30) |
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40) | open (operator 2026-10-30) |
