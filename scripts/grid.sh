@@ -273,15 +273,19 @@ run_lane() {
             rc=0
             run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" || rc=$?
             id="$(result_get "$result" campaign_id)"
-            local got_phase points cost stop
+            local got_phase got_chain points cost stop
             got_phase="$(result_get "$result" phase)"
+            got_chain="$(result_get "$result" chain_from)"
             points="$(result_get "$result" points)"
             cost="$(result_get "$result" cost_usd)"
             stop="ok"
             if (( rc != 0 )); then
                 stop="cell exit $rc"
             elif [[ "$got_phase" != "$phase" ]]; then
-                stop="phase $got_phase"
+                # R48-4: the rollup's phase, not the request's, decides.
+                stop="phase ${got_phase:-null}"
+            elif [[ "$got_chain" != "$chain" ]]; then
+                stop="chain ${got_chain:-null}"
             elif [[ "$(result_true "$result" harness_fault)" == "1" ]]; then
                 stop="harness fault"
             elif [[ "$(result_true "$result" infra_error)" == "1" ]]; then
