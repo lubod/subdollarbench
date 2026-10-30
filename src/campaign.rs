@@ -2157,6 +2157,11 @@ pub struct BoardSortKey {
     pub live: bool,
     pub current_rules: bool,
     pub points: f64,
+    /// R47 F1: the career's latest measured perf score (`career.perf`), or
+    /// the phase's own when the cell has no career block. Breaks points
+    /// ties; a score sorts above no score.
+    #[serde(default)]
+    pub perf: Option<f64>,
     pub per_dollar: Option<f64>,
     pub cost: f64,
 }
@@ -2171,10 +2176,17 @@ impl BoardSortKey {
             .as_ref()
             .map(|c| (c.points, c.total_cost_usd))
             .unwrap_or((rollup.points, rollup.total_cost_usd));
+        // R47 F1: the career's perf score, or the phase's own for a cell
+        // with no career block.
+        let perf = match &rollup.career {
+            Some(c) => c.perf.as_ref().and_then(|p| p.score),
+            None => rollup.perf.as_ref().and_then(|p| p.score),
+        };
         Self {
             live: false,
             current_rules: current,
             points,
+            perf,
             per_dollar: (cost > 0.0).then(|| points / cost),
             cost,
         }
@@ -2188,8 +2200,8 @@ pub fn is_current_rules(rules: &str) -> bool {
     rules == crate::report::rules::RULES_VERSION
 }
 
-/// The board order: current rules first, then points desc, then points per
-/// dollar desc, then cheaper.
+/// The board order: current rules first, then points desc, then perf desc
+/// (a score above none), then points per dollar desc, then cheaper.
 pub fn board_order(a: &BoardSortKey, b: &BoardSortKey) -> std::cmp::Ordering {
     b.live
         .cmp(&a.live)
@@ -2197,6 +2209,12 @@ pub fn board_order(a: &BoardSortKey, b: &BoardSortKey) -> std::cmp::Ordering {
         .then_with(|| {
             b.points
                 .partial_cmp(&a.points)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            // Higher perf first; Some sorts above None (Option's order).
+            b.perf
+                .partial_cmp(&a.perf)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .then_with(|| {
@@ -4262,6 +4280,7 @@ mod tests {
             live: false,
             current_rules: rules == RULES_VERSION,
             points,
+            perf: None,
             per_dollar: (cost > 0.0).then(|| points / cost),
             cost,
         };
@@ -4275,6 +4294,61 @@ mod tests {
         assert_eq!(board_order(&current, &current), std::cmp::Ordering::Equal);
     }
 
+    /// R47 F1: perf breaks a points tie; more points always beats a better
+    /// perf; a score sorts above no score; points per dollar decides only
+    /// after equal points and equal perf.
+    #[test]
+    fn r47_f1_perf_breaks_points_ties() {
+        let key = |points: f64, perf: Option<f64>, cost: f64| BoardSortKey {
+            live: false,
+            current_rules: true,
+            points,
+            perf,
+            per_dollar: (cost > 0.0).then(|| points / cost),
+            cost,
+        };
+        let better = key(20.0, Some(1.5), 0.5);
+        let lower = key(20.0, Some(1.2), 0.5);
+        assert_eq!(board_order(&better, &lower), std::cmp::Ordering::Less);
+        assert_eq!(board_order(&lower, &better), std::cmp::Ordering::Greater);
+        let scored = key(20.0, Some(0.9), 0.5);
+        let unscored = key(20.0, None, 0.5);
+        assert_eq!(
+            board_order(&scored, &unscored),
+            std::cmp::Ordering::Less,
+            "a score sorts above no score"
+        );
+        let cheap = key(20.0, Some(1.5), 0.25);
+        let pricey = key(20.0, Some(1.5), 0.5);
+        assert_eq!(
+            board_order(&cheap, &pricey),
+            std::cmp::Ordering::Less,
+            "equal points and perf: points per dollar decides"
+        );
+        let more = key(21.0, Some(0.1), 0.5);
+        let fewer = key(20.0, Some(9.9), 0.5);
+        assert_eq!(board_order(&more, &fewer), std::cmp::Ordering::Less);
+        assert_eq!(board_order(&fewer, &more), std::cmp::Ordering::Greater);
+
+        // The key reads the career's score, not the phase's own.
+        use crate::verifier::sql::perfscore::PerfScore;
+        let mut r = chain_rollup(1, true);
+        r.points = 20.0;
+        r.perf = Some(PerfScore {
+            workloads: Vec::new(),
+            score: Some(0.5),
+            error: None,
+        });
+        let career = r.career.as_mut().expect("career");
+        career.points = 20.0;
+        career.perf = Some(PerfScore {
+            workloads: Vec::new(),
+            score: Some(1.5),
+            error: None,
+        });
+        assert_eq!(BoardSortKey::of(&r).perf, Some(1.5));
+    }
+
     /// Round-8 finding 9: a rollup-less (live) cell is pinned first in its
     /// own group and the comparator stays a total order — sorting must
     /// never see it as "equal to everything".
@@ -4285,6 +4359,7 @@ mod tests {
             live,
             current_rules: true,
             points,
+            perf: None,
             per_dollar: Some(points / 0.5),
             cost: 0.5,
         };

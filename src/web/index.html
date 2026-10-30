@@ -2460,6 +2460,25 @@
       const c = leaf && cellRollup(leaf).career;
       return c ? Number(c.total_cost_usd || 0) : 0;
     }
+    /// R47 F1/F2: the career's latest perf score (the leaf's career block),
+    /// or null when no phase has a score.
+    function careerPerf(cells) {
+      const leaf = careerLeaf(cells);
+      const r = leaf && cellRollup(leaf);
+      const p = r && (r.career && r.career.perf ? r.career.perf : r.perf);
+      return p && p.score != null ? Number(p.score) : null;
+    }
+    function perfTitle(p) {
+      if (!p) return '';
+      const bits = (p.workloads || []).map(w => {
+        const row = `${w.id}: ref ${Number(w.reference).toFixed(3)} \u00b7 candidate ${Number(w.candidate).toFixed(3)} \u00b7 ${Number(w.ratio).toFixed(2)}\u00d7`;
+        const floor = !w.correct ? ' \u00b7 floored (wrong answer, not durable)' : '';
+        const note = w.note ? ` \u00b7 ${w.note}` : '';
+        return row + floor + note;
+      });
+      if (p.error) bits.push(`harness: ${p.error}`);
+      return bits.join('\n');
+    }
 
     function groupCells(cells) {
       // Q5: a phase cell belongs to its career chain (root -> leaf), never
@@ -2491,6 +2510,12 @@
         if (a.career && b.career) {
           const pa = careerPoints(a.cells), pb = careerPoints(b.cells);
           if (pb !== pa) return pb - pa;
+          const fa = careerPerf(a.cells), fb = careerPerf(b.cells);
+          if (fa !== fb) {
+            if (fa == null) return 1;
+            if (fb == null) return -1;
+            return fb - fa;
+          }
           const da = careerCost(a.cells), db = careerCost(b.cells);
           const ra = da > 0 ? pa / da : -1, rb = db > 0 ? pb / db : -1;
           if (rb !== ra) return rb - ra;
@@ -2590,6 +2615,11 @@
       const cost = career ? Number(r.career.total_cost_usd || 0) : cellCost(cell);
       const pd = career ? (cost > 0 ? pts / cost : null) : cellPerDollar(cell);
       const maxPts = career ? 76 : (r.max_points || 0);
+      const perfObj = career
+        ? ((r.career && r.career.perf) || r.perf)
+        : r.perf;
+      const perf = perfObj && perfObj.score != null ? Number(perfObj.score) : null;
+      const perfCell = `<td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;" title="${escapeHtml(perfTitle(perfObj))}">${perf == null ? '\u2014' : perf.toFixed(2) + '\u00d7'}</td>`;
       const cur = window.__SDB_RULES__ || '';
       const rules = cellRules(cell);
       const stale = (cur && rules && rules !== cur)
@@ -2614,6 +2644,7 @@
           <div class="hint" style="${state.cls}">${escapeHtml(state.text)}${stale}${refork}</div></td>
         <td style="width:100%;">${strip}</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt1(pts)}/${Math.round(maxPts)} pts</td>
+        ${perfCell}
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">$${fmtMoney(cost)}</td>
         <td class="cardLine" style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">${pd == null ? '\u2014' : fmt1(pd)} pts/$</td>
       </tr>`;
@@ -2647,11 +2678,11 @@
           </select></label>`;
       const table = inner => `<table class="responsive-runs-table"><thead><tr>
           <th style="width:34px;">#</th><th style="width:220px;">Model</th><th>Ladder</th>
-          <th style="text-align:right;width:90px;">Points</th><th style="text-align:right;width:80px;">$</th>
+          <th style="text-align:right;width:90px;">Points</th><th style="text-align:right;width:70px;">Perf</th><th style="text-align:right;width:80px;">$</th>
           <th style="text-align:right;width:90px;">Pts/$</th>
         </tr></thead><tbody>${inner}</tbody></table>${ladderLegend()}`;
       if (!visible.length) {
-        body.innerHTML = table('<tr><td colspan="6" class="hint" style="padding:18px;">No runs yet. Start one from the Admin tab.</td></tr>');
+        body.innerHTML = table('<tr><td colspan="7" class="hint" style="padding:18px;">No runs yet. Start one from the Admin tab.</td></tr>');
         return;
       }
       let rank = 0;
@@ -2663,7 +2694,7 @@
         // newest started_at wins. The rest are expanded phase rows.
         const top = career ? (careerLeaf(cells) || cells[0]) : cells[0];
         if (boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
-          rows += `<tr><td colspan="6" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
+          rows += `<tr><td colspan="7" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
           dividerDone = true;
         }
         rank += 1;
@@ -2678,7 +2709,7 @@
             const topRollup = cellRollup(top);
             const topFrom = topRollup.chain_from;
             const topStarted = topRollup.started_at || '';
-            rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">career phases (leaf first): the top row is the cumulative career; these are the individual phase cells</td></tr>`;
+            rows += `<tr><td colspan="7" class="hint" style="padding-top:0;">career phases (leaf first): the top row is the cumulative career; these are the individual phase cells</td></tr>`;
             cells
               .filter(c => c.id !== top.id)
               .sort((a, b) => (cellRollup(a).phase || 0) - (cellRollup(b).phase || 0))
@@ -2698,7 +2729,7 @@
             const med = sorted.length % 2 === 0
               ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
               : sorted[Math.floor(sorted.length / 2)];
-            rows += `<tr><td colspan="6" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
+            rows += `<tr><td colspan="7" class="hint" style="padding-top:0;">median ${fmt1(med)} pts across ${n} runs</td></tr>`;
             cells.forEach(c => { if (c.id !== top.id) rows += boardRowHtml(c, '\u00b7', { indent: true }); });
           }
         }
@@ -2799,6 +2830,23 @@
       return `${startTxt} \u2192 ${r.finished_at ? clockOf(r.finished_at) : '\u2014'}${elapsed != null ? ' \u00b7 ' + fmtDurSec(elapsed) + ' elapsed' : ''}`;
     }
 
+    /// R47 F2: the phase's perf block on the Run view: one row per
+    /// workload with reference, candidate, ratio and the note. A floored
+    /// workload says why (wrong answer or a non-durable write).
+    function perfBlock(perf) {
+      if (!perf || !(perf.workloads || []).length) return '';
+      const rows = perf.workloads.map(w => {
+        const verdict = w.correct
+          ? 'ok'
+          : '<span style="color:var(--warning);">floored (wrong answer, not durable)</span>';
+        return `<tr><td>${escapeHtml(w.id)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.reference).toFixed(3)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.candidate).toFixed(3)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.ratio).toFixed(2)}\u00d7</td><td>${verdict}</td><td class="hint">${escapeHtml(w.note || '')}</td></tr>`;
+      }).join('');
+      const score = perf.score != null ? `${Number(perf.score).toFixed(2)}\u00d7` : '\u2014';
+      return `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">perf ${score} \u00b7 phase workloads</summary>
+        <table class="responsive-runs-table" style="margin-top:4px;"><thead><tr><th>Workload</th><th style="text-align:right;">Reference</th><th style="text-align:right;">Candidate</th><th style="text-align:right;">Ratio</th><th>Verdict</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>
+        ${perf.error ? `<div class="hint">harness: ${escapeHtml(perf.error)}</div>` : ''}</details>`;
+    }
+
     function renderRun() {
       const d = currentRunDetail;
       const body = document.getElementById('runBody');
@@ -2845,8 +2893,9 @@
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
           <div>
             <h2 style="margin:0;font-size:1.05rem;">${escapeHtml(shortModel(r.model || d.id))}</h2>
-            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 SQLite ${escapeHtml(r.sqlite_version || '\u2014')} \u00b7 image ${escapeHtml((r.sandbox_image || '\u2014').slice(0, 19))}${r.cap_price_basis ? ' \u00b7 ' + escapeHtml(r.cap_price_basis) : (rulesAtLeast(r.rules_version, '2026-10-19.39') ? ' \u00b7 cap at list price (model_prices.json)' : '')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${r.phase ? ` \u00b7 phase ${r.phase}` : ''}${r.chain_from ? ` \u00b7 <a href="#run/${encodeURIComponent(r.chain_from)}" style="color:var(--primary);">from ${escapeHtml(r.chain_from)}</a>` : ''}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${r.over_budget ? ` \u00b7 <span style="color:var(--warning);">over budget by $${fmtMoney(total - cap)}</span>` : ''}${r.cap_reached ? ' \u00b7 <span style="color:var(--warning);">budget cap reached</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
+            <div class="hint">${escapeHtml(modelMeta(r.model || '', r.harness, r.effort))} \u00b7 rules ${escapeHtml(r.rules_version || '\u2014')} \u00b7 SQLite ${escapeHtml(r.sqlite_version || '\u2014')} \u00b7 image ${escapeHtml((r.sandbox_image || '\u2014').slice(0, 19))}${r.cap_price_basis ? ' \u00b7 ' + escapeHtml(r.cap_price_basis) : (rulesAtLeast(r.rules_version, '2026-10-19.39') ? ' \u00b7 cap at list price (model_prices.json)' : '')} \u00b7 ${escapeHtml(runTimes(d, r))} \u00b7 ${escapeHtml(d.state || '')}${r.phase ? ` \u00b7 phase ${r.phase}` : ''}${r.chain_from ? ` \u00b7 <a href="#run/${encodeURIComponent(r.chain_from)}" style="color:var(--primary);">from ${escapeHtml(r.chain_from)}</a>` : ''}${d.state === 'done' && d.stop_reason ? ' \u00b7 ' + escapeHtml(d.stop_reason) : ''}${d.superseded ? ` \u00b7 <span class="badge" style="border-color:var(--warning);color:var(--warning);" title="this branch was superseded; it stays visible for the record">superseded${d.superseded_by ? ' by ' + escapeHtml(d.superseded_by) : ''}</span>` : ''}${r.over_budget ? ` \u00b7 <span style="color:var(--warning);">over budget by $${fmtMoney(total - cap)}</span>` : ''}${r.cap_reached ? ' \u00b7 <span style="color:var(--warning);">budget cap reached</span>' : ''}${r.over_wall ? ' \u00b7 <span style="color:var(--warning);">over wall</span>' : ''}</div>
             ${r.career ? `<div class="hint">career: ${fmt1(r.career.points || 0)} pts \u00b7 $${fmtMoney(r.career.total_cost_usd || 0)} \u00b7 ${(r.career.cells || []).length} phase cell(s)</div>` : ''}
+            ${perfBlock(r.perf)}
             ${(r.worker != null || r.concurrent_cells != null || r.grading_wait_s != null) ? `<div class="hint">lane ${r.worker ?? '?'} \u00b7 ${r.concurrent_cells ?? 1} cell(s) at once \u00b7 grading wait ${fmtDurSec(r.grading_wait_s || 0)}</div>` : ''}
             ${d.live_run ? `<div class="hint" style="color:var(--primary);">${escapeHtml(liveSummary(false))}</div>` : ''}
           </div>

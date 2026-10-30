@@ -1747,6 +1747,7 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
                 live: false,
                 current_rules: false,
                 points: 0.0,
+                perf: None,
                 per_dollar: None,
                 cost: 0.0,
             })
@@ -2029,6 +2030,37 @@ pub(crate) async fn start_campaign(
     }
 }
 
+/// R47 F4: the campaign whose `refork.of` names `id`. The superseded cell
+/// stays available in the Run view (the public board drops its branch).
+fn superseded_by(runs_dir: &std::path::Path, id: &str) -> Option<String> {
+    let rd = std::fs::read_dir(runs_dir).ok()?;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("campaign_") || !e.path().is_dir() {
+            continue;
+        }
+        let rollup: Option<serde_json::Value> =
+            std::fs::read_to_string(e.path().join("campaign.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .or_else(|| {
+                    std::fs::read_to_string(e.path().join("status.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .and_then(|v| v.get("rollup").cloned())
+                });
+        if rollup
+            .as_ref()
+            .and_then(|r| r.pointer("/refork/of"))
+            .and_then(|v| v.as_str())
+            == Some(id)
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
 /// One campaign in depth (gui-spec.md §5.4): the rollup with rounds and
 /// classified failures backfilled for old cells, the full ladder (every
 /// ticket, attempted or not) and the caps. This is what the Run view and
@@ -2123,6 +2155,10 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
         body["phases"] = crate::campaign::phases_json(spec);
     }
     body["live_run"] = serde_json::json!(live);
+    // R47 F4: a superseded branch stays renderable, marked.
+    let superseded_by = superseded_by(&RunArchiver::resolve_runs_dir(), &clean);
+    body["superseded"] = serde_json::json!(superseded_by.is_some());
+    body["superseded_by"] = serde_json::json!(superseded_by);
     body["updated_at"] = status
         .as_ref()
         .map(|s| s["updated_at"].clone())
@@ -4829,6 +4865,111 @@ global.fetch = async (url) => {
         );
         let _ = fs::remove_dir_all(kept);
         let _ = fs::remove_dir_all(gone);
+    }
+
+    /// R47 F4: a superseded branch stays visible in the Run detail (200)
+    /// and says which refork replaced it.
+    #[tokio::test]
+    async fn r47_f4_detail_marks_superseded() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let old = format!("campaign_sdb-sql_r47supold_{}", std::process::id());
+        let new = format!("campaign_sdb-sql_r47supnew_{}", std::process::id());
+        let make = |name: &str, refork: Option<serde_json::Value>| {
+            let dir = runs.join(name);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("campaign.json"),
+                serde_json::json!({
+                    "campaign_id": name, "name": "sdb-sql", "model": "m",
+                    "harness": "omp", "effort": "high", "task": "sql",
+                    "started_at": "2026-10-30T00:00:00Z",
+                    "finished_at": "2026-10-30T01:00:00Z", "stages": [],
+                    "reached": 0, "regression_free_tickets": 0, "points": 0.0,
+                    "max_points": 76.0,
+                    "rules_version": crate::report::rules::RULES_VERSION,
+                    "total_cost_usd": 0.01, "over_budget": false,
+                    "cap_reached": false, "over_wall": false,
+                    "refork": refork
+                })
+                .to_string(),
+            )
+            .unwrap();
+            dir
+        };
+        let old_dir = make(&old, None);
+        let new_dir = make(
+            &new,
+            Some(serde_json::json!({"of": old, "reason": "retry"})),
+        );
+        let resp = get_campaign_detail(axum::extract::Path(old.clone())).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the Run view still serves it"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["superseded"], true);
+        assert_eq!(body["superseded_by"], serde_json::json!(new));
+        let _ = fs::remove_dir_all(old_dir);
+        let _ = fs::remove_dir_all(new_dir);
+    }
+
+    /// R47 F2: the API carries the phase's perf block and the career's
+    /// latest one, and the GUI board has the Perf column and the Run view's
+    /// per-workload block.
+    #[tokio::test]
+    async fn r47_f2_api_carries_perf() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let name = format!("campaign_sdb-sql_r47perf_{}", std::process::id());
+        let dir = runs.join(&name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let perf = serde_json::json!({
+            "workloads": [{
+                "id": "W1", "metric": "latency", "reference": 1.0,
+                "candidate": 0.5, "ratio": 2.0, "correct": true
+            }],
+            "score": 2.0
+        });
+        let rollup = serde_json::json!({
+            "campaign_id": name, "name": "sdb-sql", "model": "m",
+            "harness": "omp", "effort": "high", "task": "sql",
+            "started_at": "2026-10-30T00:00:00Z",
+            "finished_at": "2026-10-30T01:00:00Z", "stages": [],
+            "reached": 0, "regression_free_tickets": 0, "points": 1.0,
+            "max_points": 76.0, "rules_version": crate::report::rules::RULES_VERSION,
+            "total_cost_usd": 0.01, "over_budget": false, "cap_reached": false,
+            "over_wall": false,
+            "perf": perf,
+            "career": {"points": 1.0, "total_cost_usd": 0.01, "cells": [name], "perf": perf}
+        });
+        fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+
+        let Json(cells) = get_campaigns().await;
+        let row = cells
+            .iter()
+            .find(|c| c["id"].as_str() == Some(name.as_str()))
+            .unwrap_or_else(|| panic!("the perf cell must render: {cells:?}"));
+        assert_eq!(row["rollup"]["perf"]["score"], 2.0);
+        assert_eq!(row["rollup"]["career"]["perf"]["score"], 2.0);
+        assert_eq!(row["board_key"]["perf"], 2.0);
+
+        let gui = include_str!("index.html");
+        assert!(
+            gui.contains("<th style=\"text-align:right;width:70px;\">Perf</th>"),
+            "the GUI board has no Perf column"
+        );
+        assert!(
+            gui.contains("function perfBlock(perf)"),
+            "Run view perf block"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// Round-13: the console board applies the same hide/poison rule as the
