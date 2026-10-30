@@ -331,6 +331,19 @@ run_lane() {
 run_grid() {
     RUNNING_DIR="${LEDGER}.running"
     mkdir -p "$(dirname "$LEDGER")"
+    # R48-7: the ledger's career column is the line index in the careers
+    # file. Freeze that file next to the ledger on the first start; a later
+    # start with a different file would give the same index to another
+    # career, so refuse before any phase.
+    local careers_copy="${LEDGER}.careers"
+    if [[ -f "$careers_copy" ]]; then
+        if ! cmp -s "$CAREERS_FILE" "$careers_copy"; then
+            log "careers file changed since this grid started ($careers_copy); start a new grid with a new --ledger"
+            return 1
+        fi
+    else
+        cp "$CAREERS_FILE" "$careers_copy"
+    fi
     rm -rf "$RUNNING_DIR"
     mkdir -p "$RUNNING_DIR"
     rm -f "$STOP"
@@ -544,6 +557,105 @@ EOF
     [[ "$got" == "1 2 3 4 " ]] || { echo "career 0 did not resume: $got"; exit 1; }
     got="$(awk -F'\t' 'NR > 1 && $1 == 1 { printf "%s ", $3 }' "$LEDGER")"
     [[ "$got" == "1 2 " ]] || { echo "the blocked career 1 ran: $got"; exit 1; }
+
+    # 6) R48-4: the result's rollup phase, not the request, decides. A
+    # phase-1 request whose rollup says phase 2 stops the grid and records
+    # the reason in the ledger.
+    scenario="$dir/six"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    SDB_FAKE_RESULT_PHASE=2
+    export SDB_FAKE_RESULT_PHASE
+    load_careers "$CAREERS_FILE"
+    run_grid || true
+    got="$(awk -F'\t' 'NR > 1 { s = $8 } END { print s }' "$LEDGER")"
+    [[ "$got" == "phase 2" ]] || { echo "phase mismatch stop: '$got'"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "phase mismatch did not STOP"; exit 1; }
+    unset SDB_FAKE_RESULT_PHASE
+    export -n SDB_FAKE_RESULT_PHASE 2>/dev/null || true
+
+    # 7) R48-4: a rollup chain_from that differs from the chain passed stops
+    # the grid too.
+    scenario="$dir/seven"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    SDB_FAKE_RESULT_CHAIN=bogus
+    export SDB_FAKE_RESULT_CHAIN
+    load_careers "$CAREERS_FILE"
+    run_grid || true
+    got="$(awk -F'\t' 'NR > 1 { s = $8 } END { print s }' "$LEDGER")"
+    [[ "$got" == "chain bogus" ]] || { echo "chain mismatch stop: '$got'"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "chain mismatch did not STOP"; exit 1; }
+    unset SDB_FAKE_RESULT_CHAIN
+
+    # 8) R48-5: preflight refuses while a long test holds the lock and
+    # passes once it is released. SDB_GRID_PREFLIGHT_TEST keeps the
+    # tree/record/port checks out of this scenario.
+    scenario="$dir/eight"
+    mkdir -p "$scenario"
+    lock="$scenario/long-test.lock"
+    (
+        . "$ROOT/scripts/long-test-lock.sh"
+        SDB_LONG_TEST_LOCK="$lock" hold_long_test_lock
+        sleep 5
+    ) &
+    holder=$!
+    sleep 0.2
+    if ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=1 SDB_LONG_TEST_LOCK="$lock"; preflight 1 ); then
+        echo "preflight passed while the long-test lock was held"
+        kill "$holder" 2>/dev/null || true
+        exit 1
+    fi
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    if ! ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=1 SDB_LONG_TEST_LOCK="$lock"; preflight 1 ); then
+        echo "preflight failed while the long-test lock was free"
+        exit 1
+    fi
+
+    # 9) R48-7: the careers file is frozen with the ledger. A restart with
+    # an edited file refuses and records no row; restoring it resumes.
+    scenario="$dir/nine"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 c2 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=2
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    load_careers "$CAREERS_FILE"
+    run_grid
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 8 ]] || { echo "frozen run: expected 8 rows, got $rows"; exit 1; }
+    printf '%s\n' c1 c3 > "$scenario/careers.txt"
+    rc=0
+    run_grid || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "an edited careers file was accepted (rc=$rc)"; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 8 ]] || {
+        echo "an edited careers file recorded a row"; exit 1; }
+    printf '%s\n' c1 c2 > "$scenario/careers.txt"
+    run_grid
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 8 ]] || {
+        echo "a matching restart recorded a row"; exit 1; }
 
     echo "RESULT: PASS (grid self-test)"
 }
