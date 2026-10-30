@@ -489,10 +489,19 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
             per_dollar: (cost > 0.0).then(|| points / cost),
             cost,
         });
-    let started = leaf.rollup["started_at"].as_str().unwrap_or("").to_string();
-    let finished_at = leaf.rollup["finished_at"]
-        .as_str()
-        .or_else(|| leaf.rollup["started_at"].as_str())
+    // R51 F4 (R44-14): the career spans its phase cells, not only the leaf.
+    let started = cells
+        .iter()
+        .filter_map(|c| c.rollup["started_at"].as_str())
+        .filter(|s| !s.is_empty())
+        .min()
+        .unwrap_or("")
+        .to_string();
+    let finished_at = cells
+        .iter()
+        .filter_map(|c| c.rollup["finished_at"].as_str())
+        .filter(|s| !s.is_empty())
+        .max()
         .unwrap_or("")
         .to_string();
     CareerCell {
@@ -961,6 +970,13 @@ fn render_board(cells: &[CareerCell]) -> String {
     h
 }
 
+/// R51 F4: a grid date is printed to the minute.
+fn fmt_grid_time(s: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|_| s.to_string())
+}
+
 fn sorted_unique(values: impl Iterator<Item = f64>) -> Vec<f64> {
     let mut v: Vec<f64> = values.filter(|x| x.is_finite()).collect();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
@@ -1288,8 +1304,8 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(image),
         esc(&harness_effort),
         CAREER_CAP_USD,
-        esc(first),
-        esc(last),
+        esc(&fmt_grid_time(first)),
+        esc(&fmt_grid_time(last)),
         caps
     ));
     h.push_str(&format!(
@@ -1605,6 +1621,23 @@ mod tests {
         let mut sv: Value = serde_json::from_str(&read(&spath)).unwrap();
         sv["rollup"] = v;
         fs::write(&spath, sv.to_string()).unwrap();
+    }
+
+    /// R51 F4: rewrite a phase's start/finish in both files.
+    fn set_phase_times(runs: &Path, prefix: &str, phase: u32, started: &str, finished: &str) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["started_at"] = serde_json::json!(started);
+            rollup["finished_at"] = serde_json::json!(finished);
+            fs::write(path, v.to_string()).unwrap();
+        }
     }
 
     /// R51 F3: rewrite (or remove) a phase's effort in both files.
@@ -2146,6 +2179,51 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R51 F4 (R44-14): the grid dates run from the earliest phase start
+    /// of any ranked career to the latest finish, to the minute.
+    #[test]
+    fn r51_f4_grid_dates() {
+        let (base, runs, out) = fixture("r51dates");
+        career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
+        let a = [
+            (
+                "2026-10-20T01:09:00.900460150+00:00",
+                "2026-10-20T01:20:00.5+00:00",
+            ),
+            ("2026-10-20T01:30:00.2+00:00", "2026-10-20T01:50:00.2+00:00"),
+            ("2026-10-20T02:00:00.2+00:00", "2026-10-20T02:30:00.2+00:00"),
+            ("2026-10-20T03:00:00.2+00:00", "2026-10-20T04:00:00.1+00:00"),
+        ];
+        let b = [
+            (
+                "2026-10-20T00:30:00.123+00:00",
+                "2026-10-20T00:45:00.9+00:00",
+            ),
+            ("2026-10-20T10:00:00.9+00:00", "2026-10-20T11:00:00.9+00:00"),
+            ("2026-10-20T20:00:00.9+00:00", "2026-10-20T21:00:00.9+00:00"),
+            (
+                "2026-10-21T01:00:00.9+00:00",
+                "2026-10-21T02:00:00.999+00:00",
+            ),
+        ];
+        for (i, (start, end)) in a.iter().enumerate() {
+            set_phase_times(&runs, "a", i as u32 + 1, start, end);
+        }
+        for (i, (start, end)) in b.iter().enumerate() {
+            set_phase_times(&runs, "b", i as u32 + 1, start, end);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(
+            html.contains("2026-10-20 00:30 UTC → 2026-10-21 02:00 UTC"),
+            "the grid dates must span the careers: {html}"
+        );
+        assert!(!html.contains("00:30:00"), "seconds leaked: {html}");
+        assert!(!html.contains(".999"), "nanoseconds leaked: {html}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R51 F3 (R44-10): a rollup without effort renders no "high" and
     /// groups apart from a real high-effort career.
     #[test]
