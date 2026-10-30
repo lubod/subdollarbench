@@ -405,9 +405,31 @@ fn result_with(
     candidate: f64,
     ratio: f64,
     correct: bool,
-    numbers: BTreeMap<String, f64>,
+    mut numbers: BTreeMap<String, f64>,
     note: Option<String>,
 ) -> WorkloadResult {
+    // R50 F7: a floored workload stores the floor as its ratio (the score
+    // already did this in `from_workloads`) and keeps the measured ratio
+    // under `raw_ratio`. The note always says why it floored: a wrong
+    // answer, a deadline (a correct but slow server), or the transport.
+    let (ratio, note) = if correct {
+        (ratio, note)
+    } else {
+        if ratio.is_finite() && ratio > 0.0 {
+            numbers.insert("raw_ratio".into(), round6(ratio));
+        }
+        let note = match note {
+            Some(n) if n.contains("workload deadline after") => {
+                let tail = n.split("workload deadline after").nth(1).unwrap_or("");
+                Some(format!(
+                    "too slow: the workload deadline passed after{tail}"
+                ))
+            }
+            Some(n) => Some(n),
+            None => Some("the candidate answered wrong".to_string()),
+        };
+        (WRONG_FLOOR, note)
+    };
     WorkloadResult {
         id: id.to_string(),
         metric: metric_of(id).to_string(),
@@ -565,6 +587,8 @@ struct PairedRound {
     /// The reference's answers are the harness's responsibility.
     reference_correct: bool,
     candidate_correct: bool,
+    /// R50 F7: the first query the candidate answered wrong, for the note.
+    candidate_first_bad: Option<usize>,
 }
 
 /// Run one round of a latency workload against both servers with the two
@@ -592,6 +616,7 @@ where
         ratios: Vec::with_capacity(count),
         reference_correct: true,
         candidate_correct: true,
+        candidate_first_bad: None,
     };
     for i in 0..count {
         if Instant::now() >= deadline {
@@ -608,7 +633,12 @@ where
             (rt, rr, ct, cr)
         };
         out.reference_correct &= check(i, &rr);
-        out.candidate_correct &= check(i, &cr);
+        if !check(i, &cr) {
+            out.candidate_correct = false;
+            if out.candidate_first_bad.is_none() {
+                out.candidate_first_bad = Some(i);
+            }
+        }
         out.reference.push(rt);
         out.candidate.push(ct);
         if ct > 0.0 {
@@ -673,6 +703,12 @@ where
                 break;
             }
         };
+        if !out.candidate_correct && note.is_none() {
+            note = Some(format!(
+                "the candidate answered wrong (query {})",
+                out.candidate_first_bad.unwrap_or(0)
+            ));
+        }
         correct &= out.candidate_correct;
         ref_lat.extend(out.reference);
         cand_lat.extend(out.candidate);
@@ -2124,6 +2160,73 @@ mod tests {
         );
         let err = score.error.as_deref().unwrap_or("");
         assert!(err.contains("reference"), "reason: {err}");
+    }
+
+    /// R50 F7 (R49-3's neighbour): a fast but wrong W3 stores the floor as
+    /// its ratio, keeps the measured ratio under `raw_ratio`, and says the
+    /// answer was wrong. The score is the same as before the change
+    /// (`from_workloads` already floored on `correct`).
+    #[test]
+    fn r50_f7_wrong_workload_stores_the_floor() {
+        let reference = fake_engine(Duration::from_millis(1), false);
+        let candidate = fake_engine(Duration::ZERO, true);
+        let cfg = PerfConfig::small_for_tests();
+        let score = run_pair(&reference.to_string(), &candidate.to_string(), 3, &cfg);
+        let w3 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W3")
+            .expect("phase 3 runs W3");
+        assert!(!w3.correct, "a wrong answer must floor W3");
+        assert_eq!(w3.ratio, WRONG_FLOOR, "the stored ratio is the floor");
+        let raw = w3
+            .numbers
+            .get("raw_ratio")
+            .copied()
+            .expect("the measured ratio is kept");
+        assert!(raw > 1.0, "raw_ratio {raw} must be the measured ratio");
+        let note = w3.note.as_deref().unwrap_or("");
+        assert!(
+            note.contains("answered wrong") && note.contains("query"),
+            "note: {note}"
+        );
+        // Same score as the pre-change block: from_workloads floors a wrong
+        // workload whatever ratio the field holds.
+        let mut before = score.workloads.clone();
+        for w in &mut before {
+            if let Some(v) = w.numbers.get("raw_ratio") {
+                w.ratio = *v;
+            }
+        }
+        assert_eq!(PerfScore::from_workloads(before).score, score.score);
+    }
+
+    /// R50 F7: a right but too-slow candidate gets the deadline note, not a
+    /// wrong-answer one.
+    #[test]
+    fn r50_f7_deadline_note_says_slow() {
+        let reference = fake_engine(Duration::ZERO, false);
+        let candidate = fake_engine(Duration::from_millis(5), false);
+        let cfg = PerfConfig {
+            rounds: 1,
+            lookups: 1000,
+            workload_deadline: Duration::from_millis(50),
+            ..PerfConfig::small_for_tests()
+        };
+        let score = run_pair(&reference.to_string(), &candidate.to_string(), 3, &cfg);
+        let w1 = score
+            .workloads
+            .iter()
+            .find(|w| w.id == "W1")
+            .expect("phase 1 runs W1");
+        assert!(!w1.correct, "the deadline must floor W1");
+        let note = w1.note.as_deref().unwrap_or("");
+        assert!(
+            note.starts_with("too slow:"),
+            "the note says the server was slow: {note}"
+        );
+        assert!(note.contains("deadline"), "{note}");
+        assert!(!note.contains("answered wrong"), "{note}");
     }
 
     /// A fast engine that answers one wrong value per workload scores the
