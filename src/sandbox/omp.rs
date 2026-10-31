@@ -1259,12 +1259,30 @@ impl OmpRunner {
                         } else {
                             "∞".to_string()
                         };
-                        let waiting = format!(
-                            "[WAITING] Turn {}/{} in progress: Model is reasoning and generating response... (elapsed: {}s)",
-                            cur_turns + 1,
-                            max_str,
-                            idle
-                        );
+                        // R56 F2: a heartbeat while a tool call is in
+                        // flight names the tool and its command.
+                        let waiting = match inflight.as_ref() {
+                            Some(tool) => {
+                                let command = clip_command(&tool.command, 100);
+                                let what = if command.is_empty() {
+                                    tool.tool.clone()
+                                } else {
+                                    format!("{}: {}", tool.tool, command)
+                                };
+                                format!(
+                                    "[WAITING] Turn {}/{}: tool running ({what}) (elapsed: {}s)",
+                                    cur_turns + 1,
+                                    max_str,
+                                    tool.started.elapsed().as_secs()
+                                )
+                            }
+                            None => format!(
+                                "[WAITING] Turn {}/{} in progress: Model is reasoning and generating response... (elapsed: {}s)",
+                                cur_turns + 1,
+                                max_str,
+                                idle
+                            ),
+                        };
                         let _ = ctx.tx.send(waiting);
                     }
                     thread::sleep(Duration::from_millis(150));
@@ -3794,6 +3812,68 @@ mod tests {
         let _ = handle.join();
         assert!(!saw_stall, "a returned tool must not stall");
         assert!(stall.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R56 F2: the heartbeat names an in-flight tool, and returns to the
+    /// reasoning text after its toolResult.
+    #[test]
+    fn r56_f2_heartbeat_names_running_tool() {
+        let dir = std::env::temp_dir().join(format!("r56_heartbeat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("hung.jsonl");
+        std::fs::write(
+            &session,
+            include_str!("fixtures/hung-tool-session-tail.jsonl"),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        ctx.stall_after = Duration::from_secs(600);
+        let handle = thread::spawn(move || OmpRunner::tail_session_file(ctx));
+
+        let mut saw_tool = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(l) if l.contains("[WAITING]") && l.contains("tool running (bash:") => {
+                    saw_tool = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_tool, "heartbeat must name the running tool");
+
+        let id = "call_dc2a2e3f6cb3497586372f53cd42b46c|fc_tmp_nmbq1345ytb";
+        let result = format!(
+            r#"{{"type":"message","message":{{"role":"toolResult","toolCallId":"{id}","toolName":"bash","content":[{{"type":"text","text":"done"}}]}}}}"#
+        );
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&session)
+                .unwrap();
+            writeln!(f, "{result}").unwrap();
+        }
+        let mut saw_reasoning = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(l) if l.contains("[WAITING]") && l.contains("reasoning") => {
+                    saw_reasoning = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        assert!(saw_reasoning, "heartbeat must return to reasoning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
