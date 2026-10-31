@@ -39,6 +39,7 @@ from `TEMPLATE.md`.
 | [51](51.md) | Publishing: a marked target, one secret list, the results page (R44-9, R44-10, R44-14, Q8 a; R43-1, R43-2; graded: full gate) | merged `0f2e364` |
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40; R47-1, R51-1) | merged `0690c3d` |
 | [53](53.md) | Two cells at once: a lock per worker, distinct ids, the sweep keeps campaign containers (2-lane smoke; graded: full gate) | open (operator 2026-10-31 "open 53") |
+| [54](54.md) | Tooling: rehearsal cells for $0, seen-failing records, git hooks, citation check (graded: full gate) | draft (reviewer 2026-10-31; operator to open after 53 merges) |
 
 **Status values:**
 
