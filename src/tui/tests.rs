@@ -181,11 +181,66 @@ fn r42_f5_help_lists_every_key() {
 fn r42_f5_header_states() {
     let mut a = App::new();
     a.set_status(serde_json::json!({"is_running":false,"rules_version":"2026-10-19.42","sandbox_image":"sha256:abc","queue":{"pending":0}}));
-    assert!(draw(&a, 120, 10).contains("engine ● idle"));
+    assert!(draw(&a, 120, 10).contains("cells ● idle"));
+    a.set_campaigns(vec![campaign("campaign_h", "running", "m", 1.0, 0.1, 1)]);
     a.set_status(serde_json::json!({"is_running":true,"rules_version":"2026-10-19.42","sandbox_image":"sha256:abc","queue":{"pending":2}}));
-    assert!(draw(&a, 120, 10).contains("engine ● running"));
+    assert!(draw(&a, 120, 10).contains("cells ● 1 running"));
     a.unreachable("refused");
     assert!(draw(&a, 120, 10).contains("engine ● unreachable"));
+}
+
+/// R52 F2: a real /api/campaigns row (captured fixture); the test sets a
+/// running state and a start 37 minutes ago without adding fields the API
+/// does not serve.
+fn api_cell() -> Value {
+    let mut v: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    v["state"] = serde_json::json!("running");
+    v["started_at"] =
+        serde_json::json!((chrono::Utc::now() - chrono::Duration::minutes(37)).to_rfc3339());
+    v["wall_cap_min"] = serde_json::json!(480);
+    assert!(v["live"].get("wall_elapsed_min").is_none());
+    assert!(v["live"].get("wall_min").is_none());
+    v
+}
+
+fn header_of(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim_end()
+}
+
+#[test]
+fn r52_f2_header_fits_80() {
+    let mut a = App::new();
+    a.set_status(serde_json::json!({"rules_version":"2026-10-19.42","sandbox_image":"sha256:abcdef","queue":{"pending":1}}));
+    a.set_campaigns(vec![api_cell()]);
+    for w in [80u16, 200] {
+        let s = draw(&a, w, 20);
+        let h = header_of(&s);
+        assert!(h.ends_with("?help q quit"), "width {w}: {h}");
+        assert!(h.chars().count() <= w as usize, "width {w}: {h}");
+    }
+}
+
+#[test]
+fn r52_f2_header_counts_running_cells() {
+    let mut a = App::new();
+    a.set_status(serde_json::json!({"is_running":false,"rules_version":"2026-10-19.42","queue":{"pending":0}}));
+    let mut one = api_cell();
+    one["id"] = serde_json::json!("campaign_one");
+    let mut two = api_cell();
+    two["id"] = serde_json::json!("campaign_two");
+    a.set_campaigns(vec![one, two]);
+    let h = header_of(&draw(&a, 120, 20)).to_string();
+    assert!(h.contains("cells ● 2 running"), "{h}");
+    assert!(!h.contains("engine ● idle"), "{h}");
+}
+
+#[test]
+fn r52_f2_wall_from_api_fields() {
+    let mut a = App::new();
+    a.set_status(serde_json::json!({"rules_version":"2026-10-19.42","queue":{"pending":0}}));
+    a.set_campaigns(vec![api_cell()]);
+    let s = draw(&a, 120, 30);
+    assert!(s.contains("wall 37/480 m"), "{s}");
 }
 
 #[test]

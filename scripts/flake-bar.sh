@@ -7,9 +7,8 @@
 # test run appends one line immediately, so an interrupted chunk is kept;
 # the summary at the end is recomputed over every line so far.
 set -euo pipefail
+BAR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$(git rev-parse --show-toplevel)" || exit 1
-
-. scripts/long-test-lock.sh
 
 # R27-3/R28 F2: the record is keyed by graded content, not by commit, so
 # a docs-only commit keeps the same resumable record. The paths are the
@@ -24,6 +23,7 @@ flake_key() {
 passes=1
 only=""
 self_test=0
+key_only=0
 load=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +33,8 @@ while [[ $# -gt 0 ]]; do
         --only)
             [[ $# -ge 2 ]] || { echo "[flake] --only needs a test name" >&2; exit 2; }
             only="$2"; shift 2 ;;
+        --key)
+            key_only=1; shift ;;
         --self-test)
             self_test=1; shift ;;
         --load)
@@ -48,6 +50,13 @@ done
 [[ "$load" =~ ^[0-9]+$ ]] || {
     echo "[flake] --load must be a non-negative integer" >&2; exit 2
 }
+
+# R52 F4 (round 40 F2): the one key computation; sql-cell.sh and grid.sh
+# call this instead of copying the graded-path hash.
+if [[ "$key_only" -eq 1 ]]; then
+    flake_key "$(git rev-parse --show-toplevel)" HEAD
+    exit 0
+fi
 
 # The bar keeps every ladder proof (the old list) and adds the r45/r49
 # live proofs. The fast-gate skip list is scripts/live-proofs.sh, which is
@@ -140,6 +149,7 @@ run_chunk() {
 }
 
 if [[ "$self_test" -eq 1 ]]; then
+    . "$BAR_ROOT/scripts/long-test-lock.sh"
     # R48 F3: the load helper's own self-test runs with the bar's.
     scripts/flake-load.sh self-test
     # R45-1: the bar is the union of every ladder proof and the r45 live
@@ -226,7 +236,8 @@ if [[ "$self_test" -eq 1 ]]; then
 
     # R27-3: a docs-only commit keeps the content key; a graded edit moves it.
     repo="$dir/repo"
-    mkdir -p "$repo/src" "$repo/docs"
+    mkdir -p "$repo/src" "$repo/docs" "$repo/scripts"
+    cp scripts/graded-paths.txt "$repo/scripts/graded-paths.txt"
     git -C "$repo" init -q
     git -C "$repo" config user.email flake@example.com
     git -C "$repo" config user.name flake
@@ -236,6 +247,12 @@ if [[ "$self_test" -eq 1 ]]; then
     git -C "$repo" add -A
     git -C "$repo" commit -qm one
     key1=$(flake_key "$repo" HEAD)
+    # R52 F4: --key prints the same key as the record header.
+    bar_abs="$PWD/scripts/flake-bar.sh"
+    got_key="$(cd "$repo" && "$bar_abs" --key)"
+    [[ "$got_key" == "$key1" ]] || {
+        echo "--key printed $got_key, expected $key1"; exit 1;
+    }
     echo "two" > "$repo/docs/readme.md"
     git -C "$repo" add -A
     git -C "$repo" commit -qm two
@@ -283,6 +300,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
 fi
 
 # R48-5: bar runs are long tests; hold the shared lock for the whole run.
+. "$BAR_ROOT/scripts/long-test-lock.sh"
 hold_long_test_lock
 
 mapfile -t all_tests < <(tests_from_source)

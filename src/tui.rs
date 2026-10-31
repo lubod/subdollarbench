@@ -362,30 +362,56 @@ fn ladder(c: &Value, no_color: bool) -> String {
         .collect()
 }
 
-fn header_line(app: &App) -> String {
-    let status = if let Some(e) = &app.engine_error {
-        format!("engine ● unreachable ({e})")
+fn running_cells(app: &App) -> usize {
+    app.campaigns
+        .iter()
+        .filter(|c| c["state"].as_str() == Some("running"))
+        .count()
+}
+
+/// R42-8: grid cells are CLI campaigns, not engine jobs; the field counts
+/// the Board's running cells. The engine's own state shows only when it is
+/// unreachable.
+fn status_field(app: &App) -> String {
+    if let Some(e) = &app.engine_error {
+        return format!("engine ● unreachable ({e})");
+    }
+    let running = running_cells(app);
+    if running > 0 {
+        format!("cells ● {running} running")
     } else {
-        let running = app.status["is_running"].as_bool().unwrap_or(false);
-        if running {
-            "engine ● running".to_string()
-        } else {
-            "engine ● idle".to_string()
-        }
-    };
+        "cells ● idle".to_string()
+    }
+}
+
+/// R42-6: at a narrow width the middle fields drop from the right (image,
+/// then rules); the `?help q quit` hint is never dropped.
+fn header_line(app: &App, width: u16) -> String {
+    let status = status_field(app);
     let rules = app.status["rules_version"].as_str().unwrap_or("—");
     let image = app.status["sandbox_image"].as_str().unwrap_or("—");
     let image = image.rsplit(':').next().unwrap_or(image);
     let paused = app.status["queue_paused"].as_bool().unwrap_or(false);
     let q = app.status["queue"]["pending"].as_u64().unwrap_or(0);
-    format!(
-        "subdollarbench tui · {status} · rules {rules} · image {image} · queue {q}{} ?help q quit",
+    let tail = format!(
+        "queue {q}{} ?help q quit",
         if paused { " (paused)" } else { "" }
-    )
+    );
+    let base = format!("subdollarbench tui · {status}");
+    let mut fields = vec![format!("rules {rules}"), format!("image {image}"), tail];
+    let render = |fields: &[String]| format!("{base} · {}", fields.join(" · "));
+    let mut line = render(&fields);
+    while line.chars().count() > width as usize && fields.len() > 1 {
+        // Image is first to go, then rules; the queue/hint tail stays.
+        let drop = if fields.len() > 2 { 1 } else { 0 };
+        fields.remove(drop);
+        line = render(&fields);
+    }
+    line
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    frame.render_widget(Paragraph::new(header_line(app)), area);
+    frame.render_widget(Paragraph::new(header_line(app, area.width)), area);
 }
 
 fn render_cells(frame: &mut Frame, app: &App, area: Rect) {
@@ -452,6 +478,22 @@ fn render_cells(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// R42-7: minutes since the cell's recorded start, from the API's
+/// `started_at` (top level or rollup fallback).
+fn elapsed_minutes(c: &Value) -> i64 {
+    let started = c["started_at"]
+        .as_str()
+        .or_else(|| c["rollup"]["started_at"].as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+    started
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                .num_minutes()
+                .max(0)
+        })
+        .unwrap_or(0)
+}
+
 fn render_live(frame: &mut Frame, app: &App, area: Rect) {
     let Some(c) = app.selected_cell() else {
         frame.render_widget(Paragraph::new("no cell"), area);
@@ -476,8 +518,13 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
                 .or_else(|| Some(cost(c)))
                 .unwrap_or(0.0),
             c["rollup"]["budget_usd"].as_f64().unwrap_or(0.99),
-            live["wall_elapsed_min"].as_u64().unwrap_or(0),
-            live["wall_min"].as_u64().unwrap_or(0)
+            // R42-7: /api/campaigns serves `started_at` and `wall_cap_min`;
+            // the old live.wall_elapsed_min/wall_min fields do not exist.
+            elapsed_minutes(c),
+            c["wall_cap_min"]
+                .as_u64()
+                .or_else(|| c["rollup"]["wall_min"].as_u64())
+                .unwrap_or(0)
         )),
     ];
     lines.extend(app.filtered_log());

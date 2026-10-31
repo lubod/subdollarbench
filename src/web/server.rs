@@ -3955,6 +3955,201 @@ mod tests {
         );
     }
 
+    /// R52 F1/F6/F7: the same DOM stub, plus a body that calls the console
+    /// functions under test. Keep the stub in sync with GUI_SMOKE_HARNESS.
+    const GUI_CASE_PREFIX: &str = r#"
+const fs = require('fs');
+const path = require('path');
+const dir = __dirname;
+const els = {};
+function makeEl(id) {
+  return {
+    id: id || '', style: {}, dataset: {}, children: [], value: '', textContent: '', innerHTML: '',
+    className: '', checked: false, disabled: false, href: '',
+    classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
+    appendChild(){}, removeChild(){}, remove(){}, addEventListener(){}, removeEventListener(){},
+    querySelector(){ return makeEl('q'); }, querySelectorAll(){ return []; },
+    setAttribute(){}, getAttribute(){ return null; }, focus(){}, click(){}, insertBefore(){},
+    scrollTo(){}, closest(){ return null; }, contains(){ return false; },
+    getBoundingClientRect(){ return { top:0,left:0,width:0,height:0,bottom:0,right:0 }; },
+    open(){}, close(){}, reset(){}, submit(){}, removeAttribute(){},
+  };
+}
+function el(id) { if (!els[id]) els[id] = makeEl(id); return els[id]; }
+const store = {};
+global.localStorage = { getItem: k => (k in store ? store[k] : null), setItem: (k,v)=>{store[k]=String(v);}, removeItem: k=>{delete store[k];} };
+global.document = {
+  visibilityState: 'visible',
+  getElementById: el, querySelector(){ return makeEl('q'); }, querySelectorAll(){ return []; },
+  createElement(){ return makeEl('c'); }, addEventListener(){}, body: makeEl('body'), documentElement: makeEl('html'), cookie: '',
+};
+global.addEventListener = () => {};
+global.removeEventListener = () => {};
+global.window = global;
+global.location = { hash: '#board', href: 'http://x/', pathname: '/', search: '' };
+global.navigator = { userAgent: 'node' };
+global.EventSource = class { constructor(){} close(){} addEventListener(){} };
+global.setInterval = () => 0;
+global.clearInterval = () => {};
+global.alert = () => {};
+global.confirm = () => true;
+global.scrollTo = () => {};
+global.fetch = async (url) => {
+  const u = String(url || '');
+  if (u.includes('/api/campaigns') && !u.includes('/log')) return { ok: true, status: 200, headers: { get: () => null }, json: async () => [], text: async () => '' };
+  if (u.includes('/api/models') || u.includes('/api/runs') || u.includes('/api/queue')) return { ok: true, status: 200, headers: { get: () => null }, json: async () => [], text: async () => '' };
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '' };
+};
+process.on('unhandledRejection', e => { console.log('UNHANDLED:', e && e.message ? e.message : e); process.exit(1); });
+eval(fs.readFileSync(path.join(dir, 'shared.js'), 'utf8'));
+eval(fs.readFileSync(path.join(dir, 'routes.js'), 'utf8'));
+eval(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'));
+// __BODY__
+"#;
+
+    fn run_gui_case(name: &str, body: &str) -> Option<(bool, String, String)> {
+        let html = include_str!("index.html");
+        let mut scripts = Vec::new();
+        let mut rest = html;
+        while let Some(s) = rest.find("<script>") {
+            let body = &rest[s + "<script>".len()..];
+            if let Some(e) = body.find("</script>") {
+                scripts.push(&body[..e]);
+                rest = &body[e + "</script>".len()..];
+            } else {
+                break;
+            }
+        }
+        assert_eq!(scripts.len(), 1, "index.html must hold one inline script");
+        let dir = std::env::temp_dir().join(format!(
+            "gui_case_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shared.js"), include_str!("shared.js")).unwrap();
+        std::fs::write(dir.join("routes.js"), include_str!("routes.js")).unwrap();
+        std::fs::write(dir.join("app.js"), scripts[0]).unwrap();
+        std::fs::write(
+            dir.join("harness.js"),
+            GUI_CASE_PREFIX.replace("// __BODY__", body),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(dir.join("harness.js"))
+            .output()
+            .ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        out.map(|o| {
+            (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+            )
+        })
+    }
+
+    fn assert_gui_case(name: &str, body: &str, needle: &str) {
+        match run_gui_case(name, body) {
+            Some((ok, out, err)) => {
+                assert!(ok && out.contains(needle), "{name} failed:\n{out}\n{err}")
+            }
+            None => eprintln!("node not found; skipping {name}"),
+        }
+    }
+
+    /// R52 F1 (R39-4): opening pushes one entry, the picker replaces it, and
+    /// the close button (history.back) returns to the Board; the entry count
+    /// grew by one.
+    #[test]
+    fn r52_f1_picker_replaces_history() {
+        let body = r#"
+(async () => {
+global.fetch = async (url) => {
+  const u = String(url || '');
+  if (u.includes('/api/campaigns') && !u.includes('/log')) return { ok: true, status: 200, headers: { get: () => null }, json: async () => [
+    { id: 'cellA', state: 'running', rollup: { model: 'a' }, ladder: [] },
+    { id: 'cellB', state: 'running', rollup: { model: 'b' }, ladder: [] },
+    { id: 'cellC', state: 'running', rollup: { model: 'c' }, ladder: [] },
+  ], text: async () => '' };
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '' };
+};
+await refreshBoard();
+const entries = ['#board']; let idx = 0;
+global.location = {
+  _hash: '#board',
+  get hash() { return this._hash; },
+  set hash(v) { entries.splice(idx + 1); entries.push(v); idx = entries.length - 1; this._hash = v; },
+  replace(v) { entries[idx] = v; this._hash = v; applyHash(); },
+  href: 'http://x/', pathname: '/', search: '',
+};
+global.history = {
+  get length() { return entries.length; },
+  back() { if (idx > 0) { idx--; global.location._hash = entries[idx]; applyHash(); } },
+};
+applyHash();
+global.location.hash = '#live/cellA';
+applyHash();
+switchLive('cellB');
+switchLive('cellC');
+if (entries.length !== 2) { console.log('length after switches ' + entries.length); process.exit(1); }
+closeLive();
+if (global.location.hash !== '#board') { console.log('close hash ' + global.location.hash); process.exit(1); }
+if (entries.length !== 2) { console.log('length after close ' + entries.length); process.exit(1); }
+console.log('F1 OK');
+})().catch(e => { console.log('F1 ERR ' + e.message); process.exit(1); });
+"#;
+        assert_gui_case("f1", body, "F1 OK");
+    }
+
+    /// R52 F6 (R47-1): the GUI hover and the Run block show a floored
+    /// workload's 0.10x and reason, never its raw ratio.
+    #[test]
+    fn r52_f6_floored_workload_says_why() {
+        let body = r#"
+const pt = eval('perfTitle');
+const pb = eval('perfBlock');
+const p = { score: 0.1, workloads: [
+  { id: 'W3', metric: 'latency', reference: 1, candidate: 0.04, ratio: 64.06, correct: false },
+  { id: 'W4', metric: 'throughput', reference: 100, candidate: 40, ratio: 0.4, correct: false, note: 'not durable: 3 flushes for 10 commits' },
+]};
+const title = pt(p);
+const w3 = title.split('\n').find(l => l.startsWith('W3:'));
+if (!w3 || !w3.includes('0.10\u00d7') || !w3.includes('floored') || w3.includes('durable') || w3.includes('64.06\u00d7')) {
+  console.log('W3 ' + w3); process.exit(1);
+}
+if (!title.includes('not durable: 3 flushes for 10 commits')) { console.log('W4 note missing'); process.exit(1); }
+const block = pb(p);
+if (!block.includes('0.10\u00d7') || !block.includes('floored') || block.includes('64.06\u00d7')) {
+  console.log('block ' + block); process.exit(1);
+}
+console.log('F6 OK');
+"#;
+        assert_gui_case("f6", body, "F6 OK");
+    }
+
+    /// R52 F7 (R51-1): an unknown effort renders no "high" in the Inspect
+    /// field; a recorded low stays low.
+    #[test]
+    fn r52_f7_inspect_effort_blank() {
+        let body = r#"
+const ie = eval('inspectEffortHtml');
+const blank = ie({ task: 'sql' });
+if (blank.includes('high')) { console.log('blank ' + blank); process.exit(1); }
+const low = ie({ effort: 'low', task: 'sql' });
+if (!low.includes('low') || low.includes('high')) { console.log('low ' + low); process.exit(1); }
+const field = el('modalInspectEffort');
+field.innerHTML = blank;
+if (field.innerHTML.includes('high')) { console.log('field high'); process.exit(1); }
+console.log('F7 OK');
+"#;
+        assert_gui_case("f7", body, "F7 OK");
+    }
+
     /// The GUI console is inline JS inside index.html: a typo there breaks
     /// the whole page and nothing in the Rust compile path would notice.
     /// Pins the Board/Run/Live markers (gui-spec.md §4), forbids the retired

@@ -16,9 +16,57 @@ pub const AUTO_EXTEND_BUDGET_ENV: &str = "SDB_AUTO_EXTEND_TRIALS";
 #[derive(Parser, Debug)]
 #[command(name = "subdollarbench")]
 #[command(about = "Autonomous Under-$1 System-Building Benchmark for Budget LLMs", long_about = None)]
+#[command(
+    version = env!("CARGO_PKG_VERSION"),
+    long_version = crate::config::version_line_static()
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Round 40 F1 / R52 F3: the official cell's caps, named once and used by
+/// clap and by the "not the official cell" note.
+/// R52 F5 (round 40 F3): the one version line, used by clap's `--version`
+/// and by the cell preflight. Kept here (not in the graded rules stamp).
+pub fn version_line() -> String {
+    format!(
+        "{} · rules {} · fingerprint {} · SQLite {}",
+        env!("CARGO_PKG_VERSION"),
+        crate::report::rules::RULES_VERSION,
+        crate::report::rules::fingerprint(),
+        crate::report::rules::sqlite_version()
+    )
+}
+
+/// The cached `&'static str` clap needs for `--version`.
+pub fn version_line_static() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(version_line).as_str()
+}
+
+pub const OFFICIAL_CELL_BUDGET_USD: f64 = 0.99;
+pub const OFFICIAL_CELL_WALL_MIN: u64 = 480;
+pub const OFFICIAL_CELL_TIMEOUT_MIN: u64 = 120;
+
+/// The note a run prints when its budget/wall differ from the official
+/// cell in the direction that changes what it measures (larger, or no
+/// wall). A smaller smoke cell is intentionally quiet.
+pub fn unofficial_cell_note(budget_usd: f64, wall_min: u64) -> Option<String> {
+    let mut diffs = Vec::new();
+    if budget_usd > OFFICIAL_CELL_BUDGET_USD {
+        diffs.push(format!(
+            "budget ${budget_usd:.2} > ${OFFICIAL_CELL_BUDGET_USD:.2}"
+        ));
+    }
+    if wall_min == 0 {
+        diffs.push(format!("wall off (official {OFFICIAL_CELL_WALL_MIN} min)"));
+    } else if wall_min > OFFICIAL_CELL_WALL_MIN {
+        diffs.push(format!(
+            "wall {wall_min} min > {OFFICIAL_CELL_WALL_MIN} min"
+        ));
+    }
+    (!diffs.is_empty()).then(|| format!("[campaign] not the official cell: {}", diffs.join("; ")))
 }
 
 #[derive(Subcommand, Debug)]
@@ -36,10 +84,10 @@ pub enum CampaignAction {
     },
     /// Run a campaign end-to-end from the CLI (foreground, no engine needed)
     Run {
-        /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour;
-        /// the ladder stops with over_wall when reached).
-        #[arg(long)]
-        wall_min: Option<u64>,
+        /// Wall-clock cap in minutes (0 turns the cap off; the official
+        /// cell is 480)
+        #[arg(long, default_value_t = OFFICIAL_CELL_WALL_MIN)]
+        wall_min: u64,
         /// Campaign name (directory under ./campaigns)
         #[arg(long)]
         name: String,
@@ -54,10 +102,10 @@ pub enum CampaignAction {
         harness: Harness,
         /// Campaign budget cap in USD; the ladder stops (over_budget) once
         /// cumulative effective cost reaches it
-        #[arg(short = 'b', long, default_value_t = 1.00)]
+        #[arg(short = 'b', long, default_value_t = OFFICIAL_CELL_BUDGET_USD)]
         budget_usd: f64,
         /// Per-stage agent timeout backstop (minutes; cost is the real bound)
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = OFFICIAL_CELL_TIMEOUT_MIN)]
         timeout_min: u64,
         /// OpenRouter API key (defaults to OPENROUTER_API_KEY)
         #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
@@ -90,6 +138,7 @@ pub enum CampaignAction {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Export the sdb-sql career board (static HTML) and grid.json
     Portal {
         /// Path to runs directory
         #[arg(long, default_value = "./runs")]
@@ -247,7 +296,7 @@ pub enum Commands {
     Log {
         /// Run id or prefix is NOT needed: the engine streams the active run.
         /// Kept for symmetry with `watch`; positional is ignored.
-        #[arg(default_value = "")]
+        #[arg(default_value = "", hide = true)]
         run: String,
 
         /// Lines to show
@@ -715,6 +764,110 @@ mod tests {
         assert_eq!(json, "\"sql\"");
         let de: TaskType = serde_json::from_str(&json).unwrap();
         assert_eq!(de, TaskType::Sql);
+    }
+
+    /// R52 F5 (round 40 F3): the version line names the rules, fingerprint
+    /// and SQLite version.
+    #[test]
+    fn r52_f5_version_names_rules() {
+        let line = version_line();
+        assert!(line.contains(env!("CARGO_PKG_VERSION")), "{line}");
+        assert!(
+            line.contains(&format!("rules {}", crate::report::rules::RULES_VERSION)),
+            "the rules segment: {line}"
+        );
+        assert!(
+            line.contains(&crate::report::rules::fingerprint()),
+            "{line}"
+        );
+        assert!(
+            line.contains(crate::report::rules::sqlite_version()),
+            "{line}"
+        );
+        assert_eq!(version_line_static(), line);
+    }
+
+    /// R52 F5 (round 40 F3/F5): portal has an about line, log's ignored
+    /// positional is hidden, and --version carries the rules line.
+    #[test]
+    fn r52_f5_help_text() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let portal = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "portal")
+            .expect("portal");
+        assert!(
+            portal
+                .get_about()
+                .map(|a| !a.to_string().trim().is_empty())
+                .unwrap_or(false),
+            "portal needs an about line"
+        );
+        let log = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "log")
+            .expect("log");
+        let run = log
+            .get_arguments()
+            .find(|a| a.get_id() == "run")
+            .expect("log run argument");
+        assert!(run.is_hide_set(), "log's ignored run must be hidden");
+        let version = cmd.get_long_version().unwrap_or("");
+        assert!(
+            version.contains(crate::report::rules::RULES_VERSION),
+            "--version lacks the rules version: {version}"
+        );
+    }
+
+    /// R52 F3 (round 40 F1): the CLI defaults are the official cell.
+    #[test]
+    fn r52_f3_campaign_run_defaults_are_official() {
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "campaign",
+            "run",
+            "--name",
+            "sdb-sql",
+            "--model",
+            "m",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Campaign {
+                action:
+                    CampaignAction::Run {
+                        budget_usd,
+                        wall_min,
+                        timeout_min,
+                        ..
+                    },
+            } => {
+                // Pin the official values literally, not through the same
+                // constants clap used.
+                assert_eq!(budget_usd, 0.99);
+                assert_eq!(wall_min, 480);
+                assert_eq!(timeout_min, 120);
+                assert_eq!(OFFICIAL_CELL_BUDGET_USD, 0.99);
+                assert_eq!(OFFICIAL_CELL_WALL_MIN, 480);
+                assert_eq!(OFFICIAL_CELL_TIMEOUT_MIN, 120);
+            }
+            _ => panic!("expected campaign run"),
+        }
+    }
+
+    #[test]
+    fn r52_f3_unofficial_cell_note() {
+        let budget = unofficial_cell_note(1.0, 480).expect("larger budget");
+        assert!(budget.contains("budget $1.00 > $0.99"), "{budget}");
+        let wall = unofficial_cell_note(0.99, 481).expect("larger wall");
+        assert!(wall.contains("wall 481 min > 480 min"), "{wall}");
+        let off = unofficial_cell_note(0.99, 0).expect("wall off");
+        assert!(off.contains("wall off"), "{off}");
+        assert!(
+            unofficial_cell_note(0.5, 60).is_none(),
+            "a smaller smoke cell is the operator's own choice"
+        );
     }
 
     #[test]

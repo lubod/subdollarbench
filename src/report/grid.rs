@@ -803,14 +803,26 @@ fn perf_tooltip(perf: &crate::verifier::sql::perfscore::PerfScore) -> String {
         .workloads
         .iter()
         .map(|w| {
+            // R52 F6 (R47-1): a floored block shows the floor, not the raw
+            // ratio; the note says why, and a measured ratio may follow.
+            let ratio = if w.correct {
+                w.ratio
+            } else {
+                crate::verifier::sql::perfscore::WRONG_FLOOR
+            };
             let mut line = format!(
                 "{}: ref {:.3} · candidate {:.3} · {:.2}×",
-                w.id, w.reference, w.candidate, w.ratio
+                w.id, w.reference, w.candidate, ratio
             );
             if !w.correct {
-                line.push_str(" · floored (wrong answer, not durable)");
-            }
-            if let Some(note) = &w.note {
+                line.push_str(" · floored");
+                if let Some(note) = &w.note {
+                    line.push_str(&format!(" · {note}"));
+                }
+                if let Some(raw) = w.numbers.get("raw_ratio") {
+                    line.push_str(&format!(" · measured {raw:.2}×"));
+                }
+            } else if let Some(note) = &w.note {
                 line.push_str(&format!(" · {note}"));
             }
             line
@@ -2205,6 +2217,41 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
+    /// and reason, never its raw ratio or a guessed "not durable".
+    #[test]
+    fn r52_f6_floored_workload_says_why() {
+        let (base, runs, out) = fixture("r52floor");
+        career(&runs, "floor", "m", [1.0; 4], [0.01; 4]);
+        set_career_perf(
+            &runs,
+            "floor",
+            0.1,
+            serde_json::json!([
+                {"id": "W3", "metric": "latency", "reference": 1.0, "candidate": 0.04, "ratio": 64.06, "correct": false},
+                {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 40.0, "ratio": 0.4, "correct": false, "note": "not durable: 3 flushes for 10 commits"}
+            ]),
+        );
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let w3_start = pos(&html, "W3:");
+        let w4_start = pos(&html, "W4:");
+        let w3 = &html[w3_start..w4_start];
+        assert!(w3.contains("0.10×"), "W3 floor: {w3}");
+        assert!(w3.contains("floored"), "W3 reason: {w3}");
+        assert!(!w3.contains("durable"), "W3 guessed a cause: {w3}");
+        assert!(!w3.contains("64.06×"), "W3 raw ratio leaked: {w3}");
+        assert!(
+            html.contains("not durable: 3 flushes for 10 commits"),
+            "W4's recorded note must stay: {html}"
+        );
+        assert!(
+            !html.contains("floored (wrong answer, not durable)"),
+            "the old blanket wording is gone: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R51 F5 (Q8 a): the results page names the snapshot date, says costs
     /// are base rates, and lists each ranked model's override.
     #[test]
@@ -2334,8 +2381,8 @@ mod tests {
         assert!(html.contains("W1: ref 1.000"), "{html}");
         assert!(html.contains("candidate 0.760"), "{html}");
         assert!(
-            html.contains("floored (wrong answer, not durable)"),
-            "{html}"
+            html.contains("0.10× · floored · not durable"),
+            "the W4 floor and its recorded note: {html}"
         );
         let plain = &html[pos(&html, "plain-model")..];
         let row = &plain[..plain.find("</tr>").unwrap()];

@@ -161,8 +161,8 @@ preflight() {
         return 1
     fi
     local key record
-    mapfile -t graded < <(grep -vE '^[[:space:]]*(#|$)' "$ROOT/scripts/graded-paths.txt")
-    key="$(cd "$ROOT" && git ls-tree -r HEAD -- "${graded[@]}" | sha256sum | cut -c1-12)"
+    # R52 F4: one key computation for the bar, the cell and the grid.
+    key="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
     record="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
     if ! grep -q 'RESULT: PASS' "$record" 2>/dev/null; then
         log "preflight: no PASS flake record for key $key ($record)"
