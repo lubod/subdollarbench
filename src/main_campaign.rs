@@ -450,6 +450,7 @@ fn concurrent_cells_at(runs: &std::path::Path, worker: u8, env: Option<u32>) -> 
         .max(1)
 }
 
+#[allow(clippy::too_many_arguments)] // the campaign runner's public surface
 pub async fn run(
     name: String,
     model: String,
