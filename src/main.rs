@@ -1416,6 +1416,7 @@ mod tests {
     /// worker 9, temp runs) passes its stages and records `rehearsal`;
     /// phase 2 chains from it.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
     async fn r54_f1_rehearsal_cell_live() {
         static SQL_PERF_LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
