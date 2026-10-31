@@ -330,7 +330,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     effort,
                     harness,
                     budget_usd,
-                    wall_min,
+                    (wall_min > 0).then_some(wall_min),
                     timeout_min,
                     api_key,
                     eval_only,
@@ -624,7 +624,7 @@ mod tests {
                 assert_eq!(model, "openrouter/meta/muse-spark-1.3-contributor");
                 assert_eq!(effort, "high");
                 assert_eq!(budget_usd, 0.75);
-                assert_eq!(wall_min, Some(120));
+                assert_eq!(wall_min, 120);
                 assert_eq!(timeout_min, 120);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1372,7 +1372,7 @@ mod tests {
         assert!(run_cli(Cli {
             command: Commands::Campaign {
                 action: subdollarbench::config::CampaignAction::Run {
-                    wall_min: None,
+                    wall_min: 0,
                     name: "no-such-campaign".to_string(),
                     model: "test-model".to_string(),
                     effort: "low".to_string(),

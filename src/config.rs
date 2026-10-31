@@ -21,6 +21,32 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Round 40 F1 / R52 F3: the official cell's caps, named once and used by
+/// clap and by the "not the official cell" note.
+pub const OFFICIAL_CELL_BUDGET_USD: f64 = 0.99;
+pub const OFFICIAL_CELL_WALL_MIN: u64 = 480;
+pub const OFFICIAL_CELL_TIMEOUT_MIN: u64 = 120;
+
+/// The note a run prints when its budget/wall differ from the official
+/// cell in the direction that changes what it measures (larger, or no
+/// wall). A smaller smoke cell is intentionally quiet.
+pub fn unofficial_cell_note(budget_usd: f64, wall_min: u64) -> Option<String> {
+    let mut diffs = Vec::new();
+    if budget_usd > OFFICIAL_CELL_BUDGET_USD {
+        diffs.push(format!(
+            "budget ${budget_usd:.2} > ${OFFICIAL_CELL_BUDGET_USD:.2}"
+        ));
+    }
+    if wall_min == 0 {
+        diffs.push(format!("wall off (official {OFFICIAL_CELL_WALL_MIN} min)"));
+    } else if wall_min > OFFICIAL_CELL_WALL_MIN {
+        diffs.push(format!(
+            "wall {wall_min} min > {OFFICIAL_CELL_WALL_MIN} min"
+        ));
+    }
+    (!diffs.is_empty()).then(|| format!("[campaign] not the official cell: {}", diffs.join("; ")))
+}
+
 #[derive(Subcommand, Debug)]
 pub enum CampaignAction {
     /// List bundled campaigns
@@ -36,10 +62,10 @@ pub enum CampaignAction {
     },
     /// Run a campaign end-to-end from the CLI (foreground, no engine needed)
     Run {
-        /// Optional wall-clock cap in minutes (sdb-sql runs are multi-hour;
-        /// the ladder stops with over_wall when reached).
-        #[arg(long)]
-        wall_min: Option<u64>,
+        /// Wall-clock cap in minutes (0 turns the cap off; the official
+        /// cell is 480)
+        #[arg(long, default_value_t = OFFICIAL_CELL_WALL_MIN)]
+        wall_min: u64,
         /// Campaign name (directory under ./campaigns)
         #[arg(long)]
         name: String,
@@ -54,10 +80,10 @@ pub enum CampaignAction {
         harness: Harness,
         /// Campaign budget cap in USD; the ladder stops (over_budget) once
         /// cumulative effective cost reaches it
-        #[arg(short = 'b', long, default_value_t = 1.00)]
+        #[arg(short = 'b', long, default_value_t = OFFICIAL_CELL_BUDGET_USD)]
         budget_usd: f64,
         /// Per-stage agent timeout backstop (minutes; cost is the real bound)
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = OFFICIAL_CELL_TIMEOUT_MIN)]
         timeout_min: u64,
         /// OpenRouter API key (defaults to OPENROUTER_API_KEY)
         #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
@@ -715,6 +741,51 @@ mod tests {
         assert_eq!(json, "\"sql\"");
         let de: TaskType = serde_json::from_str(&json).unwrap();
         assert_eq!(de, TaskType::Sql);
+    }
+
+    /// R52 F3 (round 40 F1): the CLI defaults are the official cell.
+    #[test]
+    fn r52_f3_campaign_run_defaults_are_official() {
+        let cli = Cli::try_parse_from([
+            "subdollarbench",
+            "campaign",
+            "run",
+            "--name",
+            "sdb-sql",
+            "--model",
+            "m",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Campaign {
+                action:
+                    CampaignAction::Run {
+                        budget_usd,
+                        wall_min,
+                        timeout_min,
+                        ..
+                    },
+            } => {
+                assert_eq!(budget_usd, OFFICIAL_CELL_BUDGET_USD);
+                assert_eq!(wall_min, OFFICIAL_CELL_WALL_MIN);
+                assert_eq!(timeout_min, OFFICIAL_CELL_TIMEOUT_MIN);
+            }
+            _ => panic!("expected campaign run"),
+        }
+    }
+
+    #[test]
+    fn r52_f3_unofficial_cell_note() {
+        let budget = unofficial_cell_note(1.0, 480).expect("larger budget");
+        assert!(budget.contains("budget $1.00 > $0.99"), "{budget}");
+        let wall = unofficial_cell_note(0.99, 481).expect("larger wall");
+        assert!(wall.contains("wall 481 min > 480 min"), "{wall}");
+        let off = unofficial_cell_note(0.99, 0).expect("wall off");
+        assert!(off.contains("wall off"), "{off}");
+        assert!(
+            unofficial_cell_note(0.5, 60).is_none(),
+            "a smaller smoke cell is the operator's own choice"
+        );
     }
 
     #[test]

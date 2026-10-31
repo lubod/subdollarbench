@@ -457,6 +457,12 @@ pub async fn run(
     if worker > 7 {
         anyhow::bail!("--worker must be 0-7 (got {worker})");
     }
+    // R52 F3 (round 40 F1): say when this is not the official cell.
+    if let Some(note) =
+        subdollarbench::config::unofficial_cell_note(budget_usd, wall_min.unwrap_or(0))
+    {
+        eprintln!("{note}");
+    }
     let lc = campaign::load_campaign(&name).context("load campaign")?;
     // R23 D3: dollars are the denominator; a paid launch without a list
     // price has no dollar bound. Eval-only runs do not spend.
