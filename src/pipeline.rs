@@ -3552,9 +3552,8 @@ impl BenchmarkPipeline {
             omp_stats.cache_write_tokens,
         );
 
-        let mut live_spend_delta = None;
         let shared_note = shared_at_start.or_else(|| shared_key_note(&runs_dir, config.worker));
-        let (delta, live_spend_note) = if shared_note.is_some() {
+        let (live_spend_delta, live_spend_note) = if shared_note.is_some() {
             (None, shared_note)
         } else {
             let mut delta = None;
@@ -3568,7 +3567,6 @@ impl BenchmarkPipeline {
             }
             gate_spend_delta(delta, None)
         };
-        live_spend_delta = delta;
 
         // R24 R2: the committed snapshot is the scored cost. The live key
         // delta is audit-only; a provider promo or lag cannot move a score.
