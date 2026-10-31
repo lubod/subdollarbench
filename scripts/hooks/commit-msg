@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# R54 F4: one item per commit on a round branch.
+#
+# On round<NN> the subject must be `R<NN> <ID>: ...` with exactly one item
+# ID, or `R<NN>: ...` for a status commit. A subject naming two IDs
+# (`F1/F6`, `F1 F2`, `F1,F2`) is refused. Master's own subjects are not
+# checked. `git commit --no-verify` bypasses this hook; AGENTS.md says when
+# that is allowed.
+set -euo pipefail
+
+msg_file="${1:?commit-msg: message file missing}"
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+if [[ ! "$branch" =~ ^round([0-9]+)$ ]]; then
+    exit 0
+fi
+nn="${BASH_REMATCH[1]}"
+subject="$(awk 'NF && $0 !~ /^#/ { sub(/[[:space:]]+$/, ""); print; exit }' "$msg_file")"
+
+fail() {
+    echo "[commit-msg] $*" >&2
+    echo "[commit-msg] on round$nn use 'R$nn <ID>: ...' (one item) or 'R$nn: ...'" >&2
+    exit 1
+}
+
+[[ -n "$subject" ]] || fail "the subject is empty"
+
+if [[ "$subject" =~ ^R([0-9]+):[[:space:]] ]]; then
+    [[ "${BASH_REMATCH[1]}" == "$nn" ]] \
+        || fail "subject says R${BASH_REMATCH[1]} on branch round$nn"
+    exit 0
+fi
+
+if [[ "$subject" =~ ^R([0-9]+)[[:space:]]+([^:]+):[[:space:]] ]]; then
+    [[ "${BASH_REMATCH[1]}" == "$nn" ]] \
+        || fail "subject says R${BASH_REMATCH[1]} on branch round$nn"
+    ids="${BASH_REMATCH[2]}"
+    [[ "$ids" =~ ^[A-Za-z][A-Za-z0-9]*(-[0-9]+)?$ ]] \
+        || fail "subject names more than one item ID ('$ids')"
+    exit 0
+fi
+
+fail "subject is not 'R$nn <ID>: ...' or 'R$nn: ...': $subject"
