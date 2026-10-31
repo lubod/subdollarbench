@@ -58,7 +58,11 @@ run_patched() {
     RUN_RC=0
     (
         cd "$RUN_WT"
-        CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}" \
+        # Build in the worktree's own target. Sharing the main checkout's
+        # target lets cargo reuse artifacts whose env!("CARGO_MANIFEST_DIR")
+        # still names this worktree after it is deleted (the first round-54
+        # gate failed exactly that way). SEEN_TARGET_DIR opts into a cache.
+        CARGO_TARGET_DIR="${SEEN_TARGET_DIR:-$RUN_TMP/target}" \
             flock "$common/sdb-gates/cargo-test.lock" \
             nice -n 19 cargo test "$test" -- --exact
     ) >"$RUN_LOG" 2>&1 || RUN_RC=$?
