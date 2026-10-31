@@ -73,7 +73,6 @@ pub fn unofficial_cell_note(budget_usd: f64, wall_min: u64) -> Option<String> {
 pub enum CampaignAction {
     /// List bundled campaigns
     List,
-    /// Print the stage plan (no spend, no engine)
     /// [maintain] Hold a campaign lock for a test (hidden)
     #[command(hide = true)]
     LockHold {
@@ -84,6 +83,7 @@ pub enum CampaignAction {
         #[arg(long, default_value_t = 5)]
         seconds: u64,
     },
+    /// Print the stage plan (no spend, no engine)
     DryRun {
         /// Campaign name (directory under ./campaigns)
         #[arg(long)]
