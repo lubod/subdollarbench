@@ -356,6 +356,18 @@ fn r55_f2_campaign_spend_counts_ticket() {
     a.handle_key(KeyCode::Down, KeyModifiers::NONE);
     let s = draw(&a, 120, 30);
     assert!(s.contains("campaign $ 0.0440"), "w1:\n{s}");
+
+    // R55-1: once the ticket's rollup record exists, campaign_spent
+    // already includes it; adding ticket_spent again would double-count.
+    let mut recorded = campaign("recorded", "running", "m", 3.0, 0.5, 2);
+    recorded["live"]["campaign_spent"] = serde_json::json!(0.253354);
+    recorded["live"]["ticket_spent"] = serde_json::json!(0.059693);
+    recorded["rollup"]["stages"] = serde_json::json!([{"id": 2, "passed": true}]);
+    let mut b = App::new();
+    b.set_campaigns(vec![recorded]);
+    let s = draw(&b, 120, 25);
+    assert!(s.contains("campaign $ 0.2534"), "{s}");
+    assert!(!s.contains("campaign $ 0.3130"), "{s}");
 }
 
 /// R55 F3: the header's image comes from /api/status; the captured

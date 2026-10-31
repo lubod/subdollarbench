@@ -340,6 +340,18 @@ fn max_points(c: &Value) -> f64 {
 /// R55 F1: a running career phase counts the chain's points so far plus
 /// this phase's own. A finished phase's `career` block already holds the
 /// total.
+/// R55-1: true when this live ticket already has a rollup stage record
+/// (its verdict landed); `campaign_spent` then includes the ticket.
+fn ticket_recorded(c: &Value) -> bool {
+    let Some(ticket) = c["live"]["ticket"].as_u64() else {
+        return false;
+    };
+    c["rollup"]["stages"]
+        .as_array()
+        .map(|stages| stages.iter().any(|s| s["id"].as_u64() == Some(ticket)))
+        .unwrap_or(false)
+}
+
 fn career_points(c: &Value, all: &[Value]) -> f64 {
     if let Some(p) = c["rollup"]["career"]["points"].as_f64() {
         return p;
@@ -573,7 +585,7 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
         // R55 F2: `campaign_spent` counts finished tickets; while a ticket
         // is live, add its spend so the line is never below ticket $.
         let mut campaign = live["campaign_spent"].as_f64().unwrap_or_else(|| cost(c));
-        if matches!(c["state"].as_str(), Some("running") | Some("stalled")) {
+        if matches!(c["state"].as_str(), Some("running") | Some("stalled")) && !ticket_recorded(c) {
             campaign += live["ticket_spent"].as_f64().unwrap_or(0.0);
         }
         lines.push(Line::from(format!(
