@@ -40,7 +40,7 @@ from `TEMPLATE.md`.
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40; R47-1, R51-1) | merged `0690c3d` |
 | [53](53.md) | Two cells at once: a lock per worker, distinct ids, the sweep keeps campaign containers (2-lane smoke; graded: full gate) | merged `e111d69` |
 | [54](54.md) | Tooling: rehearsal cells for $0, seen-failing records, git hooks, citation check (graded: full gate) | merged `7731cda` (operator 2026-10-31 "merge"; R54-1 fixed) |
-| [55](55.md) | The TUI shows real numbers: one points scale, live spend, the image field, R52-1 | draft (operator 2026-10-31 "put it") |
+| [55](55.md) | The TUI shows real numbers: one points scale, live spend, the image field, R52-1; R54-3 (the pre-push hook) | open (operator 2026-10-31 "open 55") |
 | [56](56.md) | A hung tool call and two lanes: stall guard, the live line names the tool, the audit key delta per lane, `concurrent_cells`, the Board's hung-agent warning, Docker tools refuse beside a cell (R54-2) | draft (operator 2026-10-31 "plan it"; no bump, 6 items) |
 
 **Status values:**
