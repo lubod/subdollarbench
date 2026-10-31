@@ -93,6 +93,20 @@ step() {
 
 step "cargo fmt --check" cargo fmt --check
 step "cargo clippy --all-targets -D warnings" cargo clippy --all-targets -- -D warnings
+
+# R54 F5: citation check on the round files this branch changes. A warning
+# only: a drifted cite must be seen, but it does not block the gate.
+if [[ -n "$base" ]]; then
+    while IFS= read -r round_file; do
+        [[ -f "$round_file" ]] || continue
+        if ! cite_out="$(scripts/check-cites.sh "$round_file" 2>&1)"; then
+            {
+                echo "WARN  citation check: $round_file"
+                printf '%s\n' "$cite_out" | sed 's/^/      /'
+            } >>"$out"
+        fi
+    done < <(git diff --name-only "$base" HEAD -- 'docs/rounds/*.md' 2>/dev/null || true)
+fi
 if [[ $fast == 1 ]]; then
     # The tests to skip are read from the source, so a new SQL_PERF_LIVE
     # proof is skipped without editing this script.
