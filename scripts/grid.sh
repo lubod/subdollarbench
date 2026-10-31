@@ -47,6 +47,8 @@ DRY_RUN=0
 WORKER_BASE=1
 MAX_PHASE=4
 BUDGET_SET=0
+LEDGER_SET=0
+STOP_SET=0
 
 log() { echo "[grid] $*" >&2; }
 
@@ -68,9 +70,9 @@ while [[ $# -gt 0 ]]; do
         --cap) CAP="$2"; shift 2 ;;
         --budget) PHASE_BUDGET="$2"; BUDGET_SET=1; shift 2 ;;
         --wall) PHASE_WALL="$2"; shift 2 ;;
-        --ledger) LEDGER="$2"; shift 2 ;;
+        --ledger) LEDGER="$2"; LEDGER_SET=1; shift 2 ;;
         --hold) HOLD="$2"; shift 2 ;;
-        --stop) STOP="$2"; shift 2 ;;
+        --stop) STOP="$2"; STOP_SET=1; shift 2 ;;
         --cell) CELL="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
@@ -93,6 +95,12 @@ if [[ "$REHEARSAL" == "1" && "$BUDGET_SET" != "1" ]]; then
     # A rehearsal spends nothing; the ledger and the cap stay at $0.
     PHASE_BUDGET=0
 fi
+if [[ "$REHEARSAL" == "1" ]]; then
+    # R54-1: a rehearsal must never feed the paid grid's resume table.
+    # The hold file stays shared so `gap` pauses both.
+    [[ "$LEDGER_SET" == "1" ]] || LEDGER="$RUNS/.grid-rehearsal-ledger.tsv"
+    [[ "$STOP_SET" == "1" ]] || STOP="$RUNS/.grid-rehearsal-stop"
+fi
 LEDGER="${LEDGER:-$RUNS/.grid-ledger.tsv}"
 HOLD="${HOLD:-$RUNS/.grid-hold}"
 STOP="${STOP:-$RUNS/.grid-stop}"
@@ -100,6 +108,35 @@ RUNNING_DIR="${LEDGER}.running"
 
 ledger_total() {
     awk -F'\t' 'NR > 1 { s += $7 } END { printf "%.6f", s }' "$LEDGER" 2>/dev/null || echo 0
+}
+
+# R54-1: rows whose campaign rollup says rehearsal/smoke, as
+# `<mark>TAB<row>`. A missing rollup is not a mark (stub ledgers and old
+# rows stay readable).
+ledger_marked_rows() {
+    [[ -f "$LEDGER" ]] || return 0
+    local row id file mark
+    while IFS= read -r row; do
+        id="$(printf '%s\n' "$row" | awk -F'\t' '{print $5}')"
+        [[ -n "$id" && "$id" != "—" && "$id" != "-" ]] || continue
+        file="$RUNS/$id/campaign.json"
+        [[ -f "$file" ]] || continue
+        mark="$(python3 - "$file" <<'PYEOF'
+import json, sys
+try:
+    r = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+for key in ("rehearsal", "smoke"):
+    if r.get(key):
+        print(key)
+        break
+PYEOF
+)"
+        if [[ -n "$mark" ]]; then
+            printf '%s\t%s\n' "$mark" "$row"
+        fi
+    done < <(tail -n +2 "$LEDGER" 2>/dev/null || true)
 }
 
 ledger_add() {
@@ -349,6 +386,21 @@ run_lane() {
 }
 
 run_grid() {
+    local marked mark row
+    # R54-1: a paid grid may not resume from a rehearsal/smoke row: its
+    # phase 2+ would chain from the reference workspace and spend on a
+    # career the board can never rank.
+    if [[ "$REHEARSAL" != "1" ]]; then
+        marked="$(ledger_marked_rows)"
+        if [[ -n "$marked" ]]; then
+            while IFS=$'\t' read -r mark row; do
+                [[ -n "$mark" ]] || continue
+                log "ledger row names a $mark campaign: $row"
+            done <<<"$marked"
+            log "refusing a paid grid whose ledger holds a rehearsal/smoke row; start a new ledger"
+            return 1
+        fi
+    fi
     RUNNING_DIR="${LEDGER}.running"
     mkdir -p "$(dirname "$LEDGER")"
     # R48-7: the ledger's career column is the line index in the careers
@@ -393,7 +445,7 @@ load_careers() {
 }
 
 self_test() {
-    local dir fake trace scenario
+    local dir fake trace scenario runs out got paid_rows paid_rc first_chain chain p
     dir="$(mktemp -d)"
     trap 'rm -rf "${dir:-}"' EXIT
     fake="$dir/cell.sh"
@@ -405,8 +457,9 @@ career="${SDB_CELL_CAREER:?}"
 phase="${SDB_CELL_PHASE:?}"
 worker="${SDB_CELL_WORKER:?}"
 chain="${SDB_CELL_CHAIN:-}"
-id="fake-c$career-$model-p$phase"
-if [[ "$phase" -gt 1 && "$chain" != "fake-c$career-$model-p$((phase - 1))" ]]; then
+prefix="${SDB_FAKE_PREFIX:-fake}"
+id="$prefix-c$career-$model-p$phase"
+if [[ "$phase" -gt 1 && "$chain" != "$prefix-c$career-$model-p$((phase - 1))" ]]; then
     echo "bad chain for career $career $model phase $phase: '$chain'" >&2
     exit 1
 fi
@@ -676,6 +729,90 @@ EOF
     run_grid
     [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 8 ]] || {
         echo "a matching restart recorded a row"; exit 1; }
+
+
+    # 10) R54-1: --rehearsal has its own ledger and stop file; a paid grid
+    # on the same careers file starts at phase 1 and never chains from a
+    # rehearsal id.
+    scenario="$dir/ten"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/reh.trace" SDB_FAKE_PREFIX=reh \
+        "$ROOT/scripts/grid.sh" --rehearsal --careers "$scenario/careers.txt" \
+        --lanes 1 --cell "$fake" >"$scenario/reh.out" 2>&1
+    [[ -f "$runs/.grid-rehearsal-ledger.tsv" ]] || {
+        echo "the rehearsal grid did not use its own ledger"
+        cat "$scenario/reh.out"
+        exit 1
+    }
+    out="$(SDB_RUNS_DIR="$runs" "$ROOT/scripts/grid.sh" --rehearsal \
+        --careers "$scenario/careers.txt" --lanes 1 --cell "$fake" --dry-run 2>&1)"
+    grep -q "ledger: $runs/.grid-rehearsal-ledger.tsv" <<<"$out" || {
+        echo "rehearsal ledger default wrong: $out"; exit 1; }
+    grep -q "stop:   $runs/.grid-rehearsal-stop" <<<"$out" || {
+        echo "rehearsal stop default wrong: $out"; exit 1; }
+    paid_rc=0
+    SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/paid.trace" SDB_FAKE_PREFIX=paid \
+        "$ROOT/scripts/grid.sh" --careers "$scenario/careers.txt" \
+        --lanes 1 --cell "$fake" >"$scenario/paid.out" 2>&1 || paid_rc=$?
+    [[ "$paid_rc" -eq 0 ]] || {
+        echo "paid grid after a rehearsal exited $paid_rc"
+        cat "$scenario/paid.out"
+        exit 1
+    }
+    paid_rows=$(($(wc -l < "$runs/.grid-ledger.tsv") - 1))
+    [[ "$paid_rows" -eq 4 ]] || {
+        echo "paid grid after a rehearsal ran $paid_rows phases, want 4"
+        cat "$scenario/paid.out"
+        exit 1
+    }
+    got="$(awk -F'\t' 'NR > 1 { printf "%s ", $3 }' "$runs/.grid-ledger.tsv")"
+    [[ "$got" == "1 2 3 4 " ]] || { echo "paid grid phases: $got"; exit 1; }
+    if grep -q 'reh-' "$runs/.grid-ledger.tsv"; then
+        echo "the paid ledger names a rehearsal id"; exit 1
+    fi
+    first_chain="$(awk -F'\t' '$3 == 1 { print $4 }' "$scenario/paid.trace")"
+    [[ -z "$first_chain" ]] || { echo "paid phase 1 chains from '$first_chain'"; exit 1; }
+    for p in 2 3 4; do
+        chain="$(awk -F'\t' -v p="$p" '$3 == p { print $4 }' "$scenario/paid.trace")"
+        [[ "$chain" == "paid-c0-c1-p$((p - 1))" ]] || {
+            echo "paid phase $p chains from '$chain'"; exit 1; }
+    done
+
+    # 11) R54-1: a paid grid refuses a ledger whose campaign rollup is
+    # marked, naming the rows; no cell runs.
+    scenario="$dir/eleven"
+    runs="$scenario/runs"
+    mkdir -p "$runs/fake-c0-c1-p1" "$runs/fake-c1-c1-p1"
+    printf '{"rehearsal": true}\n' > "$runs/fake-c0-c1-p1/campaign.json"
+    printf '{"smoke": true}\n' > "$runs/fake-c1-c1-p1/campaign.json"
+    printf '%s\n' c1 c1 > "$scenario/careers.txt"
+    {
+        printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n'
+        printf '0\tc1\t1\t1\tfake-c0-c1-p1\t1\t0\tok\t2026-10-31T00:00:00Z\n'
+        printf '1\tc1\t1\t2\tfake-c1-c1-p1\t1\t0\tok\t2026-10-31T00:00:00Z\n'
+    } > "$runs/.grid-ledger.tsv"
+    rc=0
+    out="$(SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/trace" \
+        "$ROOT/scripts/grid.sh" --careers "$scenario/careers.txt" \
+        --lanes 2 --cell "$fake" 2>&1)" || rc=$?
+    [[ "$rc" -eq 1 ]] || {
+        echo "a paid grid with marked rows exited $rc, want 1"
+        echo "$out"
+        exit 1
+    }
+    for want in fake-c0-c1-p1 fake-c1-c1-p1 rehearsal smoke; do
+        grep -q "$want" <<<"$out" || {
+            echo "the refusal did not name $want"
+            echo "$out"
+            exit 1
+        }
+    done
+    [[ ! -s "$scenario/trace" ]] || {
+        echo "a cell ran before the marked-row refusal"; exit 1; }
+    [[ "$(($(wc -l < "$runs/.grid-ledger.tsv") - 1))" -eq 2 ]] || {
+        echo "the refusal changed the ledger"; exit 1; }
 
     echo "RESULT: PASS (grid self-test)"
 }
