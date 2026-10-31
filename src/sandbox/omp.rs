@@ -1083,9 +1083,7 @@ impl OmpRunner {
                 "turns"
             } else if reason.contains("budget cap") || reason.contains("campaign cap's headroom") {
                 "dollars"
-            } else if reason.contains("Watchdog") {
-                "wall"
-            } else if reason.contains("[STALL]") {
+            } else if reason.contains("Watchdog") || reason.contains("[STALL]") {
                 "wall"
             } else {
                 "crash"
