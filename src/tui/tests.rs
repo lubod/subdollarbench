@@ -374,3 +374,23 @@ fn r55_f3_header_image_from_status() {
     let h = header_of(&draw(&a, 120, 10)).to_string();
     assert!(h.contains("image abcdef123456"), "{h}");
 }
+
+/// R55 F4 (R52-1): the full connection error is clipped in the header,
+/// never the `?help q quit` hint; the live pane keeps the whole error.
+#[test]
+fn r55_f4_unreachable_header_fits_80() {
+    let err = "error sending request for url (http://127.0.0.1:3000/api/status)";
+    let mut a = App::new();
+    a.unreachable(err);
+    for w in [80u16, 120] {
+        let s = draw(&a, w, 24);
+        let h = header_of(&s);
+        assert!(h.ends_with("?help q quit"), "width {w}: {h}");
+        assert!(h.chars().count() <= w as usize, "width {w}: {h}");
+    }
+    let s = draw(&a, 120, 24);
+    assert!(
+        s.contains(err),
+        "the full error is not in the live pane:\n{s}"
+    );
+}

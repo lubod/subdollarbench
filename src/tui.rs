@@ -409,10 +409,23 @@ fn status_field(app: &App) -> String {
     }
 }
 
+/// R55 F4 (R52-1): the header keeps the hint; the status field is the
+/// first thing cut. The full error stays in the live pane.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// R42-6: at a narrow width the middle fields drop from the right (image,
 /// then rules); the `?help q quit` hint is never dropped.
 fn header_line(app: &App, width: u16) -> String {
-    let status = status_field(app);
     let rules = app.status["rules_version"].as_str().unwrap_or("—");
     let paused = app.status["queue_paused"].as_bool().unwrap_or(false);
     let q = app.status["queue"]["pending"].as_u64().unwrap_or(0);
@@ -420,7 +433,12 @@ fn header_line(app: &App, width: u16) -> String {
         "queue {q}{} ?help q quit",
         if paused { " (paused)" } else { "" }
     );
-    let base = format!("subdollarbench tui · {status}");
+    let prefix = "subdollarbench tui";
+    // Leave room for the two separators and the tail before clipping the
+    // status: the hint wins over the error text.
+    let room = (width as usize).saturating_sub(prefix.chars().count() + tail.chars().count() + 6);
+    let status = clip(&status_field(app), room);
+    let base = format!("{prefix} · {status}");
     let mut fields = vec![format!("rules {rules}")];
     if let Some(image) = app.status["sandbox_image"]
         .as_str()
@@ -536,19 +554,14 @@ fn elapsed_minutes(c: &Value) -> i64 {
 }
 
 fn render_live(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(c) = app.selected_cell() else {
-        frame.render_widget(Paragraph::new("no cell"), area);
-        return;
-    };
-    let live = c.get("live").unwrap_or(&Value::Null);
-    // R55 F2: campaign_spent counts finished tickets; add the live ticket
-    // so campaign $ is never below ticket $.
-    let mut campaign = live["campaign_spent"].as_f64().unwrap_or_else(|| cost(c));
-    if matches!(c["state"].as_str(), Some("running") | Some("stalled")) {
-        campaign += live["ticket_spent"].as_f64().unwrap_or(0.0);
+    let mut lines = Vec::new();
+    // R55 F4: the full engine error lives here; the header may clip it.
+    if let Some(e) = &app.engine_error {
+        lines.push(Line::from(format!("engine unreachable: {e}")));
     }
-    let mut lines = vec![
-        Line::from(format!(
+    if let Some(c) = app.selected_cell() {
+        let live = c.get("live").unwrap_or(&Value::Null);
+        lines.push(Line::from(format!(
             "ticket {} {} · round {} · turn {}/{} · {}",
             live["ticket"].as_u64().unwrap_or(0),
             live["title"].as_str().unwrap_or(""),
@@ -556,8 +569,14 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
             live["turn"].as_u64().unwrap_or(0),
             live["max_turns"].as_u64().unwrap_or(0),
             state_text(c)
-        )),
-        Line::from(format!(
+        )));
+        // R55 F2: `campaign_spent` counts finished tickets; while a ticket
+        // is live, add its spend so the line is never below ticket $.
+        let mut campaign = live["campaign_spent"].as_f64().unwrap_or_else(|| cost(c));
+        if matches!(c["state"].as_str(), Some("running") | Some("stalled")) {
+            campaign += live["ticket_spent"].as_f64().unwrap_or(0.0);
+        }
+        lines.push(Line::from(format!(
             "ticket $ {:.4}   campaign $ {:.4} / {:.2}   wall {}/{} m",
             live["ticket_spent"].as_f64().unwrap_or(0.0),
             campaign,
@@ -569,12 +588,17 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
                 .as_u64()
                 .or_else(|| c["rollup"]["wall_min"].as_u64())
                 .unwrap_or(0)
-        )),
-    ];
+        )));
+    } else if lines.is_empty() {
+        lines.push(Line::from("no cell"));
+    }
     lines.extend(app.filtered_log());
+    let title = app
+        .selected_cell()
+        .map(short_model)
+        .unwrap_or_else(|| "no cell".to_string());
     let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
-        " live: {} · {} ",
-        short_model(c),
+        " live: {title} · {} ",
         if app.follow { "following" } else { "paused" }
     )));
     frame.render_widget(p, area);
