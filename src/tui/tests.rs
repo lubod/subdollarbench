@@ -357,3 +357,20 @@ fn r55_f2_campaign_spend_counts_ticket() {
     let s = draw(&a, 120, 30);
     assert!(s.contains("campaign $ 0.0440"), "w1:\n{s}");
 }
+
+/// R55 F3: the header's image comes from /api/status; the captured
+/// fixture has no field, so the test adds the response's new field.
+#[test]
+fn r55_f3_header_image_from_status() {
+    let raw: Value = serde_json::from_str(include_str!("fixtures/api-status.json")).unwrap();
+    assert!(raw.get("sandbox_image").is_none());
+    let mut a = App::new();
+    a.set_status(raw.clone());
+    let h = header_of(&draw(&a, 120, 10)).to_string();
+    assert!(!h.contains("image "), "no image field when absent: {h}");
+    let mut with = raw;
+    with["sandbox_image"] = serde_json::json!("sha256:abcdef1234567890");
+    a.set_status(with);
+    let h = header_of(&draw(&a, 120, 10)).to_string();
+    assert!(h.contains("image abcdef123456"), "{h}");
+}

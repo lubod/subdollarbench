@@ -179,6 +179,37 @@ pub struct StatusResponse {
     pub sqlite_version: String,
     #[serde(default)]
     pub cap_price_basis: String,
+    /// R55 F3: the sandbox image `/api/status` serves for the TUI header
+    /// (the rollups and run details carry their own stamp). None when the
+    /// image cannot be inspected.
+    #[serde(default)]
+    pub sandbox_image: Option<String>,
+}
+
+/// R55 F3: one 60 s cache for the status image. `sandbox_image_id` shells
+/// out to `docker image inspect`, so a per-request call would be wrong.
+/// The private cache in `src/campaign.rs` cannot be shared without a
+/// graded-path change; this cache calls the same public lookup.
+static STATUS_SANDBOX_IMAGE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    std::sync::Mutex::new(None);
+
+fn cached_status_sandbox_image() -> Option<String> {
+    {
+        let cache = STATUS_SANDBOX_IMAGE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((at, id)) = cache.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(60) {
+                return id.clone();
+            }
+        }
+    }
+    let id = crate::sandbox::omp_updater::sandbox_image_id();
+    let mut cache = STATUS_SANDBOX_IMAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *cache = Some((std::time::Instant::now(), id.clone()));
+    id
 }
 
 pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
@@ -234,6 +265,7 @@ pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: crate::report::rules::sqlite_version().to_string(),
         cap_price_basis: crate::report::rules::CAP_PRICE_BASIS.to_string(),
+        sandbox_image: cached_status_sandbox_image(),
     })
     .into_response()
 }
@@ -3209,6 +3241,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status["rules_version"], crate::report::rules::RULES_VERSION);
+    }
+
+    /// R55 F3: /api/status carries the sandbox image key (a string when
+    /// the image is inspectable, null when it is not).
+    #[tokio::test]
+    async fn r55_f3_status_serves_sandbox_image() {
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(status.get("sandbox_image").is_some(), "{status}");
+        assert!(
+            status["sandbox_image"].is_null() || status["sandbox_image"].is_string(),
+            "{status}"
+        );
     }
 
     /// R28 F1: the rules/status endpoint and a run's detail carry the

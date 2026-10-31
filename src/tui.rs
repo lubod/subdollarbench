@@ -414,8 +414,6 @@ fn status_field(app: &App) -> String {
 fn header_line(app: &App, width: u16) -> String {
     let status = status_field(app);
     let rules = app.status["rules_version"].as_str().unwrap_or("—");
-    let image = app.status["sandbox_image"].as_str().unwrap_or("—");
-    let image = image.rsplit(':').next().unwrap_or(image);
     let paused = app.status["queue_paused"].as_bool().unwrap_or(false);
     let q = app.status["queue"]["pending"].as_u64().unwrap_or(0);
     let tail = format!(
@@ -423,7 +421,21 @@ fn header_line(app: &App, width: u16) -> String {
         if paused { " (paused)" } else { "" }
     );
     let base = format!("subdollarbench tui · {status}");
-    let mut fields = vec![format!("rules {rules}"), format!("image {image}"), tail];
+    let mut fields = vec![format!("rules {rules}")];
+    if let Some(image) = app.status["sandbox_image"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        let short: String = image
+            .rsplit(':')
+            .next()
+            .unwrap_or(image)
+            .chars()
+            .take(12)
+            .collect();
+        fields.push(format!("image {short}"));
+    }
+    fields.push(tail);
     let render = |fields: &[String]| format!("{base} · {}", fields.join(" · "));
     let mut line = render(&fields);
     while line.chars().count() > width as usize && fields.len() > 1 {
