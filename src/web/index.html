@@ -1702,6 +1702,14 @@
       btn.classList.toggle('stalled', !!b.stalled);
     }
 
+    /// R52 F1 (R39-4): a picker change replaces the current overlay entry,
+    /// so one back press (or the close button) returns to the view the
+    /// overlay was opened from. Opening the overlay still pushes one entry.
+    function switchLive(id) {
+      if (!id) return;
+      location.replace('#live/' + encodeURIComponent(id));
+    }
+
     function openLive(id) {
       if (!id) return;
       if (!liveOpen) {
@@ -2067,7 +2075,7 @@
       const liveChoices = boardCache.filter(c => c && (c.state === 'running' || c.state === 'stalled'));
       const picker = liveChoices.length > 1
         ? `<div class="hint" style="display:flex;align-items:center;gap:6px;">Console:
-             <select onchange="if(this.value){location.hash='live/'+encodeURIComponent(this.value);}">
+             <select onchange="switchLive(this.value)">
                ${liveChoices.map(c => `<option value="${escapeHtml(c.id)}" ${c.id === liveRunId ? 'selected' : ''}>${escapeHtml(shortModel((c.rollup || {}).model || c.id))} · ${escapeHtml(c.state)}</option>`).join('')}
              </select></div>`
         : '';
@@ -2471,10 +2479,20 @@
     function perfTitle(p) {
       if (!p) return '';
       const bits = (p.workloads || []).map(w => {
-        const row = `${w.id}: ref ${Number(w.reference).toFixed(3)} \u00b7 candidate ${Number(w.candidate).toFixed(3)} \u00b7 ${Number(w.ratio).toFixed(2)}\u00d7`;
-        const floor = !w.correct ? ' \u00b7 floored (wrong answer, not durable)' : '';
-        const note = w.note ? ` \u00b7 ${w.note}` : '';
-        return row + floor + note;
+        // R52 F6 (R47-1): a floored block shows the floor, not its raw
+        // ratio, and says why only from the recorded note.
+        const ratio = w.correct ? Number(w.ratio) : 0.1;
+        let row = `${w.id}: ref ${Number(w.reference).toFixed(3)} \u00b7 candidate ${Number(w.candidate).toFixed(3)} \u00b7 ${ratio.toFixed(2)}\u00d7`;
+        if (!w.correct) {
+          row += ' \u00b7 floored';
+          if (w.note) row += ` \u00b7 ${w.note}`;
+          if (w.numbers && w.numbers.raw_ratio != null) {
+            row += ` \u00b7 measured ${Number(w.numbers.raw_ratio).toFixed(2)}\u00d7`;
+          }
+        } else if (w.note) {
+          row += ` \u00b7 ${w.note}`;
+        }
+        return row;
       });
       if (p.error) bits.push(`harness: ${p.error}`);
       return bits.join('\n');
@@ -2836,10 +2854,14 @@
     function perfBlock(perf) {
       if (!perf || !(perf.workloads || []).length) return '';
       const rows = perf.workloads.map(w => {
+        const ratio = w.correct ? Number(w.ratio) : 0.1;
+        const measured = !w.correct && w.numbers && w.numbers.raw_ratio != null
+          ? ` <span class="hint">(measured ${Number(w.numbers.raw_ratio).toFixed(2)}\u00d7)</span>`
+          : '';
         const verdict = w.correct
           ? 'ok'
-          : '<span style="color:var(--warning);">floored (wrong answer, not durable)</span>';
-        return `<tr><td>${escapeHtml(w.id)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.reference).toFixed(3)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.candidate).toFixed(3)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.ratio).toFixed(2)}\u00d7</td><td>${verdict}</td><td class="hint">${escapeHtml(w.note || '')}</td></tr>`;
+          : '<span style="color:var(--warning);">floored</span>' + measured;
+        return `<tr><td>${escapeHtml(w.id)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.reference).toFixed(3)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${Number(w.candidate).toFixed(3)}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${ratio.toFixed(2)}\u00d7</td><td>${verdict}</td><td class="hint">${escapeHtml(w.note || '')}</td></tr>`;
       }).join('');
       const score = perf.score != null ? `${Number(perf.score).toFixed(2)}\u00d7` : '\u2014';
       return `<details style="margin-top:4px;"><summary class="hint" style="cursor:pointer;">perf ${score} \u00b7 phase workloads</summary>
@@ -3740,6 +3762,14 @@
       await loadInspectedRun(runId, opts || {});
     }
 
+    /// R52 F7 (R51-1): an unknown effort shows the placeholder, never an
+    /// invented "high".
+    function inspectEffortHtml(m) {
+      return m.effort
+        ? `${escapeHtml(m.effort)} <span style="color:var(--text-muted); font-size:0.72rem;">· ${escapeHtml(m.task)}</span>`
+        : '-';
+    }
+
     async function loadInspectedRun(runId, opts) {
       openRunInspectorModal();
       renderCrumbs();
@@ -3792,7 +3822,7 @@
         document.getElementById('modalInspectThroughput').textContent = formatThroughput(m.throughput_req_sec, m.task);
         document.getElementById('modalInspectDuration').textContent = formatDuration(m.duration_seconds || 0);
         document.getElementById('modalInspectTurns').textContent = (m.turns !== undefined && m.turns !== null) ? m.turns : '-';
-        document.getElementById('modalInspectEffort').innerHTML = `${escapeHtml(m.effort || 'high')} <span style="color:var(--text-muted); font-size:0.72rem;">· ${escapeHtml(m.task)}</span>`;
+        document.getElementById('modalInspectEffort').innerHTML = inspectEffortHtml(m);
 
         // Render Test Stages
         renderInspectStages(m);
