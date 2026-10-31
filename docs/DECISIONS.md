@@ -571,3 +571,37 @@ The benchmark answers "what does a dollar buy" (round 23):
   7. the 20-pass bar and the load bar;
   8. the calibration career;
   9. the grid.
+
+## 23. Rounds 53 and 54 before the long tests; push after merges (2026-10-31)
+
+- **Round 53** (two cells at once) is a #22 step-5 fix: the 2-lane smoke
+  refused lane 1 on the one `runs/.campaign.lock` (`53.md`, Why). Lane 1
+  was skipped (operator: "skip it"); the 2-lane smoke runs again after
+  53 merges and deploys.
+- **Round 54** (rehearsal cells, seen-failing records, git hooks, the
+  citation check) opens once round 53 has merged, and merges **before**
+  the bar (operator, 2026-10-31: "1 yes, 2 before"). The planned rounds
+  in #22's sense are now 53 and 54.
+- **Push:** `master` and the round tags went to `origin` on 2026-10-31
+  (197 commits; the secret scan's 15 hits were fixtures, none of the
+  `.env` values). From now on the reviewer pushes after each merge,
+  after the scan (operator: "push").
+- **AGENTS.md trimmed to rules** (operator: "trim"); the history it
+  carried is kept below.
+
+### AGENTS.md history (moved here on 2026-10-31)
+
+- "While a cell runs" rules: operator, 2026-10-28.
+- "Two rounds at once" (one `cargo test` on the host, the shared lock):
+  operator, 2026-10-29, for rounds 45 and 48.
+- "A new test must be seen failing": rounds 37 and 44 (tests that could
+  never fail, or never pass).
+- The rules freeze: declared at `.41` (2026-10-26, #20); round 36 bumped
+  it to `.42`; `.44` is current.
+- The full gate's length: round 31's record `3acf7ae264fe.txt`, 2367 s
+  of tests; the fast gate's: `b898bcb6a83b.fast.txt`, 222 s.
+- The flake bar's pace: `31.md`, "After the merge": 20 passes in 16.6 h.
+- CI: the sandbox build with the runner's UID/GID (round 33); round 37
+  removed round 35's two bench-host skips and added
+  `r37_f1_worker_ports_do_not_collide`; round 43 deleted the retired
+  verifiers, so coverage measures the whole active tree.
