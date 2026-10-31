@@ -643,11 +643,12 @@ impl UiServer {
                     if busy {
                         continue;
                     }
+                    let live = live_run_ids(&sweep);
                     let orphans =
                         crate::sandbox::docker::SandboxManager::reap_orphan_containers_except(
-                            &live_run_ids(&sweep),
+                            &live,
                         );
-                    crate::sandbox::docker::SandboxManager::prune_labeled_networks();
+                    crate::sandbox::docker::SandboxManager::prune_labeled_networks_except(&live);
                     if ghosts + orphans > 0 {
                         send_status(
                             &sweep.log_sender,
@@ -681,6 +682,11 @@ impl UiServer {
             for key in state.cancel_flags.lock().unwrap().keys() {
                 ids.insert(key.clone());
             }
+            // R53 F3: a CLI campaign's containers carry sdb.run=<campaign_id>
+            // (or a stage stem under it), and the lock is its live fact.
+            for h in crate::campaign::live_lock_holders() {
+                ids.insert(h.campaign_id);
+            }
             ids
         }
 
@@ -694,14 +700,18 @@ impl UiServer {
             // to the dead previous engine), so the empty live set lets the
             // age gate reap ancient running orphans too. Restart-while-old-
             // still-dying is serialized by systemd stop-before-start.
+            // R53 F3: a restarted engine must not reap a CLI campaign that
+            // is still running (its lock is live).
+            let live: std::collections::HashSet<String> = crate::campaign::live_lock_holders()
+                .into_iter()
+                .map(|h| h.campaign_id)
+                .collect();
             let stale_containers =
-                crate::sandbox::docker::SandboxManager::reap_orphan_containers_except(
-                    &std::collections::HashSet::new(),
-                );
+                crate::sandbox::docker::SandboxManager::reap_orphan_containers_except(&live);
             if stale_containers > 0 {
                 println!("[RECONCILE] reaped {stale_containers} orphan container(s) at startup");
             }
-            crate::sandbox::docker::SandboxManager::prune_labeled_networks();
+            crate::sandbox::docker::SandboxManager::prune_labeled_networks_except(&live);
             crate::sandbox::docker::SandboxManager::prune_stale_networks();
         }
         // Background check and auto-update of sandbox OMP on server startup
