@@ -3698,6 +3698,7 @@ impl BenchmarkPipeline {
             cost_formula_usd: Some(breakdown.total_cost_usd),
             live_spend_delta_usd: live_spend_delta,
             live_spend_note: live_spend_note.clone(),
+            stall: omp_stats.stall.clone(),
             effective_cost_usd: Some(effective_cost_usd),
             savings_percent: breakdown.savings_percent,
             efficiency_score,

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -9,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +58,16 @@ pub fn cap_headroom_reason(
     })
 }
 
+/// R56 F1: one tool call that never returned. Recorded on the ticket's
+/// manifest and in the live line.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolStall {
+    pub tool: String,
+    pub command: String,
+    pub started_at: String,
+    pub ended_at: String,
+}
+
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct OmpSessionStats {
@@ -83,6 +94,9 @@ pub struct OmpSessionStats {
     /// R23 D1/D5: why the session ended: dollars | turns | wall | ready |
     /// crash. None when the runner could not classify the end.
     pub stop_reason: Option<String>,
+    /// R56 F1: the tool call that hung, when the stall guard ended the
+    /// session.
+    pub stall: Option<ToolStall>,
 }
 
 /// The `omp` argv after its runner flags: every option, then `--`, then the
@@ -357,6 +371,44 @@ pub struct TailSessionContext {
     /// Set when classify_billing_error trips on a session line: the runner
     /// pauses the queue instead of scoring the trial.
     pub billing_tripped: Arc<AtomicBool>,
+    /// R56 F1: a tool call with no result for this long ends the session.
+    pub stall_after: Duration,
+    /// R56 F1: the stall to record when the guard fires.
+    pub stall: Arc<Mutex<Option<ToolStall>>>,
+}
+
+/// R56 F1: `SDB_TOOL_STALL_S`, default 600.
+fn tool_stall_after() -> Duration {
+    Duration::from_secs(
+        std::env::var("SDB_TOOL_STALL_S")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(600),
+    )
+}
+
+/// R56 F1/F2: the tool call currently in flight in a session.
+struct InflightTool {
+    id: String,
+    tool: String,
+    command: String,
+    started_at: String,
+    started: Instant,
+}
+
+/// One line, clipped for the live line.
+fn clip_command(command: &str, max: usize) -> String {
+    let one = command.replace(['\n', '\r'], " ");
+    let one = one.trim();
+    if one.chars().count() <= max {
+        return one.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = one.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// All launch parameters for one agent session. Bundled in a struct so the
@@ -775,6 +827,7 @@ impl OmpRunner {
         // session lines as token stats only once the feed proves live.
         let extension_feed = Arc::new(AtomicBool::new(false));
         // Spawn thread to tail the active session .jsonl file in real-time
+        let stall = Arc::new(Mutex::new(None::<ToolStall>));
         let tail_ctx = TailSessionContext {
             session_dir,
             start_time,
@@ -788,6 +841,8 @@ impl OmpRunner {
             max_call_usd: max_call_usd.clone(),
             accumulated_tokens: accumulated_tokens.clone(),
             accumulated_cached: accumulated_cached.clone(),
+            stall_after: tool_stall_after(),
+            stall: stall.clone(),
             limit_reached: limit_reached.clone(),
             limit_reason: limit_reason.clone(),
             cancel_flag: cancel_flag.clone(),
@@ -984,6 +1039,7 @@ impl OmpRunner {
         };
         stats.cost_usd = accumulated_cost.lock().map(|l| *l).unwrap_or(0.0);
         stats.max_call_usd = max_call_usd.lock().map(|l| *l).unwrap_or(0.0);
+        stats.stall = stall.lock().ok().and_then(|s| s.clone());
 
         let has_runnable = canonical_workdir.join("Dockerfile").exists()
             || canonical_workdir.join("start.sh").exists();
@@ -1028,6 +1084,8 @@ impl OmpRunner {
             } else if reason.contains("budget cap") || reason.contains("campaign cap's headroom") {
                 "dollars"
             } else if reason.contains("Watchdog") {
+                "wall"
+            } else if reason.contains("[STALL]") {
                 "wall"
             } else {
                 "crash"
@@ -1117,11 +1175,41 @@ impl OmpRunner {
 
         let mut last_activity = std::time::Instant::now();
         let mut last_heartbeat = std::time::Instant::now();
+        let mut inflight: Option<InflightTool> = None;
+        let mut stall_fired = false;
 
         while ctx.running.load(Ordering::SeqCst) {
             if let Some(ref cf) = ctx.cancel_flag {
                 if cf.load(Ordering::SeqCst) {
                     break;
+                }
+            }
+            // R56 F1: a tool call that never returns ends the session as
+            // --max-time does, graded on the workspace as it stands.
+            if !stall_fired {
+                if let Some(tool) = inflight.as_ref() {
+                    let elapsed = tool.started.elapsed();
+                    if elapsed >= ctx.stall_after {
+                        let command = clip_command(&tool.command, 120);
+                        let msg = format!(
+                            "[STALL] {} ran {} s without returning ({}); ending the session, graded on the workspace as is",
+                            tool.tool,
+                            elapsed.as_secs(),
+                            command
+                        );
+                        let _ = ctx.tx.send(msg.clone());
+                        *ctx.limit_reason.lock().unwrap() = Some(msg);
+                        ctx.limit_reached.store(true, Ordering::SeqCst);
+                        if let Ok(mut store) = ctx.stall.lock() {
+                            *store = Some(ToolStall {
+                                tool: tool.tool.clone(),
+                                command: tool.command.clone(),
+                                started_at: tool.started_at.clone(),
+                                ended_at: chrono::Utc::now().to_rfc3339(),
+                            });
+                        }
+                        stall_fired = true;
+                    }
                 }
             }
             line_buf.clear();
@@ -1163,20 +1251,21 @@ impl OmpRunner {
                     }
                     let cur_turns = ctx.turn_counter.load(Ordering::SeqCst);
                     let max_t = ctx.limits.max_turns.unwrap_or(0);
-                    let elapsed = last_activity.elapsed().as_secs();
-                    if elapsed >= 3 && last_heartbeat.elapsed() >= Duration::from_secs(3) {
+                    let idle = last_activity.elapsed().as_secs();
+                    if idle >= 3 && last_heartbeat.elapsed() >= Duration::from_secs(3) {
                         last_heartbeat = std::time::Instant::now();
                         let max_str = if max_t > 0 {
                             max_t.to_string()
                         } else {
                             "∞".to_string()
                         };
-                        let _ = ctx.tx.send(format!(
+                        let waiting = format!(
                             "[WAITING] Turn {}/{} in progress: Model is reasoning and generating response... (elapsed: {}s)",
                             cur_turns + 1,
                             max_str,
-                            elapsed
-                        ));
+                            idle
+                        );
+                        let _ = ctx.tx.send(waiting);
                     }
                     thread::sleep(Duration::from_millis(150));
                 }
@@ -1194,6 +1283,42 @@ impl OmpRunner {
                         // Check limits & telemetry in session line
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line_buf.trim())
                         {
+                            // R56 F1/F2: track the tool call in flight. A
+                            // result clears it; a start replaces it.
+                            if val.get("type").and_then(|v| v.as_str()) == Some("custom")
+                                && val.get("customType").and_then(|v| v.as_str())
+                                    == Some("tool_execution_start")
+                            {
+                                let d = &val["data"];
+                                inflight = Some(InflightTool {
+                                    id: d["toolCallId"].as_str().unwrap_or("").to_string(),
+                                    tool: d["toolName"].as_str().unwrap_or("tool").to_string(),
+                                    command: d
+                                        .pointer("/args/command")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    started_at: d["startedAt"]
+                                        .as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+                                    started: Instant::now(),
+                                });
+                                stall_fired = false;
+                            }
+                            if val.pointer("/message/role").and_then(|r| r.as_str())
+                                == Some("toolResult")
+                            {
+                                let id =
+                                    val.pointer("/message/toolCallId").and_then(|v| v.as_str());
+                                if inflight
+                                    .as_ref()
+                                    .map(|i| id.map(|x| i.id == x).unwrap_or(true))
+                                    .unwrap_or(false)
+                                {
+                                    inflight = None;
+                                }
+                            }
                             let mut assistant_turn = false;
                             // 1. Assistant turn check
                             if val.pointer("/message/role").and_then(|r| r.as_str())
@@ -1995,6 +2120,7 @@ impl OmpRunner {
             max_call_usd,
             effort_effective: thinking_effective,
             stop_reason: None,
+            stall: None,
         })
     }
     pub fn fallback_extract_files_from_session(session_path: &Path, workdir: &Path) {
@@ -2653,6 +2779,8 @@ mod tests {
             billing_tripped: Arc::new(AtomicBool::new(false)),
             max_call_usd: Arc::new(Mutex::new(0.0f64)),
             accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stall_after: tool_stall_after(),
+            stall: Arc::new(Mutex::new(None)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -2708,6 +2836,8 @@ mod tests {
                 billing_tripped: Arc::new(AtomicBool::new(false)),
                 max_call_usd: Arc::new(Mutex::new(0.0f64)),
                 accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                stall_after: tool_stall_after(),
+                stall: Arc::new(Mutex::new(None)),
             },
             active_file,
         )
@@ -2930,6 +3060,8 @@ mod tests {
             billing_tripped: Arc::new(AtomicBool::new(false)),
             max_call_usd: Arc::new(Mutex::new(0.0f64)),
             accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stall_after: tool_stall_after(),
+            stall: Arc::new(Mutex::new(None)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -3053,6 +3185,8 @@ mod tests {
             billing_tripped: Arc::new(AtomicBool::new(false)),
             max_call_usd: Arc::new(Mutex::new(0.0f64)),
             accumulated_cached: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stall_after: tool_stall_after(),
+            stall: Arc::new(Mutex::new(None)),
         };
         let handle = std::thread::spawn(move || {
             OmpRunner::tail_session_file(tail_ctx);
@@ -3579,6 +3713,87 @@ mod tests {
         running.store(false, Ordering::SeqCst);
         let _ = handle.join();
         assert!(saw_waiting, "idle tailer must heartbeat");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R56 F1: the hung fixture's tool start never gets a result; the
+    /// stall guard ends the session within 5 s and records the command.
+    #[test]
+    fn r56_f1_hung_tool_ends_session() {
+        let dir = std::env::temp_dir().join(format!("r56_hung_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("hung.jsonl");
+        std::fs::write(
+            &session,
+            include_str!("fixtures/hung-tool-session-tail.jsonl"),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        ctx.stall_after = Duration::from_secs(2);
+        let stall = ctx.stall.clone();
+        let handle = thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut line = None;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(l) if l.contains("[STALL]") => {
+                    line = Some(l);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        let line = line.expect("stall line within 5 s");
+        assert!(line.contains("bash"), "{line}");
+        let record = stall.lock().unwrap().clone().expect("stall record");
+        assert!(
+            record
+                .command
+                .starts_with("cd /workspace && rm -rf /tmp/sdbdata"),
+            "{}",
+            record.command
+        );
+        assert!(!record.started_at.is_empty() && !record.ended_at.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R56 F1: the capped fixture's tool result arrives; no stall is
+    /// recorded even with the same low threshold.
+    #[test]
+    fn r56_f1_returned_tool_is_not_a_stall() {
+        let dir = std::env::temp_dir().join(format!("r56_capped_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("capped.jsonl");
+        std::fs::write(
+            &session,
+            include_str!("fixtures/capped-tool-session-excerpt.jsonl"),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let (mut ctx, _active) = tailer_ctx(dir.clone(), tx, running.clone());
+        ctx.active_file = Arc::new(Mutex::new(Some(session.clone())));
+        ctx.stall_after = Duration::from_secs(2);
+        let stall = ctx.stall.clone();
+        let handle = thread::spawn(move || OmpRunner::tail_session_file(ctx));
+        std::thread::sleep(Duration::from_millis(2500));
+        let mut saw_stall = false;
+        while let Ok(l) = rx.recv_timeout(Duration::from_millis(50)) {
+            if l.contains("[STALL]") {
+                saw_stall = true;
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = handle.join();
+        assert!(!saw_stall, "a returned tool must not stall");
+        assert!(stall.lock().unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
