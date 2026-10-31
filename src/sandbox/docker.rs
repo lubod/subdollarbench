@@ -1882,6 +1882,12 @@ impl SandboxManager {
     /// an sdb.run label AND zero containers AND older than the staleness
     /// threshold. Replaces name-pattern sweeps that reaped live siblings.
     pub fn prune_labeled_networks() {
+        Self::prune_labeled_networks_except(&std::collections::HashSet::new())
+    }
+
+    /// R53 F3: keep a live campaign's networks regardless of age. The
+    /// network carries the same `sdb.run` label as its containers.
+    pub fn prune_labeled_networks_except(live_ids: &std::collections::HashSet<String>) {
         let ls = Command::new("docker")
             .args([
                 "network",
@@ -1903,18 +1909,41 @@ impl SandboxManager {
                     "inspect",
                     id,
                     "--format",
-                    "{{len .Containers}} {{.Created}}",
+                    "{{len .Containers}} {{.Created}} {{index .Labels \"sdb.run\"}}",
                 ])
                 .output();
             let text = match detail {
                 Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
                 _ => continue,
             };
+            let label = text.split_whitespace().nth(2).unwrap_or("");
+            if Self::run_matches_live(label, live_ids) {
+                continue;
+            }
             if !Self::network_is_stale(&text) {
                 continue;
             }
             let _ = Command::new("docker").args(["network", "rm", id]).output();
         }
+    }
+
+    /// R53 F3: a running container older than the age limit is reaped only
+    /// when its run matches no live campaign/cell. Split out so the age
+    /// and the live set are testable without Docker.
+    pub fn should_reap_running(
+        created: &str,
+        run: &str,
+        live_ids: &std::collections::HashSet<String>,
+    ) -> bool {
+        if Self::run_matches_live(run, live_ids) {
+            return false;
+        }
+        Self::container_created_secs(created).is_some_and(|ts| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|now| now.as_secs().saturating_sub(ts) > Self::MAX_RUNNING_ORPHAN_AGE_SECS)
+                .unwrap_or(false)
+        })
     }
 
     /// Reap orphan *containers*: labeled containers whose network is gone
@@ -2024,20 +2053,10 @@ impl SandboxManager {
             // Running but ancient and unmatched: abandoned by a dead engine,
             // never coming back. Live matches always survive regardless of age
             // (a 9-trial cell legitimately runs for hours).
-            if !stopped && !Self::run_matches_live(run, live_ids) {
-                let age_ok = Self::container_created_secs(created).is_some_and(|ts| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|now| {
-                            now.as_secs().saturating_sub(ts) > Self::MAX_RUNNING_ORPHAN_AGE_SECS
-                        })
-                        .unwrap_or(false)
-                });
-                if age_ok {
-                    let rm = Command::new("docker").args(["rm", "-f", id]).output();
-                    if rm.map(|o| o.status.success()).unwrap_or(false) {
-                        reaped += 1;
-                    }
+            if !stopped && Self::should_reap_running(created, run, live_ids) {
+                let rm = Command::new("docker").args(["rm", "-f", id]).output();
+                if rm.map(|o| o.status.success()).unwrap_or(false) {
+                    reaped += 1;
                 }
             }
         }
@@ -2237,6 +2256,29 @@ mod gc_tests {
             &live
         ));
         assert!(!SandboxManager::run_matches_live("unrelated", &live));
+    }
+
+    /// R53 F3: a live campaign's old running container is kept; the same
+    /// container with no live lock is reaped. Young containers are kept.
+    #[test]
+    fn r53_f3_sweep_keeps_campaign_containers() {
+        let old = (chrono::Utc::now() - chrono::Duration::hours(4)).to_rfc3339();
+        let live = live(&["campaign_x_w0"]);
+        assert!(
+            !SandboxManager::should_reap_running(&old, "campaign_x_w0_s0_full", &live),
+            "a live campaign's old container must be kept"
+        );
+        assert!(
+            SandboxManager::should_reap_running(&old, "campaign_y_w0_s0_full", &live),
+            "an old container with no live lock is reaped"
+        );
+        let young = chrono::Utc::now().to_rfc3339();
+        assert!(
+            !SandboxManager::should_reap_running(&young, "campaign_y_w0_s0_full", &live),
+            "the age gate keeps young containers"
+        );
+        // Networks carry the same sdb.run label and use this match.
+        assert!(SandboxManager::run_matches_live("campaign_x_w0", &live));
     }
 
     #[test]

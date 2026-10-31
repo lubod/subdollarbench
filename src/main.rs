@@ -308,6 +308,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             subdollarbench::config::CampaignAction::DryRun { name, model } => {
                 main_campaign::dry_run(&name, &model)?
             }
+            subdollarbench::config::CampaignAction::LockHold {
+                worker,
+                id,
+                seconds,
+            } => {
+                let _lock = subdollarbench::campaign::CampaignLock::acquire(&id, worker)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                std::thread::sleep(std::time::Duration::from_secs(seconds));
+                return Ok(());
+            }
             subdollarbench::config::CampaignAction::Run {
                 name,
                 model,
@@ -639,6 +649,7 @@ mod tests {
             Some(2),
             Some("campaign_prev"),
             None,
+            0,
         );
         let cli = Cli::try_parse_from(
             std::iter::once("subdollarbench").chain(args.iter().map(String::as_str)),
