@@ -36,7 +36,7 @@ from `TEMPLATE.md`.
 | [49](49.md) | W4 counts only durable commits: data on disk, a flush check, R45-3/R45-6, rules `.44` (graded: full gate + bar) | merged `bdffb77` |
 | [47](47.md) | The board v2: perf column and tie-break; R44-6/7/8/13 (graded: full gate) | merged `c47e679` |
 | [50](50.md) | The grid driver and the flush counter: R48-4..7, R49-2, R49-3 (graded: full gate) | merged `6c04723` |
-| [51](51.md) | Publishing: a marked target, one secret list, the results page (R44-9, R44-10, R44-14, Q8 a; R43-1, R43-2; graded: full gate) | open (operator 2026-10-30; R43-1/2 added "add to 51") |
+| [51](51.md) | Publishing: a marked target, one secret list, the results page (R44-9, R44-10, R44-14, Q8 a; R43-1, R43-2; graded: full gate) | merged `0f2e364` |
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40; R47-1) | open (operator 2026-10-30; R47-1 added "add to 52") |
 
 **Status values:**
