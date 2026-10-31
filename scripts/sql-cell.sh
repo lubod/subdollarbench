@@ -18,6 +18,135 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# R52 F4 (round 40 F2): refuse a dirty tree and a missing/failed flake
+# record before the build. The key is flake-bar.sh's one computation.
+# SDB_CELL_SMOKE=1 skips the record for a sub-$0.99 smoke cell and says so.
+CELL_FLAKE_KEY=""
+CELL_FLAKE_RESULT=""
+cell_gate() {
+    local root="$1" budget="$2" smoke="$3"
+    local status tracked p
+    CELL_FLAKE_KEY=""
+    CELL_FLAKE_RESULT=""
+    status="$(cd "$root" && git status --porcelain --untracked-files=all 2>/dev/null || true)"
+    tracked="$(printf '%s\n' "$status" | grep -v '^??' || true)"
+    if [[ -n "$tracked" ]]; then
+        echo "[cell] FATAL: the tracked tree is dirty; commit first" >&2
+        return 1
+    fi
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        case "$p" in
+            src/*|campaigns/*|extensions/*|build.rs)
+                echo "[cell] FATAL: untracked $p is graded content; commit it" >&2
+                return 1 ;;
+        esac
+    done < <(printf '%s\n' "$status" | sed -n 's/^?? //p')
+    if [[ "$smoke" == "1" ]]; then
+        if awk -v b="$budget" 'BEGIN { exit !(b >= 0.99) }'; then
+            echo "[cell] FATAL: a smoke cell needs a budget below \$0.99 (got $budget)" >&2
+            return 1
+        fi
+        CELL_FLAKE_RESULT="SMOKE"
+        echo "[cell] SMOKE: not a publishable cell"
+        return 0
+    fi
+    local key record
+    key="$(cd "$root" && scripts/flake-bar.sh --key)" || {
+        echo "[cell] FATAL: could not compute the flake key" >&2
+        return 1
+    }
+    record="$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
+    if [[ ! -f "$record" ]]; then
+        echo "[cell] FATAL: no flake record for $key ($record); run scripts/flake-bar.sh" >&2
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS' "$record"; then
+        echo "[cell] FATAL: the flake record for $key is not a PASS ($record)" >&2
+        return 1
+    fi
+    CELL_FLAKE_KEY="$key"
+    CELL_FLAKE_RESULT="PASS"
+    return 0
+}
+
+self_test() {
+    local dir repo key record out rc
+    dir="$(mktemp -d /tmp/sdb-cell-self-test.XXXXXX)"
+    trap "rm -rf '$dir'" EXIT
+    repo="$dir/repo"
+    mkdir -p "$repo/src" "$repo/scripts"
+    cp scripts/flake-bar.sh scripts/graded-paths.txt scripts/long-test-lock.sh "$repo/scripts/"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email cell@example.com
+    git -C "$repo" config user.name cell
+    echo one > "$repo/src/x.rs"
+    echo lock > "$repo/Cargo.lock"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm one
+
+    # 1) A dirty tracked file is refused.
+    echo two > "$repo/src/x.rs"
+    if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
+        echo '[self-test] a dirty tracked tree was accepted' >&2; return 1
+    fi
+    git -C "$repo" checkout -- src/x.rs
+    echo '[self-test] dirty tracked refused'
+
+    # 2) No record is refused.
+    if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
+        echo '[self-test] a missing record was accepted' >&2; return 1
+    fi
+    echo '[self-test] missing record refused'
+
+    key="$(cd "$repo" && scripts/flake-bar.sh --key)"
+    record="$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
+    mkdir -p "$(dirname "$record")"
+
+    # 3) IN PROGRESS is refused.
+    printf 'RESULT: IN PROGRESS\n' > "$record"
+    if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
+        echo '[self-test] IN PROGRESS was accepted' >&2; return 1
+    fi
+    echo '[self-test] in-progress record refused'
+
+    # 4) FAIL is refused.
+    printf 'RESULT: FAIL (x)\n' > "$record"
+    if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
+        echo '[self-test] FAIL was accepted' >&2; return 1
+    fi
+    echo '[self-test] failed record refused'
+
+    # 5) PASS is allowed and reports the key.
+    printf 'RESULT: PASS\n' > "$record"
+    cell_gate "$repo" 0.5 0 || { echo '[self-test] PASS was refused' >&2; return 1; }
+    [[ "$CELL_FLAKE_KEY" == "$key" && "$CELL_FLAKE_RESULT" == "PASS" ]] || {
+        echo '[self-test] PASS did not report the key' >&2; return 1; }
+    echo '[self-test] pass record allowed'
+
+    # 6) SMOKE with no record is allowed and says so.
+    rm -f "$record"
+    out="$(cell_gate "$repo" 0.5 1 2>&1)" || {
+        echo '[self-test] smoke without a record was refused' >&2; return 1; }
+    grep -q 'SMOKE: not a publishable cell' <<<"$out" || {
+        echo '[self-test] smoke did not print the SMOKE line' >&2; return 1; }
+    echo '[self-test] smoke allowed'
+
+    # 7) SMOKE at the official budget is refused.
+    if cell_gate "$repo" 0.99 1 >/dev/null 2>&1; then
+        echo '[self-test] smoke at $0.99 was accepted' >&2; return 1
+    fi
+    echo '[self-test] smoke at $0.99 refused'
+
+    echo 'RESULT: PASS (cell self-test)'
+    return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+    self_test
+    exit $?
+fi
 MODEL="${1:?usage: sql-cell.sh <model> [budget_usd] [wall_min] [extra...]}"
 shift || true
 BUDGET="${1:-0.99}"
@@ -54,6 +183,9 @@ if [[ -f "$ROOT/.env" ]]; then
     fi
 fi
 
+SMOKE="${SDB_CELL_SMOKE:-0}"
+cell_gate "$ROOT" "$BUDGET" "$SMOKE" || exit 1
+
 echo "[cell] building release binary ($BIN)"
 (cd "$ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --bins)
 
@@ -89,7 +221,7 @@ if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$CELL_PORT "
     exit 1
 fi
 
-echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT phase=${PHASE:-full} chain=${CHAIN:-none} worker=$WORKER port=$CELL_PORT root=$ROOT"
+echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT phase=${PHASE:-full} chain=${CHAIN:-none} worker=$WORKER port=$CELL_PORT flake=${CELL_FLAKE_KEY:-none} bar=$CELL_FLAKE_RESULT root=$ROOT"
 PHASE_ARGS=()
 if [[ -n "$PHASE" ]]; then PHASE_ARGS+=(--phase "$PHASE"); fi
 if [[ -n "$CHAIN" ]]; then PHASE_ARGS+=(--chain "$CHAIN"); fi
