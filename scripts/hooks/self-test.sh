@@ -154,12 +154,29 @@ if grep -qF "$env_value" <<<"$out"; then
 fi
 echo '[self-test] real .env value refused on an allowlisted path'
 
+# R55-2: a content line starting with ++ is a +++ diff line, not a file
+# header; its value is still real.
+printf '++%s\n' "$env_value" >>"$hooksrepo/scripts/hooks/pre-push"
+git -C "$hooksrepo" add scripts/hooks/pre-push
+git -C "$hooksrepo" commit -qm plus
+plus_commit="$(git -C "$hooksrepo" rev-parse HEAD)"
+rc=0
+out="$(push_hooks "$plus_commit" "$value_commit" 2>&1)" || rc=$?
+[[ "$rc" -eq 1 ]] || { echo "[self-test] a ++ value line was accepted (rc=$rc)" >&2; exit 1; }
+grep -q 'scripts/hooks/pre-push' <<<"$out" || {
+    echo '[self-test] the ++ value hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }
+if grep -qF "$env_value" <<<"$out"; then
+    echo '[self-test] the ++ value was printed' >&2
+    exit 1
+fi
+echo '[self-test] ++ value line refused'
+
 echo 'sk-or-v1-NOT-ALLOWLISTED-FIXTURE' >"$hooksrepo/leak.txt"
 git -C "$hooksrepo" add leak.txt
 git -C "$hooksrepo" commit -qm leak
 leak_commit="$(git -C "$hooksrepo" rev-parse HEAD)"
 rc=0
-out="$(push_hooks "$leak_commit" "$value_commit" 2>&1)" || rc=$?
+out="$(push_hooks "$leak_commit" "$plus_commit" 2>&1)" || rc=$?
 [[ "$rc" -eq 1 ]] || { echo "[self-test] a pattern hit outside the list was accepted (rc=$rc)" >&2; exit 1; }
 grep -q 'leak.txt' <<<"$out" || {
     echo '[self-test] the pattern hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }

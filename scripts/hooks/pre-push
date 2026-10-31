@@ -105,22 +105,37 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     # from the repo's .env is refused even on an allowlisted path.
     if ((${#values[@]} > 0)); then
         file=""
+        header=0
+        check_value() {
+            local text="$1" v
+            for v in "${values[@]}"; do
+                if [[ "$text" == *"$v"* ]]; then
+                    refuse "$ref" "$file contains a value from .env"
+                    return 0
+                fi
+            done
+            return 0
+        }
         while IFS= read -r line; do
             case "$line" in
                 "diff --git "*)
                     file="${line#diff --git a/}"
                     file="${file%% b/*}"
+                    header=1
                     ;;
-                "+++"*) ;;
-                "+"*)
-                    content="${line#+}"
-                    for v in "${values[@]}"; do
-                        if [[ "$content" == *"$v"* ]]; then
-                            refuse "$ref" "$file contains a value from .env"
-                            break
-                        fi
-                    done
+                "--- "*)
+                    # The next +++ line is the file header, not content.
+                    if ((header == 1)); then header=2; fi
                     ;;
+                "+++ "*)
+                    if ((header == 2)); then
+                        header=0
+                    else
+                        check_value "${line#+}"
+                    fi
+                    ;;
+                "@@"*) header=0 ;;
+                "+"*) check_value "${line#+}" ;;
             esac
         done <<<"$diff_out"
     fi
