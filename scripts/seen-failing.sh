@@ -32,7 +32,8 @@ first_failure() {
     if [[ -z "$line" ]]; then
         line="$(grep -m1 'FAILED' "$log" || true)"
     fi
-    printf '%s' "$line"
+    # Keep the record readable when the assertion message is a whole dump.
+    printf '%s' "$line" | cut -c1-400
 }
 
 # Run the test in a fresh worktree at `commit` with `patch` applied.
