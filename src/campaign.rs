@@ -2157,6 +2157,8 @@ fn live_rollup_stub_at_with(
         },
         ladder_state: None,
         harness_fault: None,
+        rehearsal: live["rehearsal"].as_bool().unwrap_or(false),
+        smoke: live["smoke"].as_bool().unwrap_or(false),
     }
 }
 
@@ -2686,6 +2688,12 @@ pub struct CampaignRollup {
     /// non-result: the runner poisons it and no board publishes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_fault: Option<String>,
+    /// R54 F1: a $0 launch of the real path with the reference candidate.
+    #[serde(default)]
+    pub rehearsal: bool,
+    /// R54 F1: a sub-$0.99 smoke cell; never ranked, and its career is not.
+    #[serde(default)]
+    pub smoke: bool,
 }
 
 fn outcomes_vec(m: &HashMap<u32, LadderOutcome>) -> Vec<(u32, LadderOutcome)> {
@@ -3095,6 +3103,8 @@ where
         perf: None,
         ladder_state: None,
         harness_fault: None,
+        rehearsal: false,
+        smoke: false,
         refork: None,
     };
 
@@ -4158,6 +4168,8 @@ mod tests {
             points: 0.0,
             max_points: 0.0,
             harness_fault: None,
+            rehearsal: false,
+            smoke: false,
             phase: None,
             chain_from: None,
             career: None,
@@ -4683,6 +4695,8 @@ mod tests {
             points: 1.0,
             max_points: 4.0,
             harness_fault: None,
+            rehearsal: false,
+            smoke: false,
             phase: None,
             chain_from: None,
             career: None,
@@ -6397,6 +6411,8 @@ mod tests {
             perf: None,
             ladder_state: None,
             harness_fault: None,
+            rehearsal: false,
+            smoke: false,
             refork: None,
         }
     }

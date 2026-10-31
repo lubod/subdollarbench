@@ -143,6 +143,12 @@ pub enum CampaignAction {
         /// `worker_port(base, worker)`; lanes 1-7 never touch worker 0's.
         #[arg(long, default_value_t = 0)]
         worker: u8,
+        /// R54: a $0 rehearsal: eval-only, reference candidate, no API key
+        #[arg(long, default_value_t = false)]
+        rehearsal: bool,
+        /// R54: a sub-$0.99 smoke cell; never ranked
+        #[arg(long, default_value_t = false)]
+        smoke: bool,
     },
 }
 

@@ -333,6 +333,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 chain,
                 refork,
                 worker,
+                rehearsal,
+                smoke,
             } => {
                 main_campaign::run(
                     name,
@@ -343,7 +345,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     (wall_min > 0).then_some(wall_min),
                     timeout_min,
                     api_key,
-                    eval_only,
+                    eval_only || rehearsal,
+                    rehearsal,
+                    smoke,
                     workspace,
                     phase,
                     chain,
@@ -1392,6 +1396,8 @@ mod tests {
                     timeout_min: 5,
                     api_key: None,
                     eval_only: true,
+                    rehearsal: false,
+                    smoke: false,
                     workspace: None,
                     phase: None,
                     chain: None,
@@ -1403,6 +1409,112 @@ mod tests {
         .await
         .is_err());
 
+        drop(env);
+    }
+
+    /// R54 F1 live: a phase-1 rehearsal (eval-only, reference candidate,
+    /// worker 9, temp runs) passes its stages and records `rehearsal`;
+    /// phase 2 chains from it.
+    #[tokio::test]
+    async fn r54_f1_rehearsal_cell_live() {
+        static SQL_PERF_LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        // Resolve the real root before SdbEnv flips SDB_HOME.
+        let real_campaign = subdollarbench::config::get_repo_root().join("campaigns/sdb-sql");
+        let env = SdbEnv::new("r54rehearsal").await;
+        // The campaign spec is a read-only graded input like tasks/src;
+        // link only the one campaign so the fixture tests still see an
+        // empty campaigns dir.
+        fs::create_dir_all(env.root.join("campaigns")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_campaign, env.root.join("campaigns/sdb-sql")).unwrap();
+        // The campaign lock lives in runs/, before the launch creates it.
+        fs::create_dir_all(env.root.join("runs")).unwrap();
+        std::env::set_var("SDB_CAMPAIGN_TEST_WORKER_MAX", "99");
+        main_campaign::run(
+            "sdb-sql".to_string(),
+            "test-model".to_string(),
+            "low".to_string(),
+            Harness::Omp,
+            0.99,
+            None,
+            120,
+            None,
+            true,
+            true,
+            false,
+            None,
+            Some(1),
+            None,
+            None,
+            9,
+        )
+        .await
+        .expect("phase-1 rehearsal");
+        let runs = env.root.join("runs");
+        let mut dirs: Vec<_> = fs::read_dir(&runs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("campaign.json").is_file())
+            .collect();
+        dirs.sort();
+        let first = dirs.pop().expect("phase-1 campaign dir");
+        let rollup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(first.join("campaign.json")).unwrap())
+                .unwrap();
+        assert_eq!(rollup["rehearsal"], true, "{rollup}");
+        assert_eq!(rollup["phase"], 1, "{rollup}");
+        let stages = rollup["stages"].as_array().expect("stages");
+        assert!(!stages.is_empty(), "{rollup}");
+        assert!(
+            stages.iter().all(|s| s["passed"] == true),
+            "phase 1 must pass: {rollup}"
+        );
+        let id = first.file_name().unwrap().to_string_lossy().to_string();
+        main_campaign::run(
+            "sdb-sql".to_string(),
+            "test-model".to_string(),
+            "low".to_string(),
+            Harness::Omp,
+            0.99,
+            None,
+            120,
+            None,
+            true,
+            true,
+            false,
+            None,
+            Some(2),
+            Some(id.clone()),
+            None,
+            9,
+        )
+        .await
+        .expect("phase-2 rehearsal");
+        let second = fs::read_dir(&runs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.join("campaign.json").is_file() && p.file_name().unwrap().to_string_lossy() != id
+            })
+            .expect("phase-2 campaign dir");
+        let rollup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(second.join("campaign.json")).unwrap())
+                .unwrap();
+        assert_eq!(rollup["rehearsal"], true, "{rollup}");
+        assert_eq!(rollup["phase"], 2, "{rollup}");
+        assert_eq!(rollup["chain_from"], id, "{rollup}");
+        assert!(
+            rollup["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["passed"] == true),
+            "phase 2 must pass: {rollup}"
+        );
+        std::env::remove_var("SDB_CAMPAIGN_TEST_WORKER_MAX");
         drop(env);
     }
 }
