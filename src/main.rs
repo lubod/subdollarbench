@@ -1420,8 +1420,10 @@ mod tests {
     async fn r54_f1_rehearsal_cell_live() {
         static SQL_PERF_LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        // Resolve the real root before SdbEnv flips SDB_HOME.
-        let real_campaign = subdollarbench::config::get_repo_root().join("campaigns/sdb-sql");
+        // The checkout is a compile-time constant, so another test holding
+        // SDB_HOME cannot change which campaign this links.
+        let real_campaign =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("campaigns/sdb-sql");
         let env = SdbEnv::new("r54rehearsal").await;
         // The campaign spec is a read-only graded input like tasks/src;
         // link only the one campaign so the fixture tests still see an
