@@ -857,6 +857,24 @@ pub const COMPILED_GRADED_DIGEST: &str = env!("SDB_COMPILED_RULES_DIGEST");
 /// for at least 64).
 const STAMP_BYTES: usize = 16;
 
+/// R52 F5 (round 40 F3): the one version line, used by `--version` and
+/// by the cell preflight.
+pub fn version_line() -> String {
+    format!(
+        "{} · rules {} · fingerprint {} · SQLite {}",
+        env!("CARGO_PKG_VERSION"),
+        RULES_VERSION,
+        fingerprint(),
+        sqlite_version()
+    )
+}
+
+/// The cached `&'static str` clap needs for `--version`.
+pub fn version_line_static() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(version_line).as_str()
+}
+
 /// Hash of the graded inputs, as `"{RULES_VERSION}+{hex32}"`.
 pub fn fingerprint() -> String {
     fingerprint_root(&crate::config::get_repo_root())
@@ -958,6 +976,18 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, content).unwrap();
         PathBuf::from(rel)
+    }
+
+    /// R52 F5 (round 40 F3): the version line names the rules, fingerprint
+    /// and SQLite version.
+    #[test]
+    fn r52_f5_version_names_rules() {
+        let line = version_line();
+        assert!(line.contains(env!("CARGO_PKG_VERSION")), "{line}");
+        assert!(line.contains(RULES_VERSION), "{line}");
+        assert!(line.contains(&fingerprint()), "{line}");
+        assert!(line.contains(&sqlite_version()), "{line}");
+        assert_eq!(version_line_static(), line);
     }
 
     #[test]

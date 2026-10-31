@@ -16,6 +16,10 @@ pub const AUTO_EXTEND_BUDGET_ENV: &str = "SDB_AUTO_EXTEND_TRIALS";
 #[derive(Parser, Debug)]
 #[command(name = "subdollarbench")]
 #[command(about = "Autonomous Under-$1 System-Building Benchmark for Budget LLMs", long_about = None)]
+#[command(
+    version = env!("CARGO_PKG_VERSION"),
+    long_version = crate::report::rules::version_line_static()
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -116,6 +120,7 @@ pub enum CampaignAction {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Export the sdb-sql career board (static HTML) and grid.json
     Portal {
         /// Path to runs directory
         #[arg(long, default_value = "./runs")]
@@ -273,7 +278,7 @@ pub enum Commands {
     Log {
         /// Run id or prefix is NOT needed: the engine streams the active run.
         /// Kept for symmetry with `watch`; positional is ignored.
-        #[arg(default_value = "")]
+        #[arg(default_value = "", hide = true)]
         run: String,
 
         /// Lines to show
@@ -741,6 +746,39 @@ mod tests {
         assert_eq!(json, "\"sql\"");
         let de: TaskType = serde_json::from_str(&json).unwrap();
         assert_eq!(de, TaskType::Sql);
+    }
+
+    /// R52 F5 (round 40 F3/F5): portal has an about line, log's ignored
+    /// positional is hidden, and --version carries the rules line.
+    #[test]
+    fn r52_f5_help_text() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let portal = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "portal")
+            .expect("portal");
+        assert!(
+            portal
+                .get_about()
+                .map(|a| !a.to_string().trim().is_empty())
+                .unwrap_or(false),
+            "portal needs an about line"
+        );
+        let log = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "log")
+            .expect("log");
+        let run = log
+            .get_arguments()
+            .find(|a| a.get_id() == "run")
+            .expect("log run argument");
+        assert!(run.is_hide_set(), "log's ignored run must be hidden");
+        let version = cmd.get_long_version().unwrap_or("");
+        assert!(
+            version.contains(crate::report::rules::RULES_VERSION),
+            "--version lacks the rules version: {version}"
+        );
     }
 
     /// R52 F3 (round 40 F1): the CLI defaults are the official cell.

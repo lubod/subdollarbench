@@ -203,6 +203,9 @@ for marker in "never answered a probe" "-repair" "embedded SQL engine or parser"
     fi
 done
 
+# R52 F5: the cell line names the rules the binary will grade with.
+CELL_VERSION="$("$BIN" --version 2>/dev/null || true)"
+
 # Merge hygiene: fmt is fast; clippy stays in CI so the preflight is quick.
 if ! (cd "$ROOT" && cargo fmt --check >/dev/null 2>&1); then
     echo "[cell] FATAL: cargo fmt --check fails; run cargo fmt" >&2
@@ -221,7 +224,7 @@ if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$CELL_PORT "
     exit 1
 fi
 
-echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT phase=${PHASE:-full} chain=${CHAIN:-none} worker=$WORKER port=$CELL_PORT flake=${CELL_FLAKE_KEY:-none} bar=$CELL_FLAKE_RESULT root=$ROOT"
+echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effort=$EFFORT phase=${PHASE:-full} chain=${CHAIN:-none} worker=$WORKER port=$CELL_PORT flake=${CELL_FLAKE_KEY:-none} bar=$CELL_FLAKE_RESULT version=${CELL_VERSION:-unknown} root=$ROOT"
 PHASE_ARGS=()
 if [[ -n "$PHASE" ]]; then PHASE_ARGS+=(--phase "$PHASE"); fi
 if [[ -n "$CHAIN" ]]; then PHASE_ARGS+=(--chain "$CHAIN"); fi
