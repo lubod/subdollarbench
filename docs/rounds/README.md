@@ -39,7 +39,9 @@ from `TEMPLATE.md`.
 | [51](51.md) | Publishing: a marked target, one secret list, the results page (R44-9, R44-10, R44-14, Q8 a; R43-1, R43-2; graded: full gate) | merged `0f2e364` |
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40; R47-1, R51-1) | merged `0690c3d` |
 | [53](53.md) | Two cells at once: a lock per worker, distinct ids, the sweep keeps campaign containers (2-lane smoke; graded: full gate) | merged `e111d69` |
-| [54](54.md) | Tooling: rehearsal cells for $0, seen-failing records, git hooks, citation check (graded: full gate) | open (operator 2026-10-31 "1 yes", after 53 merged; before the bar, DECISIONS #23) |
+| [54](54.md) | Tooling: rehearsal cells for $0, seen-failing records, git hooks, citation check (graded: full gate) | blocked (R54-1; review 2026-10-31) |
+| [55](55.md) | The TUI shows real numbers: one points scale, live spend, the image field, R52-1 | draft (operator 2026-10-31 "put it") |
+| [56](56.md) | A hung tool call and two lanes: stall guard, the live line names the tool, the audit key delta per lane, `concurrent_cells`, the Board's hung-agent warning, Docker tools refuse beside a cell (R54-2) | draft (operator 2026-10-31 "plan it"; rules-bump decision pending) |
 
 **Status values:**
 
