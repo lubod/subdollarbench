@@ -25,7 +25,7 @@ slug() {
 
 first_failure() {
     local log="$1" line
-    line="$(grep -m1 -E 'assertion .* failed' "$log" || true)"
+    line="$(grep -m1 -E 'assertion.*failed' "$log" || true)"
     if [[ -z "$line" ]]; then
         line="$(grep -m1 -E 'panicked at|^error(\[|:)' "$log" || true)"
     fi
