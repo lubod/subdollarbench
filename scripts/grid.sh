@@ -41,8 +41,12 @@ HOLD=""
 STOP=""
 CELL="${SDB_GRID_CELL:-$ROOT/scripts/sql-cell.sh}"
 SELF_TEST=0
+REAL=0
+REHEARSAL=0
 DRY_RUN=0
 WORKER_BASE=1
+MAX_PHASE=4
+BUDGET_SET=0
 
 log() { echo "[grid] $*" >&2; }
 
@@ -50,8 +54,9 @@ usage() {
     cat >&2 <<'EOF'
 usage: grid.sh --careers <file> --lanes <n> [--cap <usd>] [--budget <usd>]
                [--wall <min>] [--ledger <file>] [--hold <file>] [--stop <file>]
-               [--cell <path>] [--dry-run]
-       grid.sh --self-test
+               [--cell <path>] [--dry-run] [--max-phase <n>]
+       grid.sh --rehearsal --careers <file> --lanes <n> [--cap <usd>]
+       grid.sh --self-test [--real]
 EOF
     exit 2
 }
@@ -61,7 +66,7 @@ while [[ $# -gt 0 ]]; do
         --careers) CAREERS_FILE="$2"; shift 2 ;;
         --lanes) LANES="$2"; shift 2 ;;
         --cap) CAP="$2"; shift 2 ;;
-        --budget) PHASE_BUDGET="$2"; shift 2 ;;
+        --budget) PHASE_BUDGET="$2"; BUDGET_SET=1; shift 2 ;;
         --wall) PHASE_WALL="$2"; shift 2 ;;
         --ledger) LEDGER="$2"; shift 2 ;;
         --hold) HOLD="$2"; shift 2 ;;
@@ -69,6 +74,9 @@ while [[ $# -gt 0 ]]; do
         --cell) CELL="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
+        --real) REAL=1; shift ;;
+        --rehearsal) REHEARSAL=1; shift ;;
+        --max-phase) MAX_PHASE="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) log "unknown argument: $1"; usage ;;
     esac
@@ -76,6 +84,15 @@ done
 
 [[ "$LANES" =~ ^[1-9][0-9]*$ ]] || { log "--lanes must be a positive integer"; exit 2; }
 [[ "$CAP" =~ ^[0-9]+([.][0-9]+)?$ ]] || { log "--cap must be a non-negative number"; exit 2; }
+[[ "$MAX_PHASE" =~ ^[1-4]$ ]] || { log "--max-phase must be 1-4"; exit 2; }
+if [[ "$REAL" == "1" && "$SELF_TEST" != "1" ]]; then
+    log "--real needs --self-test"
+    exit 2
+fi
+if [[ "$REHEARSAL" == "1" && "$BUDGET_SET" != "1" ]]; then
+    # A rehearsal spends nothing; the ledger and the cap stay at $0.
+    PHASE_BUDGET=0
+fi
 LEDGER="${LEDGER:-$RUNS/.grid-ledger.tsv}"
 HOLD="${HOLD:-$RUNS/.grid-hold}"
 STOP="${STOP:-$RUNS/.grid-stop}"
@@ -160,13 +177,15 @@ preflight() {
         log "preflight: the tracked tree is dirty"
         return 1
     fi
-    local key record
-    # R52 F4: one key computation for the bar, the cell and the grid.
-    key="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
-    record="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
-    if ! grep -q 'RESULT: PASS' "$record" 2>/dev/null; then
-        log "preflight: no PASS flake record for key $key ($record)"
-        return 1
+    if [[ "$REHEARSAL" != "1" ]]; then
+        local key record
+        # R52 F4: one key computation for the bar, the cell and the grid.
+        key="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
+        record="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
+        if ! grep -q 'RESULT: PASS' "$record" 2>/dev/null; then
+            log "preflight: no PASS flake record for key $key ($record)"
+            return 1
+        fi
     fi
     local base port
     for base in 5480 5481 8101 8102 8103; do
@@ -226,6 +245,7 @@ run_cell() {
     SDB_CELL_PHASE="$phase" \
     SDB_CELL_CHAIN="$chain" \
     SDB_CELL_WORKER="$worker" \
+    SDB_CELL_REHEARSAL="$REHEARSAL" \
     SDB_CONCURRENT_CELLS="$LANES" \
     SDB_CELL_RESULT="$result" \
         "$CELL" "$model" "$PHASE_BUDGET" "$PHASE_WALL"
@@ -260,10 +280,10 @@ run_lane() {
             start_phase=1
             chain=""
         fi
-        if (( start_phase > 4 )); then
+        if (( start_phase > MAX_PHASE )); then
             continue
         fi
-        for ((phase = start_phase; phase <= 4; phase++)); do
+        for ((phase = start_phase; phase <= MAX_PHASE; phase++)); do
             if [[ -f "$STOP" ]]; then
                 log "lane $lane worker $worker: STOP before $model phase $phase"
                 return "$failed"
@@ -660,7 +680,100 @@ EOF
     echo "RESULT: PASS (grid self-test)"
 }
 
+# R54 F2: an opt-in real grid. Two lanes on workers 8 and 9, each one
+# career of two chained rehearsal phases, in a temp runs dir. This is the
+# check the stub self-test cannot make: two real launches hold two worker
+# locks at once. On round-53-open's single runs/.campaign.lock the second
+# lane dies at "campaign ... is already running".
+real_self_test() {
+    if ! command -v docker >/dev/null 2>&1; then
+        log "real self-test: Docker is not available"
+        return 1
+    fi
+    local dir scenario rows got c w ids total id rc=0
+    dir="$(mktemp -d /tmp/sdb-grid-real.XXXXXX)"
+    trap 'rm -rf "${dir:-}"' EXIT
+    scenario="$dir"
+    printf 'test-model\ntest-model\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=2
+    CAP=0
+    PHASE_BUDGET=0
+    MAX_PHASE=2
+    WORKER_BASE=8
+    REHEARSAL=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    export SDB_RUNS_DIR="$scenario/runs"
+    mkdir -p "$SDB_RUNS_DIR"
+    export SDB_CELL_REHEARSAL=1
+    export SDB_CAMPAIGN_TEST_WORKER_MAX=99
+    # The cell still checks the tree; the self-test may run on a commit
+    # the developer just built, so skip only the grid preflight.
+    export SDB_GRID_SKIP_PREFLIGHT=1
+    CELL="$ROOT/scripts/sql-cell.sh"
+    load_careers "$CAREERS_FILE"
+    log "real self-test: 2 lanes x 2 phases on workers 8/9, runs $SDB_RUNS_DIR"
+    run_grid || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        log "real self-test: the grid failed (rc=$rc)"
+        [[ -f "$LEDGER" ]] && cat "$LEDGER" >&2
+        return 1
+    fi
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 4 ]] || {
+        log "real self-test: expected 4 ledger rows, got $rows"
+        cat "$LEDGER" >&2
+        return 1
+    }
+    for c in 0 1; do
+        got="$(awk -F'\t' -v c="$c" 'NR > 1 && $1 == c { printf "%s ", $3 }' "$LEDGER")"
+        [[ "$got" == "1 2 " ]] || {
+            log "real self-test: career $c phases '$got'"
+            return 1
+        }
+    done
+    for w in 8 9; do
+        ids="$(awk -F'\t' -v w="$w" 'NR > 1 && $4 == w { n++ } END { print n + 0 }' "$LEDGER")"
+        [[ "$ids" -gt 0 ]] || {
+            log "real self-test: worker $w never ran"
+            return 1
+        }
+    done
+    got="$(awk -F'\t' 'NR > 1 && $8 != "ok" { printf "%s ", $8 }' "$LEDGER")"
+    [[ -z "$got" ]] || {
+        log "real self-test: a phase stopped: $got"
+        return 1
+    }
+    ids="$(awk -F'\t' 'NR > 1 { print $5 }' "$LEDGER" | sort -u | wc -l)"
+    [[ "$ids" -eq 4 ]] || {
+        log "real self-test: expected 4 distinct campaign ids, got $ids"
+        return 1
+    }
+    total="$(ledger_total)"
+    awk -v t="$total" 'BEGIN { exit !(t == 0) }' || {
+        log "real self-test: a rehearsal spent \$$total"
+        return 1
+    }
+    for id in $(awk -F'\t' 'NR > 1 { print $5 }' "$LEDGER"); do
+        python3 - "$SDB_RUNS_DIR/$id/campaign.json" "$id" <<'PYEOF' || return 1
+import json, sys
+path, cid = sys.argv[1:3]
+r = json.load(open(path))
+if not r.get("rehearsal") or r.get("total_cost_usd", 0):
+    sys.exit(f"real self-test: {cid} is not a $0 rehearsal: {r}")
+PYEOF
+    done
+    echo "RESULT: PASS (grid real self-test: 2 lanes x 2 phases, workers 8/9)"
+    return 0
+}
+
 if [[ "$SELF_TEST" -eq 1 ]]; then
+    if [[ "$REAL" -eq 1 ]]; then
+        real_self_test
+        exit $?
+    fi
     self_test
     exit 0
 fi

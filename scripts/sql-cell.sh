@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CELL_FLAKE_KEY=""
 CELL_FLAKE_RESULT=""
 cell_gate() {
-    local root="$1" budget="$2" smoke="$3"
+    local root="$1" budget="$2" smoke="$3" rehearsal="${4:-0}"
     local status tracked p
     CELL_FLAKE_KEY=""
     CELL_FLAKE_RESULT=""
@@ -43,6 +43,12 @@ cell_gate() {
                 return 1 ;;
         esac
     done < <(printf '%s\n' "$status" | sed -n 's/^?? //p')
+    if [[ "$rehearsal" == "1" ]]; then
+        # R54 F2: a $0 real launch; no flake record and no API key.
+        CELL_FLAKE_RESULT="REHEARSAL"
+        echo "[cell] REHEARSAL: not a publishable cell"
+        return 0
+    fi
     if [[ "$smoke" == "1" ]]; then
         if awk -v b="$budget" 'BEGIN { exit !(b >= 0.99) }'; then
             echo "[cell] FATAL: a smoke cell needs a budget below \$0.99 (got $budget)" >&2
@@ -141,6 +147,25 @@ self_test() {
     fi
     echo '[self-test] smoke at $0.99 refused'
 
+    # 8) R54 F2: a rehearsal needs no record and says so, even at the
+    # official budget. A dirty tree is still refused.
+    rm -f "$record"
+    if ! cell_gate "$repo" 0.99 0 1 > "$dir/rehearsal.out" 2>&1; then
+        echo '[self-test] rehearsal without a record was refused' >&2; return 1
+    fi
+    out="$(cat "$dir/rehearsal.out")"
+    grep -q 'REHEARSAL: not a publishable cell' <<<"$out" || {
+        echo '[self-test] rehearsal did not print the REHEARSAL line' >&2; return 1; }
+    [[ "$CELL_FLAKE_RESULT" == "REHEARSAL" ]] || {
+        echo '[self-test] rehearsal did not report REHEARSAL' >&2; return 1; }
+    echo '[self-test] rehearsal allowed'
+    echo two > "$repo/src/x.rs"
+    if cell_gate "$repo" 0.99 0 1 >/dev/null 2>&1; then
+        echo '[self-test] a dirty rehearsal tree was accepted' >&2; return 1
+    fi
+    git -C "$repo" checkout -- src/x.rs
+    echo '[self-test] dirty rehearsal refused'
+
     echo 'RESULT: PASS (cell self-test)'
     return 0
 }
@@ -162,9 +187,20 @@ EFFORT="${SDB_CELL_EFFORT:-high}"
 PHASE="${SDB_CELL_PHASE:-}"
 CHAIN="${SDB_CELL_CHAIN:-}"
 WORKER="${SDB_CELL_WORKER:-0}"
-if ! [[ "$WORKER" =~ ^[0-7]$ ]]; then
-    echo "[cell] FATAL: SDB_CELL_WORKER must be 0-7 (got '$WORKER')" >&2
-    exit 1
+REHEARSAL="${SDB_CELL_REHEARSAL:-0}"
+SMOKE="${SDB_CELL_SMOKE:-0}"
+# R54 F2: a rehearsal needs no API key and no flake record. Workers 8-9
+# stay reserved for tests (AGENTS.md); production lanes remain 0-7.
+if [[ "$REHEARSAL" == "1" ]]; then
+    if ! [[ "$WORKER" =~ ^[0-9]$ ]]; then
+        echo "[cell] FATAL: SDB_CELL_WORKER must be 0-9 for a rehearsal (got '$WORKER')" >&2
+        exit 1
+    fi
+else
+    if ! [[ "$WORKER" =~ ^[0-7]$ ]]; then
+        echo "[cell] FATAL: SDB_CELL_WORKER must be 0-7 (got '$WORKER')" >&2
+        exit 1
+    fi
 fi
 CELL_PORT=$((5480 + WORKER * 100))
 
@@ -175,7 +211,7 @@ BIN="$TARGET_DIR/release/subdollarbench"
 # OPENROUTER_API_KEY exported in the calling shell burned a cell on
 # 2026-10-18 ("User not found." 401 at round 0, ~$0 spend, but a poisoned
 # fault row). Prefer .env; fall back to the environment.
-if [[ -f "$ROOT/.env" ]]; then
+if [[ "$REHEARSAL" != "1" && -f "$ROOT/.env" ]]; then
     ENV_KEY="$(grep -m1 '^OPENROUTER_API_KEY=' "$ROOT/.env" | cut -d= -f2- | tr -d '\"' | tr -d "'")"
     if [[ -n "${ENV_KEY:-}" ]]; then
         if [[ -n "${OPENROUTER_API_KEY:-}" && "${OPENROUTER_API_KEY}" != "$ENV_KEY" ]]; then
@@ -185,8 +221,7 @@ if [[ -f "$ROOT/.env" ]]; then
     fi
 fi
 
-SMOKE="${SDB_CELL_SMOKE:-0}"
-cell_gate "$ROOT" "$BUDGET" "$SMOKE" || exit 1
+cell_gate "$ROOT" "$BUDGET" "$SMOKE" "$REHEARSAL" || exit 1
 
 echo "[cell] building release binary ($BIN)"
 (cd "$ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --bins)
@@ -230,6 +265,8 @@ echo "[cell] model=$MODEL budget=\$$BUDGET wall=${WALL}min harness=$HARNESS effo
 PHASE_ARGS=()
 if [[ -n "$PHASE" ]]; then PHASE_ARGS+=(--phase "$PHASE"); fi
 if [[ -n "$CHAIN" ]]; then PHASE_ARGS+=(--chain "$CHAIN"); fi
+if [[ "$REHEARSAL" == "1" ]]; then PHASE_ARGS+=(--rehearsal); fi
+if [[ "$SMOKE" == "1" ]]; then PHASE_ARGS+=(--smoke); fi
 if [[ "${CELL_DRY_RUN:-0}" == "1" ]]; then
     echo "[cell] dry run: would exec: campaign run --name sdb-sql --model $MODEL" \
         "--effort $EFFORT --harness $HARNESS --budget-usd $BUDGET --wall-min $WALL --timeout-min 120 --worker $WORKER ${PHASE_ARGS[*]} $*"
@@ -238,8 +275,11 @@ fi
 
 RESULT_PATH="${SDB_CELL_RESULT:-}"
 LOG="$(mktemp)"
+# R54 F2: tests may use workers 8-9; production stays 0-7.
+EXTRA_ENV=()
+if [[ "$REHEARSAL" == "1" ]]; then EXTRA_ENV+=(SDB_CAMPAIGN_TEST_WORKER_MAX=99); fi
 set +e
-env SDB_HOME="$ROOT" "$BIN" campaign run \
+env SDB_HOME="$ROOT" "${EXTRA_ENV[@]}" "$BIN" campaign run \
     --name sdb-sql --model "$MODEL" --effort "$EFFORT" --harness "$HARNESS" \
     --budget-usd "$BUDGET" --wall-min "$WALL" --timeout-min 120 --worker "$WORKER" "${PHASE_ARGS[@]}" "$@" \
     2>&1 | tee "$LOG"
@@ -267,6 +307,8 @@ d = {
     "infra_error": False,
     "wall_stop": False,
     "phase_complete": False,
+    "rehearsal": False,
+    "smoke": False,
     "error": "no rollup line",
 }
 m = re.search(r"^rollup: (.+)$", text, re.M)
@@ -288,6 +330,8 @@ if m:
             infra_error=any(s.get("status") == "fault" for s in r.get("stages", [])),
             wall_stop=bool(r.get("over_wall")),
             phase_complete=not r.get("harness_fault") and not r.get("over_wall"),
+            rehearsal=bool(r.get("rehearsal")),
+            smoke=bool(r.get("smoke")),
             error=None,
         )
     except Exception as e:  # noqa: BLE001 - report the parse failure in the file
