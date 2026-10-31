@@ -337,9 +337,6 @@ fn max_points(c: &Value) -> f64 {
     }
 }
 
-/// R55 F1: a running career phase counts the chain's points so far plus
-/// this phase's own. A finished phase's `career` block already holds the
-/// total.
 /// R55-1: true when this live ticket already has a rollup stage record
 /// (its verdict landed); `campaign_spent` then includes the ticket.
 fn ticket_recorded(c: &Value) -> bool {
@@ -352,6 +349,9 @@ fn ticket_recorded(c: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// R55 F1: a running career phase counts the chain's points so far plus
+/// this phase's own. A finished phase's `career` block already holds the
+/// total.
 fn career_points(c: &Value, all: &[Value]) -> f64 {
     if let Some(p) = c["rollup"]["career"]["points"].as_f64() {
         return p;
