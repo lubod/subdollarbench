@@ -212,7 +212,11 @@ fn update_status(cdir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
 fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
     let t = msg.trim_start();
     let now = chrono::Utc::now().to_rfc3339();
-    live["last_activity_at"] = serde_json::json!(now);
+    // R56 F5: the 3 s heartbeat is not activity; only a real log line
+    // moves the age the Board's hung-agent warning reads.
+    if !t.starts_with("[WAITING]") {
+        live["last_activity_at"] = serde_json::json!(now);
+    }
     // A fresh verification starts here: clear the check counters and the
     // first failure, so "last check" never shows a stale or skipped line.
     let reset_checks = |live: &mut serde_json::Value| {
@@ -2017,6 +2021,26 @@ mod tests {
         assert!(msg.contains("load campaign"), "{msg}");
         assert!(!env.root.join("runs").exists());
         drop(env);
+    }
+
+    /// R56 F5: a heartbeat line does not move last_activity_at; a real
+    /// telemetry line does.
+    #[test]
+    fn r56_f5_heartbeat_is_not_activity() {
+        let mut live = serde_json::json!({
+            "last_activity_at": "2020-01-01T00:00:00Z",
+        });
+        let before = live["last_activity_at"].clone();
+        apply_live_line(
+            &mut live,
+            "[WAITING] Turn 27/200: tool running (bash: ./start.sh) (elapsed: 5682s)",
+        );
+        assert_eq!(live["last_activity_at"], before);
+        apply_live_line(
+            &mut live,
+            "[TELEMETRY] turn=27 max_turns=200 spent=0.1 tokens=1000",
+        );
+        assert_ne!(live["last_activity_at"], before);
     }
 
     /// R56 F4: a second live lane on worker 9 counts this lane too.
