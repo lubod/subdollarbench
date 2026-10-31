@@ -2,10 +2,17 @@ use super::*;
 use ratatui::{backend::TestBackend, Terminal};
 
 fn campaign(id: &str, state: &str, model: &str, points: f64, cost: f64, ticket: u64) -> Value {
+    // R55 F2: /api/campaigns' campaign_spent counts finished tickets; a
+    // live ticket's 0.0412 is added by the TUI.
+    let finished = if matches!(state, "running" | "stalled") {
+        (cost - 0.0412).max(0.0)
+    } else {
+        cost
+    };
     serde_json::json!({
         "id": id, "state": state, "current_stage": ticket,
         "live": {"ticket": ticket, "turn": 19, "max_turns": 24, "title":"Aggregates",
-                 "round":1, "ticket_spent":0.0412, "campaign_spent":cost,
+                 "round":1, "ticket_spent":0.0412, "campaign_spent":finished,
                  "wall_elapsed_min":112, "wall_min":480},
         "rollup": {"model":model, "points":points, "max_points":76.0,
                    "total_cost_usd":cost, "budget_usd":0.99, "rules_version":"2026-10-19.42"},
@@ -193,7 +200,12 @@ fn r42_f5_header_states() {
 /// running state and a start 37 minutes ago without adding fields the API
 /// does not serve.
 fn api_cell() -> Value {
-    let mut v: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let mut v = fixture
+        .as_array()
+        .and_then(|rows| rows.first())
+        .cloned()
+        .expect("api-campaigns fixture rows");
     v["state"] = serde_json::json!("running");
     v["started_at"] =
         serde_json::json!((chrono::Utc::now() - chrono::Duration::minutes(37)).to_rfc3339());
@@ -297,4 +309,100 @@ fn r42_f2_selection_survives_poll_reorder() {
     )]);
     assert_eq!(a.selected_id(), Some("campaign_a"));
     assert_eq!(a.log_len(), 0);
+}
+
+/// R55 F1: every career phase uses the 76-point denominator, while a cell
+/// outside a career keeps its own max_points. A running phase adds the
+/// chain's points.
+#[test]
+fn r55_f1_points_scale_per_row() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let rows = fixture.as_array().expect("fixture rows").clone();
+    let mut a = App::new();
+    a.set_campaigns(rows);
+    let s = draw(&a, 120, 30);
+    for want in ["0.0/76", "10.0/76", "1.0/76", "6.0/76"] {
+        assert!(s.contains(want), "missing {want}:\n{s}");
+    }
+    assert!(!s.contains("/10"), "a career row used /10:\n{s}");
+
+    let mut plain = campaign("plain", "running", "m", 4.0, 0.1, 1);
+    plain["rollup"]["max_points"] = serde_json::json!(10.0);
+    let mut b = App::new();
+    b.set_campaigns(vec![plain]);
+    assert!(draw(&b, 120, 20).contains("4.0/10"));
+
+    let mut p1 = campaign("p1", "done", "m", 10.0, 0.1, 1);
+    p1["rollup"]["phase"] = serde_json::json!(1);
+    let mut p2 = campaign("p2", "running", "m", 2.0, 0.1, 1);
+    p2["rollup"]["phase"] = serde_json::json!(2);
+    p2["rollup"]["chain_from"] = serde_json::json!("p1");
+    let mut c = App::new();
+    c.set_campaigns(vec![p1, p2]);
+    assert!(draw(&c, 120, 20).contains("12.0/76"));
+}
+
+/// R55 F2: a running ticket's spend is added to the finished-ticket
+/// campaign spend, so campaign $ is never below ticket $.
+#[test]
+fn r55_f2_campaign_spend_counts_ticket() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let rows = fixture.as_array().expect("fixture rows").clone();
+    let mut a = App::new();
+    a.set_campaigns(rows);
+    let s = draw(&a, 120, 30);
+    assert!(s.contains("campaign $ 0.0345"), "w0:\n{s}");
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    let s = draw(&a, 120, 30);
+    assert!(s.contains("campaign $ 0.0440"), "w1:\n{s}");
+
+    // R55-1: once the ticket's rollup record exists, campaign_spent
+    // already includes it; adding ticket_spent again would double-count.
+    let mut recorded = campaign("recorded", "running", "m", 3.0, 0.5, 2);
+    recorded["live"]["campaign_spent"] = serde_json::json!(0.253354);
+    recorded["live"]["ticket_spent"] = serde_json::json!(0.059693);
+    recorded["rollup"]["stages"] = serde_json::json!([{"id": 2, "passed": true}]);
+    let mut b = App::new();
+    b.set_campaigns(vec![recorded]);
+    let s = draw(&b, 120, 25);
+    assert!(s.contains("campaign $ 0.2534"), "{s}");
+    assert!(!s.contains("campaign $ 0.3130"), "{s}");
+}
+
+/// R55 F3: the header's image comes from /api/status; the captured
+/// fixture has no field, so the test adds the response's new field.
+#[test]
+fn r55_f3_header_image_from_status() {
+    let raw: Value = serde_json::from_str(include_str!("fixtures/api-status.json")).unwrap();
+    assert!(raw.get("sandbox_image").is_none());
+    let mut a = App::new();
+    a.set_status(raw.clone());
+    let h = header_of(&draw(&a, 120, 10)).to_string();
+    assert!(!h.contains("image "), "no image field when absent: {h}");
+    let mut with = raw;
+    with["sandbox_image"] = serde_json::json!("sha256:abcdef1234567890");
+    a.set_status(with);
+    let h = header_of(&draw(&a, 120, 10)).to_string();
+    assert!(h.contains("image abcdef123456"), "{h}");
+}
+
+/// R55 F4 (R52-1): the full connection error is clipped in the header,
+/// never the `?help q quit` hint; the live pane keeps the whole error.
+#[test]
+fn r55_f4_unreachable_header_fits_80() {
+    let err = "error sending request for url (http://127.0.0.1:3000/api/status)";
+    let mut a = App::new();
+    a.unreachable(err);
+    for w in [80u16, 120] {
+        let s = draw(&a, w, 24);
+        let h = header_of(&s);
+        assert!(h.ends_with("?help q quit"), "width {w}: {h}");
+        assert!(h.chars().count() <= w as usize, "width {w}: {h}");
+    }
+    let s = draw(&a, 120, 24);
+    assert!(
+        s.contains(err),
+        "the full error is not in the live pane:\n{s}"
+    );
 }

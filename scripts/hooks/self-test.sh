@@ -110,4 +110,76 @@ rc=0
 }
 echo '[self-test] clean range accepted'
 
+# R55 F5: the hook passes its own source and allowlist; a real .env
+# value is refused even on an allowlisted path; a pattern hit outside the
+# list is refused. The value is built at run time so this file does not
+# contain it.
+hooksrepo="$dir/hooksrepo"
+mkdir -p "$hooksrepo/scripts/hooks"
+git -C "$hooksrepo" init -q
+git -C "$hooksrepo" config user.email hooks@example.com
+git -C "$hooksrepo" config user.name hooks
+cp -a "$HERE/." "$hooksrepo/scripts/hooks/"
+cp "$HERE/../secret-scan-fixtures.txt" "$hooksrepo/scripts/secret-scan-fixtures.txt"
+git -C "$hooksrepo" add -A
+git -C "$hooksrepo" commit -qm hooks
+hooks_base="$(git -C "$hooksrepo" rev-parse HEAD)"
+env_value="sk-or-v1-$(date +%s)-FIXTURE-ENV"
+printf 'OPENROUTER_API_KEY=%s\n' "$env_value" >"$hooksrepo/.env"
+push_hooks() {
+    (cd "$hooksrepo" && printf 'refs/heads/x %s refs/heads/x %s\n' "$1" "${2:-0000000000000000000000000000000000000000}" \
+        | bash "$PRE_PUSH" origin "$dir/remote")
+}
+rc=0
+out="$(push_hooks "$hooks_base" 2>&1)" || rc=$?
+[[ "$rc" -eq 0 ]] || {
+    echo "[self-test] the hook refused its own source (rc=$rc)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+echo '[self-test] hook source accepted'
+
+printf '\n# %s\n' "$env_value" >>"$hooksrepo/scripts/hooks/pre-push"
+git -C "$hooksrepo" add scripts/hooks/pre-push
+git -C "$hooksrepo" commit -qm value
+value_commit="$(git -C "$hooksrepo" rev-parse HEAD)"
+rc=0
+out="$(push_hooks "$value_commit" "$hooks_base" 2>&1)" || rc=$?
+[[ "$rc" -eq 1 ]] || { echo "[self-test] a real .env value was accepted (rc=$rc)" >&2; exit 1; }
+grep -q 'scripts/hooks/pre-push' <<<"$out" || {
+    echo '[self-test] the real-value hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }
+if grep -qF "$env_value" <<<"$out"; then
+    echo '[self-test] the real .env value was printed' >&2
+    exit 1
+fi
+echo '[self-test] real .env value refused on an allowlisted path'
+
+# R55-2: a content line starting with ++ is a +++ diff line, not a file
+# header; its value is still real.
+printf '++%s\n' "$env_value" >>"$hooksrepo/scripts/hooks/pre-push"
+git -C "$hooksrepo" add scripts/hooks/pre-push
+git -C "$hooksrepo" commit -qm plus
+plus_commit="$(git -C "$hooksrepo" rev-parse HEAD)"
+rc=0
+out="$(push_hooks "$plus_commit" "$value_commit" 2>&1)" || rc=$?
+[[ "$rc" -eq 1 ]] || { echo "[self-test] a ++ value line was accepted (rc=$rc)" >&2; exit 1; }
+grep -q 'scripts/hooks/pre-push' <<<"$out" || {
+    echo '[self-test] the ++ value hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }
+if grep -qF "$env_value" <<<"$out"; then
+    echo '[self-test] the ++ value was printed' >&2
+    exit 1
+fi
+echo '[self-test] ++ value line refused'
+
+echo 'sk-or-v1-NOT-ALLOWLISTED-FIXTURE' >"$hooksrepo/leak.txt"
+git -C "$hooksrepo" add leak.txt
+git -C "$hooksrepo" commit -qm leak
+leak_commit="$(git -C "$hooksrepo" rev-parse HEAD)"
+rc=0
+out="$(push_hooks "$leak_commit" "$plus_commit" 2>&1)" || rc=$?
+[[ "$rc" -eq 1 ]] || { echo "[self-test] a pattern hit outside the list was accepted (rc=$rc)" >&2; exit 1; }
+grep -q 'leak.txt' <<<"$out" || {
+    echo '[self-test] the pattern hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }
+echo '[self-test] pattern hit outside the allowlist refused'
+
 echo 'RESULT: PASS (hooks self-test)'

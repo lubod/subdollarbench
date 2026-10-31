@@ -1,0 +1,29 @@
+{
+    "is_running": false,
+    "current_run": null,
+    "last_run": null,
+    "workers": {},
+    "db_fallback": false,
+    "queue_paused": false,
+    "campaign": {
+        "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_084959_w0",
+        "pid": 1978905,
+        "worker": 0
+    },
+    "campaigns": [
+        {
+            "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_084959_w0",
+            "pid": 1978905,
+            "worker": 0
+        },
+        {
+            "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_085009_w1",
+            "pid": 1979697,
+            "worker": 1
+        }
+    ],
+    "proxy": false,
+    "rules_version": "2026-10-19.44",
+    "sqlite_version": "3.46.0",
+    "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only."
+}

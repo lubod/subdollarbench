@@ -1,515 +1,1873 @@
-{
- "board_key": {
-  "cost": 0.16538053799999997,
-  "current_rules": true,
-  "live": false,
-  "per_dollar": 36.27996421199211,
-  "points": 6.0
- },
- "career_phase": 1,
- "chain_from": null,
- "current_stage": null,
- "id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712",
- "ladder": [
-  {
-   "cause": null,
-   "id": 0,
-   "points": 1.0,
-   "status": "pass",
-   "stop_reason": "ready",
-   "title": "Genesis: tables, insert, select",
-   "variant": "full"
+[
+ {
+  "board_key": {
+   "cost": 0.0,
+   "current_rules": true,
+   "live": true,
+   "per_dollar": null,
+   "perf": null,
+   "points": 0.0
   },
-  {
-   "cause": null,
-   "id": 1,
-   "points": 1.0,
-   "status": "pass",
-   "stop_reason": "ready",
-   "title": "Expressions and WHERE",
-   "variant": "full"
-  },
-  {
-   "cause": null,
-   "id": 2,
-   "points": 1.0,
-   "status": "pass",
-   "stop_reason": "ready",
-   "title": "Sorting and paging",
-   "variant": "full"
-  },
-  {
-   "cause": null,
-   "id": 3,
-   "points": 1.0,
-   "status": "pass",
-   "stop_reason": "ready",
-   "title": "UPDATE and DELETE",
-   "variant": "full"
-  },
-  {
-   "cause": null,
-   "id": 4,
-   "points": 2.0,
-   "status": "pass",
-   "stop_reason": "ready",
-   "title": "Persistence",
-   "variant": "full"
-  },
-  {
-   "cause": "not reached",
-   "id": 5,
-   "points": 0.0,
-   "status": "not_reached",
-   "title": "Crash safety",
-   "variant": ""
-  },
-  {
-   "cause": "needs 5",
-   "id": 6,
-   "points": 0.0,
-   "status": "waiting",
-   "title": "Transactions",
-   "variant": ""
-  },
-  {
-   "cause": "phase 2: not part of this cell",
-   "id": 7,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Aggregates",
-   "variant": ""
-  },
-  {
-   "cause": "phase 2: not part of this cell",
-   "id": 8,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Joins",
-   "variant": ""
-  },
-  {
-   "cause": "phase 2: not part of this cell",
-   "id": 9,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Constraints",
-   "variant": ""
-  },
-  {
-   "cause": "phase 2: not part of this cell",
-   "id": 10,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Subqueries",
-   "variant": ""
-  },
-  {
-   "cause": "phase 3: not part of this cell",
-   "id": 11,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Indexes + perf gate",
-   "variant": ""
-  },
-  {
-   "cause": "phase 3: not part of this cell",
-   "id": 12,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Concurrency and isolation",
-   "variant": ""
-  },
-  {
-   "cause": "phase 3: not part of this cell",
-   "id": 13,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Schema change",
-   "variant": ""
-  },
-  {
-   "cause": "phase 3: not part of this cell",
-   "id": 14,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Observability",
-   "variant": ""
-  },
-  {
-   "cause": "phase 3: not part of this cell",
-   "id": 15,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Tests and CI gate",
-   "variant": ""
-  },
-  {
-   "cause": "phase 4: not part of this cell",
-   "id": 16,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Larger than memory",
-   "variant": ""
-  },
-  {
-   "cause": "phase 4: not part of this cell",
-   "id": 17,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Incident: disk full",
-   "variant": ""
-  },
-  {
-   "cause": "phase 4: not part of this cell",
-   "id": 18,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Hostile input and limits",
-   "variant": ""
-  },
-  {
-   "cause": "phase 4: not part of this cell",
-   "id": 19,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "Replication and failover",
-   "variant": ""
-  },
-  {
-   "cause": "phase 4: not part of this cell",
-   "id": 20,
-   "points": 0.0,
-   "status": "later_phase",
-   "title": "PostgreSQL wire protocol",
-   "variant": ""
-  }
- ],
- "live": {
-  "campaign": "sdb-sql",
-  "campaign_budget": 0.99,
-  "campaign_spent": 0.16538053799999997,
-  "check_pass": 0,
-  "check_total": 0,
-  "dollars_left": 0.824619462,
-  "effort": "high",
-  "first_fail": null,
-  "harness": "omp",
-  "last_activity_at": "2026-10-29T10:01:15.297486690+00:00",
-  "max_turns": 200,
-  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
-  "phase": "agent",
-  "phase_started_at": "2026-10-29T09:52:49.167671524+00:00",
-  "round": 0,
-  "summary": null,
-  "ticket": 5,
-  "ticket_budget": 0.34,
-  "ticket_spent": 0.057217,
-  "title": "Crash safety",
-  "turn": 46,
-  "type": "resilience",
-  "variant": "full"
- },
- "log_mtime": "2026-10-29T10:01:15.447436540+00:00",
- "phases": [
-  {
-   "id": 1,
-   "max_points": 10.0,
-   "stages": [
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6
-   ],
-   "title": "Core + durability"
-  },
-  {
-   "id": 2,
-   "max_points": 12.0,
-   "stages": [
-    7,
-    8,
-    9,
-    10
-   ],
-   "title": "Relational"
-  },
-  {
-   "id": 3,
-   "max_points": 22.0,
-   "stages": [
-    11,
-    12,
-    13,
-    14,
-    15
-   ],
-   "title": "Engine"
-  },
-  {
-   "id": 4,
-   "max_points": 32.0,
-   "stages": [
-    16,
-    17,
-    18,
-    19,
-    20
-   ],
-   "title": "Hard"
-  }
- ],
- "refork": null,
- "rollup": {
-  "budget_usd": 0.99,
-  "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712",
-  "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.",
-  "cap_reached": false,
-  "effort": "high",
-  "finished_at": "",
-  "harness": "omp",
-  "ladder_state": {
-   "best": {
-    "0": true,
-    "1": true,
-    "2": true,
-    "3": true,
-    "4": true
-   },
-   "dirty": false,
-   "last_failures": {},
-   "last_green": null,
-   "liters": {},
-   "outcomes": {
-    "0": "full",
-    "1": "full",
-    "2": "full",
-    "3": "full",
-    "4": "full"
-   },
-   "passed": [
-    0,
-    1,
-    2,
-    3,
-    4
-   ]
-  },
-  "max_points": 10.0,
-  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
-  "name": "sdb-sql",
-  "over_budget": false,
-  "over_wall": false,
-  "phase": 1,
-  "points": 6.0,
-  "reached": 4,
-  "regression_free_tickets": 5,
-  "rules_version": "2026-10-19.42",
-  "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
-  "sqlite_version": "3.46.0",
-  "stages": [
+  "career_phase": 1,
+  "chain_from": null,
+  "current_stage": 0,
+  "id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_084959_w0",
+  "ladder": [
    {
-    "api_cost_usd": 0.031864722,
-    "duration_seconds": 358.620223675,
-    "effective_cost_usd": 0.05872392871025,
-    "failure": null,
-    "git_commit": "b1fa449",
-    "git_stat": "b1fa449 stage 0: Genesis: tables, insert, select [pass]\n\n .gitignore |   9 +\n SPEC.md    | 118 ++++++++++++\n server.py  | 609 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n start.sh   |   4 +\n 4 files changed, 740 insertions(+)\n",
+    "cause": null,
     "id": 0,
-    "pass_rate": 100.0,
-    "passed": true,
-    "passed_stages": 1,
-    "points": 1.0,
-    "regressed": [],
-    "regression_severity": 0,
-    "rounds": [
-     {
-      "cost_usd": 0.02676880417853,
-      "derived": false,
-      "duration_seconds": 355.606806552,
-      "failure": null,
-      "git_commit": "b1fa449",
-      "passed_stages": 1,
-      "round": 0,
-      "stop_reason": "ready",
-      "total_stages": 1,
-      "turns": 27
-     }
-    ],
-    "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s0_full",
-    "status": "passed",
-    "stop_reason": "ready",
-    "tier": 1,
+    "points": 0.0,
+    "status": "running",
     "title": "Genesis: tables, insert, select",
-    "total_stages": 1,
-    "turns": 27,
-    "type": "genesis",
-    "variant": "full"
+    "variant": ""
    },
    {
-    "api_cost_usd": 0.065667564,
-    "duration_seconds": 599.981775047,
-    "effective_cost_usd": 0.13168191725141,
-    "failure": null,
-    "git_commit": "8d1c772",
-    "git_stat": "8d1c772 stage 1: Expressions and WHERE [pass]\n\n SPEC.md   |  78 ++++++++-\n server.py | 546 +++++++++++++++++++++++++++++++++++++++++++++++++++++---------\n 2 files changed, 545 insertions(+), 79 deletions(-)\n",
+    "cause": "needs 0",
     "id": 1,
-    "pass_rate": 100.0,
-    "passed": true,
-    "passed_stages": 2,
-    "points": 1.0,
-    "regressed": [],
-    "regression_severity": 0,
-    "rounds": [
-     {
-      "cost_usd": 0.06596542072919,
-      "derived": false,
-      "duration_seconds": 598.350691544,
-      "failure": null,
-      "git_commit": "8d1c772",
-      "passed_stages": 2,
-      "round": 0,
-      "stop_reason": "ready",
-      "total_stages": 2,
-      "turns": 63
-     }
-    ],
-    "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s1_full",
-    "status": "passed",
-    "stop_reason": "ready",
-    "tier": 1,
+    "points": 0.0,
+    "status": "waiting",
     "title": "Expressions and WHERE",
-    "total_stages": 2,
-    "turns": 63,
-    "type": "feature",
-    "variant": "full"
+    "variant": ""
    },
    {
-    "api_cost_usd": 0.015474696,
-    "duration_seconds": 378.609330626,
-    "effective_cost_usd": 0.035652175918780005,
-    "failure": null,
-    "git_commit": "edf7814",
-    "git_stat": "edf7814 stage 2: Sorting and paging [pass]\n\n SPEC.md      | 51 +++++++++++++++++++++++++++++++++++++++-\n data/sdb.log |  2 ++\n server.py    | 76 ++++++++++++++++++++++++++++++++++++++++++++++++------------\n 3 files changed, 113 insertions(+), 16 deletions(-)\n",
+    "cause": "needs 1",
     "id": 2,
-    "pass_rate": 100.0,
-    "passed": true,
-    "passed_stages": 3,
-    "points": 1.0,
-    "regressed": [],
-    "regression_severity": 0,
-    "rounds": [
-     {
-      "cost_usd": 0.02009196001171,
-      "derived": false,
-      "duration_seconds": 375.758667548,
-      "failure": null,
-      "git_commit": "edf7814",
-      "passed_stages": 3,
-      "round": 0,
-      "stop_reason": "ready",
-      "total_stages": 3,
-      "turns": 24
-     }
-    ],
-    "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s2_full",
-    "status": "passed",
-    "stop_reason": "ready",
-    "tier": 1,
+    "points": 0.0,
+    "status": "waiting",
     "title": "Sorting and paging",
-    "total_stages": 3,
-    "turns": 24,
-    "type": "feature",
-    "variant": "full"
+    "variant": ""
    },
    {
-    "api_cost_usd": 0.019000032,
-    "duration_seconds": 207.79342904,
-    "effective_cost_usd": 0.0426296848712,
-    "failure": null,
-    "git_commit": "bdcc7d9",
-    "git_stat": "bdcc7d9 stage 3: UPDATE and DELETE [pass]\n\n SPEC.md   |  57 +++++++++++++++++++++++++++++++-\n server.py | 109 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n 2 files changed, 165 insertions(+), 1 deletion(-)\n",
+    "cause": "needs 1",
     "id": 3,
-    "pass_rate": 100.0,
-    "passed": true,
-    "passed_stages": 4,
-    "points": 1.0,
-    "regressed": [],
-    "regression_severity": 0,
-    "rounds": [
-     {
-      "cost_usd": 0.02358264668387,
-      "derived": false,
-      "duration_seconds": 206.22655672,
-      "failure": null,
-      "git_commit": "bdcc7d9",
-      "passed_stages": 4,
-      "round": 0,
-      "stop_reason": "ready",
-      "total_stages": 4,
-      "turns": 42
-     }
-    ],
-    "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s3_full",
-    "status": "passed",
-    "stop_reason": "ready",
-    "tier": 1,
+    "points": 0.0,
+    "status": "waiting",
     "title": "UPDATE and DELETE",
-    "total_stages": 4,
-    "turns": 42,
-    "type": "feature",
-    "variant": "full"
+    "variant": ""
    },
    {
-    "api_cost_usd": 0.033373524,
-    "duration_seconds": 569.366530891,
-    "effective_cost_usd": 0.07685471992673,
-    "failure": null,
-    "git_commit": "2ebf8e6",
-    "git_stat": "2ebf8e6 stage 4: Persistence [pass]\n\n SPEC.md   |  48 ++++++++++++++++++++++++-\n server.py | 121 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-------\n 2 files changed, 155 insertions(+), 14 deletions(-)\n",
+    "cause": "needs 0",
     "id": 4,
-    "pass_rate": 100.0,
-    "passed": true,
-    "passed_stages": 5,
-    "points": 2.0,
-    "regressed": [],
-    "regression_severity": 0,
-    "rounds": [
-     {
-      "cost_usd": 0.04343083686419,
-      "derived": false,
-      "duration_seconds": 567.687896495,
-      "failure": null,
-      "git_commit": "2ebf8e6",
-      "passed_stages": 5,
-      "round": 0,
-      "stop_reason": "ready",
-      "total_stages": 5,
-      "turns": 49
-     }
-    ],
-    "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s4_full",
-    "status": "passed",
-    "stop_reason": "ready",
-    "tier": 2,
+    "points": 0.0,
+    "status": "waiting",
     "title": "Persistence",
-    "total_stages": 5,
-    "turns": 49,
-    "type": "storage",
-    "variant": "full"
+    "variant": ""
+   },
+   {
+    "cause": "needs 4",
+    "id": 5,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "Crash safety",
+    "variant": ""
+   },
+   {
+    "cause": "needs 5",
+    "id": 6,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "Transactions",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 7,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Aggregates",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 8,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Joins",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 9,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Constraints",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 10,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Subqueries",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 11,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Indexes + perf gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 12,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Concurrency and isolation",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 13,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Schema change",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 14,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Observability",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 15,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Tests and CI gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 16,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Larger than memory",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 17,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Incident: disk full",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 18,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Hostile input and limits",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 19,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Replication and failover",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 20,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "PostgreSQL wire protocol",
+    "variant": ""
    }
   ],
-  "started_at": "2026-10-29T09:17:12.258064841+00:00",
-  "task": "sql",
-  "total_cost_usd": 0.16538053799999997,
-  "wall_min": 480
+  "live": {
+   "campaign": "sdb-sql",
+   "campaign_budget": 0.5,
+   "campaign_spent": 0.0,
+   "check_pass": 0,
+   "check_total": 0,
+   "dollars_left": 0.5,
+   "effort": "high",
+   "first_fail": null,
+   "harness": "omp",
+   "last_activity_at": "2026-10-31T08:57:25.686652692+00:00",
+   "max_turns": 200,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "phase": "agent",
+   "phase_started_at": "2026-10-31T08:50:06.798458622+00:00",
+   "round": 0,
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "summary": null,
+   "ticket": 0,
+   "ticket_budget": 0.04,
+   "ticket_spent": 0.034466,
+   "title": "Genesis: tables, insert, select",
+   "turn": 34,
+   "type": "genesis",
+   "variant": "full"
+  },
+  "log_mtime": "2026-10-31T08:57:25.685256989+00:00",
+  "phases": [
+   {
+    "id": 1,
+    "max_points": 10.0,
+    "stages": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6
+    ],
+    "title": "Core + durability"
+   },
+   {
+    "id": 2,
+    "max_points": 12.0,
+    "stages": [
+     7,
+     8,
+     9,
+     10
+    ],
+    "title": "Relational"
+   },
+   {
+    "id": 3,
+    "max_points": 22.0,
+    "stages": [
+     11,
+     12,
+     13,
+     14,
+     15
+    ],
+    "title": "Engine"
+   },
+   {
+    "id": 4,
+    "max_points": 32.0,
+    "stages": [
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "title": "Hard"
+   }
+  ],
+  "refork": null,
+  "rollup": {
+   "budget_usd": 0.5,
+   "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_084959_w0",
+   "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.",
+   "cap_reached": false,
+   "concurrent_cells": 1,
+   "effort": "high",
+   "finished_at": "",
+   "grading_wait_s": 0.0,
+   "harness": "omp",
+   "max_points": 10.0,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "name": "sdb-sql",
+   "over_budget": false,
+   "over_wall": false,
+   "phase": 1,
+   "points": 0.0,
+   "reached": null,
+   "regression_free_tickets": 0,
+   "rules_version": "2026-10-19.44",
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "sqlite_version": "3.46.0",
+   "stages": [],
+   "started_at": "2026-10-31T08:49:59.692434384+00:00",
+   "task": "sql",
+   "total_cost_usd": 0.0,
+   "wall_min": 480,
+   "worker": 0
+  },
+  "started_at": "2026-10-31T08:49:59.692434384+00:00",
+  "state": "running",
+  "stop_reason": "",
+  "updated_at": "2026-10-31T08:57:25.686681185+00:00",
+  "wall_cap_min": 480
  },
- "started_at": "2026-10-29T09:17:12.257709367+00:00",
- "state": "cancelled",
- "stop_reason": "on request",
- "updated_at": "2026-10-29T10:01:16.115247791+00:00",
- "wall_cap_min": 480
-}
+ {
+  "board_key": {
+   "cost": 0.27690337200000004,
+   "current_rules": true,
+   "live": false,
+   "per_dollar": 36.11368084026076,
+   "perf": 2.015466396717069,
+   "points": 10.0
+  },
+  "career_phase": 1,
+  "chain_from": null,
+  "current_stage": null,
+  "id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428",
+  "ladder": [
+   {
+    "cause": null,
+    "id": 0,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "dollars",
+    "title": "Genesis: tables, insert, select",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 1,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "dollars",
+    "title": "Expressions and WHERE",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 2,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Sorting and paging",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 3,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "UPDATE and DELETE",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 4,
+    "points": 2.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Persistence",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 5,
+    "points": 2.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Crash safety",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 6,
+    "points": 2.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Transactions",
+    "variant": "full"
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 7,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Aggregates",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 8,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Joins",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 9,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Constraints",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 10,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Subqueries",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 11,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Indexes + perf gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 12,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Concurrency and isolation",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 13,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Schema change",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 14,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Observability",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 15,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Tests and CI gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 16,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Larger than memory",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 17,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Incident: disk full",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 18,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Hostile input and limits",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 19,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Replication and failover",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 20,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "PostgreSQL wire protocol",
+    "variant": ""
+   }
+  ],
+  "live": {
+   "campaign": "sdb-sql",
+   "campaign_budget": 0.5,
+   "campaign_spent": 0.27690337200000004,
+   "check_pass": 7,
+   "check_total": 7,
+   "dollars_left": 0.22309662799999996,
+   "effort": "high",
+   "first_fail": null,
+   "harness": "omp",
+   "last_activity_at": "2026-10-31T07:57:32.431845718+00:00",
+   "last_check_at": "2026-10-31T07:57:19.106930740+00:00",
+   "max_turns": 200,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "phase": "crash",
+   "phase_started_at": "2026-10-31T07:51:18.386967134+00:00",
+   "round": 0,
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "summary": null,
+   "ticket": 6,
+   "ticket_budget": 0.28,
+   "ticket_spent": 0.073722,
+   "title": "Transactions",
+   "turn": 72,
+   "type": "storage",
+   "variant": "full"
+  },
+  "log_mtime": "2026-10-31T07:58:24.913583639+00:00",
+  "phases": [
+   {
+    "id": 1,
+    "max_points": 10.0,
+    "stages": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6
+    ],
+    "title": "Core + durability"
+   },
+   {
+    "id": 2,
+    "max_points": 12.0,
+    "stages": [
+     7,
+     8,
+     9,
+     10
+    ],
+    "title": "Relational"
+   },
+   {
+    "id": 3,
+    "max_points": 22.0,
+    "stages": [
+     11,
+     12,
+     13,
+     14,
+     15
+    ],
+    "title": "Engine"
+   },
+   {
+    "id": 4,
+    "max_points": 32.0,
+    "stages": [
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "title": "Hard"
+   }
+  ],
+  "refork": null,
+  "rollup": {
+   "budget_usd": 0.5,
+   "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428",
+   "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.",
+   "cap_reached": false,
+   "career": {
+    "cells": [
+     "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428"
+    ],
+    "perf": {
+     "score": 2.015466396717069,
+     "workloads": [
+      {
+       "candidate": 0.842057,
+       "correct": true,
+       "id": "W1",
+       "metric": "latency",
+       "numbers": {
+        "candidate_p50_ms": 0.842057,
+        "candidate_p99_ms": 2.609631,
+        "reference_p50_ms": 2.018581,
+        "reference_p99_ms": 4.660461
+       },
+       "ratio": 2.431111250078169,
+       "reference": 2.018581
+      },
+      {
+       "candidate": 3017.288414,
+       "correct": true,
+       "id": "W4",
+       "metric": "throughput",
+       "numbers": {
+        "candidate_1_client_commits": 1248.0,
+        "candidate_1_client_flushes": 2028.0,
+        "candidate_1_client_per_s": 564.88818,
+        "candidate_8_clients_per_s": 3017.288414,
+        "candidate_p99_ms": 4.697447,
+        "reference_1_client_commits": 2208.0,
+        "reference_1_client_flushes": 2655.0,
+        "reference_1_client_per_s": 900.488589,
+        "reference_8_clients_per_s": 764.408565,
+        "reference_p99_ms": 3.812716
+       },
+       "ratio": 1.6708839614662123,
+       "reference": 764.408565
+      }
+     ]
+    },
+    "points": 10.0,
+    "total_cost_usd": 0.27690337200000004
+   },
+   "concurrent_cells": 1,
+   "effort": "high",
+   "finished_at": "2026-10-31T07:58:24.914120290+00:00",
+   "grading_wait_s": 3.9503e-05,
+   "harness": "omp",
+   "ladder_state": {
+    "best": {
+     "0": true,
+     "1": true,
+     "2": true,
+     "3": true,
+     "4": true,
+     "5": true,
+     "6": true
+    },
+    "dirty": false,
+    "last_failures": {},
+    "last_green": "b2dddc7",
+    "liters": {},
+    "outcomes": {
+     "0": "full",
+     "1": "full",
+     "2": "full",
+     "3": "full",
+     "4": "full",
+     "5": "full",
+     "6": "full"
+    },
+    "passed": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6
+    ]
+   },
+   "max_points": 10.0,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "name": "sdb-sql",
+   "over_budget": false,
+   "over_wall": false,
+   "perf": {
+    "score": 2.015466396717069,
+    "workloads": [
+     {
+      "candidate": 0.842057,
+      "correct": true,
+      "id": "W1",
+      "metric": "latency",
+      "numbers": {
+       "candidate_p50_ms": 0.842057,
+       "candidate_p99_ms": 2.609631,
+       "reference_p50_ms": 2.018581,
+       "reference_p99_ms": 4.660461
+      },
+      "ratio": 2.431111250078169,
+      "reference": 2.018581
+     },
+     {
+      "candidate": 3017.288414,
+      "correct": true,
+      "id": "W4",
+      "metric": "throughput",
+      "numbers": {
+       "candidate_1_client_commits": 1248.0,
+       "candidate_1_client_flushes": 2028.0,
+       "candidate_1_client_per_s": 564.88818,
+       "candidate_8_clients_per_s": 3017.288414,
+       "candidate_p99_ms": 4.697447,
+       "reference_1_client_commits": 2208.0,
+       "reference_1_client_flushes": 2655.0,
+       "reference_1_client_per_s": 900.488589,
+       "reference_8_clients_per_s": 764.408565,
+       "reference_p99_ms": 3.812716
+      },
+      "ratio": 1.6708839614662123,
+      "reference": 764.408565
+     }
+    ]
+   },
+   "phase": 1,
+   "points": 10.0,
+   "reached": 6,
+   "regression_free_tickets": 7,
+   "rules_version": "2026-10-19.44",
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "sqlite_version": "3.46.0",
+   "stages": [
+    {
+     "api_cost_usd": 0.045497699999999995,
+     "duration_seconds": 318.241317982,
+     "effective_cost_usd": 0.08072453953945999,
+     "failure": null,
+     "git_commit": "0362080",
+     "git_stat": "0362080 stage 0: Genesis: tables, insert, select [pass]\n\n .gitignore |   9 +\n SPEC.md    | 154 ++++++++++++\n engine.go  | 412 ++++++++++++++++++++++++++++++++\n go.mod     |   3 +\n main.go    | 125 ++++++++++\n parser.go  | 793 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n sdb        | Bin 0 -> 3114190 bytes\n start.sh   |   7 +\n 8 files changed, 1503 insertions(+)\n",
+     "grading_wait_s": 6.031e-06,
+     "id": 0,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 1,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.03513415952489,
+       "derived": false,
+       "duration_seconds": 315.151984804,
+       "failure": null,
+       "git_commit": "0362080",
+       "passed_stages": 1,
+       "round": 0,
+       "stop_reason": "dollars",
+       "total_stages": 1,
+       "turns": 35
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s0_full",
+     "status": "passed",
+     "stop_reason": "dollars",
+     "tier": 1,
+     "title": "Genesis: tables, insert, select",
+     "total_stages": 1,
+     "turns": 35,
+     "type": "genesis",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.04449456,
+     "duration_seconds": 326.545049301,
+     "effective_cost_usd": 0.09555356147903,
+     "failure": null,
+     "git_commit": "47a2081",
+     "git_stat": "47a2081 stage 1: Expressions and WHERE [pass]\n\n SPEC.md   |  78 +++++++-\n expr.go   | 653 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n parser.go | 446 ++++++++++++++++++++++++++----------------\n sdb       | Bin 3114190 -> 3240087 bytes\n start.sh  |  13 +-\n 5 files changed, 1027 insertions(+), 163 deletions(-)\n",
+     "grading_wait_s": 5.43e-06,
+     "id": 1,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 2,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.05100471658679,
+       "derived": false,
+       "duration_seconds": 324.735553544,
+       "failure": null,
+       "git_commit": "47a2081",
+       "passed_stages": 2,
+       "round": 0,
+       "stop_reason": "dollars",
+       "total_stages": 2,
+       "turns": 57
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s1_full",
+     "status": "passed",
+     "stop_reason": "dollars",
+     "tier": 1,
+     "title": "Expressions and WHERE",
+     "total_stages": 2,
+     "turns": 57,
+     "type": "feature",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.018059772,
+     "duration_seconds": 123.47558717,
+     "effective_cost_usd": 0.0372289896151,
+     "failure": null,
+     "git_commit": "bbc9602",
+     "git_stat": "bbc9602 stage 2: Sorting and paging [pass]\n\n SPEC.md   |  51 ++++++++++++++++++++++++++++++++++++++++++++++++++-\n parser.go |  45 +++++++++++++++++++++++++++++++++++++++++++++\n sdb       | Bin 3240087 -> 3245919 bytes\n 3 files changed, 95 insertions(+), 1 deletion(-)\n",
+     "grading_wait_s": 6.141e-06,
+     "id": 2,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 3,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.01908630030796,
+       "derived": false,
+       "duration_seconds": 120.711677292,
+       "failure": null,
+       "git_commit": "bbc9602",
+       "passed_stages": 3,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 3,
+       "turns": 35
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s2_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "Sorting and paging",
+     "total_stages": 3,
+     "turns": 35,
+     "type": "feature",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.037196994,
+     "duration_seconds": 249.646326773,
+     "effective_cost_usd": 0.08872198380318999,
+     "failure": null,
+     "git_commit": "5a0244c",
+     "git_stat": "5a0244c stage 3: UPDATE and DELETE [pass]\n\n SPEC.md   |  57 +++++++++++++++-\n engine.go | 132 +++++++++++++++++++++++++++++++++++--\n parser.go | 223 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-\n sdb       | Bin 3245919 -> 3282744 bytes\n 4 files changed, 406 insertions(+), 6 deletions(-)\n",
+     "grading_wait_s": 5.58e-06,
+     "id": 3,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 4,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.05147552791165,
+       "derived": false,
+       "duration_seconds": 247.997597366,
+       "failure": null,
+       "git_commit": "5a0244c",
+       "passed_stages": 4,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 4,
+       "turns": 73
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s3_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "UPDATE and DELETE",
+     "total_stages": 4,
+     "turns": 73,
+     "type": "feature",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.031310256,
+     "duration_seconds": 256.386489317,
+     "effective_cost_usd": 0.06053325067951,
+     "failure": null,
+     "git_commit": "8391bc4",
+     "git_stat": "8391bc4 stage 4: Persistence [pass]\n\n SPEC.md |  48 +++++++++++++++++++++++++++++++++++++++++++++++-\n sdb     | Bin 3282744 -> 3213546 bytes\n 2 files changed, 47 insertions(+), 1 deletion(-)\n",
+     "grading_wait_s": 5.27e-06,
+     "id": 4,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 5,
+     "points": 2.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.029178956190640003,
+       "derived": false,
+       "duration_seconds": 254.91854056,
+       "failure": null,
+       "git_commit": "8391bc4",
+       "passed_stages": 5,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 5,
+       "turns": 41
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s4_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 2,
+     "title": "Persistence",
+     "total_stages": 5,
+     "turns": 41,
+     "type": "storage",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.026622138,
+     "duration_seconds": 307.263806773,
+     "effective_cost_usd": 0.05424090220319,
+     "failure": null,
+     "git_commit": "2d764c8",
+     "git_stat": "2d764c8 stage 5: Crash safety [pass]\n\n SPEC.md   |  48 +++++++++++++++++++++++++++++++++-\n engine.go |  87 ++++++++++++++++++++++++++++++++++++++++++++++++++++----------\n sdb       | Bin 3213546 -> 3214225 bytes\n 3 files changed, 121 insertions(+), 14 deletions(-)\n",
+     "grading_wait_s": 5.31e-06,
+     "id": 5,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 6,
+     "points": 2.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.02752600558538,
+       "derived": false,
+       "duration_seconds": 304.171853828,
+       "failure": null,
+       "git_commit": "2d764c8",
+       "passed_stages": 6,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 6,
+       "turns": 34
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s5_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 2,
+     "title": "Crash safety",
+     "total_stages": 6,
+     "turns": 34,
+     "type": "resilience",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.07372195200000001,
+     "duration_seconds": 375.630964778,
+     "effective_cost_usd": 0.15213848094334,
+     "failure": null,
+     "git_commit": "b2dddc7",
+     "git_stat": "b2dddc7 stage 6: Transactions [pass]\n\n SPEC.md   |  42 ++++++++-\n engine.go |  55 +++++++++++-\n main.go   |   4 +-\n parser.go | 245 +++++++++++++++++++++++++++++++++++-----------------\n sdb       | Bin 3214225 -> 3341096 bytes\n txn.go    | 291 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n 6 files changed, 553 insertions(+), 84 deletions(-)\n",
+     "grading_wait_s": 5.741e-06,
+     "id": 6,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 7,
+     "points": 2.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.07836631553053,
+       "derived": false,
+       "duration_seconds": 373.957184902,
+       "failure": null,
+       "git_commit": "b2dddc7",
+       "passed_stages": 7,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 7,
+       "turns": 72
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_072428_s6_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 2,
+     "title": "Transactions",
+     "total_stages": 7,
+     "turns": 72,
+     "type": "storage",
+     "variant": "full"
+    }
+   ],
+   "started_at": "2026-10-31T07:24:28.973158432+00:00",
+   "task": "sql",
+   "total_cost_usd": 0.27690337200000004,
+   "wall_min": 480,
+   "worker": 0
+  },
+  "started_at": "2026-10-31T07:24:28.972743779+00:00",
+  "state": "done",
+  "stop_reason": "ladder end",
+  "updated_at": "2026-10-31T07:58:24.914341521+00:00",
+  "wall_cap_min": 480
+ },
+ {
+  "board_key": {
+   "cost": 0.039371814,
+   "current_rules": true,
+   "live": false,
+   "per_dollar": 25.39888052910135,
+   "perf": null,
+   "points": 1.0
+  },
+  "career_phase": 1,
+  "chain_from": null,
+  "current_stage": 1,
+  "id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_085009_w1",
+  "ladder": [
+   {
+    "cause": null,
+    "id": 0,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Genesis: tables, insert, select",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 1,
+    "points": 0.0,
+    "status": "running",
+    "title": "Expressions and WHERE",
+    "variant": ""
+   },
+   {
+    "cause": "needs 1",
+    "id": 2,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "Sorting and paging",
+    "variant": ""
+   },
+   {
+    "cause": "needs 1",
+    "id": 3,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "UPDATE and DELETE",
+    "variant": ""
+   },
+   {
+    "cause": "not reached",
+    "id": 4,
+    "points": 0.0,
+    "status": "not_reached",
+    "title": "Persistence",
+    "variant": ""
+   },
+   {
+    "cause": "needs 4",
+    "id": 5,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "Crash safety",
+    "variant": ""
+   },
+   {
+    "cause": "needs 5",
+    "id": 6,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "Transactions",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 7,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Aggregates",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 8,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Joins",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 9,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Constraints",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 10,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Subqueries",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 11,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Indexes + perf gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 12,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Concurrency and isolation",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 13,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Schema change",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 14,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Observability",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 15,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Tests and CI gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 16,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Larger than memory",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 17,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Incident: disk full",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 18,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Hostile input and limits",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 19,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Replication and failover",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 20,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "PostgreSQL wire protocol",
+    "variant": ""
+   }
+  ],
+  "live": {
+   "campaign": "sdb-sql",
+   "campaign_budget": 0.5,
+   "campaign_spent": 0.039371814,
+   "check_pass": 0,
+   "check_total": 0,
+   "dollars_left": 0.460628186,
+   "effort": "high",
+   "first_fail": null,
+   "harness": "omp",
+   "last_activity_at": "2026-10-31T08:57:21.907950303+00:00",
+   "max_turns": 200,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "phase": "agent",
+   "phase_started_at": "2026-10-31T08:56:35.774315956+00:00",
+   "round": 0,
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "summary": null,
+   "ticket": 1,
+   "ticket_budget": 0.04,
+   "ticket_spent": 0.004622,
+   "title": "Expressions and WHERE",
+   "turn": 13,
+   "type": "feature",
+   "variant": "full"
+  },
+  "log_mtime": "2026-10-31T08:57:24.909284668+00:00",
+  "phases": [
+   {
+    "id": 1,
+    "max_points": 10.0,
+    "stages": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6
+    ],
+    "title": "Core + durability"
+   },
+   {
+    "id": 2,
+    "max_points": 12.0,
+    "stages": [
+     7,
+     8,
+     9,
+     10
+    ],
+    "title": "Relational"
+   },
+   {
+    "id": 3,
+    "max_points": 22.0,
+    "stages": [
+     11,
+     12,
+     13,
+     14,
+     15
+    ],
+    "title": "Engine"
+   },
+   {
+    "id": 4,
+    "max_points": 32.0,
+    "stages": [
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "title": "Hard"
+   }
+  ],
+  "refork": null,
+  "rollup": {
+   "budget_usd": 0.5,
+   "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_085009_w1",
+   "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.",
+   "cap_reached": false,
+   "concurrent_cells": 1,
+   "effort": "high",
+   "finished_at": "",
+   "grading_wait_s": 5.671e-06,
+   "harness": "omp",
+   "ladder_state": {
+    "best": {
+     "0": true
+    },
+    "dirty": false,
+    "last_failures": {},
+    "last_green": null,
+    "liters": {},
+    "outcomes": {
+     "0": "full"
+    },
+    "passed": [
+     0
+    ]
+   },
+   "max_points": 10.0,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "name": "sdb-sql",
+   "over_budget": false,
+   "over_wall": false,
+   "phase": 1,
+   "points": 1.0,
+   "reached": 0,
+   "regression_free_tickets": 1,
+   "rules_version": "2026-10-19.44",
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "sqlite_version": "3.46.0",
+   "stages": [
+    {
+     "api_cost_usd": 0.039371814,
+     "duration_seconds": 373.188513007,
+     "effective_cost_usd": 0.07660361939020999,
+     "failure": null,
+     "git_commit": "68cf831",
+     "git_stat": "68cf831 stage 0: Genesis: tables, insert, select [pass]\n\n .gitignore |   9 ++\n SPEC.md    | 154 ++++++++++++++++++++++++++++\n exec.go    |  78 +++++++++++++++\n go.mod     |   3 +\n lexer.go   |  98 ++++++++++++++++++\n main.go    | 190 +++++++++++++++++++++++++++++++++++\n parser.go  | 281 +++++++++++++++++++++++++++++++++++++++++++++++++++\n sdb        | Bin 0 -> 2113796 bytes\n start.sh   |  10 ++\n storage.go | 197 ++++++++++++++++++++++++++++++++++++\n value.go   | 110 ++++++++++++++++++++\n wal.go     | 331 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n 12 files changed, 1461 insertions(+)\n",
+     "grading_wait_s": 5.671e-06,
+     "id": 0,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 1,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.03714568717526,
+       "derived": false,
+       "duration_seconds": 370.317906253,
+       "failure": null,
+       "git_commit": "68cf831",
+       "passed_stages": 1,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 1,
+       "turns": 40
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261031_085009_w1_s0_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "Genesis: tables, insert, select",
+     "total_stages": 1,
+     "turns": 40,
+     "type": "genesis",
+     "variant": "full"
+    }
+   ],
+   "started_at": "2026-10-31T08:50:09.804901254+00:00",
+   "task": "sql",
+   "total_cost_usd": 0.039371814,
+   "wall_min": 480,
+   "worker": 0
+  },
+  "started_at": "2026-10-31T08:50:09.804500096+00:00",
+  "state": "running",
+  "stop_reason": "ladder end",
+  "updated_at": "2026-10-31T08:57:21.908034398+00:00",
+  "wall_cap_min": 480
+ },
+ {
+  "board_key": {
+   "cost": 0.16538053799999997,
+   "current_rules": false,
+   "live": false,
+   "per_dollar": 36.27996421199211,
+   "perf": null,
+   "points": 6.0
+  },
+  "career_phase": 1,
+  "chain_from": null,
+  "current_stage": null,
+  "id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712",
+  "ladder": [
+   {
+    "cause": null,
+    "id": 0,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Genesis: tables, insert, select",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 1,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Expressions and WHERE",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 2,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Sorting and paging",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 3,
+    "points": 1.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "UPDATE and DELETE",
+    "variant": "full"
+   },
+   {
+    "cause": null,
+    "id": 4,
+    "points": 2.0,
+    "status": "pass",
+    "stop_reason": "ready",
+    "title": "Persistence",
+    "variant": "full"
+   },
+   {
+    "cause": "not reached",
+    "id": 5,
+    "points": 0.0,
+    "status": "not_reached",
+    "title": "Crash safety",
+    "variant": ""
+   },
+   {
+    "cause": "needs 5",
+    "id": 6,
+    "points": 0.0,
+    "status": "waiting",
+    "title": "Transactions",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 7,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Aggregates",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 8,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Joins",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 9,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Constraints",
+    "variant": ""
+   },
+   {
+    "cause": "phase 2: not part of this cell",
+    "id": 10,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Subqueries",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 11,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Indexes + perf gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 12,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Concurrency and isolation",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 13,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Schema change",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 14,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Observability",
+    "variant": ""
+   },
+   {
+    "cause": "phase 3: not part of this cell",
+    "id": 15,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Tests and CI gate",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 16,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Larger than memory",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 17,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Incident: disk full",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 18,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Hostile input and limits",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 19,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "Replication and failover",
+    "variant": ""
+   },
+   {
+    "cause": "phase 4: not part of this cell",
+    "id": 20,
+    "points": 0.0,
+    "status": "later_phase",
+    "title": "PostgreSQL wire protocol",
+    "variant": ""
+   }
+  ],
+  "live": {
+   "campaign": "sdb-sql",
+   "campaign_budget": 0.99,
+   "campaign_spent": 0.16538053799999997,
+   "check_pass": 0,
+   "check_total": 0,
+   "dollars_left": 0.824619462,
+   "effort": "high",
+   "first_fail": null,
+   "harness": "omp",
+   "last_activity_at": "2026-10-29T10:01:15.297486690+00:00",
+   "max_turns": 200,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "phase": "agent",
+   "phase_started_at": "2026-10-29T09:52:49.167671524+00:00",
+   "round": 0,
+   "summary": null,
+   "ticket": 5,
+   "ticket_budget": 0.34,
+   "ticket_spent": 0.057217,
+   "title": "Crash safety",
+   "turn": 46,
+   "type": "resilience",
+   "variant": "full"
+  },
+  "log_mtime": "2026-10-29T10:01:15.447436540+00:00",
+  "phases": [
+   {
+    "id": 1,
+    "max_points": 10.0,
+    "stages": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6
+    ],
+    "title": "Core + durability"
+   },
+   {
+    "id": 2,
+    "max_points": 12.0,
+    "stages": [
+     7,
+     8,
+     9,
+     10
+    ],
+    "title": "Relational"
+   },
+   {
+    "id": 3,
+    "max_points": 22.0,
+    "stages": [
+     11,
+     12,
+     13,
+     14,
+     15
+    ],
+    "title": "Engine"
+   },
+   {
+    "id": 4,
+    "max_points": 32.0,
+    "stages": [
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "title": "Hard"
+   }
+  ],
+  "refork": null,
+  "rollup": {
+   "budget_usd": 0.99,
+   "campaign_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712",
+   "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.",
+   "cap_reached": false,
+   "concurrent_cells": 1,
+   "effort": "high",
+   "finished_at": "",
+   "grading_wait_s": 0.0,
+   "harness": "omp",
+   "ladder_state": {
+    "best": {
+     "0": true,
+     "1": true,
+     "2": true,
+     "3": true,
+     "4": true
+    },
+    "dirty": false,
+    "last_failures": {},
+    "last_green": null,
+    "liters": {},
+    "outcomes": {
+     "0": "full",
+     "1": "full",
+     "2": "full",
+     "3": "full",
+     "4": "full"
+    },
+    "passed": [
+     0,
+     1,
+     2,
+     3,
+     4
+    ]
+   },
+   "max_points": 10.0,
+   "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "name": "sdb-sql",
+   "over_budget": false,
+   "over_wall": false,
+   "phase": 1,
+   "points": 6.0,
+   "reached": 4,
+   "regression_free_tickets": 5,
+   "rules_version": "2026-10-19.42",
+   "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
+   "sqlite_version": "3.46.0",
+   "stages": [
+    {
+     "api_cost_usd": 0.031864722,
+     "duration_seconds": 358.620223675,
+     "effective_cost_usd": 0.05872392871025,
+     "failure": null,
+     "git_commit": "b1fa449",
+     "git_stat": "b1fa449 stage 0: Genesis: tables, insert, select [pass]\n\n .gitignore |   9 +\n SPEC.md    | 118 ++++++++++++\n server.py  | 609 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n start.sh   |   4 +\n 4 files changed, 740 insertions(+)\n",
+     "grading_wait_s": 0.0,
+     "id": 0,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 1,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.02676880417853,
+       "derived": false,
+       "duration_seconds": 355.606806552,
+       "failure": null,
+       "git_commit": "b1fa449",
+       "passed_stages": 1,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 1,
+       "turns": 27
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s0_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "Genesis: tables, insert, select",
+     "total_stages": 1,
+     "turns": 27,
+     "type": "genesis",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.065667564,
+     "duration_seconds": 599.981775047,
+     "effective_cost_usd": 0.13168191725141,
+     "failure": null,
+     "git_commit": "8d1c772",
+     "git_stat": "8d1c772 stage 1: Expressions and WHERE [pass]\n\n SPEC.md   |  78 ++++++++-\n server.py | 546 +++++++++++++++++++++++++++++++++++++++++++++++++++++---------\n 2 files changed, 545 insertions(+), 79 deletions(-)\n",
+     "grading_wait_s": 0.0,
+     "id": 1,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 2,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.06596542072919,
+       "derived": false,
+       "duration_seconds": 598.350691544,
+       "failure": null,
+       "git_commit": "8d1c772",
+       "passed_stages": 2,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 2,
+       "turns": 63
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s1_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "Expressions and WHERE",
+     "total_stages": 2,
+     "turns": 63,
+     "type": "feature",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.015474696,
+     "duration_seconds": 378.609330626,
+     "effective_cost_usd": 0.035652175918780005,
+     "failure": null,
+     "git_commit": "edf7814",
+     "git_stat": "edf7814 stage 2: Sorting and paging [pass]\n\n SPEC.md      | 51 +++++++++++++++++++++++++++++++++++++++-\n data/sdb.log |  2 ++\n server.py    | 76 ++++++++++++++++++++++++++++++++++++++++++++++++------------\n 3 files changed, 113 insertions(+), 16 deletions(-)\n",
+     "grading_wait_s": 0.0,
+     "id": 2,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 3,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.02009196001171,
+       "derived": false,
+       "duration_seconds": 375.758667548,
+       "failure": null,
+       "git_commit": "edf7814",
+       "passed_stages": 3,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 3,
+       "turns": 24
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s2_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "Sorting and paging",
+     "total_stages": 3,
+     "turns": 24,
+     "type": "feature",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.019000032,
+     "duration_seconds": 207.79342904,
+     "effective_cost_usd": 0.0426296848712,
+     "failure": null,
+     "git_commit": "bdcc7d9",
+     "git_stat": "bdcc7d9 stage 3: UPDATE and DELETE [pass]\n\n SPEC.md   |  57 +++++++++++++++++++++++++++++++-\n server.py | 109 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n 2 files changed, 165 insertions(+), 1 deletion(-)\n",
+     "grading_wait_s": 0.0,
+     "id": 3,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 4,
+     "points": 1.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.02358264668387,
+       "derived": false,
+       "duration_seconds": 206.22655672,
+       "failure": null,
+       "git_commit": "bdcc7d9",
+       "passed_stages": 4,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 4,
+       "turns": 42
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s3_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 1,
+     "title": "UPDATE and DELETE",
+     "total_stages": 4,
+     "turns": 42,
+     "type": "feature",
+     "variant": "full"
+    },
+    {
+     "api_cost_usd": 0.033373524,
+     "duration_seconds": 569.366530891,
+     "effective_cost_usd": 0.07685471992673,
+     "failure": null,
+     "git_commit": "2ebf8e6",
+     "git_stat": "2ebf8e6 stage 4: Persistence [pass]\n\n SPEC.md   |  48 ++++++++++++++++++++++++-\n server.py | 121 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-------\n 2 files changed, 155 insertions(+), 14 deletions(-)\n",
+     "grading_wait_s": 0.0,
+     "id": 4,
+     "pass_rate": 100.0,
+     "passed": true,
+     "passed_stages": 5,
+     "points": 2.0,
+     "regressed": [],
+     "regression_severity": 0,
+     "rounds": [
+      {
+       "cost_usd": 0.04343083686419,
+       "derived": false,
+       "duration_seconds": 567.687896495,
+       "failure": null,
+       "git_commit": "2ebf8e6",
+       "passed_stages": 5,
+       "round": 0,
+       "stop_reason": "ready",
+       "total_stages": 5,
+       "turns": 49
+      }
+     ],
+     "run_id": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261029_091712_s4_full",
+     "status": "passed",
+     "stop_reason": "ready",
+     "tier": 2,
+     "title": "Persistence",
+     "total_stages": 5,
+     "turns": 49,
+     "type": "storage",
+     "variant": "full"
+    }
+   ],
+   "started_at": "2026-10-29T09:17:12.258064841+00:00",
+   "task": "sql",
+   "total_cost_usd": 0.16538053799999997,
+   "wall_min": 480,
+   "worker": 0
+  },
+  "started_at": "2026-10-29T09:17:12.257709367+00:00",
+  "state": "cancelled",
+  "stop_reason": "on request",
+  "updated_at": "2026-10-29T10:01:16.115247791+00:00",
+  "wall_cap_min": 480
+ }
+]

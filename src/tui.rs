@@ -323,12 +323,49 @@ fn cost(c: &Value) -> f64 {
         .or_else(|| c["rollup"]["total_cost_usd"].as_f64())
         .unwrap_or(0.0)
 }
+/// A career phase (not a standalone cell): the rollup has `phase`, or an
+/// explicit career block. Its denominator is the 76-point ladder.
+fn is_career(c: &Value) -> bool {
+    c["rollup"]["phase"].is_number() || c["rollup"]["career"].is_object()
+}
+
 fn max_points(c: &Value) -> f64 {
-    if c["rollup"]["career"].is_object() {
+    if is_career(c) {
         76.0
     } else {
         c["rollup"]["max_points"].as_f64().unwrap_or(76.0)
     }
+}
+
+/// R55 F1: a running career phase counts the chain's points so far plus
+/// this phase's own. A finished phase's `career` block already holds the
+/// total.
+/// R55-1: true when this live ticket already has a rollup stage record
+/// (its verdict landed); `campaign_spent` then includes the ticket.
+fn ticket_recorded(c: &Value) -> bool {
+    let Some(ticket) = c["live"]["ticket"].as_u64() else {
+        return false;
+    };
+    c["rollup"]["stages"]
+        .as_array()
+        .map(|stages| stages.iter().any(|s| s["id"].as_u64() == Some(ticket)))
+        .unwrap_or(false)
+}
+
+fn career_points(c: &Value, all: &[Value]) -> f64 {
+    if let Some(p) = c["rollup"]["career"]["points"].as_f64() {
+        return p;
+    }
+    let own = c["rollup"]["points"].as_f64().unwrap_or(0.0);
+    let chain = c["rollup"]["chain_from"]
+        .as_str()
+        .or_else(|| c["chain_from"].as_str());
+    if let Some(id) = chain {
+        if let Some(prev) = all.iter().find(|p| p["id"].as_str() == Some(id)) {
+            return career_points(prev, all) + own;
+        }
+    }
+    own
 }
 
 fn ladder(c: &Value, no_color: bool) -> String {
@@ -384,21 +421,51 @@ fn status_field(app: &App) -> String {
     }
 }
 
+/// R55 F4 (R52-1): the header keeps the hint; the status field is the
+/// first thing cut. The full error stays in the live pane.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// R42-6: at a narrow width the middle fields drop from the right (image,
 /// then rules); the `?help q quit` hint is never dropped.
 fn header_line(app: &App, width: u16) -> String {
-    let status = status_field(app);
     let rules = app.status["rules_version"].as_str().unwrap_or("—");
-    let image = app.status["sandbox_image"].as_str().unwrap_or("—");
-    let image = image.rsplit(':').next().unwrap_or(image);
     let paused = app.status["queue_paused"].as_bool().unwrap_or(false);
     let q = app.status["queue"]["pending"].as_u64().unwrap_or(0);
     let tail = format!(
         "queue {q}{} ?help q quit",
         if paused { " (paused)" } else { "" }
     );
-    let base = format!("subdollarbench tui · {status}");
-    let mut fields = vec![format!("rules {rules}"), format!("image {image}"), tail];
+    let prefix = "subdollarbench tui";
+    // Leave room for the two separators and the tail before clipping the
+    // status: the hint wins over the error text.
+    let room = (width as usize).saturating_sub(prefix.chars().count() + tail.chars().count() + 6);
+    let status = clip(&status_field(app), room);
+    let base = format!("{prefix} · {status}");
+    let mut fields = vec![format!("rules {rules}")];
+    if let Some(image) = app.status["sandbox_image"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        let short: String = image
+            .rsplit(':')
+            .next()
+            .unwrap_or(image)
+            .chars()
+            .take(12)
+            .collect();
+        fields.push(format!("image {short}"));
+    }
+    fields.push(tail);
     let render = |fields: &[String]| format!("{base} · {}", fields.join(" · "));
     let mut line = render(&fields);
     while line.chars().count() > width as usize && fields.len() > 1 {
@@ -444,7 +511,11 @@ fn render_cells(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let p = points(c);
+            let p = if is_career(c) {
+                career_points(c, &app.campaigns)
+            } else {
+                points(c)
+            };
             let cost = cost(c);
             let pd = if cost > 0.0 {
                 format!("{:.1}", p / cost)
@@ -495,13 +566,14 @@ fn elapsed_minutes(c: &Value) -> i64 {
 }
 
 fn render_live(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(c) = app.selected_cell() else {
-        frame.render_widget(Paragraph::new("no cell"), area);
-        return;
-    };
-    let live = c.get("live").unwrap_or(&Value::Null);
-    let mut lines = vec![
-        Line::from(format!(
+    let mut lines = Vec::new();
+    // R55 F4: the full engine error lives here; the header may clip it.
+    if let Some(e) = &app.engine_error {
+        lines.push(Line::from(format!("engine unreachable: {e}")));
+    }
+    if let Some(c) = app.selected_cell() {
+        let live = c.get("live").unwrap_or(&Value::Null);
+        lines.push(Line::from(format!(
             "ticket {} {} · round {} · turn {}/{} · {}",
             live["ticket"].as_u64().unwrap_or(0),
             live["title"].as_str().unwrap_or(""),
@@ -509,14 +581,17 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
             live["turn"].as_u64().unwrap_or(0),
             live["max_turns"].as_u64().unwrap_or(0),
             state_text(c)
-        )),
-        Line::from(format!(
+        )));
+        // R55 F2: `campaign_spent` counts finished tickets; while a ticket
+        // is live, add its spend so the line is never below ticket $.
+        let mut campaign = live["campaign_spent"].as_f64().unwrap_or_else(|| cost(c));
+        if matches!(c["state"].as_str(), Some("running") | Some("stalled")) && !ticket_recorded(c) {
+            campaign += live["ticket_spent"].as_f64().unwrap_or(0.0);
+        }
+        lines.push(Line::from(format!(
             "ticket $ {:.4}   campaign $ {:.4} / {:.2}   wall {}/{} m",
             live["ticket_spent"].as_f64().unwrap_or(0.0),
-            live["campaign_spent"]
-                .as_f64()
-                .or_else(|| Some(cost(c)))
-                .unwrap_or(0.0),
+            campaign,
             c["rollup"]["budget_usd"].as_f64().unwrap_or(0.99),
             // R42-7: /api/campaigns serves `started_at` and `wall_cap_min`;
             // the old live.wall_elapsed_min/wall_min fields do not exist.
@@ -525,12 +600,17 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
                 .as_u64()
                 .or_else(|| c["rollup"]["wall_min"].as_u64())
                 .unwrap_or(0)
-        )),
-    ];
+        )));
+    } else if lines.is_empty() {
+        lines.push(Line::from("no cell"));
+    }
     lines.extend(app.filtered_log());
+    let title = app
+        .selected_cell()
+        .map(short_model)
+        .unwrap_or_else(|| "no cell".to_string());
     let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
-        " live: {} · {} ",
-        short_model(c),
+        " live: {title} · {} ",
         if app.follow { "following" } else { "paused" }
     )));
     frame.render_widget(p, area);
