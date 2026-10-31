@@ -2,10 +2,17 @@ use super::*;
 use ratatui::{backend::TestBackend, Terminal};
 
 fn campaign(id: &str, state: &str, model: &str, points: f64, cost: f64, ticket: u64) -> Value {
+    // R55 F2: /api/campaigns' campaign_spent counts finished tickets; a
+    // live ticket's 0.0412 is added by the TUI.
+    let finished = if matches!(state, "running" | "stalled") {
+        (cost - 0.0412).max(0.0)
+    } else {
+        cost
+    };
     serde_json::json!({
         "id": id, "state": state, "current_stage": ticket,
         "live": {"ticket": ticket, "turn": 19, "max_turns": 24, "title":"Aggregates",
-                 "round":1, "ticket_spent":0.0412, "campaign_spent":cost,
+                 "round":1, "ticket_spent":0.0412, "campaign_spent":finished,
                  "wall_elapsed_min":112, "wall_min":480},
         "rollup": {"model":model, "points":points, "max_points":76.0,
                    "total_cost_usd":cost, "budget_usd":0.99, "rules_version":"2026-10-19.42"},
@@ -333,4 +340,20 @@ fn r55_f1_points_scale_per_row() {
     let mut c = App::new();
     c.set_campaigns(vec![p1, p2]);
     assert!(draw(&c, 120, 20).contains("12.0/76"));
+}
+
+/// R55 F2: a running ticket's spend is added to the finished-ticket
+/// campaign spend, so campaign $ is never below ticket $.
+#[test]
+fn r55_f2_campaign_spend_counts_ticket() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let rows = fixture.as_array().expect("fixture rows").clone();
+    let mut a = App::new();
+    a.set_campaigns(rows);
+    let s = draw(&a, 120, 30);
+    assert!(s.contains("campaign $ 0.0345"), "w0:\n{s}");
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    a.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    let s = draw(&a, 120, 30);
+    assert!(s.contains("campaign $ 0.0440"), "w1:\n{s}");
 }

@@ -529,6 +529,12 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let live = c.get("live").unwrap_or(&Value::Null);
+    // R55 F2: campaign_spent counts finished tickets; add the live ticket
+    // so campaign $ is never below ticket $.
+    let mut campaign = live["campaign_spent"].as_f64().unwrap_or_else(|| cost(c));
+    if matches!(c["state"].as_str(), Some("running") | Some("stalled")) {
+        campaign += live["ticket_spent"].as_f64().unwrap_or(0.0);
+    }
     let mut lines = vec![
         Line::from(format!(
             "ticket {} {} · round {} · turn {}/{} · {}",
@@ -542,10 +548,7 @@ fn render_live(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(format!(
             "ticket $ {:.4}   campaign $ {:.4} / {:.2}   wall {}/{} m",
             live["ticket_spent"].as_f64().unwrap_or(0.0),
-            live["campaign_spent"]
-                .as_f64()
-                .or_else(|| Some(cost(c)))
-                .unwrap_or(0.0),
+            campaign,
             c["rollup"]["budget_usd"].as_f64().unwrap_or(0.99),
             // R42-7: /api/campaigns serves `started_at` and `wall_cap_min`;
             // the old live.wall_elapsed_min/wall_min fields do not exist.
