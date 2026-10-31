@@ -38,6 +38,7 @@ from `TEMPLATE.md`.
 | [50](50.md) | The grid driver and the flush counter: R48-4..7, R49-2, R49-3 (graded: full gate) | merged `6c04723` |
 | [51](51.md) | Publishing: a marked target, one secret list, the results page (R44-9, R44-10, R44-14, Q8 a; R43-1, R43-2; graded: full gate) | merged `0f2e364` |
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40; R47-1, R51-1) | merged `0690c3d` |
+| [53](53.md) | Two cells at once: a lock per worker, distinct ids, the sweep keeps campaign containers (2-lane smoke; graded: full gate) | open (operator 2026-10-31 "open 53") |
 
 **Status values:**
 
