@@ -18,7 +18,7 @@ pub const AUTO_EXTEND_BUDGET_ENV: &str = "SDB_AUTO_EXTEND_TRIALS";
 #[command(about = "Autonomous Under-$1 System-Building Benchmark for Budget LLMs", long_about = None)]
 #[command(
     version = env!("CARGO_PKG_VERSION"),
-    long_version = crate::report::rules::version_line_static()
+    long_version = crate::config::version_line_static()
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -27,6 +27,24 @@ pub struct Cli {
 
 /// Round 40 F1 / R52 F3: the official cell's caps, named once and used by
 /// clap and by the "not the official cell" note.
+/// R52 F5 (round 40 F3): the one version line, used by clap's `--version`
+/// and by the cell preflight. Kept here (not in the graded rules stamp).
+pub fn version_line() -> String {
+    format!(
+        "{} · rules {} · fingerprint {} · SQLite {}",
+        env!("CARGO_PKG_VERSION"),
+        crate::report::rules::RULES_VERSION,
+        crate::report::rules::fingerprint(),
+        crate::report::rules::sqlite_version()
+    )
+}
+
+/// The cached `&'static str` clap needs for `--version`.
+pub fn version_line_static() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(version_line).as_str()
+}
+
 pub const OFFICIAL_CELL_BUDGET_USD: f64 = 0.99;
 pub const OFFICIAL_CELL_WALL_MIN: u64 = 480;
 pub const OFFICIAL_CELL_TIMEOUT_MIN: u64 = 120;
@@ -746,6 +764,27 @@ mod tests {
         assert_eq!(json, "\"sql\"");
         let de: TaskType = serde_json::from_str(&json).unwrap();
         assert_eq!(de, TaskType::Sql);
+    }
+
+    /// R52 F5 (round 40 F3): the version line names the rules, fingerprint
+    /// and SQLite version.
+    #[test]
+    fn r52_f5_version_names_rules() {
+        let line = version_line();
+        assert!(line.contains(env!("CARGO_PKG_VERSION")), "{line}");
+        assert!(
+            line.contains(&format!("rules {}", crate::report::rules::RULES_VERSION)),
+            "the rules segment: {line}"
+        );
+        assert!(
+            line.contains(&crate::report::rules::fingerprint()),
+            "{line}"
+        );
+        assert!(
+            line.contains(crate::report::rules::sqlite_version()),
+            "{line}"
+        );
+        assert_eq!(version_line_static(), line);
     }
 
     /// R52 F5 (round 40 F3/F5): portal has an about line, log's ignored
