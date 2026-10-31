@@ -4919,6 +4919,42 @@ global.fetch = async (url) => {
         let _ = fs::remove_dir_all(new_dir);
     }
 
+    /// R51 F6 (R43-1): a live status without `live.effort` gives an empty
+    /// stub effort, so the Board row never invents "high".
+    #[tokio::test]
+    async fn r51_f6_live_stub_effort_blank() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let name = format!("campaign_sdb-sql_r51effort_{}", std::process::id());
+        let dir = runs.join(&name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("status.json"),
+            serde_json::json!({
+                "state": "running",
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "live": {"campaign": "sdb-sql", "model": "m", "harness": "omp"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let Json(cells) = get_campaigns().await;
+        let row = cells
+            .iter()
+            .find(|c| c["id"].as_str() == Some(name.as_str()))
+            .unwrap_or_else(|| panic!("the live cell must render: {cells:?}"));
+        assert_eq!(
+            row["rollup"]["effort"], "",
+            "an unknown effort must stay blank: {row:?}"
+        );
+        assert!(
+            !row.to_string().contains("\"effort\":\"high\""),
+            "the stub invented high: {row:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// R47 F2: the API carries the phase's perf block and the career's
     /// latest one, and the GUI board has the Perf column and the Run view's
     /// per-workload block.

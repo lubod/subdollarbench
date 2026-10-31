@@ -1648,22 +1648,78 @@ impl PortalExporter {
     /// Shared scrubber: also used by [`crate::report::archive`] so raw
     /// `console.log` never lands on disk with keys (the agent env-dumps
     /// `OPENROUTER_API_KEY=sk-or-v1-...` into the log stream).
-    pub fn secret_patterns() -> Vec<Regex> {
-        [
-            r"sk-or-v1-[A-Za-z0-9_-]+",
-            r"sk-proj-[A-Za-z0-9_-]+",
-            r"sk-ant-[A-Za-z0-9_-]+",
-            r"sk-[A-Za-z0-9_-]{8,}",
-            r"hf_[A-Za-z0-9_-]{16,}",
-            r"(?i)bearer\s+[A-Za-z0-9_\-\.~\+/=]+",
+    /// R44-10/R51 F2: the one secret list. `secret_patterns` is the
+    /// redactor; `secret_scan` is the publish check. Both read this table,
+    /// so the shell can never drift from the Rust list.
+    pub const SECRET_PATTERN_TABLE: &'static [(&'static str, &'static str)] = &[
+        ("openrouter_key", r"sk-or-v1-[A-Za-z0-9_-]+"),
+        ("openai_project_key", r"sk-proj-[A-Za-z0-9_-]+"),
+        ("anthropic_key", r"sk-ant-[A-Za-z0-9_-]+"),
+        ("sk_key", r"sk-[A-Za-z0-9_-]{8,}"),
+        ("huggingface_token", r"hf_[A-Za-z0-9_-]{16,}"),
+        ("bearer", r"(?i)bearer\s+[A-Za-z0-9_\-\.~\+/=]+"),
+        (
+            "token_assignment",
             r"(?i)(?:api_key|auth_token|access_token|token)\s*[:=]\s*\S+",
+        ),
+        (
+            "key_assignment",
             r"(?i)\b[A-Za-z0-9_]*_(?:KEY|SECRET)\s*=\s*\S+",
+        ),
+        (
+            "provider_key_assignment",
             r"(?i)(?:openrouter_api_key|openai_api_key|anthropic_api_key)\s*=\s*\S+",
-            r"--api-key(?:\s+|=)\S+",
-        ]
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
+        ),
+        ("api_key_flag", r"--api-key(?:\s+|=)\S+"),
+    ];
+
+    pub fn secret_patterns() -> Vec<Regex> {
+        Self::SECRET_PATTERN_TABLE
+            .iter()
+            .filter_map(|(_, p)| Regex::new(p).ok())
+            .collect()
+    }
+
+    /// R51 F2: scan a directory with the same list. file:line:pattern only;
+    /// never the matched value.
+    pub fn secret_scan(dir: &Path) -> Result<()> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+            let mut entries: Vec<_> = fs::read_dir(dir)?.flatten().collect();
+            entries.sort_by_key(|e| e.path());
+            for e in entries {
+                let p = e.path();
+                let md = fs::symlink_metadata(&p)?;
+                if md.file_type().is_symlink() {
+                    continue;
+                }
+                if md.is_dir() {
+                    walk(&p, out)?;
+                } else if md.is_file() {
+                    out.push(p);
+                }
+            }
+            Ok(())
+        }
+        let named: Vec<(&str, Regex)> = Self::SECRET_PATTERN_TABLE
+            .iter()
+            .filter_map(|(name, p)| Regex::new(p).ok().map(|re| (*name, re)))
+            .collect();
+        let mut files = Vec::new();
+        walk(dir, &mut files)?;
+        for file in files {
+            let Ok(bytes) = fs::read(&file) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            for (i, line) in text.lines().enumerate() {
+                for (name, re) in &named {
+                    if re.is_match(line) {
+                        anyhow::bail!("{}:{}: {}", file.display(), i + 1, name);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn redact(text: &str, patterns: &[Regex]) -> String {

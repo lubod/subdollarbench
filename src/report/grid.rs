@@ -489,10 +489,19 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
             per_dollar: (cost > 0.0).then(|| points / cost),
             cost,
         });
-    let started = leaf.rollup["started_at"].as_str().unwrap_or("").to_string();
-    let finished_at = leaf.rollup["finished_at"]
-        .as_str()
-        .or_else(|| leaf.rollup["started_at"].as_str())
+    // R51 F4 (R44-14): the career spans its phase cells, not only the leaf.
+    let started = cells
+        .iter()
+        .filter_map(|c| c.rollup["started_at"].as_str())
+        .filter(|s| !s.is_empty())
+        .min()
+        .unwrap_or("")
+        .to_string();
+    let finished_at = cells
+        .iter()
+        .filter_map(|c| c.rollup["finished_at"].as_str())
+        .filter(|s| !s.is_empty())
+        .max()
         .unwrap_or("")
         .to_string();
     CareerCell {
@@ -500,7 +509,10 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         cells: cells.iter().map(|c| c.name.clone()).collect(),
         model: leaf.rollup["model"].as_str().unwrap_or("?").to_string(),
         harness: leaf.rollup["harness"].as_str().unwrap_or("?").to_string(),
-        effort: leaf.rollup["effort"].as_str().unwrap_or("high").to_string(),
+        // R51 F3 (R44-10): an unknown effort stays empty; the board, the
+        // results page and the Run view show nothing there, and grouping
+        // keeps it apart from a real "high".
+        effort: leaf.rollup["effort"].as_str().unwrap_or("").to_string(),
         phase: leaf.phase,
         phase_total,
         finished,
@@ -814,6 +826,16 @@ fn perf_tooltip(perf: &crate::verifier::sql::perfscore::PerfScore) -> String {
     }
 }
 
+/// R51 F3: the effort fragment, omitted entirely when the cell did not
+/// record one (never defaulted to "high").
+fn effort_note(effort: &str) -> String {
+    if effort.is_empty() {
+        String::new()
+    } else {
+        format!(" · effort {}", esc(effort))
+    }
+}
+
 fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -824,10 +846,10 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         format!("career-row {extra_class}")
     };
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{} · effort {}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{}{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         esc(&c.campaign_id),
         esc(&c.model),
-        esc(&c.effort),
+        effort_note(&c.effort),
         flags_of(c),
         strip_html(&c.ladder),
         reached_of(c),
@@ -861,12 +883,12 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         );
     }
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{} · effort {} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{}{} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         g.rank_label(),
         esc(&g.model),
         more,
         esc(&g.harness),
-        esc(&g.effort),
+        effort_note(&g.effort),
         best.points,
         med.points,
         worst.points,
@@ -946,6 +968,13 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf cell for each workload's reference, candidate, ratio and any floor.</li><li><b>Ties</b>: adjacent models are a rank group (<code>2=</code>) when the worse model's best career is at least as good as the better model's worst, by the shared board order (points, then perf, then points per dollar). Ties never block publishing.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Older rule sets are incomparable and sit below the board.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
     h.push_str("</main></body></html>");
     h
+}
+
+/// R51 F4: a grid date is printed to the minute.
+fn fmt_grid_time(s: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|_| s.to_string())
 }
 
 fn sorted_unique(values: impl Iterator<Item = f64>) -> Vec<f64> {
@@ -1172,6 +1201,36 @@ fn render_results(cells: &[CareerCell]) -> String {
         v.dedup();
         v.join(", ")
     };
+    let harness_effort = if effort.is_empty() {
+        harness.clone()
+    } else {
+        format!("{harness} / {effort}")
+    };
+    // R51 F5 (Q8 a): the snapshot date and the ranked models' overrides.
+    let mut ranked_models: Vec<&str> = current.iter().map(|c| c.model.as_str()).collect();
+    ranked_models.sort();
+    ranked_models.dedup();
+    let overrides = ranked_models
+        .iter()
+        .map(|m| {
+            let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
+            if detail.is_empty() {
+                format!("{} — none", esc(m))
+            } else {
+                format!("{} — {}", esc(m), esc(detail))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let prices = format!(
+        "base rates per call (snapshot {}); overrides: {}",
+        esc(crate::cost::calculator::price_snapshot_as_of()),
+        if overrides.is_empty() {
+            "—"
+        } else {
+            &overrides
+        }
+    );
     let mut dates: Vec<&str> = current
         .iter()
         .flat_map(|c| [c.started.as_str(), c.finished_at.as_str()])
@@ -1262,17 +1321,17 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
     ));
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{} / {}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
+        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
         esc(rules),
         esc(&recorded_text),
         fingerprint_note,
         esc(crate::report::rules::sqlite_version()),
         esc(image),
-        esc(&harness),
-        esc(&effort),
+        esc(&harness_effort),
         CAREER_CAP_USD,
-        esc(first),
-        esc(last),
+        prices,
+        esc(&fmt_grid_time(first)),
+        esc(&fmt_grid_time(last)),
         caps
     ));
     h.push_str(&format!(
@@ -1588,6 +1647,44 @@ mod tests {
         let mut sv: Value = serde_json::from_str(&read(&spath)).unwrap();
         sv["rollup"] = v;
         fs::write(&spath, sv.to_string()).unwrap();
+    }
+
+    /// R51 F4: rewrite a phase's start/finish in both files.
+    fn set_phase_times(runs: &Path, prefix: &str, phase: u32, started: &str, finished: &str) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["started_at"] = serde_json::json!(started);
+            rollup["finished_at"] = serde_json::json!(finished);
+            fs::write(path, v.to_string()).unwrap();
+        }
+    }
+
+    /// R51 F3: rewrite (or remove) a phase's effort in both files.
+    fn set_effort(runs: &Path, prefix: &str, phase: u32, effort: Option<&str>) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            match effort {
+                Some(e) => rollup["effort"] = serde_json::json!(e),
+                None => {
+                    rollup.as_object_mut().unwrap().remove("effort");
+                }
+            }
+            fs::write(path, v.to_string()).unwrap();
+        }
     }
 
     fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -2108,6 +2205,107 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R51 F5 (Q8 a): the results page names the snapshot date, says costs
+    /// are base rates, and lists each ranked model's override.
+    #[test]
+    fn r51_f5_prices_row() {
+        let (base, runs, out) = fixture("r51prices");
+        for (prefix, model) in [
+            ("haiku", "anthropic/claude-haiku-5.5"),
+            ("luna", "openai/gpt-6-luna"),
+            ("deepseek", "deepseek/deepseek-v4.1-flash-1017"),
+            ("mimo", "xiaomi/mimo-v2.6-flash"),
+            ("qwen", "qwen/qwen3.8-flash"),
+        ] {
+            career(&runs, prefix, model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("<th>Prices</th>"), "{html}");
+        assert!(html.contains("2026-10-28"), "{html}");
+        assert!(html.contains("base rates per call"), "{html}");
+        for needle in [
+            "5× the prompt rate above 100k prompt tokens",
+            "2× above 272k prompt tokens",
+            "2× in weekday peak hours",
+            "xiaomi/mimo-v2.6-flash — none",
+            "qwen/qwen3.8-flash — none",
+        ] {
+            assert!(html.contains(needle), "missing {needle:?}: {html}");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R51 F4 (R44-14): the grid dates run from the earliest phase start
+    /// of any ranked career to the latest finish, to the minute.
+    #[test]
+    fn r51_f4_grid_dates() {
+        let (base, runs, out) = fixture("r51dates");
+        career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
+        let a = [
+            (
+                "2026-10-20T01:09:00.900460150+00:00",
+                "2026-10-20T01:20:00.5+00:00",
+            ),
+            ("2026-10-20T01:30:00.2+00:00", "2026-10-20T01:50:00.2+00:00"),
+            ("2026-10-20T02:00:00.2+00:00", "2026-10-20T02:30:00.2+00:00"),
+            ("2026-10-20T03:00:00.2+00:00", "2026-10-20T04:00:00.1+00:00"),
+        ];
+        let b = [
+            (
+                "2026-10-20T00:30:00.123+00:00",
+                "2026-10-20T00:45:00.9+00:00",
+            ),
+            ("2026-10-20T10:00:00.9+00:00", "2026-10-20T11:00:00.9+00:00"),
+            ("2026-10-20T20:00:00.9+00:00", "2026-10-20T21:00:00.9+00:00"),
+            (
+                "2026-10-21T01:00:00.9+00:00",
+                "2026-10-21T02:00:00.999+00:00",
+            ),
+        ];
+        for (i, (start, end)) in a.iter().enumerate() {
+            set_phase_times(&runs, "a", i as u32 + 1, start, end);
+        }
+        for (i, (start, end)) in b.iter().enumerate() {
+            set_phase_times(&runs, "b", i as u32 + 1, start, end);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(
+            html.contains("2026-10-20 00:30 UTC → 2026-10-21 02:00 UTC"),
+            "the grid dates must span the careers: {html}"
+        );
+        assert!(!html.contains("00:30:00"), "seconds leaked: {html}");
+        assert!(!html.contains(".999"), "nanoseconds leaked: {html}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R51 F3 (R44-10): a rollup without effort renders no "high" and
+    /// groups apart from a real high-effort career.
+    #[test]
+    fn r51_f3_unknown_effort_blank() {
+        let (base, runs, out) = fixture("r51effort");
+        career(&runs, "none", "effort-model", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            set_effort(&runs, "none", phase, None);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(
+            !html.contains("effort high") && !html.contains("high ·"),
+            "an unknown effort must render nothing: {html}"
+        );
+        career(&runs, "high", "effort-model", [1.0; 4], [0.01; 4]);
+        let cells = careers(runs.to_str().unwrap());
+        let groups = model_groups(&cells);
+        let efforts: Vec<&str> = groups.iter().map(|g| g.effort.as_str()).collect();
+        assert!(efforts.contains(&""), "unknown effort group: {efforts:?}");
+        assert!(efforts.contains(&"high"), "high effort group: {efforts:?}");
+        assert_eq!(efforts.len(), 2, "same model, two efforts: {efforts:?}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R47 F2: a career with a perf block shows a Perf column and its
     /// score; one without shows an em dash. The hover names each workload
     /// and flags a floored one; the methodology names the tie-break.

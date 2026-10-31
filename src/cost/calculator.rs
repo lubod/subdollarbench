@@ -429,23 +429,83 @@ struct PriceEntry {
 
 #[derive(Debug, Deserialize)]
 struct PriceSnapshot {
+    as_of: String,
     models: Vec<PriceEntry>,
 }
 
+fn snapshot() -> &'static PriceSnapshot {
+    static SNAPSHOT: OnceLock<PriceSnapshot> = OnceLock::new();
+    SNAPSHOT.get_or_init(|| {
+        serde_json::from_str(include_str!("model_prices.json"))
+            .expect("the committed model price snapshot must parse")
+    })
+}
+
 fn snapshot_entries() -> &'static [PriceEntry] {
-    static SNAPSHOT: OnceLock<Vec<PriceEntry>> = OnceLock::new();
-    SNAPSHOT
-        .get_or_init(|| {
-            let parsed: PriceSnapshot = serde_json::from_str(include_str!("model_prices.json"))
-                .expect("the committed model price snapshot must parse");
-            parsed.models
-        })
-        .as_slice()
+    snapshot().models.as_slice()
+}
+
+/// R51 F5 (Q8 a): provider price overrides applied on top of the snapshot's
+/// base rates. The snapshot cannot express them (they depend on context
+/// size or the hour), so they live in this one table next to the snapshot
+/// reader, outside the graded JSON. An empty detail means no override.
+pub const PRICE_OVERRIDES: &[(&str, &str)] = &[
+    (
+        "anthropic/claude-haiku-5.5",
+        "5× the prompt rate above 100k prompt tokens",
+    ),
+    ("openai/gpt-6-luna", "2× above 272k prompt tokens"),
+    (
+        "deepseek/deepseek-v4.1-flash-1017",
+        "2× in weekday peak hours",
+    ),
+    ("xiaomi/mimo-v2.6-flash", ""),
+    ("qwen/qwen3.8-flash", ""),
+];
+
+/// The override for a model, matched like the snapshot (openrouter/ prefix
+/// ignored, case-insensitive). `Some("")` means the model is priced but has
+/// no override; `None` means the model is not in the grid table.
+pub fn price_override_for(model: &str) -> Option<&'static str> {
+    let m = model.to_lowercase();
+    let m = m.strip_prefix("openrouter/").unwrap_or(&m);
+    PRICE_OVERRIDES
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(m))
+        .map(|(_, detail)| *detail)
+}
+
+/// The snapshot's date, for the results page's Prices row.
+pub fn price_snapshot_as_of() -> &'static str {
+    snapshot().as_of.as_str()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R51 F5: every grid model has an overrides entry (empty allowed), and
+    /// the lookup matches like the snapshot.
+    #[test]
+    fn r51_f5_every_grid_model_has_an_entry() {
+        for m in [
+            "anthropic/claude-haiku-5.5",
+            "openai/gpt-6-luna",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "xiaomi/mimo-v2.6-flash",
+            "qwen/qwen3.8-flash",
+        ] {
+            assert!(price_override_for(m).is_some(), "{m} has no entry");
+        }
+        assert_eq!(price_override_for("xiaomi/mimo-v2.6-flash"), Some(""));
+        assert_eq!(price_override_for("qwen/qwen3.8-flash"), Some(""));
+        assert_eq!(
+            price_override_for("openrouter/OpenAI/GPT-6-LUNA"),
+            Some("2× above 272k prompt tokens")
+        );
+        assert_eq!(price_override_for("unknown/model"), None);
+        assert_eq!(price_snapshot_as_of(), "2026-10-28");
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

@@ -99,8 +99,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             runs_dir,
             out,
             variance,
+            secret_scan,
             ..
         } => {
+            if let Some(dir) = secret_scan {
+                PortalExporter::secret_scan(std::path::Path::new(&dir))?;
+                println!("secret scan: clean");
+                return Ok(());
+            }
             // Round-12 P1: the legacy pre-sdb-sql page is retired; the
             // public surface is the sdb-sql board (same as the engine's
             // rebuild endpoint and the campaign finish).
@@ -698,6 +704,69 @@ mod tests {
         }
     }
 
+    /// R51 F2: the CLI's secret scan names file, line and pattern, never the
+    /// value; a clean tree passes.
+    #[tokio::test]
+    async fn r51_f2_secret_scan_cli() {
+        let dir = std::env::temp_dir().join(format!(
+            "r51_secret_scan_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let cli = |scan: String| Cli {
+            command: Commands::Portal {
+                runs_dir: "./runs".to_string(),
+                results_dir: "./results".to_string(),
+                out: "./portal".to_string(),
+                base_url: String::new(),
+                keep: 50,
+                variance: false,
+                secret_scan: Some(scan),
+            },
+        };
+        for (name, text, value, pattern) in [
+            (
+                "key.txt",
+                "OPENROUTER_API_KEY=plainsecret123\n",
+                "plainsecret123",
+                "assignment",
+            ),
+            (
+                "bearer.txt",
+                "authorization: bearer bearerabc123XYZ\n",
+                "bearerabc123XYZ",
+                "bearer",
+            ),
+            (
+                "sk.txt",
+                "planted sk-or-v1-abcdefghijklmnop\n",
+                "abcdefghijklmnop",
+                "openrouter_key",
+            ),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, text).unwrap();
+            let err = run_cli(cli(dir.to_string_lossy().to_string()))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(name), "file not named: {err}");
+            assert!(err.contains(":1:"), "line not named: {err}");
+            assert!(err.contains(pattern), "pattern not named: {err}");
+            assert!(!err.contains(value), "the value leaked: {err}");
+            fs::remove_file(&path).unwrap();
+        }
+        assert!(run_cli(cli(dir.to_string_lossy().to_string()))
+            .await
+            .is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Round-12 P1: `portal` exports the sdb-sql board. The legacy pre-
     /// sdb-sql page (with its per-run pages, console logs and
     /// results.json) can no longer be written anywhere.
@@ -767,6 +836,7 @@ mod tests {
                 base_url: "".to_string(),
                 keep: 50,
                 variance: false,
+                secret_scan: None,
             },
         };
         assert!(run_cli(cli).await.is_ok());

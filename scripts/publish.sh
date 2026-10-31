@@ -52,6 +52,24 @@ bar_record() {
     fi
 }
 
+# R51 F2 (R44-10): the binary owns the secret list. In a self-test or a
+# fresh checkout without a release build, build the debug binary once.
+secret_scan_bin() {
+    if [[ -n "${SDB_BIN:-}" && -x "$SDB_BIN" ]]; then
+        printf '%s' "$SDB_BIN"
+        return 0
+    fi
+    if [[ -x "$PWD/target/release/subdollarbench" ]]; then
+        printf '%s' "$PWD/target/release/subdollarbench"
+        return 0
+    fi
+    if cargo build --quiet --bin subdollarbench >/dev/null 2>&1; then
+        printf '%s' "$PWD/target/debug/subdollarbench"
+        return 0
+    fi
+    return 1
+}
+
 validate_export() {
     local dir="$1" bar="$2" rc=0
     [[ -s "$dir/index.html" ]] || { echo "[publish] refusal: index.html missing" >&2; return 1; }
@@ -85,33 +103,54 @@ PY
         echo "[publish] refusal: flake record has no RESULT: PASS" >&2
         return 1
     }
-    if grep -RInE \
-        -e 'sk-or-v1-[A-Za-z0-9_-]+' \
-        -e 'sk-proj-[A-Za-z0-9_-]+' \
-        -e 'sk-ant-[A-Za-z0-9_-]+' \
-        -e 'sk-[A-Za-z0-9_-]{8,}' \
-        -e 'hf_[A-Za-z0-9_-]{16,}' \
-        -e 'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]+' \
-        -e '(api_key|auth_token|access_token|token)[[:space:]]*[:=][[:space:]]*[^[:space:]]+' \
-        -e '[A-Za-z0-9_]*(KEY|SECRET)[[:space:]]*=[[:space:]]*[^[:space:]]+' \
-        -e '--api-key([[:space:]]+|=)[^[:space:]]+' \
-        "$dir" >/tmp/sdb-publish-secret-scan.$$ 2>&1; then
+    local scanner out
+    scanner="$(secret_scan_bin)" || {
+        echo "[publish] refusal: no binary for the secret scan" >&2
+        return 1
+    }
+    out="$(mktemp)"
+    if ! "$scanner" portal --secret-scan "$dir" >"$out" 2>&1; then
         echo "[publish] refusal: secret scan found a match" >&2
-        sed -n '1,8p' /tmp/sdb-publish-secret-scan.$$ >&2
-        rm -f /tmp/sdb-publish-secret-scan.$$
+        sed -n '1,8p' "$out" >&2
+        rm -f "$out"
         return 1
     fi
-    rm -f /tmp/sdb-publish-secret-scan.$$
+    rm -f "$out"
     return "$rc"
+}
+
+# R44-9: a mistyped target must never be wiped by --delete. The target
+# carries a marker the export writes too, so a normal --delete keeps it.
+target_marker() {
+    local target="$1"
+    if [[ "$target" == *:* && "$target" != /* ]]; then
+        local host="${target%%:*}" path="${target#*:}"
+        ssh -o BatchMode=yes "$host" "test -f $(printf '%q' "$path")/.sdb-publish" 2>/dev/null
+    else
+        [[ -f "$target/.sdb-publish" ]]
+    fi
 }
 
 deploy() {
     local dir="$1" target="$2" how="$3"
     if [[ "$how" == "push" ]]; then
+        if ! target_marker "$target"; then
+            echo "[publish] refusal: the target has no .sdb-publish marker; refusing to rsync --delete there" >&2
+            echo "[publish] create it first: ssh <host> 'touch <path>/.sdb-publish' (local: touch <dir>/.sdb-publish)" >&2
+            return 1
+        fi
         rsync -a --delete "$dir/" "$target"
     else
-        echo "[publish] dry run (rsync -n):"
-        rsync -an --delete --itemize-changes "$dir/" "$target"
+        local listing
+        listing="$(rsync -an --delete --itemize-changes "$dir/" "$target")"
+        printf '[publish] dry run (rsync -n):\n%s\n' "$listing"
+        # A file in the export's own set is never deleted; any *deleting
+        # line is therefore outside it and means the target is not ours.
+        if grep -q '^\*deleting[[:space:]]' <<<"$listing"; then
+            echo "[publish] refusal: the target holds files this export would delete:" >&2
+            grep '^\*deleting[[:space:]]' <<<"$listing" >&2
+            return 1
+        fi
     fi
 }
 
@@ -153,24 +192,55 @@ PY
     fi
     echo '[self-test] missing bar refused'
 
-    secret="$root/secret"
-    cp -a "$good" "$secret"
-    printf 'planted sk-or-v1-abcdefghijklmnop\n' > "$secret/note.txt"
-    if validate_export "$secret" "$bar" >/dev/null 2>&1; then
-        echo '[self-test] planted secret was accepted' >&2; exit 1
-    fi
-    echo '[self-test] planted sk-or string refused'
+    while IFS='|' read -r planted value; do
+        secret="$root/secret"
+        rm -rf "$secret"
+        cp -a "$good" "$secret"
+        printf '%s\n' "$planted" > "$secret/note.txt"
+        rc=0
+        out="$(validate_export "$secret" "$bar" 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] planted secret was accepted: $planted" >&2; exit 1
+        }
+        case "$out" in
+            *"$value"*) echo '[self-test] the scan printed the secret value' >&2; exit 1 ;;
+        esac
+    done <<'EOF'
+sk-or-v1-abcdefghijklmnop|abcdefghijklmnop
+authorization: bearer bearerabc123XYZ|bearerabc123XYZ
+OPENROUTER_API_KEY=sk-live-value|sk-live-value
+EOF
+    echo '[self-test] planted secrets refused without values'
 
-    deploy "$good" "$target" dry
+    # R44-9: the export writes the marker; an unmarked target refuses a
+    # push and is left untouched.
+    printf 'sdb-publish\n' > "$good/.sdb-publish"
+    if deploy "$good" "$target" push >/dev/null 2>&1; then
+        echo '[self-test] an unmarked target was pushed' >&2; exit 1
+    fi
     [[ -z "$(find "$target" -mindepth 1 -print -quit)" ]] || {
-        echo '[self-test] dry run copied files' >&2; exit 1
+        echo '[self-test] a refused push wrote to the target' >&2; exit 1
     }
-    echo '[self-test] dry run copied nothing'
+    echo '[self-test] unmarked target refused'
+    printf 'sdb-publish\n' > "$target/.sdb-publish"
     deploy "$good" "$target" push
-    [[ -f "$target/index.html" && -f "$target/results.html" ]] || {
-        echo '[self-test] --yes did not copy' >&2; exit 1
+    [[ -f "$target/index.html" && -f "$target/results.html" && -f "$target/.sdb-publish" ]] || {
+        echo '[self-test] --yes did not copy (or removed the marker)' >&2; exit 1
     }
-    echo '[self-test] --yes copied'
+    echo '[self-test] marked target pushed'
+    printf 'stray\n' > "$target/stray.txt"
+    rc=0
+    if out="$(deploy "$good" "$target" dry 2>&1)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    [[ "$rc" -ne 0 ]] || { echo '[self-test] stray target file was accepted' >&2; exit 1; }
+    grep -q '\*deleting[[:space:]][[:space:]]*stray.txt' <<<"$out" || {
+        echo '[self-test] dry run did not list the stray deletion' >&2; exit 1
+    }
+    [[ -f "$target/stray.txt" ]] || { echo '[self-test] dry run deleted' >&2; exit 1; }
+    echo '[self-test] stray target file listed and refused'
     echo '[self-test] PASS'
     exit 0
 fi
@@ -185,6 +255,7 @@ export="$(mktemp -d /tmp/sdb-publish.XXXXXX)"
 trap 'rm -rf "$export"' EXIT
 runs="${SDB_RUNS_DIR:-$PWD/runs}"
 "$bin" portal --runs-dir "$runs" --out "$export" >/dev/null
+printf 'sdb-publish\n' > "$export/.sdb-publish"
 bar="$(bar_record)"
 validate_export "$export" "$bar" || exit 1
 echo "[publish] export checks passed"

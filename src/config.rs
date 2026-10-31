@@ -114,6 +114,11 @@ pub enum Commands {
         /// Print the career variance report (points/$ ranges and rank ties)
         #[arg(long, default_value_t = false)]
         variance: bool,
+
+        /// Scan a directory for secrets and exit 1 on a match (file, line
+        /// and pattern name only; never the value)
+        #[arg(long)]
+        secret_scan: Option<String>,
     },
 
     /// Manage the Docker sandbox image and OMP agent
@@ -737,6 +742,7 @@ mod tests {
                 base_url,
                 keep,
                 variance: _,
+                secret_scan: _,
             } => {
                 assert_eq!(runs_dir, "./runs");
                 assert_eq!(results_dir, "./results");
