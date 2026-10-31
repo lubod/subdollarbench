@@ -24,6 +24,11 @@ fail() {
 
 [[ -n "$subject" ]] || fail "the subject is empty"
 
+# A merge brings master into the round branch; it is not an item commit.
+if [[ "$subject" == Merge\ * ]]; then
+    exit 0
+fi
+
 if [[ "$subject" =~ ^R([0-9]+):[[:space:]] ]]; then
     [[ "${BASH_REMATCH[1]}" == "$nn" ]] \
         || fail "subject says R${BASH_REMATCH[1]} on branch round$nn"

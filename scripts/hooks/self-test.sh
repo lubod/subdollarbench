@@ -42,6 +42,7 @@ expect_msg 'R54 F1/F2: x' refuse || exit 1
 expect_msg 'R54 F1 F2: x' refuse || exit 1
 expect_msg 'R54 F1,F2: x' refuse || exit 1
 expect_msg 'R54: ready abc' accept || exit 1
+expect_msg 'Merge master into round54' accept || exit 1
 expect_msg 'R53 F1: x' refuse || exit 1
 git -C "$repo" checkout -q master
 expect_msg 'Merge round54: tooling' accept || exit 1
