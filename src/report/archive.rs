@@ -125,6 +125,14 @@ pub struct RunManifest {
     /// scored cost is always the snapshot formula.
     #[serde(default)]
     pub live_spend_delta_usd: Option<f64>,
+    /// R56 F3: why the live key delta is null (the key is shared with
+    /// another lane). None when the delta is present or was not queried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_spend_note: Option<String>,
+    /// R56 F1: the tool call that hung and ended the session, when the
+    /// stall guard fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall: Option<crate::sandbox::ToolStall>,
     #[serde(default)]
     pub effective_cost_usd: Option<f64>,
     pub savings_percent: f64,
@@ -606,6 +614,8 @@ mod tests {
             cost_source: None,
             cost_formula_usd: None,
             live_spend_delta_usd: None,
+            live_spend_note: None,
+            stall: None,
             effective_cost_usd: Some(0.005),
             savings_percent: 65.0,
             efficiency_score: 400.0,
@@ -786,6 +796,8 @@ mod tests {
             cost_source: None,
             cost_formula_usd: None,
             live_spend_delta_usd: None,
+            live_spend_note: None,
+            stall: None,
             effective_cost_usd: None,
             savings_percent: 0.0,
             efficiency_score: 0.0,
