@@ -193,7 +193,12 @@ fn r42_f5_header_states() {
 /// running state and a start 37 minutes ago without adding fields the API
 /// does not serve.
 fn api_cell() -> Value {
-    let mut v: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let mut v = fixture
+        .as_array()
+        .and_then(|rows| rows.first())
+        .cloned()
+        .expect("api-campaigns fixture rows");
     v["state"] = serde_json::json!("running");
     v["started_at"] =
         serde_json::json!((chrono::Utc::now() - chrono::Duration::minutes(37)).to_rfc3339());
@@ -297,4 +302,35 @@ fn r42_f2_selection_survives_poll_reorder() {
     )]);
     assert_eq!(a.selected_id(), Some("campaign_a"));
     assert_eq!(a.log_len(), 0);
+}
+
+/// R55 F1: every career phase uses the 76-point denominator, while a cell
+/// outside a career keeps its own max_points. A running phase adds the
+/// chain's points.
+#[test]
+fn r55_f1_points_scale_per_row() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/api-campaigns.json")).unwrap();
+    let rows = fixture.as_array().expect("fixture rows").clone();
+    let mut a = App::new();
+    a.set_campaigns(rows);
+    let s = draw(&a, 120, 30);
+    for want in ["0.0/76", "10.0/76", "1.0/76", "6.0/76"] {
+        assert!(s.contains(want), "missing {want}:\n{s}");
+    }
+    assert!(!s.contains("/10"), "a career row used /10:\n{s}");
+
+    let mut plain = campaign("plain", "running", "m", 4.0, 0.1, 1);
+    plain["rollup"]["max_points"] = serde_json::json!(10.0);
+    let mut b = App::new();
+    b.set_campaigns(vec![plain]);
+    assert!(draw(&b, 120, 20).contains("4.0/10"));
+
+    let mut p1 = campaign("p1", "done", "m", 10.0, 0.1, 1);
+    p1["rollup"]["phase"] = serde_json::json!(1);
+    let mut p2 = campaign("p2", "running", "m", 2.0, 0.1, 1);
+    p2["rollup"]["phase"] = serde_json::json!(2);
+    p2["rollup"]["chain_from"] = serde_json::json!("p1");
+    let mut c = App::new();
+    c.set_campaigns(vec![p1, p2]);
+    assert!(draw(&c, 120, 20).contains("12.0/76"));
 }

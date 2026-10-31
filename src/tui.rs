@@ -323,12 +323,37 @@ fn cost(c: &Value) -> f64 {
         .or_else(|| c["rollup"]["total_cost_usd"].as_f64())
         .unwrap_or(0.0)
 }
+/// A career phase (not a standalone cell): the rollup has `phase`, or an
+/// explicit career block. Its denominator is the 76-point ladder.
+fn is_career(c: &Value) -> bool {
+    c["rollup"]["phase"].is_number() || c["rollup"]["career"].is_object()
+}
+
 fn max_points(c: &Value) -> f64 {
-    if c["rollup"]["career"].is_object() {
+    if is_career(c) {
         76.0
     } else {
         c["rollup"]["max_points"].as_f64().unwrap_or(76.0)
     }
+}
+
+/// R55 F1: a running career phase counts the chain's points so far plus
+/// this phase's own. A finished phase's `career` block already holds the
+/// total.
+fn career_points(c: &Value, all: &[Value]) -> f64 {
+    if let Some(p) = c["rollup"]["career"]["points"].as_f64() {
+        return p;
+    }
+    let own = c["rollup"]["points"].as_f64().unwrap_or(0.0);
+    let chain = c["rollup"]["chain_from"]
+        .as_str()
+        .or_else(|| c["chain_from"].as_str());
+    if let Some(id) = chain {
+        if let Some(prev) = all.iter().find(|p| p["id"].as_str() == Some(id)) {
+            return career_points(prev, all) + own;
+        }
+    }
+    own
 }
 
 fn ladder(c: &Value, no_color: bool) -> String {
@@ -444,7 +469,11 @@ fn render_cells(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let p = points(c);
+            let p = if is_career(c) {
+                career_points(c, &app.campaigns)
+            } else {
+                points(c)
+            };
             let cost = cost(c);
             let pd = if cost > 0.0 {
                 format!("{:.1}", p / cost)
