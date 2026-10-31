@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # R54 F4: scan the pushed range and the pushed trees before a push.
+# R55 F5: a real .env value is refused everywhere; a pattern-only hit is
+# allowed in scripts/secret-scan-fixtures.txt.
 #
-# Runs both secret checks from AGENTS.md ("Commits"): the range diff for
-# credential patterns, and every tracked .env / bench.db / runs/ path.
-# It prints the file name, never the matching value. A hook cannot be
+# The scan prints file names, never the matching value. A hook cannot be
 # bypassed for this scan: AGENTS.md allows `--no-verify` for the commit
 # format, never here.
 set -euo pipefail
 
 secret_re='sk-or-|OPENROUTER_API_KEY=.|SDB_UI_(TOKEN|USER|PASS)=.|PRIVATE KEY'
 forbidden_re='(^|/)\.env$|bench\.db|^runs/'
+root="$(git rev-parse --show-toplevel)"
+allow_file="$root/scripts/secret-scan-fixtures.txt"
 empty_tree="$(git hash-object -t tree /dev/null)"
 hits=0
 
@@ -17,6 +19,53 @@ refuse() {
     echo "[pre-push] refused $1: $2" >&2
     hits=$((hits + 1))
 }
+
+# The allowlist: one path or glob per line, comments and blanks ignored.
+allow=()
+if [[ -f "$allow_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" ]] && allow+=("$line")
+    done <"$allow_file"
+fi
+
+allowed_path() {
+    local f="$1" p
+    for p in "${allow[@]}"; do
+        # shellcheck disable=SC2254
+        case "$f" in $p) return 0 ;; esac
+    done
+    return 1
+}
+
+# The repo's .env: a worktree has no copy, so fall back to the checkout
+# that owns the common .git directory. Only the credential keys count.
+common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+env_file=""
+for cand in "$root/.env" "$(dirname "$common")/.env"; do
+    if [[ -f "$cand" ]]; then
+        env_file="$cand"
+        break
+    fi
+done
+values=()
+if [[ -n "$env_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+        key="${BASH_REMATCH[2]}"
+        val="${BASH_REMATCH[3]}"
+        [[ "$key" == "OPENROUTER_API_KEY" || "$key" == SDB_UI_* ]] || continue
+        val="${val%$'\r'}"
+        if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then
+            val="${val:1:${#val}-2}"
+        elif [[ "$val" == \'*\' && ${#val} -ge 2 ]]; then
+            val="${val:1:${#val}-2}"
+        fi
+        [[ ${#val} -ge 8 ]] && values+=("$val")
+    done <"$env_file"
+fi
 
 # The base to diff from for one pushed ref.
 range_base() {
@@ -44,16 +93,44 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     [[ -n "${local_sha:-}" ]] || continue
     [[ "$local_sha" =~ ^0+$ ]] && continue
     _remote_sha="${_remote_sha:-}"
+    ref="${remote_ref:-$local_ref}"
     base="$(range_base "$_remote_sha" "$local_sha")"
 
-    # 1) credential patterns in the range; map each hit to its file name.
     if ! diff_out="$(git diff -U0 "$base" "$local_sha" 2>/dev/null)"; then
-        refuse "${remote_ref:-$local_ref}" "cannot read the pushed range"
+        refuse "$ref" "cannot read the pushed range"
         continue
     fi
+
+    # 1) Real values first, everywhere: an added line holding a value
+    # from the repo's .env is refused even on an allowlisted path.
+    if ((${#values[@]} > 0)); then
+        file=""
+        while IFS= read -r line; do
+            case "$line" in
+                "diff --git "*)
+                    file="${line#diff --git a/}"
+                    file="${file%% b/*}"
+                    ;;
+                "+++"*) ;;
+                "+"*)
+                    content="${line#+}"
+                    for v in "${values[@]}"; do
+                        if [[ "$content" == *"$v"* ]]; then
+                            refuse "$ref" "$file contains a value from .env"
+                            break
+                        fi
+                    done
+                    ;;
+            esac
+        done <<<"$diff_out"
+    fi
+
+    # 2) The pattern, unless the path is allowlisted; the message names
+    # the file, never the matching text.
     while IFS= read -r file; do
         [[ -n "$file" ]] || continue
-        refuse "${remote_ref:-$local_ref}" "$file matches a secret pattern"
+        allowed_path "$file" && continue
+        refuse "$ref" "$file matches a secret pattern"
     done < <(
         printf '%s\n' "$diff_out" | awk -v re="$secret_re" '
             /^diff --git / { f = $3; sub(/^a\//, "", f) }
@@ -61,10 +138,10 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
         ' | sort -u
     )
 
-    # 2) tracked files that must never be pushed.
+    # 3) Tracked files that must never be pushed (no allowlist applies).
     while IFS= read -r file; do
         [[ -n "$file" ]] || continue
-        refuse "${remote_ref:-$local_ref}" "$file is tracked"
+        refuse "$ref" "$file is tracked"
     done < <(git ls-tree -r --name-only "$local_sha" | grep -E "$forbidden_re" || true)
 done
 
