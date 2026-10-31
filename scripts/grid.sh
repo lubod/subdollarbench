@@ -823,6 +823,11 @@ EOF
 # locks at once. On round-53-open's single runs/.campaign.lock the second
 # lane dies at "campaign ... is already running".
 real_self_test() {
+    # R56 F6: a real grid runs Docker next to a live cell.
+    "$ROOT/scripts/beside-cell.sh" check "grid --self-test --real" || return 1
+    if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
+        return 0
+    fi
     if ! command -v docker >/dev/null 2>&1; then
         log "real self-test: Docker is not available"
         return 1

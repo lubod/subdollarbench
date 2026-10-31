@@ -14,6 +14,9 @@
 # A passing test writes nothing and exits 1.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIVE_CHECK=0
+
 usage() {
     sed -n '4,7p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
@@ -122,6 +125,9 @@ record_case() {
         printf 'patch_sha256: %s\n' "$sha"
         printf 'patch_file: %s\n' "$(basename "$patch_copy")"
         printf 'command: cargo test %s -- --exact\n' "$test"
+        if [[ "$LIVE_CHECK" == "1" && "${SDB_ALLOW_BESIDE_CELL:-0}" == "1" ]]; then
+            printf 'beside_cell_override: SDB_ALLOW_BESIDE_CELL=1\n'
+        fi
         printf 'result: FAIL\n'
         printf 'failing: %s\n' "$line"
     } >"$record"
@@ -277,6 +283,14 @@ case "${1:-}" in
 esac
 
 [[ $# -eq 2 ]] || usage
+# R56 F6: a live proof builds and runs Docker; refuse next to a live cell.
+if scripts/live-proofs.sh | grep -qx "$1"; then
+    LIVE_CHECK=1
+    "$ROOT/scripts/beside-cell.sh" check "seen-failing $1" || exit 1
+    if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
+        exit 0
+    fi
+fi
 if [[ ! -f "$2" ]]; then
     echo "[seen] patch not found: $2" >&2
     exit 1
