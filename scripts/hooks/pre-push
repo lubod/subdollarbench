@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# R54 F4: scan the pushed range and the pushed trees before a push.
+#
+# Runs both secret checks from AGENTS.md ("Commits"): the range diff for
+# credential patterns, and every tracked .env / bench.db / runs/ path.
+# It prints the file name, never the matching value. A hook cannot be
+# bypassed for this scan: AGENTS.md allows `--no-verify` for the commit
+# format, never here.
+set -euo pipefail
+
+secret_re='sk-or-|OPENROUTER_API_KEY=.|SDB_UI_(TOKEN|USER|PASS)=.|PRIVATE KEY'
+forbidden_re='(^|/)\.env$|bench\.db|^runs/'
+empty_tree="$(git hash-object -t tree /dev/null)"
+hits=0
+
+refuse() {
+    echo "[pre-push] refused $1: $2" >&2
+    hits=$((hits + 1))
+}
+
+# The base to diff from for one pushed ref.
+range_base() {
+    local remote_sha="$1" local_sha="$2" commits first
+    if [[ ! "$remote_sha" =~ ^0+$ ]]; then
+        printf '%s' "$remote_sha"
+        return 0
+    fi
+    commits="$(git rev-list "$local_sha" --not --remotes 2>/dev/null || true)"
+    if [[ -n "$commits" ]]; then
+        first="$(printf '%s\n' "$commits" | tail -1)"
+        if git rev-parse --verify --quiet "$first^" >/dev/null; then
+            printf '%s' "$(git rev-parse "$first^")"
+        else
+            printf '%s' "$empty_tree"
+        fi
+    elif git rev-parse --verify --quiet "$local_sha^" >/dev/null; then
+        printf '%s' "$(git rev-parse "$local_sha^")"
+    else
+        printf '%s' "$empty_tree"
+    fi
+}
+
+while read -r local_ref local_sha remote_ref _remote_sha; do
+    [[ -n "${local_sha:-}" ]] || continue
+    [[ "$local_sha" =~ ^0+$ ]] && continue
+    _remote_sha="${_remote_sha:-}"
+    base="$(range_base "$_remote_sha" "$local_sha")"
+
+    # 1) credential patterns in the range; map each hit to its file name.
+    if ! diff_out="$(git diff -U0 "$base" "$local_sha" 2>/dev/null)"; then
+        refuse "${remote_ref:-$local_ref}" "cannot read the pushed range"
+        continue
+    fi
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        refuse "${remote_ref:-$local_ref}" "$file matches a secret pattern"
+    done < <(
+        printf '%s\n' "$diff_out" | awk -v re="$secret_re" '
+            /^diff --git / { f = $3; sub(/^a\//, "", f) }
+            $0 ~ re { if (f != "") { print f; f = "" } }
+        ' | sort -u
+    )
+
+    # 2) tracked files that must never be pushed.
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        refuse "${remote_ref:-$local_ref}" "$file is tracked"
+    done < <(git ls-tree -r --name-only "$local_sha" | grep -E "$forbidden_re" || true)
+done
+
+if [[ "$hits" -gt 0 ]]; then
+    echo "[pre-push] $hits hit(s); the push is refused (values are not printed)" >&2
+    exit 1
+fi
+exit 0

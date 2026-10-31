@@ -448,14 +448,22 @@ pub async fn run(
     timeout_min: u64,
     api_key: Option<String>,
     eval_only: bool,
+    rehearsal: bool,
+    smoke: bool,
     workspace: Option<String>,
     phase: Option<u32>,
     chain: Option<String>,
     refork: Option<String>,
     worker: u8,
 ) -> Result<()> {
-    if worker > 7 {
-        anyhow::bail!("--worker must be 0-7 (got {worker})");
+    // R54: the rehearsal live proof runs on worker 9, clear of the live
+    // cells' 0-7 (AGENTS.md, tests use 8+). Production stays 0-7.
+    let max_worker: u8 = std::env::var("SDB_CAMPAIGN_TEST_WORKER_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
+    if worker > max_worker {
+        anyhow::bail!("--worker must be 0-{max_worker} (got {worker})");
     }
     // R52 F3 (round 40 F1): say when this is not the official cell.
     if let Some(note) =
@@ -466,9 +474,11 @@ pub async fn run(
     let lc = campaign::load_campaign(&name).context("load campaign")?;
     // R23 D3: dollars are the denominator; a paid launch without a list
     // price has no dollar bound. Eval-only runs do not spend.
-    campaign::require_model_list_price(&model, eval_only)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    if !rehearsal {
+        campaign::require_model_list_price(&model, eval_only)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
     // Foreground campaigns use this worker's ports (base + 100*worker);
     // a live engine wave holds worker 0's. Fail fast instead of colliding.
     if let Ok(v) = subdollarbench::remote::get_json("http://127.0.0.1:3000", "/api/status").await {
@@ -599,6 +609,8 @@ pub async fn run(
             "dollars_left": budget_usd,
             "sandbox_image": launch_image,
             "career_phase": phase,
+            "rehearsal": rehearsal,
+            "smoke": smoke,
             "chain_from": chain,
             "refork": refork_info,
         });
@@ -645,6 +657,13 @@ pub async fn run(
         }
         copy_workspace(src, &workdir)?;
         println!("workspace seeded from {}", src.display());
+    }
+    if rehearsal && chain.is_none() && workspace.is_none() {
+        // The real launch, no agent: the reference candidate passes the
+        // ladder's stages. Phase 2+ comes from the chained workspace.
+        let port = subdollarbench::web::server::worker_port(5480, worker);
+        subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
+        println!("[REHEARSAL] workspace seeded with the reference candidate on port {port}");
     }
 
     println!(
@@ -857,6 +876,9 @@ pub async fn run(
     }
 
     rollup.refork = refork_info.clone();
+    // R54 F1: the board badges and never ranks these.
+    rollup.rehearsal = rehearsal;
+    rollup.smoke = smoke;
     // R48 F1/F5: how this phase ran. `concurrent_cells` is the driver's
     // lane count (SDB_CONCURRENT_CELLS, default 1); `worker` is the lane.
     rollup.worker = worker;
@@ -1544,6 +1566,8 @@ mod tests {
             grading_wait_s: 0.0,
             harness_fault: None,
             refork: None,
+            rehearsal: false,
+            smoke: false,
         }
     }
 
@@ -1958,6 +1982,8 @@ mod tests {
             5,
             None,
             true,
+            false,
+            false,
             None,
             None,
             None,

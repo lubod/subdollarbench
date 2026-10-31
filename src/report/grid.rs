@@ -29,6 +29,9 @@ pub struct CareerCell {
     pub phase: Option<u32>,
     pub phase_total: u32,
     pub finished: bool,
+    /// R54 F1: a $0 rehearsal or a smoke cell; shown, never ranked.
+    pub rehearsal: bool,
+    pub smoke: bool,
     pub state: String,
     pub reached: Option<u32>,
     pub regression_free: u32,
@@ -408,7 +411,15 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         0
     };
     let phases: HashSet<u32> = cells.iter().filter_map(|c| c.phase).collect();
-    let finished = if leaf.phase.is_some() {
+    let rehearsal = cells
+        .iter()
+        .any(|c| c.rollup["rehearsal"].as_bool().unwrap_or(false));
+    let smoke = cells
+        .iter()
+        .any(|c| c.rollup["smoke"].as_bool().unwrap_or(false));
+    let finished = if rehearsal || smoke {
+        false
+    } else if leaf.phase.is_some() {
         leaf.state == "done"
             && phase_total > 0
             && phases.len() as u32 == phase_total
@@ -516,6 +527,8 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         phase: leaf.phase,
         phase_total,
         finished,
+        rehearsal,
+        smoke,
         state: leaf.state.clone(),
         reached,
         regression_free,
@@ -848,6 +861,16 @@ fn effort_note(effort: &str) -> String {
     }
 }
 
+fn mark_badge(c: &CareerCell) -> String {
+    if c.rehearsal {
+        " <span class=\"b warn\">REHEARSAL</span>".to_string()
+    } else if c.smoke {
+        " <span class=\"b warn\">SMOKE</span>".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -858,9 +881,10 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         format!("career-row {extra_class}")
     };
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b><div class=\"mut\">{}{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b>{}<div class=\"mut\">{}{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         esc(&c.campaign_id),
         esc(&c.model),
+        mark_badge(c),
         effort_note(&c.effort),
         flags_of(c),
         strip_html(&c.ladder),
@@ -895,9 +919,10 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         );
     }
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}<div class=\"mut\">{}{} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
         g.rank_label(),
         esc(&g.model),
+        mark_badge(med),
         more,
         esc(&g.harness),
         effort_note(&g.effort),
@@ -942,10 +967,16 @@ fn render_board(cells: &[CareerCell]) -> String {
             "<tr class=\"divider\"><td colspan=\"11\">unfinished careers (not ranked)</td></tr>",
         );
         for c in unfinished {
-            let label = match (c.phase, c.phase_total) {
-                (Some(p), t) if t > 0 => format!("phase {p} of {t}"),
-                (Some(p), _) => format!("phase {p}"),
-                _ => "in progress".to_string(),
+            let label = if c.rehearsal {
+                "rehearsal (not ranked)".to_string()
+            } else if c.smoke {
+                "smoke (not ranked)".to_string()
+            } else {
+                match (c.phase, c.phase_total) {
+                    (Some(p), t) if t > 0 => format!("phase {p} of {t}"),
+                    (Some(p), _) => format!("phase {p}"),
+                    _ => "in progress".to_string(),
+                }
             };
             rows.push_str(&career_row(c, Some(&label), "unfinished"));
         }
@@ -1346,6 +1377,20 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&fmt_grid_time(last)),
         caps
     ));
+    let marked: Vec<&CareerCell> = cells.iter().filter(|c| c.rehearsal || c.smoke).collect();
+    if !marked.is_empty() {
+        h.push_str("<section><h2>Rehearsals and smoke cells (not ranked)</h2><div class=\"wrap\"><table><tbody>");
+        for c in marked {
+            h.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
+                esc(&c.campaign_id),
+                mark_badge(c),
+                c.points,
+                c.cost
+            ));
+        }
+        h.push_str("</tbody></table></div></section>");
+    }
     h.push_str(&format!(
         "<section><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>"
     ));
@@ -1421,6 +1466,7 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
         "ranked_fingerprints": ranked_fingerprints,
         "careers": cells.len(),
         "ranked": ranked.len(),
+        "ranked_rehearsal": ranked.iter().filter(|c| c.rehearsal || c.smoke).count(),
         "models": model_groups(&cells).iter().map(|g| g.model.clone()).collect::<Vec<_>>(),
     });
     fs::write(
@@ -1659,6 +1705,22 @@ mod tests {
         let mut sv: Value = serde_json::from_str(&read(&spath)).unwrap();
         sv["rollup"] = v;
         fs::write(&spath, sv.to_string()).unwrap();
+    }
+
+    /// R54 F1: set `rehearsal`/`smoke` on a phase rollup in both files.
+    fn set_mark(runs: &Path, prefix: &str, phase: u32, key: &str) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup[key] = serde_json::json!(true);
+            fs::write(path, v.to_string()).unwrap();
+        }
     }
 
     /// R51 F4: rewrite a phase's start/finish in both files.
@@ -2217,6 +2279,48 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+    /// R54 F1: a rehearsal is badged and never ranked, on the board and
+    /// the results page.
+    #[test]
+    fn r54_f1_rehearsal_never_ranked() {
+        let (base, runs, out) = fixture("r54rehearsal");
+        career(&runs, "reh", "m", [1.0; 4], [0.01; 4]);
+        set_mark(&runs, "reh", 4, "rehearsal");
+        let cells = careers(runs.to_str().unwrap());
+        assert!(cells[0].rehearsal && !cells[0].finished);
+        assert!(model_groups(&cells).is_empty(), "a rehearsal must not rank");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        assert!(board.contains("REHEARSAL"), "{board}");
+        assert!(board.contains("rehearsal (not ranked)"), "{board}");
+        let results = read(&out.join("results.html"));
+        assert!(results.contains("REHEARSAL"), "{results}");
+        assert!(results.contains("not ranked"), "{results}");
+        let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
+        assert_eq!(meta["ranked"], 0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R54 F1: a career whose phase 1 is a smoke cell is badged and
+    /// unranked even though phase 4 has no mark of its own.
+    #[test]
+    fn r54_f1_smoke_career_never_ranked() {
+        let (base, runs, out) = fixture("r54smoke");
+        career(&runs, "smk", "m", [1.0; 4], [0.01; 4]);
+        set_mark(&runs, "smk", 1, "smoke");
+        let cells = careers(runs.to_str().unwrap());
+        assert!(cells[0].smoke && !cells[0].finished);
+        assert!(
+            model_groups(&cells).is_empty(),
+            "a smoke career must not rank"
+        );
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        assert!(board.contains("SMOKE"), "{board}");
+        assert!(board.contains("smoke (not ranked)"), "{board}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
     /// and reason, never its raw ratio or a guessed "not durable".
     #[test]

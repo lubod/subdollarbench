@@ -97,6 +97,9 @@ if len(fps) != 1 or fps[0] != v.get("fingerprint"):
 if not int(v.get("ranked") or 0) > 0:
     print("[publish] refusal: no ranked careers", file=sys.stderr)
     raise SystemExit(1)
+if int(v.get("ranked_rehearsal") or 0) > 0:
+    print("[publish] refusal: a rehearsal or smoke cell is in the ranked set", file=sys.stderr)
+    raise SystemExit(1)
 PY
     [[ -f "$bar" ]] || { echo "[publish] refusal: flake record missing ($bar)" >&2; return 1; }
     grep -q '^RESULT: PASS' "$bar" || {
@@ -186,6 +189,19 @@ PY
         echo '[self-test] mixed fingerprint was accepted' >&2; exit 1
     fi
     echo '[self-test] mixed fingerprint refused'
+
+    rehearsal="$root/rehearsal"
+    cp -a "$good" "$rehearsal"
+    python3 - "$rehearsal/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_rehearsal"]=1
+json.dump(v,open(p,"w"))
+PY
+    if validate_export "$rehearsal" "$bar" >/dev/null 2>&1; then
+        echo '[self-test] ranked rehearsal was accepted' >&2; exit 1
+    fi
+    echo '[self-test] ranked rehearsal refused'
 
     if validate_export "$good" "$root/no-such-bar" >/dev/null 2>&1; then
         echo '[self-test] missing bar was accepted' >&2; exit 1

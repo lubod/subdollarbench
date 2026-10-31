@@ -44,8 +44,9 @@ goes under "Changes after open". -->
 
 <!-- Implementer, per item: the commit, the tests added, anything the
 reviewer should look at, and anything deferred and why. For each new
-test, the command and the failing line on the code without its fix
-(AGENTS.md, "Tests"). -->
+test, cite the seen-failing record
+`<git-common-dir>/sdb-gates/seen-<HEAD>-<test>.txt` instead of quoting
+the failing line (AGENTS.md, "Tests"; scripts/seen-failing.sh). -->
 
 Ready: `Status: ready <gated commit>`. After that commit, only this file
 changes.
