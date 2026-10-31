@@ -74,6 +74,16 @@ pub enum CampaignAction {
     /// List bundled campaigns
     List,
     /// Print the stage plan (no spend, no engine)
+    /// [maintain] Hold a campaign lock for a test (hidden)
+    #[command(hide = true)]
+    LockHold {
+        #[arg(long)]
+        worker: u8,
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+    },
     DryRun {
         /// Campaign name (directory under ./campaigns)
         #[arg(long)]

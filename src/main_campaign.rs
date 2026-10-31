@@ -513,14 +513,14 @@ pub async fn run(
 
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let model_tag = model.replace(['/', ':'], "_");
-    let campaign_id = format!("campaign_{}_{}_{}", lc.spec.name, model_tag, ts);
+    let campaign_id = campaign::campaign_id_for(&lc.spec.name, &model_tag, &ts, worker);
     // R36-3: the Board's live stub reads this cell's own image from
     // status.json. One inspect at launch (a CLI path) replaces one inspect
     // per Board request.
     let launch_image = subdollarbench::sandbox::omp_updater::sandbox_image_id();
     // One campaign at a time, CLI or GUI: the lock covers every path and
     // is released when this process ends (round-7 finding 1).
-    let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id)
+    let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id, worker)
         .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
 
     let (chain_state, chain_career, chain_image) = if let Some(chain_id) = chain.as_deref() {
@@ -579,8 +579,7 @@ pub async fn run(
     } else {
         (None, None, None)
     };
-    let cdir = runs_dir.join(&campaign_id);
-    std::fs::create_dir_all(&cdir)?;
+    let cdir = campaign::create_campaign_dir(&runs_dir, &campaign_id)?;
     // The campaign-level live fields (round-8 improvement A): every later
     // status write merges into this document.
     update_status(&cdir, |v| {

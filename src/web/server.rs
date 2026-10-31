@@ -162,6 +162,10 @@ pub struct StatusResponse {
     /// same fact POST /api/campaigns refuses on (round-7 finding 1).
     #[serde(default)]
     pub campaign: Option<serde_json::Value>,
+    /// R53 F1: every live campaign-lock holder, one per worker (plus a
+    /// legacy single lock). `campaign` stays the first for old clients.
+    #[serde(default)]
+    pub campaigns: Vec<serde_json::Value>,
     /// GUI-proxy mode (engine owns dispatch): /api/stream there is a
     /// one-shot snapshot, so the GUI must use the console poll as the live
     /// path and skip EventSource entirely.
@@ -211,8 +215,22 @@ pub(crate) async fn get_status(State(state): State<AppState>) -> Response {
         db_fallback: state.db_fallback,
         queue_paused: state.queue_paused.load(Ordering::SeqCst),
         proxy: !state.engine_url.is_empty(),
-        campaign: crate::campaign::live_lock_holder()
-            .map(|h| serde_json::json!({"pid": h.pid, "campaign_id": h.campaign_id})),
+        campaign: {
+            let holders = crate::campaign::live_lock_holders();
+            holders.first().map(|h| {
+                serde_json::json!({"pid": h.pid, "campaign_id": h.campaign_id, "worker": h.worker})
+            })
+        },
+        campaigns: crate::campaign::live_lock_holders()
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "pid": h.pid,
+                    "campaign_id": h.campaign_id,
+                    "worker": h.worker,
+                })
+            })
+            .collect(),
         rules_version: crate::report::rules::RULES_VERSION.to_string(),
         sqlite_version: crate::report::rules::sqlite_version().to_string(),
         cap_price_basis: crate::report::rules::CAP_PRICE_BASIS.to_string(),
@@ -1778,6 +1796,9 @@ pub(crate) struct CampaignStartRequest {
     /// R1: deliberate fork reason for an already-used chain.
     #[serde(default)]
     pub refork: Option<String>,
+    /// R53 F1: the worker lane this launch will use (0-7).
+    #[serde(default)]
+    pub worker: u8,
 }
 
 /// Start a campaign run (gui-spec.md §4.4): what `scripts/sql-cell.sh`
@@ -1803,15 +1824,24 @@ pub(crate) async fn start_campaign(
             .unwrap_or_default();
         return (status, String::from_utf8_lossy(&bytes).to_string()).into_response();
     }
-    // One campaign at a time, whichever launcher took the lock.
-    if let Some(holder) = crate::campaign::live_lock_holder() {
+    // R53 F1: refuse only when the worker this launch would use is held.
+    let worker = req.worker;
+    if worker > 7 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "worker must be 0-7"})),
+        )
+            .into_response();
+    }
+    if let Some(holder) = crate::campaign::live_lock_for_worker(worker) {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
                 "error": format!(
-                    "campaign {} (pid {}) is already running",
-                    holder.campaign_id, holder.pid
-                )
+                    "campaign {} (pid {}) is already running on worker {}",
+                    holder.campaign_id, holder.pid, holder.worker
+                ),
+                "worker": holder.worker,
             })),
         )
             .into_response();
@@ -1974,6 +2004,7 @@ pub(crate) async fn start_campaign(
         req.phase,
         req.chain.as_deref(),
         refork,
+        worker,
     );
     let cmd = format!("subdollarbench {}", args.join(" "));
     let mut command = std::process::Command::new(exe);
@@ -5256,6 +5287,74 @@ global.fetch = async (url) => {
             dir.starts_with(std::env::temp_dir()),
             "tests must not write the real portal: {dir:?}"
         );
+    }
+
+    /// R53 F1: /api/status lists every worker's live lock and a legacy
+    /// lock; the console launch refuses the held worker by name.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn r53_f1_lock_readers_see_every_worker() {
+        let _serial = CAMPAIGN_LOCK_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let w0 = runs.join(".campaign.lock.w0");
+        let w1 = runs.join(".campaign.lock.w1");
+        let legacy = runs.join(".campaign.lock");
+        for p in [&w0, &w1, &legacy] {
+            let _ = std::fs::remove_file(p);
+        }
+        let l0 = crate::campaign::CampaignLock::try_acquire_at_worker(&w0, "c0", 0).unwrap();
+        let l1 = crate::campaign::CampaignLock::try_acquire_at_worker(&w1, "c1", 1).unwrap();
+        let old = crate::campaign::CampaignLock::try_acquire_at(&legacy, "old").unwrap();
+        let base = serve_test_app(create_test_state()).await;
+        let client = authed_client();
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let campaigns = status["campaigns"].as_array().expect("campaigns list");
+        assert_eq!(campaigns.len(), 3, "{status}");
+        assert!(status["campaign"].is_object(), "{status}");
+        assert!(
+            campaigns
+                .iter()
+                .any(|c| c["campaign_id"] == "c1" && c["worker"] == 1),
+            "{status}"
+        );
+        assert!(
+            campaigns.iter().any(|c| c["campaign_id"] == "old"),
+            "legacy lock: {status}"
+        );
+        assert!(crate::campaign::live_lock_for_worker(2).is_none());
+        for worker in [0u8, 1] {
+            let resp = client
+                .post(format!("{base}/api/campaigns"))
+                .json(&serde_json::json!({"model": "m", "worker": worker}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "worker {worker}");
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("already running"),
+                "{body}"
+            );
+        }
+        drop(l0);
+        drop(l1);
+        drop(old);
+        for p in [&w0, &w1, &legacy] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     /// Round-8 finding 1: the suite points at an isolated runs dir, so a

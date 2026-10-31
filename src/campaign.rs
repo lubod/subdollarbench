@@ -1535,19 +1535,57 @@ pub fn mark_agent_crash(failure: &mut FailureSummary, console: &str) -> bool {
     false
 }
 
+/// R53 F2: two cells that start the same model in the same second on
+/// different workers get distinct ids. The timestamp stays readable by the
+/// grid, the board and `--chain`.
+pub fn campaign_id_for(campaign: &str, model_tag: &str, timestamp: &str, worker: u8) -> String {
+    format!("campaign_{campaign}_{model_tag}_{timestamp}_w{worker}")
+}
+
+/// R53 F2: create the campaign directory exclusively, so two writers can
+/// never share one even if their ids collide.
+pub fn create_campaign_dir(runs: &std::path::Path, campaign_id: &str) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(runs)
+        .map_err(|e| anyhow::anyhow!("create runs dir {}: {e}", runs.display()))?;
+    let dir = runs.join(campaign_id);
+    match std::fs::create_dir(&dir) {
+        Ok(()) => Ok(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
+            "campaign directory {} already exists (another cell started in the same second?)",
+            dir.display()
+        ),
+        Err(e) => anyhow::bail!("create campaign dir {}: {e}", dir.display()),
+    }
+}
+
 /// The campaign lock (round-7 finding 1): one campaign at a time, whether
 /// started from the CLI (`scripts/sql-cell.sh`) or the console. A small
 /// JSON file holding `{pid, campaign_id}`; a lock whose holder is gone is
 /// stale and may be replaced. Every campaign path takes it, so the GUI,
 /// the queue and the CLI all agree on who is running.
-pub fn campaign_lock_path() -> std::path::PathBuf {
+pub fn campaign_lock_path_for(worker: u8) -> std::path::PathBuf {
+    crate::report::archive::RunArchiver::resolve_runs_dir()
+        .join(format!(".campaign.lock.w{worker}"))
+}
+
+/// The pre-round-53 single lock; still read as a live holder until its
+/// process exits.
+pub fn legacy_campaign_lock_path() -> std::path::PathBuf {
     crate::report::archive::RunArchiver::resolve_runs_dir().join(".campaign.lock")
+}
+
+/// R53 F1: worker 0's lock path (the old name's closest equivalent).
+pub fn campaign_lock_path() -> std::path::PathBuf {
+    campaign_lock_path_for(0)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LockInfo {
     pub pid: u32,
     pub campaign_id: String,
+    /// R53 F1: the worker whose lock this is (legacy locks default 0).
+    #[serde(default)]
+    pub worker: u8,
     /// The holder's process start time from /proc/<pid>/stat (field 22).
     /// A reused pid gets a different start time, so the lock goes stale
     /// instead of pinning an unrelated process (round-8 finding 5). Zero
@@ -1579,10 +1617,39 @@ fn holder_alive(info: &LockInfo) -> bool {
     ticks == info.start_ticks
 }
 
-/// The live campaign-lock holder, if any. A dead holder's lock is ignored
-/// (and will be replaced by the next `acquire`).
+/// Every live campaign-lock holder: each worker's lock plus a legacy
+/// single lock. Dead holders are ignored.
+pub fn live_lock_holders() -> Vec<LockInfo> {
+    let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+    live_lock_holders_in(&runs)
+}
+
+pub fn live_lock_holders_in(runs: &std::path::Path) -> Vec<LockInfo> {
+    let mut out = Vec::new();
+    for worker in 0..8u8 {
+        if let Some(mut h) = live_lock_holder_at(&runs.join(format!(".campaign.lock.w{worker}"))) {
+            // A test may write a lock file by hand without the field.
+            if h.worker != worker && h.worker == 0 {
+                h.worker = worker;
+            }
+            out.push(h);
+        }
+    }
+    if let Some(h) = live_lock_holder_at(&runs.join(".campaign.lock")) {
+        out.push(h);
+    }
+    out
+}
+
+/// The holder of one worker's lock, if live (legacy locks count as
+/// worker 0's).
+pub fn live_lock_for_worker(worker: u8) -> Option<LockInfo> {
+    live_lock_holders().into_iter().find(|h| h.worker == worker)
+}
+
+/// The first live holder, for old clients.
 pub fn live_lock_holder() -> Option<LockInfo> {
-    live_lock_holder_at(&campaign_lock_path())
+    live_lock_holders().into_iter().next()
 }
 
 /// The same check against an explicit path (tests use a temp file).
@@ -1601,8 +1668,8 @@ pub struct CampaignLock {
 
 impl CampaignLock {
     /// Take the lock for this process, or name the live holder.
-    pub fn acquire(campaign_id: &str) -> Result<CampaignLock, String> {
-        Self::try_acquire_at(&campaign_lock_path(), campaign_id)
+    pub fn acquire(campaign_id: &str, worker: u8) -> Result<CampaignLock, String> {
+        Self::try_acquire_at_worker(&campaign_lock_path_for(worker), campaign_id, worker)
     }
 
     /// The same acquisition against an explicit path (tests use a temp
@@ -1610,6 +1677,14 @@ impl CampaignLock {
     pub fn try_acquire_at(
         path: &std::path::Path,
         campaign_id: &str,
+    ) -> Result<CampaignLock, String> {
+        Self::try_acquire_at_worker(path, campaign_id, 0)
+    }
+
+    pub fn try_acquire_at_worker(
+        path: &std::path::Path,
+        campaign_id: &str,
+        worker: u8,
     ) -> Result<CampaignLock, String> {
         let path = path.to_path_buf();
         for _ in 0..3 {
@@ -1623,6 +1698,7 @@ impl CampaignLock {
                     let info = LockInfo {
                         pid: std::process::id(),
                         campaign_id: campaign_id.to_string(),
+                        worker,
                         start_ticks: process_start_ticks(std::process::id()).unwrap_or(0),
                     };
                     let _ =
@@ -1663,9 +1739,9 @@ pub fn effective_state(campaign_id: &str, state: &str, updated_at: Option<&str>)
     // Only *this* cell's lock keeps it running: another campaign holding
     // the lock says nothing about a cell that died yesterday (round-8
     // finding 4).
-    let lock_live = live_lock_holder()
-        .map(|h| h.campaign_id == campaign_id)
-        .unwrap_or(false);
+    let lock_live = live_lock_holders()
+        .iter()
+        .any(|h| h.campaign_id == campaign_id);
     effective_state_with(state, updated_at, lock_live)
 }
 
@@ -2114,11 +2190,12 @@ pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<()
 /// The argv `POST /api/campaigns` spawns: one place, and the CLI parse
 /// test pins that the real clap definition accepts it (round-8 finding 2).
 pub fn launcher_args(model: &str, effort: &str, budget_usd: f64, wall_min: u64) -> Vec<String> {
-    launcher_args_with_phase(model, effort, budget_usd, wall_min, None, None, None)
+    launcher_args_with_phase(model, effort, budget_usd, wall_min, None, None, None, 0)
 }
 
 /// Launcher argv with the optional career phase/chain (P1). Kept separate
 /// so the existing launcher callers and their CLI-parse test stay stable.
+#[allow(clippy::too_many_arguments)]
 pub fn launcher_args_with_phase(
     model: &str,
     effort: &str,
@@ -2127,6 +2204,7 @@ pub fn launcher_args_with_phase(
     phase: Option<u32>,
     chain: Option<&str>,
     refork: Option<&str>,
+    worker: u8,
 ) -> Vec<String> {
     let mut args: Vec<String> = [
         "campaign",
@@ -2159,6 +2237,8 @@ pub fn launcher_args_with_phase(
         args.push("--refork".into());
         args.push(r.to_string());
     }
+    args.push("--worker".into());
+    args.push(worker.to_string());
     args
 }
 
@@ -4289,6 +4369,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// R53 F1: one lock per worker; two workers are independent, the same
+    /// worker is refused by name, and a dead holder's lock is replaced.
+    #[test]
+    fn r53_f1_lock_per_worker() {
+        let dir = tmp_dir("r53locks");
+        let w0 = dir.join(".campaign.lock.w0");
+        let w1 = dir.join(".campaign.lock.w1");
+        let l0 = CampaignLock::try_acquire_at_worker(&w0, "c0", 0).expect("worker 0");
+        let l1 = CampaignLock::try_acquire_at_worker(&w1, "c1", 1).expect("worker 1");
+        let err = CampaignLock::try_acquire_at_worker(&w0, "c2", 0).unwrap_err();
+        assert!(err.contains("c0"), "{err}");
+        assert!(err.contains("already running"), "{err}");
+        let mut holders = live_lock_holders_in(&dir);
+        holders.sort_by_key(|h| h.worker);
+        assert_eq!(holders.len(), 2, "{holders:?}");
+        assert_eq!((holders[0].worker, holders[1].worker), (0, 1));
+        drop(l1);
+        // A stale lock is replaced.
+        std::fs::write(
+            &w1,
+            serde_json::json!({
+                "pid": 999_999_999u32, "campaign_id": "dead", "worker": 1,
+                "start_ticks": 1u64
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let l2 = CampaignLock::try_acquire_at_worker(&w1, "c3", 1).expect("stale replaced");
+        assert_eq!(
+            live_lock_holder_at(&w1).map(|h| h.campaign_id),
+            Some("c3".to_string())
+        );
+        drop(l0);
+        drop(l2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R53 F1: every worker's lock and a legacy single lock are visible.
+    #[test]
+    fn r53_f1_lock_readers_see_every_worker() {
+        let dir = tmp_dir("r53readers");
+        let l0 = CampaignLock::try_acquire_at_worker(&dir.join(".campaign.lock.w0"), "c0", 0)
+            .expect("w0");
+        let l1 = CampaignLock::try_acquire_at_worker(&dir.join(".campaign.lock.w1"), "c1", 1)
+            .expect("w1");
+        let legacy =
+            CampaignLock::try_acquire_at(&dir.join(".campaign.lock"), "old").expect("legacy");
+        let mut holders = live_lock_holders_in(&dir);
+        holders.sort_by_key(|h| h.campaign_id.clone());
+        assert_eq!(holders.len(), 3, "{holders:?}");
+        assert!(holders
+            .iter()
+            .any(|h| h.campaign_id == "c0" && h.worker == 0));
+        assert!(holders
+            .iter()
+            .any(|h| h.campaign_id == "c1" && h.worker == 1));
+        assert!(holders.iter().any(|h| h.campaign_id == "old"));
+        drop(l0);
+        drop(l1);
+        drop(legacy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R53 F2: the id carries the worker, and the directory is exclusive.
+    #[test]
+    fn r53_f2_same_second_ids_differ() {
+        let a = campaign_id_for("sdb-sql", "m", "20261031_070000", 0);
+        let b = campaign_id_for("sdb-sql", "m", "20261031_070000", 1);
+        assert_ne!(a, b);
+        assert!(a.ends_with("_w0") && b.ends_with("_w1"), "{a} {b}");
+        let root = tmp_dir("r53dir");
+        let dir = create_campaign_dir(&root, &a).expect("first create");
+        assert!(dir.is_dir());
+        let err = create_campaign_dir(&root, &a).unwrap_err().to_string();
+        assert!(err.contains("already exists"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Round-7 finding 6: a dead writer must not show "running" forever.
     #[test]
     fn effective_state_marks_stale_running_cells_stalled() {
@@ -6142,6 +6300,7 @@ mod tests {
             Some(2),
             Some("prev"),
             None,
+            1,
         );
         assert!(a.windows(2).any(|w| w[0] == "--phase" && w[1] == "2"));
         assert!(a.windows(2).any(|w| w[0] == "--chain" && w[1] == "prev"));
