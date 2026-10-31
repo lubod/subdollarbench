@@ -41,6 +41,7 @@ from `TEMPLATE.md`.
 | [53](53.md) | Two cells at once: a lock per worker, distinct ids, the sweep keeps campaign containers (2-lane smoke; graded: full gate) | merged `e111d69` |
 | [54](54.md) | Tooling: rehearsal cells for $0, seen-failing records, git hooks, citation check (graded: full gate) | open (operator 2026-10-31 "1 yes", after 53 merged; before the bar, DECISIONS #23) |
 | [55](55.md) | The TUI shows real numbers: one points scale, live spend, the image field, R52-1 | draft (operator 2026-10-31 "put it") |
+| [56](56.md) | A hung tool call and two lanes: stall guard, the live line names the tool, the audit key delta per lane, `concurrent_cells` | draft (operator 2026-10-31 "plan it"; rules-bump decision pending) |
 
 **Status values:**
 
