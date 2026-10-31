@@ -40,6 +40,7 @@ from `TEMPLATE.md`.
 | [52](52.md) | The operator's tools: GUI, TUI and CLI (R39-4, R42-6..8, round 40; R47-1, R51-1) | merged `0690c3d` |
 | [53](53.md) | Two cells at once: a lock per worker, distinct ids, the sweep keeps campaign containers (2-lane smoke; graded: full gate) | merged `e111d69` |
 | [54](54.md) | Tooling: rehearsal cells for $0, seen-failing records, git hooks, citation check (graded: full gate) | open (operator 2026-10-31 "1 yes", after 53 merged; before the bar, DECISIONS #23) |
+| [55](55.md) | The TUI shows real numbers: one points scale, live spend, the image field, R52-1 | draft (operator 2026-10-31 "put it") |
 
 **Status values:**
 
