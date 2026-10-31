@@ -86,7 +86,12 @@ self_test() {
     git -C "$repo" add -A
     git -C "$repo" commit -qm one
 
-    # 1) A dirty tracked file is refused.
+    key="$(cd "$repo" && scripts/flake-bar.sh --key)"
+    record="$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
+    mkdir -p "$(dirname "$record")"
+    printf 'RESULT: PASS\n' > "$record"
+
+    # 1) A dirty tracked file is refused even with a PASS record.
     echo two > "$repo/src/x.rs"
     if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
         echo '[self-test] a dirty tracked tree was accepted' >&2; return 1
@@ -95,14 +100,11 @@ self_test() {
     echo '[self-test] dirty tracked refused'
 
     # 2) No record is refused.
+    rm -f "$record"
     if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
         echo '[self-test] a missing record was accepted' >&2; return 1
     fi
     echo '[self-test] missing record refused'
-
-    key="$(cd "$repo" && scripts/flake-bar.sh --key)"
-    record="$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
-    mkdir -p "$(dirname "$record")"
 
     # 3) IN PROGRESS is refused.
     printf 'RESULT: IN PROGRESS\n' > "$record"

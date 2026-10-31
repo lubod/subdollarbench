@@ -984,9 +984,12 @@ mod tests {
     fn r52_f5_version_names_rules() {
         let line = version_line();
         assert!(line.contains(env!("CARGO_PKG_VERSION")), "{line}");
-        assert!(line.contains(RULES_VERSION), "{line}");
+        assert!(
+            line.contains(&format!("rules {RULES_VERSION}")),
+            "the rules segment: {line}"
+        );
         assert!(line.contains(&fingerprint()), "{line}");
-        assert!(line.contains(&sqlite_version()), "{line}");
+        assert!(line.contains(sqlite_version()), "{line}");
         assert_eq!(version_line_static(), line);
     }
 

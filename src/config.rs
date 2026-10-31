@@ -804,9 +804,14 @@ mod tests {
                         ..
                     },
             } => {
-                assert_eq!(budget_usd, OFFICIAL_CELL_BUDGET_USD);
-                assert_eq!(wall_min, OFFICIAL_CELL_WALL_MIN);
-                assert_eq!(timeout_min, OFFICIAL_CELL_TIMEOUT_MIN);
+                // Pin the official values literally, not through the same
+                // constants clap used.
+                assert_eq!(budget_usd, 0.99);
+                assert_eq!(wall_min, 480);
+                assert_eq!(timeout_min, 120);
+                assert_eq!(OFFICIAL_CELL_BUDGET_USD, 0.99);
+                assert_eq!(OFFICIAL_CELL_WALL_MIN, 480);
+                assert_eq!(OFFICIAL_CELL_TIMEOUT_MIN, 120);
             }
             _ => panic!("expected campaign run"),
         }
