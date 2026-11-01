@@ -441,7 +441,6 @@ fn copy_workspace_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// R56 F4: lanes live at one ticket start: this lane plus the other live
 /// locks, at least `SDB_CONCURRENT_CELLS` (or 1).
 fn concurrent_cells_at(runs: &std::path::Path, worker: u8, env: Option<u32>) -> u32 {
