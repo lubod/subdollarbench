@@ -11,6 +11,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNS="${SDB_CELL_RUNS_DIR:-$ROOT/runs}"
+if [[ "${1:-}" == "check" ]]; then
+    shift
+fi
 TOOL="${1:-tool}"
 
 exec python3 - "$RUNS" "$TOOL" <<'PYEOF'

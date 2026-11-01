@@ -284,9 +284,9 @@ esac
 
 [[ $# -eq 2 ]] || usage
 # R56 F6: a live proof builds and runs Docker; refuse next to a live cell.
-if scripts/live-proofs.sh | grep -qx "$1"; then
+if "$ROOT/scripts/live-proofs.sh" | grep -qx "${1##*::}"; then
     LIVE_CHECK=1
-    "$ROOT/scripts/beside-cell.sh" check "seen-failing $1" || exit 1
+    "$ROOT/scripts/beside-cell.sh" "seen-failing $1" || exit 1
     if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
         exit 0
     fi

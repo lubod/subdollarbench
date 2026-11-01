@@ -60,7 +60,7 @@ fi
 
 # R56 F6: the bar runs the live proofs; it refuses next to a live cell.
 # `--key` above is only a hash and stays allowed.
-"$BAR_ROOT/scripts/beside-cell.sh" check "flake-bar" || exit 1
+"$BAR_ROOT/scripts/beside-cell.sh" "flake-bar" || exit 1
 if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
     exit 0
 fi

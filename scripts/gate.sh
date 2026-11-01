@@ -28,7 +28,7 @@ done
 # to a live cell. `--fast` stays allowed (AGENTS.md).
 beside_override=""
 if [[ $fast -eq 0 ]]; then
-    scripts/beside-cell.sh check "gate (full)" || exit 1
+    scripts/beside-cell.sh "gate (full)" || exit 1
     if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
         exit 0
     fi

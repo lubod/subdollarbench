@@ -29,8 +29,8 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 refuse() {
-    local name="$1"
-    shift
+    local name="$1" want="$2"
+    shift 2
     local out rc=0
     out="$("$@" 2>&1)" || rc=$?
     if [[ "$rc" -eq 0 ]]; then
@@ -40,6 +40,11 @@ refuse() {
     fi
     if ! grep -q 'campaign_beside' <<<"$out"; then
         echo "[self-test] $name did not name the campaign" >&2
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+    if ! grep -qF "$want" <<<"$out"; then
+        echo "[self-test] $name did not name the tool as $want" >&2
         printf '%s\n' "$out" >&2
         return 1
     fi
@@ -76,11 +81,11 @@ done
     exit 1
 }
 
-refuse 'seen-failing' "$ROOT/scripts/seen-failing.sh" \
-    test_pipeline_eval_only_sql_stage11_indexes_live /dev/null
-refuse 'grid --self-test --real' "$ROOT/scripts/grid.sh" --self-test --real
-refuse 'flake-bar' "$ROOT/scripts/flake-bar.sh" --passes 1
-refuse 'gate (full)' "$ROOT/scripts/gate.sh"
+refuse 'seen-failing' 'seen-failing' "$ROOT/scripts/seen-failing.sh" \
+    pipeline::tests::test_pipeline_eval_only_sql_stage11_indexes_live /dev/null
+refuse 'grid --self-test --real' 'grid --self-test --real' "$ROOT/scripts/grid.sh" --self-test --real
+refuse 'flake-bar' 'flake-bar' "$ROOT/scripts/flake-bar.sh" --passes 1
+refuse 'gate (full)' 'gate (full)' "$ROOT/scripts/gate.sh"
 
 kill "$holder" 2>/dev/null || true
 wait "$holder" 2>/dev/null || true
@@ -88,7 +93,7 @@ holder=""
 rm -f "$runs/.campaign.lock.w0" "$runs/.campaign.lock"
 
 start 'seen-failing' "$ROOT/scripts/seen-failing.sh" \
-    test_pipeline_eval_only_sql_stage11_indexes_live /dev/null
+    pipeline::tests::test_pipeline_eval_only_sql_stage11_indexes_live /dev/null
 start 'grid --self-test --real' "$ROOT/scripts/grid.sh" --self-test --real
 start 'flake-bar' "$ROOT/scripts/flake-bar.sh" --passes 1
 start 'gate (full)' "$ROOT/scripts/gate.sh"
