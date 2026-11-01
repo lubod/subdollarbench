@@ -11,7 +11,6 @@ set -euo pipefail
 secret_re='sk-or-|OPENROUTER_API_KEY=.|SDB_UI_(TOKEN|USER|PASS)=.|PRIVATE KEY'
 forbidden_re='(^|/)\.env$|bench\.db|^runs/'
 root="$(git rev-parse --show-toplevel)"
-allow_file="$root/scripts/secret-scan-fixtures.txt"
 empty_tree="$(git hash-object -t tree /dev/null)"
 hits=0
 
@@ -20,17 +19,9 @@ refuse() {
     hits=$((hits + 1))
 }
 
-# The allowlist: one path or glob per line, comments and blanks ignored.
+# The allowlist is the one in the commit being pushed, never the working
+# tree: an uncommitted edit must not widen the scan.
 allow=()
-if [[ -f "$allow_file" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%#*}"
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -n "$line" ]] && allow+=("$line")
-    done <"$allow_file"
-fi
-
 allowed_path() {
     local f="$1" p
     for p in "${allow[@]}"; do
@@ -100,6 +91,14 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
         refuse "$ref" "cannot read the pushed range"
         continue
     fi
+    allow=()
+    allow_text="$(git show "$local_sha:scripts/secret-scan-fixtures.txt" 2>/dev/null || true)"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" ]] && allow+=("$line")
+    done <<<"$allow_text"
 
     # 1) Real values first, everywhere: an added line holding a value
     # from the repo's .env is refused even on an allowlisted path.
