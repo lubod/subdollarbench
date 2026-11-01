@@ -23,7 +23,7 @@
         }
     ],
     "proxy": false,
-    "rules_version": "2026-10-19.44",
+    "rules_version": "2026-10-19.45",
     "sqlite_version": "3.46.0",
     "cap_price_basis": "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only."
 }

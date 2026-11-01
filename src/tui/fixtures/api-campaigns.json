@@ -280,7 +280,7 @@
    "points": 0.0,
    "reached": null,
    "regression_free_tickets": 0,
-   "rules_version": "2026-10-19.44",
+   "rules_version": "2026-10-19.45",
    "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
    "sqlite_version": "3.46.0",
    "stages": [],
@@ -703,7 +703,7 @@
    "points": 10.0,
    "reached": 6,
    "regression_free_tickets": 7,
-   "rules_version": "2026-10-19.44",
+   "rules_version": "2026-10-19.45",
    "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
    "sqlite_version": "3.46.0",
    "stages": [
@@ -1290,7 +1290,7 @@
    "points": 1.0,
    "reached": 0,
    "regression_free_tickets": 1,
-   "rules_version": "2026-10-19.44",
+   "rules_version": "2026-10-19.45",
    "sandbox_image": "sha256:4402fd520bd6764023c381df7cb009df16c27ea2da9e5456dc7b2300f7d62d28",
    "sqlite_version": "3.46.0",
    "stages": [

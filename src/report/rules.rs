@@ -15,6 +15,13 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-10-19.45`: round 58. Stage 12's busy retries use a 10 s time
+///   budget with full-jitter exponential backoff (2-16 ms) instead of 400
+///   fixed tries, so a correct server is not failed by a starved client's
+///   retry streak (the 20-pass bar's stage-12 flake). A server that never
+///   commits a busy transaction still fails. Score impact: points and the
+///   cap are unchanged; careers restart at phase 1; `.44` and `.45` never
+///   chain.
 /// - `2026-10-19.44`: round 49. W4 counts only durable commits. The perf
 ///   data dirs live on the runs disk (a memory data root is a harness
 ///   fault), the harness reads the backing disk's flush-request counter
@@ -808,7 +815,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.44";
+pub const RULES_VERSION: &str = "2026-10-19.45";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
@@ -977,7 +984,7 @@ mod tests {
         let rel = put(&root, "src/scoring.rs", "fixture\n");
         let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
         assert_eq!(
-            fp, "2026-10-19.44+769e9623e9f76d5c8620fdf5a53abbd6",
+            fp, "2026-10-19.45+3f130e9c32746682385428074d15f69a",
             "the SHA-256 stamp must be stable"
         );
         assert_eq!(fp, fingerprint_files(&root, &[rel]));
