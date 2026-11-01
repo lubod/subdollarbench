@@ -1626,7 +1626,9 @@ pub fn live_lock_holders() -> Vec<LockInfo> {
 
 pub fn live_lock_holders_in(runs: &std::path::Path) -> Vec<LockInfo> {
     let mut out = Vec::new();
-    for worker in 0..8u8 {
+    // R56 F3/F4/F6: test lanes use 8 and 9; scan them too so a tool's
+    // beside-cell check and the concurrent-lane count see a test lock.
+    for worker in 0..=9u8 {
         if let Some(mut h) = live_lock_holder_at(&runs.join(format!(".campaign.lock.w{worker}"))) {
             // A test may write a lock file by hand without the field.
             if h.worker != worker && h.worker == 0 {
@@ -1639,6 +1641,19 @@ pub fn live_lock_holders_in(runs: &std::path::Path) -> Vec<LockInfo> {
         out.push(h);
     }
     out
+}
+
+/// R56 F4: the lanes live at this instant: this worker plus every other
+/// live lock's worker. At least 1.
+pub fn live_lane_count_in(runs: &std::path::Path, worker: u8) -> u32 {
+    let mut workers = std::collections::BTreeSet::new();
+    workers.insert(worker);
+    for h in live_lock_holders_in(runs) {
+        if h.worker != worker {
+            workers.insert(h.worker);
+        }
+    }
+    workers.len() as u32
 }
 
 /// The holder of one worker's lock, if live (legacy locks count as

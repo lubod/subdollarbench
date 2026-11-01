@@ -212,7 +212,11 @@ fn update_status(cdir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
 fn apply_live_line(live: &mut serde_json::Value, msg: &str) -> bool {
     let t = msg.trim_start();
     let now = chrono::Utc::now().to_rfc3339();
-    live["last_activity_at"] = serde_json::json!(now);
+    // R56 F5: the 3 s heartbeat is not activity; only a real log line
+    // moves the age the Board's hung-agent warning reads.
+    if !t.starts_with("[WAITING]") {
+        live["last_activity_at"] = serde_json::json!(now);
+    }
     // A fresh verification starts here: clear the check counters and the
     // first failure, so "last check" never shows a stale or skipped line.
     let reset_checks = |live: &mut serde_json::Value| {
@@ -438,6 +442,15 @@ fn copy_workspace_all(src: &Path, dst: &Path) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// R56 F4: lanes live at one ticket start: this lane plus the other live
+/// locks, at least `SDB_CONCURRENT_CELLS` (or 1).
+fn concurrent_cells_at(runs: &std::path::Path, worker: u8, env: Option<u32>) -> u32 {
+    subdollarbench::campaign::live_lane_count_in(runs, worker)
+        .max(env.unwrap_or(1))
+        .max(1)
+}
+
+#[allow(clippy::too_many_arguments)] // the campaign runner's public surface
 pub async fn run(
     name: String,
     model: String,
@@ -756,6 +769,17 @@ pub async fn run(
             }
         }
     };
+    // R56 F4: the most lanes live at any ticket start of this phase.
+    let concurrent_max = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let env_cells = std::env::var("SDB_CONCURRENT_CELLS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let runs_dir = RunArchiver::resolve_runs_dir();
+    concurrent_max.fetch_max(
+        concurrent_cells_at(&runs_dir, worker, env_cells),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    let concurrent_max_stage = concurrent_max.clone();
     let rollup = campaign::run_campaign_phase_on_image(
         &lc,
         &opts,
@@ -765,6 +789,8 @@ pub async fn run(
         chain_career.as_ref(),
         chain_image.as_deref(),
         |attempt| {
+            let lanes = concurrent_cells_at(&RunArchiver::resolve_runs_dir(), worker, env_cells);
+            concurrent_max_stage.fetch_max(lanes, std::sync::atomic::Ordering::SeqCst);
             let job = StageJob {
                 stage: attempt.stage.clone(),
                 variant: attempt.variant,
@@ -882,10 +908,10 @@ pub async fn run(
     // R48 F1/F5: how this phase ran. `concurrent_cells` is the driver's
     // lane count (SDB_CONCURRENT_CELLS, default 1); `worker` is the lane.
     rollup.worker = worker;
-    rollup.concurrent_cells = std::env::var("SDB_CONCURRENT_CELLS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    rollup.concurrent_cells = concurrent_max
+        .load(std::sync::atomic::Ordering::SeqCst)
+        .max(env_cells.unwrap_or(1))
+        .max(1);
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
@@ -1996,5 +2022,59 @@ mod tests {
         assert!(msg.contains("load campaign"), "{msg}");
         assert!(!env.root.join("runs").exists());
         drop(env);
+    }
+
+    /// R56 F5: a heartbeat line does not move last_activity_at; a real
+    /// telemetry line does.
+    #[test]
+    fn r56_f5_heartbeat_is_not_activity() {
+        let mut live = serde_json::json!({
+            "last_activity_at": "2020-01-01T00:00:00Z",
+        });
+        let before = live["last_activity_at"].clone();
+        apply_live_line(
+            &mut live,
+            "[WAITING] Turn 27/200: tool running (bash: ./start.sh) (elapsed: 5682s)",
+        );
+        assert_eq!(live["last_activity_at"], before);
+        apply_live_line(
+            &mut live,
+            "[TELEMETRY] turn=27 max_turns=200 spent=0.1 tokens=1000",
+        );
+        assert_ne!(live["last_activity_at"], before);
+    }
+
+    /// R56 F4: a second live lane on worker 9 counts this lane too.
+    #[test]
+    fn r56_f4_concurrent_cells_counts_live_lanes() {
+        let dir = std::env::temp_dir().join(format!("r56_lanes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let ticks: u64 = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        std::fs::write(
+            dir.join(".campaign.lock.w9"),
+            serde_json::json!({
+                "pid": std::process::id(),
+                "campaign_id": "campaign_other_lane",
+                "worker": 9,
+                "start_ticks": ticks,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(concurrent_cells_at(&dir, 0, None), 2);
+        assert_eq!(concurrent_cells_at(&dir, 0, Some(3)), 3);
+        std::fs::remove_file(dir.join(".campaign.lock.w9")).unwrap();
+        assert_eq!(concurrent_cells_at(&dir, 0, None), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

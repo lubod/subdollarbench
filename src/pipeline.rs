@@ -870,6 +870,29 @@ pub struct BenchmarkConfig {
     pub baseline_rps: Option<f64>,
 }
 
+/// R56 F3: the first other live lane in the cells' runs dir, if any.
+fn other_live_lane(runs: &std::path::Path, worker: u8) -> Option<u32> {
+    crate::campaign::live_lock_holders_in(runs)
+        .into_iter()
+        .find(|h| h.worker != worker)
+        .map(|h| h.worker as u32)
+}
+
+/// R56 F3: the note when the provider key is shared with another lane.
+fn shared_key_note(runs: &std::path::Path, worker: u8) -> Option<String> {
+    other_live_lane(runs, worker).map(|w| format!("shared key: w{w} live"))
+}
+
+/// R56 F3: the live delta is audit-only; with another lane it is not
+/// attributable to this cell, so it is dropped and the note says why.
+fn gate_spend_delta(delta: Option<f64>, note: Option<String>) -> (Option<f64>, Option<String>) {
+    if note.is_some() {
+        (None, note)
+    } else {
+        (delta, None)
+    }
+}
+
 #[derive(Debug)]
 pub struct PipelineOutput {
     pub manifest: RunManifest,
@@ -2660,6 +2683,8 @@ impl BenchmarkPipeline {
 
         let start_time = Instant::now();
         let started_at = Utc::now().to_rfc3339();
+        let runs_dir = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let shared_at_start = shared_key_note(&runs_dir, config.worker);
 
         let run_id = config.run_id.clone().unwrap_or_else(|| {
             format!(
@@ -3527,15 +3552,21 @@ impl BenchmarkPipeline {
             omp_stats.cache_write_tokens,
         );
 
-        let mut live_spend_delta = None;
-        if let (Some(key), Some(init)) = (&config.api_key, initial_spend) {
-            sleep(Duration::from_millis(1500)).await;
-            if let Some(fin) = ModelPricing::query_openrouter_key_usage(key).await {
-                if fin >= init {
-                    live_spend_delta = Some(fin - init);
+        let shared_note = shared_at_start.or_else(|| shared_key_note(&runs_dir, config.worker));
+        let (live_spend_delta, live_spend_note) = if shared_note.is_some() {
+            (None, shared_note)
+        } else {
+            let mut delta = None;
+            if let (Some(key), Some(init)) = (&config.api_key, initial_spend) {
+                sleep(Duration::from_millis(1500)).await;
+                if let Some(fin) = ModelPricing::query_openrouter_key_usage(key).await {
+                    if fin >= init {
+                        delta = Some(fin - init);
+                    }
                 }
             }
-        }
+            gate_spend_delta(delta, None)
+        };
 
         // R24 R2: the committed snapshot is the scored cost. The live key
         // delta is audit-only; a provider promo or lag cannot move a score.
@@ -3545,6 +3576,11 @@ impl BenchmarkPipeline {
             logger.log(&format!(
                 "[COST] snapshot ${:.4}; live key delta ${:.4} recorded for audit only",
                 breakdown.total_cost_usd, live
+            ));
+        } else if let Some(note) = &live_spend_note {
+            logger.log(&format!(
+                "[COST] snapshot ${:.4}; live key delta not recorded ({note})",
+                breakdown.total_cost_usd
             ));
         }
         let effective_cost_usd = ModelPricing::calculate_effective_cost(
@@ -3659,6 +3695,8 @@ impl BenchmarkPipeline {
             cost_source: Some(cost_source.to_string()),
             cost_formula_usd: Some(breakdown.total_cost_usd),
             live_spend_delta_usd: live_spend_delta,
+            live_spend_note: live_spend_note.clone(),
+            stall: omp_stats.stall.clone(),
             effective_cost_usd: Some(effective_cost_usd),
             savings_percent: breakdown.savings_percent,
             efficiency_score,
@@ -7062,6 +7100,48 @@ main()
         );
 
         cleanup_covtest_network("sqlshrink");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R56 F3: another live lane makes the shared key delta unattributable;
+    /// alone, the delta is kept.
+    #[test]
+    fn r56_f3_spend_delta_only_alone() {
+        let dir = std::env::temp_dir().join(format!("r56_spend_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let stat = fs::read_to_string("/proc/self/stat").unwrap();
+        let ticks = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .to_string();
+        fs::write(
+            dir.join(".campaign.lock.w9"),
+            serde_json::json!({
+                "pid": std::process::id(),
+                "campaign_id": "campaign_other_lane",
+                "worker": 9,
+                "start_ticks": ticks.parse::<u64>().unwrap(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let note = shared_key_note(&dir, 0);
+        assert_eq!(note.as_deref(), Some("shared key: w9 live"));
+        let (delta, note) = gate_spend_delta(Some(0.2), note);
+        assert!(delta.is_none());
+        assert_eq!(note.as_deref(), Some("shared key: w9 live"));
+
+        fs::remove_file(dir.join(".campaign.lock.w9")).unwrap();
+        let note = shared_key_note(&dir, 0);
+        assert!(note.is_none());
+        let (delta, note) = gate_spend_delta(Some(0.2), note);
+        assert_eq!(delta, Some(0.2));
+        assert!(note.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -24,6 +24,19 @@ for arg in "$@"; do
     esac
 done
 
+# R56 F6: a full gate builds and runs Docker-heavy tests; it refuses next
+# to a live cell. `--fast` stays allowed (AGENTS.md).
+beside_override=""
+if [[ $fast -eq 0 ]]; then
+    scripts/beside-cell.sh "gate (full)" || exit 1
+    if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
+        exit 0
+    fi
+    if [[ "${SDB_ALLOW_BESIDE_CELL:-0}" == "1" ]]; then
+        beside_override="SDB_ALLOW_BESIDE_CELL=1"
+    fi
+fi
+
 # R48-5: a full gate is a long test. Hold the shared long-test lock for
 # the whole run, so the grid's preflight refuses to start a phase next to
 # it. `--fast` and plain unit tests stay allowed while a cell runs.
@@ -74,6 +87,9 @@ trap 'rm -f "$log"' EXIT
     echo "started: $(date -u +%FT%TZ)"
     echo "rustc:   $(rustc --version)"
 } >"$out"
+if [[ -n "$beside_override" ]]; then
+    echo "beside-cell: override $beside_override" >>"$out"
+fi
 
 fail=0
 step() {
