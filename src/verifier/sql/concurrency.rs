@@ -39,7 +39,9 @@ const BUSY_BUDGET: Duration = Duration::from_secs(10);
 const RETRY_PAUSE: Duration = Duration::from_millis(2);
 
 fn busy_pause(tries: u32) -> Duration {
-    let cap_ms = 2u64.saturating_mul(1u64 << tries.min(3)).min(16);
+    let cap_ms = 2u64
+        .saturating_mul(1u64 << tries.saturating_sub(1).min(3))
+        .min(16);
     let jitter = rand::random::<f64>();
     Duration::from_secs_f64((cap_ms as f64 * jitter).max(1.0) / 1000.0)
 }
@@ -873,6 +875,22 @@ mod tests {
         // Full: the same engine must fail (c).
         let err = scenario(&addr, timeout(), 8, false).unwrap_err();
         assert!(err.contains("blocked"), "{err}");
+    }
+
+    /// R58 F1: the full-jitter caps are 2, 4, 8, 16, 16 ms; each draw
+    /// stays within 1 ms and its cap.
+    #[test]
+    fn r58_f1_busy_pause_caps() {
+        for (tries, cap_ms) in [(1u32, 2u64), (2, 4), (3, 8), (4, 16), (5, 16)] {
+            for _ in 0..200 {
+                let d = busy_pause(tries);
+                assert!(d >= Duration::from_millis(1), "tries {tries}: {d:?}");
+                assert!(
+                    d <= Duration::from_millis(cap_ms),
+                    "tries {tries}: {d:?} > {cap_ms} ms"
+                );
+            }
+        }
     }
 
     /// R58 F1: a 1,000-transaction busy streak on one connection is
