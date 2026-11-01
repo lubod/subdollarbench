@@ -788,8 +788,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            let mut next_id = 0usize;
-            for stream in listener.incoming() {
+            for (next_id, stream) in listener.incoming().enumerate() {
                 let Ok(sock) = stream else { break };
                 let mock = mock.clone();
                 // Connection 0 is the setup connection; the first client
@@ -799,7 +798,6 @@ mod tests {
                 } else {
                     0
                 };
-                next_id += 1;
                 std::thread::spawn(move || {
                     let mut conn = Conn::new(busy_left);
                     let mut sock = sock;
