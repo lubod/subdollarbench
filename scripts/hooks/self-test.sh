@@ -182,4 +182,51 @@ grep -q 'leak.txt' <<<"$out" || {
     echo '[self-test] the pattern hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }
 echo '[self-test] pattern hit outside the allowlist refused'
 
+# R57 F1: the allowlist comes from the pushed commit. An uncommitted
+# line that would allow the leak has no effect; the same line committed
+# in the pushed commit does.
+allowrepo="$dir/allowrepo"
+mkdir -p "$allowrepo/scripts/hooks"
+git -C "$allowrepo" init -q
+git -C "$allowrepo" config user.email hooks@example.com
+git -C "$allowrepo" config user.name hooks
+cp -a "$HERE/." "$allowrepo/scripts/hooks/"
+cp "$HERE/../secret-scan-fixtures.txt" "$allowrepo/scripts/secret-scan-fixtures.txt"
+git -C "$allowrepo" add -A
+git -C "$allowrepo" commit -qm hooks
+allow_base="$(git -C "$allowrepo" rev-parse HEAD)"
+echo 'sk-or-v1-ALLOWLIST-LEAK' >"$allowrepo/leak.txt"
+git -C "$allowrepo" add leak.txt
+git -C "$allowrepo" commit -qm leak
+allow_leak="$(git -C "$allowrepo" rev-parse HEAD)"
+echo 'leak.txt' >>"$allowrepo/scripts/secret-scan-fixtures.txt"
+push_allow() {
+    (cd "$allowrepo" && printf 'refs/heads/x %s refs/heads/x %s\n' "$1" "$allow_base" \
+        | bash "$PRE_PUSH" origin "$dir/remote")
+}
+rc=0
+out="$(push_allow "$allow_leak" 2>&1)" || rc=$?
+[[ "$rc" -eq 1 ]] || {
+    echo "[self-test] an uncommitted allowlist line was used (rc=$rc)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+grep -q 'leak.txt' <<<"$out" || {
+    echo '[self-test] the uncommitted case named no file' >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+echo '[self-test] uncommitted allowlist ignored'
+git -C "$allowrepo" add scripts/secret-scan-fixtures.txt
+git -C "$allowrepo" commit -qm allow
+allow_commit="$(git -C "$allowrepo" rev-parse HEAD)"
+rc=0
+out="$(push_allow "$allow_commit" 2>&1)" || rc=$?
+[[ "$rc" -eq 0 ]] || {
+    echo "[self-test] a committed allowlist line was refused (rc=$rc)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+echo '[self-test] committed allowlist accepted'
+
 echo 'RESULT: PASS (hooks self-test)'
