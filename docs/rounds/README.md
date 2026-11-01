@@ -43,7 +43,7 @@ from `TEMPLATE.md`.
 | [55](55.md) | The TUI shows real numbers: one points scale, live spend, the image field, R52-1; R54-3 (the pre-push hook) | merged `81c1a0b` |
 | [56](56.md) | A hung tool call and two lanes: stall guard, the live line names the tool, the audit key delta per lane, `concurrent_cells`, the Board's hung-agent warning, Docker tools refuse beside a cell (R54-2) | merged `9380525` |
 | [57](57.md) | Tooling follow-ups: the hook reads its allowlist from the pushed commit (R55-3); a stall is always `wall` (R56-3) | merged `57fbdc3` |
-| [58](58.md) | Grading: a busy retry is a time budget with jittered backoff (the bar's stage-12 flake); rules `.45` (full gate) | open (operator 2026-11-01 "Stop, fix, re-bar", "open 58") |
+| [58](58.md) | Grading: a busy retry is a time budget with jittered backoff (the bar's stage-12 flake); rules `.45` (full gate) | blocked (R58-1) |
 
 **Status values:**
 
