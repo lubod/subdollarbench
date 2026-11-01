@@ -68,6 +68,22 @@ pub struct ToolStall {
     pub ended_at: String,
 }
 
+/// R56 F1/R57 F2: classify a stopped session. The [STALL] marker wins over
+/// any model text in the command (which may contain "turn limit").
+fn stop_reason_from(reason: &str) -> &'static str {
+    if reason.contains("[STALL]") {
+        "wall"
+    } else if reason.contains("turn limit") {
+        "turns"
+    } else if reason.contains("budget cap") || reason.contains("campaign cap's headroom") {
+        "dollars"
+    } else if reason.contains("Watchdog") {
+        "wall"
+    } else {
+        "crash"
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct OmpSessionStats {
@@ -1079,15 +1095,7 @@ impl OmpRunner {
                 .ok()
                 .and_then(|r| r.clone())
                 .unwrap_or_default();
-            if reason.contains("turn limit") {
-                "turns"
-            } else if reason.contains("budget cap") || reason.contains("campaign cap's headroom") {
-                "dollars"
-            } else if reason.contains("Watchdog") || reason.contains("[STALL]") {
-                "wall"
-            } else {
-                "crash"
-            }
+            stop_reason_from(&reason)
         } else {
             "ready"
         };
@@ -3873,6 +3881,15 @@ mod tests {
         let _ = handle.join();
         assert!(saw_reasoning, "heartbeat must return to reasoning");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R57 F2: the [STALL] marker wins even when the command contains
+    /// the turn/budget limit words.
+    #[test]
+    fn r57_f2_stall_reason_ignores_command() {
+        let reason =
+            "[STALL] bash ran 600 s without returning (echo turn limit; echo budget cap); ending the session";
+        assert_eq!(stop_reason_from(reason), "wall");
     }
 
     // -----------------------------------------------------------------
