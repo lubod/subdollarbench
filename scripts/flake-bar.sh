@@ -14,6 +14,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 # a docs-only commit keeps the same resumable record. The paths are the
 # same list scripts/gate.sh reads.
 . "$BAR_ROOT/scripts/graded-filter.sh"
+. "$BAR_ROOT/scripts/bar-proofs.sh"
 mapfile -t graded_paths < <(graded_path_entries)
 flake_key() {
     local repo="$1" tree="$2"
@@ -26,6 +27,7 @@ passes=1
 only=""
 self_test=0
 key_only=0
+list_only=0
 load=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +41,8 @@ while [[ $# -gt 0 ]]; do
             key_only=1; shift ;;
         --self-test)
             self_test=1; shift ;;
+        --list)
+            list_only=1; shift ;;
         --load)
             [[ $# -ge 2 ]] || { echo "[flake] --load needs a value" >&2; exit 2; }
             load="$2"; shift 2 ;;
@@ -60,22 +64,25 @@ if [[ "$key_only" -eq 1 ]]; then
     exit 0
 fi
 
+# R61 F7: the list lives in scripts/bar-proofs.sh, shared with the ready
+# gate's proof map so the two cannot drift.
+tests_from_source() {
+    bar_proofs "$(git rev-parse --show-toplevel)"
+}
+
+# R61 F7: the ready gate's self-test compares its map against this list.
+# `--list` is read-only, like --key, so it stays allowed beside a cell.
+if [[ "$list_only" -eq 1 ]]; then
+    tests_from_source
+    exit 0
+fi
+
 # R56 F6: the bar runs the live proofs; it refuses next to a live cell.
 # `--key` above is only a hash and stays allowed.
 "$BAR_ROOT/scripts/beside-cell.sh" "flake-bar" || exit 1
 if [[ "${SDB_BESIDE_CELL_ONLY:-0}" == "1" ]]; then
     exit 0
 fi
-
-# The bar keeps every ladder proof (the old list) and adds the r45/r49
-# live proofs. The fast-gate skip list is scripts/live-proofs.sh, which is
-# the SQL_PERF_LIVE holders only; the bar must not shrink to that list.
-tests_from_source() {
-    {
-        grep -ohE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs src/pipeline/tests.rs
-        grep -ohE 'fn r4[59]_[a-z0-9_]*' src/pipeline.rs src/pipeline/tests.rs
-    } | sed 's/^fn //' | sort -u
-}
 
 runs_for() {
     awk -v t="$1" '$1 == "TEST" && $2 == t && $3 != "RERUN" { n++ } END { print n + 0 }' "$2"
