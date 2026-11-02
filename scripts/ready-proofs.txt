@@ -1,0 +1,8 @@
+# R61 F6: the core proofs every `gate.sh --ready` runs. Both stage-20
+# proofs regrade all 21 stages, so a change no map entry names still gets a
+# real end-to-end run. Every name here must be in scripts/live-proofs.sh
+# (the fast set skips exactly that list), or gate.sh --self-test fails.
+test_pipeline_eval_only_sql_stage20_pgwire_live
+test_pipeline_eval_only_sql_stage20_pgwire_lite_live
+r45_f5_perfscore_cli
+r49_f2_unsynced_candidate_floors_live
