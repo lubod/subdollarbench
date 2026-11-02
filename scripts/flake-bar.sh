@@ -71,13 +71,13 @@ fi
 # the SQL_PERF_LIVE holders only; the bar must not shrink to that list.
 tests_from_source() {
     {
-        grep -oE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs src/pipeline/tests.rs
-        grep -oE 'fn r4[59]_[a-z0-9_]*' src/pipeline.rs src/pipeline/tests.rs
+        grep -ohE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs src/pipeline/tests.rs
+        grep -ohE 'fn r4[59]_[a-z0-9_]*' src/pipeline.rs src/pipeline/tests.rs
     } | sed 's/^fn //' | sort -u
 }
 
 runs_for() {
-    awk -v t="$1" '$1 == "TEST" && $2 == t { n++ } END { print n + 0 }' "$2"
+    awk -v t="$1" '$1 == "TEST" && $2 == t && $3 != "RERUN" { n++ } END { print n + 0 }' "$2"
 }
 passes_for() {
     awk -v t="$1" '$1 == "TEST" && $2 == t && $3 == "PASS" { n++ } END { print n + 0 }' "$2"
@@ -108,6 +108,7 @@ summary() {
         line="${passes}/${runs} ${t} cured=${cured}"
         if [[ "$fails" -gt 0 ]]; then line+=" FAIL=${fails}"; fi
         if [[ "$rf" -gt 0 || "$cured" -gt 1 ]]; then line+=" RERUN=FAIL"; any_fail=1; fi
+        if [[ $((fails - cured - rf)) -gt 0 ]]; then any_fail=1; fi
         total_cured=$((total_cured + cured))
         [[ "$cured" -gt 0 ]] && cured_names+=("$t")
         echo "$line"
@@ -171,6 +172,7 @@ run_chunk() {
                 else
                     cp "$log" "${base}-${t}-rerun-${utc}.log"
                     echo "TEST $t RERUN FAIL $((SECONDS - r0)) $(date -u +%FT%TZ) log=${base}-${t}-rerun-${utc}.log" >> "$record"
+                    failed=1
                 fi
             fi
         done
