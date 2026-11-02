@@ -106,6 +106,15 @@ summary() {
     local tests=("$@")
     local any_fail=0 min_runs=20 all_full=1 line total_cured=0 cured_names=()
     echo "--- summary ---"
+    local harness
+    harness="$(awk '$1 == "HARNESS" {
+        t = $2; $1 = ""; $2 = ""; sub(/^  */, "");
+        print t ": " $0; exit
+    }' "$record")"
+    if [[ -n "$harness" ]]; then
+        echo "RESULT: FAIL (harness: $harness)"
+        return 1
+    fi
     for t in "${tests[@]}"; do
         local runs passes fails cured rf
         runs=$(runs_for "$t" "$record")
@@ -152,6 +161,26 @@ run_one() {
     nice -n 10 cargo test --lib "pipeline::tests::$1" -- --exact --nocapture
 }
 
+# R62 F4: a run that never produced a test result is a harness failure, not
+# a proof FAIL. Exit 127 is the shell's "cannot run cargo"; a filter that
+# matched no test is R61-1's silent-pass mode.
+harness_reason() {
+    local rc="$1" log="$2"
+    if [[ "$rc" -eq 127 ]]; then
+        echo "exit 127"
+        return 0
+    fi
+    if grep -q '^running 0 tests' "$log"; then
+        echo "filter matched 0 tests"
+        return 0
+    fi
+    if ! grep -q '^test result:' "$log"; then
+        echo "no test result line"
+        return 0
+    fi
+    return 1
+}
+
 # R28 F3: one failure is recorded and the chunk continues; the caller's
 # summary always covers the full test list.
 run_chunk() {
@@ -164,7 +193,15 @@ run_chunk() {
                 continue
             fi
             local t0=$SECONDS
-            if run_one "$t" > "$log" 2>&1; then
+            local rc=0
+            run_one "$t" > "$log" 2>&1 || rc=$?
+            local reason
+            if reason="$(harness_reason "$rc" "$log")"; then
+                echo "HARNESS $t $reason" >> "$record"
+                failed=1
+                return 1
+            fi
+            if [[ "$rc" -eq 0 ]]; then
                 echo "TEST $t PASS $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
             else
                 local utc base full_log
@@ -177,7 +214,14 @@ run_chunk() {
                 tail -n 40 "$log" | sed 's/^/  /' >> "$record"
                 echo "OUTPUT-END" >> "$record"
                 local r0=$SECONDS
-                if run_one "$t" > "$log" 2>&1; then
+                local rrc=0
+                run_one "$t" > "$log" 2>&1 || rrc=$?
+                if reason="$(harness_reason "$rrc" "$log")"; then
+                    echo "HARNESS $t rerun: $reason" >> "$record"
+                    failed=1
+                    return 1
+                fi
+                if [[ "$rrc" -eq 0 ]]; then
                     echo "TEST $t RERUN PASS $((SECONDS - r0)) $(date -u +%FT%TZ)" >> "$record"
                 else
                     cp "$log" "${base}-${t}-rerun-${utc}.log"
@@ -312,9 +356,17 @@ if [[ "$self_test" -eq 1 ]]; then
     failed=0
     calls=0
     run_one() {
-        [[ "$1" == "flaky" ]] || return 0
+        if [[ "$1" != "flaky" ]]; then
+            echo 'test result: ok. 1 passed; 0 failed'
+            return 0
+        fi
         calls=$((calls + 1))
-        [[ "$calls" -gt 1 ]]
+        if [[ "$calls" -gt 1 ]]; then
+            echo 'test result: ok. 1 passed; 0 failed'
+            return 0
+        fi
+        echo 'test result: FAILED. 0 passed; 1 failed'
+        return 1
     }
     record="$dir/rerun.flake.txt"
     : > "$record"
@@ -327,10 +379,62 @@ if [[ "$self_test" -eq 1 ]]; then
     }
     [[ "$failed" -eq 0 ]] || { echo "a cured failure set the exit state"; exit 1; }
 
+    # R62 F4: exit 127 is a harness failure; the chunk stops and the
+    # summary says so.
+    log="$dir/harness.log"
+    failed=0
+    run_one() { echo 'nice: cargo: No such file or directory' >&2; return 127; }
+    record="$dir/harness127.flake.txt"
+    : > "$record"
+    if run_chunk "$record" 1 alpha beta; then
+        echo "a harness failure did not stop the chunk"; exit 1
+    fi
+    grep -q '^HARNESS alpha exit 127$' "$record" || { cat "$record"; exit 1; }
+    if grep -q '^TEST beta' "$record"; then
+        echo "the chunk continued after a harness failure"; exit 1
+    fi
+    [[ "$failed" -eq 1 ]] || { echo "a harness failure did not set the exit state"; exit 1; }
+    summary "$record" alpha beta > "$dir/harness127.txt" || true
+    grep -q 'RESULT: FAIL (harness: alpha: exit 127)' "$dir/harness127.txt" || {
+        cat "$dir/harness127.txt"; exit 1;
+    }
+    echo "[self-test] exit 127 stops the bar"
+
+    # R62 F4: a filter that matched no test is a harness failure too, even
+    # though cargo exits 0.
+    log="$dir/harness0.log"
+    failed=0
+    run_one() {
+        echo 'running 0 tests'
+        echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'
+        return 0
+    }
+    record="$dir/harness0.flake.txt"
+    : > "$record"
+    if run_chunk "$record" 1 alpha beta; then
+        echo "a 0-test filter did not stop the chunk"; exit 1
+    fi
+    grep -q '^HARNESS alpha filter matched 0 tests$' "$record" || { cat "$record"; exit 1; }
+    if grep -q '^TEST beta' "$record"; then
+        echo "the chunk continued after a 0-test filter"; exit 1
+    fi
+    summary "$record" alpha beta > "$dir/harness0.txt" || true
+    grep -q 'RESULT: FAIL (harness: alpha: filter matched 0 tests)' "$dir/harness0.txt" || {
+        cat "$dir/harness0.txt"; exit 1;
+    }
+    echo "[self-test] a 0-test filter stops the bar"
+
     # R28 F3: a failing proof is recorded and the rest of the chunk runs.
     log="$dir/fake.log"
     failed=0
-    run_one() { [[ "$1" != "fail" ]]; }
+    run_one() {
+        if [[ "$1" == "fail" ]]; then
+            echo 'test result: FAILED. 0 passed; 1 failed'
+            return 1
+        fi
+        echo 'test result: ok. 1 passed; 0 failed'
+        return 0
+    }
     record="$dir/chunk.flake.txt"
     : > "$record"
     run_chunk "$record" 1 alpha fail beta
