@@ -70,8 +70,17 @@ start() {
     systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
     rm -f "$status"
 
+    # The user manager's PATH lacks ~/.cargo/bin and friends: pass the
+    # caller's PATH (and the toolchain homes, when set) to the unit. The
+    # first bar through this script failed 1,120 runs on `nice: cargo: No
+    # such file or directory` (docs/rounds/61.md, "After the merge").
+    local envs=(--setenv="SDB_DETACH_STATUS=$status" --setenv="PATH=$PATH")
+    local v
+    for v in CARGO_HOME RUSTUP_HOME; do
+        [[ -n "${!v:-}" ]] && envs+=(--setenv="$v=${!v}")
+    done
     if ! systemd-run --user --unit "$unit" --same-dir --collect \
-        --setenv="SDB_DETACH_STATUS=$status" \
+        "${envs[@]}" \
         -- bash -c 'rc=0; "$@" || rc=$?; printf "%s\n" "$rc" > "$SDB_DETACH_STATUS.tmp"; mv "$SDB_DETACH_STATUS.tmp" "$SDB_DETACH_STATUS"; exit "$rc"' \
         _ "$@"; then
         echo "[detach] FATAL: systemd-run could not start $unit" >&2
@@ -93,7 +102,7 @@ start() {
 self_test() {
     local dir marker out rc unit i launcher
     dir="$(mktemp -d /tmp/sdb-detach-self-test.XXXXXX)"
-    trap "systemctl --user stop sdb-detach-survive sdb-detach-busy >/dev/null 2>&1 || true; systemctl --user reset-failed sdb-detach-survive sdb-detach-busy >/dev/null 2>&1 || true; rm -rf '$dir'" EXIT
+    trap "systemctl --user stop sdb-detach-survive sdb-detach-busy sdb-detach-path >/dev/null 2>&1 || true; systemctl --user reset-failed sdb-detach-survive sdb-detach-busy sdb-detach-path >/dev/null 2>&1 || true; rm -rf '$dir'" EXIT
     export SDB_DETACH_DIR="$dir"
     marker="$dir/marker"
 
@@ -154,7 +163,28 @@ self_test() {
     systemctl --user stop sdb-detach-busy >/dev/null 2>&1 || true
     echo "[self-test] duplicate name refused"
 
-    # 4) Linger off is refused with the fix.
+    # 4) The unit sees the caller's PATH: a command only on that PATH runs.
+    mkdir -p "$dir/pathbin"
+    printf '#!/usr/bin/env bash\necho on-path > "$1"\n' >"$dir/pathbin/sdb-detach-probe"
+    chmod +x "$dir/pathbin/sdb-detach-probe"
+    PATH="$dir/pathbin:$PATH" "$ROOT/scripts/detach.sh" detach-path -- \
+        sdb-detach-probe "$dir/path-marker" >"$dir/path.out" 2>&1 || {
+        echo "[self-test] the PATH fixture did not start" >&2
+        cat "$dir/path.out" >&2
+        return 1
+    }
+    for i in $(seq 1 100); do
+        [[ -f "$dir/detach-path.status" ]] && break
+        sleep 0.1
+    done
+    [[ "$(cat "$dir/detach-path.status" 2>/dev/null)" == "0" && -f "$dir/path-marker" ]] || {
+        echo "[self-test] the unit did not see the caller's PATH" >&2
+        journalctl --user -u sdb-detach-path --no-pager -n 5 >&2 || true
+        return 1
+    }
+    echo "[self-test] the caller's PATH reaches the unit"
+
+    # 5) Linger off is refused with the fix.
     mkdir -p "$dir/bin"
     cat >"$dir/bin/loginctl" <<'EOF'
 #!/usr/bin/env bash
