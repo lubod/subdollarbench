@@ -1023,8 +1023,9 @@ fn loadavg_text() -> String {
         .unwrap_or_else(|e| format!("unreadable ({e})"))
 }
 
-/// R60 F1: one measurement inside the tolerance, or one re-measure
-/// after a miss. The closure returns a `PerfScore` or its error.
+/// R60 F1/R61 F9: one measurement inside the tolerance, or one re-measure
+/// after a miss. The closure returns a `PerfScore` or its error. A first
+/// miss is printed to stderr before the re-measure.
 fn perf_self_check<F>(mut run: F) -> Result<(), String>
 where
     F: FnMut() -> Result<PerfScore, String>,
@@ -1044,13 +1045,13 @@ where
         failures.push(format!(
             "run {attempt}: {message}\nloadavg before: {before}\nloadavg after: {after}"
         ));
+        if attempt == 1 {
+            eprintln!("{}", failures.last().unwrap());
+        }
     }
     Err(failures.join("\n\n"))
 }
 
-/// R59-1: the perf self-check measures once, and re-measures once on
-/// a loaded host. The tolerance itself is unchanged (±0.1); a
-/// systematic miss still fails both runs.
 #[test]
 fn r60_f1_first_run_in_tolerance_measures_once() {
     let mut calls = 0;
