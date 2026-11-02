@@ -30,7 +30,7 @@ src/verifier/sql/sentinel.rs full
 src/verifier/sql/shrink.rs full
 src/verifier/sql/wire.rs full
 src/verifier/sql/concurrency.rs test_pipeline_eval_only_sql_stage12_concurrency_live,test_pipeline_eval_only_sql_stage12_concurrency_lite_live
-src/verifier/sql/perf.rs test_pipeline_eval_only_sql_stage11_indexes_live,test_pipeline_eval_only_sql_stage11_lite_live
+src/verifier/sql/perf.rs test_pipeline_eval_only_sql_stage11_indexes_live
 src/verifier/sql/perfscore.rs r45_f1_reference_scores_one,r45_f5_perfscore_cli
 src/verifier/sql/observability.rs test_pipeline_eval_only_sql_stage14_observability_live
 src/verifier/sql/memory.rs test_pipeline_eval_only_sql_stage16_memory_live

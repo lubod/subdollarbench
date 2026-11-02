@@ -26,6 +26,13 @@ core_proofs() {
     grep -vE '^[[:space:]]*(#|$)' "$(ready_proofs_file)" || true
 }
 
+# The proofs --ready can add: exactly scripts/live-proofs.sh, the list the
+# fast set skips. A proof outside it already ran in the fast set.
+ready_full_set() {
+    local repo="$1"
+    ( cd "$repo" && scripts/live-proofs.sh )
+}
+
 path_is_mapped() {
     local path="$1" line glob
     while IFS= read -r line; do
@@ -47,7 +54,7 @@ proofs_for_path() {
         IFS=','
         for name in $toks; do
             case "$name" in
-                full) bar_proofs "$repo" ;;
+                full) ready_full_set "$repo" ;;
                 core) ;;
                 *) printf '%s\n' "$name" ;;
             esac
@@ -76,7 +83,7 @@ mapped_ready_proofs() {
         local proof
         while IFS= read -r proof; do
             printf '%s\tno merge-base: full set\n' "$proof"
-        done < <(bar_proofs "$repo")
+        done < <(ready_full_set "$repo")
         return 0
     fi
     local path header name proof full
@@ -93,13 +100,17 @@ mapped_ready_proofs() {
                     full=1
                     break
                 fi
+                # A proof the fast set already ran needs no extra run.
+                if ! ready_full_set "$repo" | grep -qx "$name"; then
+                    continue
+                fi
                 printf '%s\tmapped: %s (hunk)\n' "$name" "$path"
             done < <(git -C "$repo" diff -U0 "$base" HEAD -- "$path" \
                 | sed -n 's/^@@[^@]*@@ *//p')
             if [[ "$full" -eq 1 ]]; then
                 while IFS= read -r proof; do
                     printf '%s\tunattributed hunk: full set\n' "$proof"
-                done < <(bar_proofs "$repo")
+                done < <(ready_full_set "$repo")
             fi
         else
             while IFS= read -r proof; do
@@ -163,8 +174,10 @@ self_test() {
     [[ $failed -eq 0 ]] || return 1
     echo "[self-test] every graded file has an entry"
 
-    # 2) Every proof named in the map is in the bar's list.
+    # 2) Every proof named in the map is in the bar's list and in
+    # live-proofs.sh (the ready gate runs only the latter).
     mapfile -t bar < <(bar_proofs "$PROOF_MAP_ROOT")
+    mapfile -t live < <(cd "$PROOF_MAP_ROOT" && scripts/live-proofs.sh)
     while IFS= read -r line; do
         glob="${line%% *}"
         oldifs="$IFS"
@@ -176,16 +189,19 @@ self_test() {
                     printf '%s\n' "${bar[@]}" | grep -qx "$proof" || {
                         echo "[proof-map] $glob names $proof, which the bar does not run" >&2
                         failed=1
+                    }
+                    printf '%s\n' "${live[@]}" | grep -qx "$proof" || {
+                        echo "[proof-map] $glob names $proof, which live-proofs.sh does not run" >&2
+                        failed=1
                     } ;;
             esac
         done
         IFS="$oldifs"
     done < <(proof_map_entries)
     [[ $failed -eq 0 ]] || return 1
-    echo "[self-test] every mapped proof is in the bar list"
+    echo "[self-test] every mapped proof is in the bar and live-proofs lists"
 
     # 3) Every core proof is in the live-proofs.sh skip list.
-    mapfile -t live < <(cd "$PROOF_MAP_ROOT" && scripts/live-proofs.sh)
     while IFS= read -r proof; do
         printf '%s\n' "${live[@]}" | grep -qx "$proof" || {
             echo "[proof-map] core proof $proof is not in live-proofs.sh" >&2
@@ -202,17 +218,32 @@ self_test() {
         "$PROOF_MAP_ROOT/scripts/ready-proofs.txt" \
         "$PROOF_MAP_ROOT/scripts/graded-filter.sh" \
         "$PROOF_MAP_ROOT/scripts/bar-proofs.sh" \
+        "$PROOF_MAP_ROOT/scripts/live-proofs.sh" \
         "$PROOF_MAP_ROOT/scripts/proof-map.sh" "$repo/scripts/"
     printf '*.rs diff=rust\n' >"$repo/.gitattributes"
     printf '# docs\n' >"$repo/docs/readme.md"
     printf 'pub fn concurrency() {}\n' >"$repo/src/verifier/sql/concurrency.rs"
     : >"$repo/src/pipeline.rs"
+    : >"$repo/src/main.rs"
     {
         while IFS= read -r proof; do
-            printf 'fn %s() {\n    let x = 1;\n}\n\n' "$proof"
+            if printf '%s\n' "${live[@]}" | grep -qx "$proof"; then
+                printf 'fn %s() { let _serial = SQL_PERF_LIVE.lock(); }\n\n' "$proof"
+            else
+                printf 'fn %s() {}\n\n' "$proof"
+            fi
         done < <(bar_proofs "$PROOF_MAP_ROOT")
-        printf 'fn helper() {\n    let x = 1;\n}\n'
+        # The two live proofs outside the bar (r54, the tests/CI gate) still
+        # belong to the full ready set.
+        while IFS= read -r proof; do
+            printf '%s\n' "${bar[@]}" | grep -qx "$proof" && continue
+            printf 'fn %s() { let _serial = SQL_PERF_LIVE.lock(); }\n\n' "$proof"
+        done < <(printf '%s\n' "${live[@]}")
     } >"$repo/src/pipeline/tests.rs"
+    # The proof-body fixture needs a body line to change.
+    sed -i 's/^fn r45_f1_reference_scores_one() { let _serial = SQL_PERF_LIVE\.lock(); }$/fn r45_f1_reference_scores_one() {\n    let _serial = SQL_PERF_LIVE.lock();\n    let x = 1;\n}/' \
+        "$repo/src/pipeline/tests.rs"
+    printf 'fn helper() {\n    let x = 1;\n}\n' >>"$repo/src/pipeline/tests.rs"
     git -C "$repo" init -q -b master
     git -C "$repo" config user.email proof-map@example.com
     git -C "$repo" config user.name proof-map
@@ -266,8 +297,8 @@ self_test() {
     git -C "$repo" add -A
     git -C "$repo" commit -qm helper
     mapfile -t got < <(mapped_ready_proofs "$repo" master)
-    [[ ${#got[@]} -eq ${#bar[@]} ]] || {
-        echo "[self-test] a helper hunk selected ${#got[@]} proofs, want ${#bar[@]}" >&2
+    [[ ${#got[@]} -eq ${#live[@]} ]] || {
+        echo "[self-test] a helper hunk selected ${#got[@]} proofs, want ${#live[@]}" >&2
         return 1
     }
     echo "[self-test] a helper hunk selects the full set"
