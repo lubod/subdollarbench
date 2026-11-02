@@ -35,6 +35,34 @@ fn r61_f2_tests_rs_outside_digest() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// R61-4: `#[cfg(test)]` must be one of the attribute lines directly
+/// above `mod tests;`, not merely somewhere in the parent. A `#[path]`
+/// line may sit between them.
+fn declares_cfg_test_tests(src: &str) -> bool {
+    let lines: Vec<&str> = src.lines().map(str::trim).collect();
+    for (i, line) in lines.iter().enumerate() {
+        if *line != "mod tests;" {
+            continue;
+        }
+        let mut saw_cfg_test = false;
+        let mut j = i;
+        while j > 0 {
+            let prev = lines[j - 1];
+            if !(prev.starts_with("#[") && prev.ends_with(']')) {
+                break;
+            }
+            if prev == "#[cfg(test)]" {
+                saw_cfg_test = true;
+            }
+            j -= 1;
+        }
+        if saw_cfg_test {
+            return true;
+        }
+    }
+    false
+}
+
 fn check_cfg_test_only(root: &Path, dirs: &[&str]) -> Result<(), String> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = fs::read_dir(root.join(dir)) else {
@@ -62,24 +90,11 @@ fn check_cfg_test_only(root: &Path, dirs: &[&str]) -> Result<(), String> {
             parent_dir.join(format!("{stem}.rs")),
             parent_dir.join(&stem).join("mod.rs"),
         ];
-        let mut ok = candidates.iter().any(|p| {
+        let ok = candidates.iter().any(|p| {
             fs::read_to_string(p)
-                .map(|s| s.contains("#[cfg(test)]\nmod tests;"))
+                .map(|s| declares_cfg_test_tests(&s))
                 .unwrap_or(false)
         });
-        // A `#[path = "graded_hash.rs"]` module declares its child tests
-        // beside the path file, not a same-named sibling. Accept any
-        // sibling source that declares the module under cfg(test).
-        if !ok {
-            if let Ok(rd) = fs::read_dir(parent_dir) {
-                ok = rd.flatten().any(|e| {
-                    e.path().extension().and_then(|x| x.to_str()) == Some("rs")
-                        && fs::read_to_string(e.path())
-                            .map(|s| s.contains("#[cfg(test)]\nmod tests;"))
-                            .unwrap_or(false)
-                });
-            }
-        }
         if !ok {
             return Err(format!(
                 "{} has no '#[cfg(test)] mod tests;' parent",
@@ -96,10 +111,24 @@ fn r61_f2_test_files_are_cfg_test_only() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     check_cfg_test_only(manifest, &["src"]).expect("the tree must be cfg(test)-only");
     let root = temp_root("fixture");
-    fs::create_dir_all(root.join("src/x")).unwrap();
-    fs::write(root.join("src/x/tests.rs"), "").unwrap();
+    fs::create_dir_all(root.join("src/a/x")).unwrap();
+    fs::write(root.join("src/a/x/tests.rs"), "").unwrap();
+    fs::write(root.join("src/a/x.rs"), "pub fn x() {}\n").unwrap();
+    fs::write(root.join("src/a/y.rs"), "#[cfg(test)]\nmod tests;\n").unwrap();
     assert!(check_cfg_test_only(&root, &["src"]).is_err());
-    fs::write(root.join("src/x.rs"), "#[cfg(test)]\nmod tests;\n").unwrap();
+    fs::write(root.join("src/a/x.rs"), "#[cfg(test)]\nmod tests;\n").unwrap();
+    assert!(check_cfg_test_only(&root, &["src"]).is_ok());
+    // R61-4: an unrelated #[cfg(test)] item above a bare mod tests; is not
+    // a declaration of the test module.
+    fs::create_dir_all(root.join("src/a/z")).unwrap();
+    fs::write(root.join("src/a/z/tests.rs"), "").unwrap();
+    fs::write(
+        root.join("src/a/z.rs"),
+        "#[cfg(test)]\nfn helper() {}\nmod tests;\n",
+    )
+    .unwrap();
+    assert!(check_cfg_test_only(&root, &["src"]).is_err());
+    fs::write(root.join("src/a/z.rs"), "#[cfg(test)]\nmod tests;\n").unwrap();
     assert!(check_cfg_test_only(&root, &["src"]).is_ok());
     let _ = fs::remove_dir_all(&root);
 }

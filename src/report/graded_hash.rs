@@ -152,4 +152,5 @@ pub fn compiled_digest(root: &Path, manifest: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "graded_hash/tests.rs"]
 mod tests;
