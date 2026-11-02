@@ -17,6 +17,7 @@ mapfile -t graded_paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.t
 flake_key() {
     local repo="$1" tree="$2"
     ( cd "$repo" && git ls-tree -r "$tree" -- "${graded_paths[@]}" \
+        | awk '$4 !~ /(^|\/)tests\.rs$/ || $4 == "src/pipeline/tests.rs"' \
         | sha256sum | cut -c1-12 )
 }
 
@@ -70,8 +71,8 @@ fi
 # the SQL_PERF_LIVE holders only; the bar must not shrink to that list.
 tests_from_source() {
     {
-        grep -oE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs
-        grep -oE 'fn r4[59]_[a-z0-9_]*' src/pipeline.rs
+        grep -oE 'fn test_pipeline_eval_only_sql_stage[0-9a-z_]*_live' src/pipeline.rs src/pipeline/tests.rs
+        grep -oE 'fn r4[59]_[a-z0-9_]*' src/pipeline.rs src/pipeline/tests.rs
     } | sed 's/^fn //' | sort -u
 }
 

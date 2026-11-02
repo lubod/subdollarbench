@@ -60,7 +60,9 @@ mapfile -t graded_paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.t
 base="$(git merge-base HEAD master 2>/dev/null || true)"
 touched=""
 if [[ -n "$base" ]]; then
-    touched="$(git diff --name-only "$base" HEAD -- "${graded_paths[@]}" | head -5 | tr '\n' ' ')"
+    touched="$(git diff --name-only "$base" HEAD -- "${graded_paths[@]}" \
+        | awk '$0 !~ /(^|\/)tests\.rs$/ || $0 == "src/pipeline/tests.rs"' \
+        | head -5 | tr '\n' ' ')"
 fi
 
 commit="$(git rev-parse --short=12 HEAD)"

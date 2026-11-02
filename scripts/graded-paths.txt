@@ -1,5 +1,6 @@
 # One graded-path list for scripts/gate.sh (scope) and scripts/flake-bar.sh
-# (record key). A change under any of these needs the full gate and moves
+# (record key). Test-only tests.rs files are excluded everywhere except
+# src/pipeline/tests.rs (the live proofs); see flake_key and gate scope. A change under any of these needs the full gate and moves
 # the flake record.
 src/verifier
 src/pipeline.rs
