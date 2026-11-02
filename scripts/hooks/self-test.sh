@@ -127,7 +127,8 @@ hooks_base="$(git -C "$hooksrepo" rev-parse HEAD)"
 env_value="sk-or-v1-$(date +%s)-FIXTURE-ENV"
 printf 'OPENROUTER_API_KEY=%s\n' "$env_value" >"$hooksrepo/.env"
 push_hooks() {
-    (cd "$hooksrepo" && printf 'refs/heads/x %s refs/heads/x %s\n' "$1" "${2:-0000000000000000000000000000000000000000}" \
+    local ref="${3:-refs/heads/x}"
+    (cd "$hooksrepo" && printf '%s %s %s %s\n' "$ref" "$1" "$ref" "${2:-0000000000000000000000000000000000000000}" \
         | bash "$PRE_PUSH" origin "$dir/remote")
 }
 rc=0
@@ -181,6 +182,32 @@ out="$(push_hooks "$leak_commit" "$plus_commit" 2>&1)" || rc=$?
 grep -q 'leak.txt' <<<"$out" || {
     echo '[self-test] the pattern hit named no file' >&2; printf '%s\n' "$out" >&2; exit 1; }
 echo '[self-test] pattern hit outside the allowlist refused'
+
+# R62 F5: removing a pattern line adds nothing, so it passes; adding one
+# was refused above.
+git -C "$hooksrepo" rm -q leak.txt
+git -C "$hooksrepo" commit -qm remove-leak
+remove_commit="$(git -C "$hooksrepo" rev-parse HEAD)"
+rc=0
+out="$(push_hooks "$remove_commit" "$leak_commit" 2>&1)" || rc=$?
+[[ "$rc" -eq 0 ]] || {
+    echo "[self-test] a removed pattern line was refused (rc=$rc)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+echo '[self-test] a removed pattern line passes'
+
+# R62 F5: a tag on a commit already reachable from a remote-tracking ref
+# adds nothing new; the pattern is not scanned.
+git -C "$hooksrepo" update-ref refs/remotes/origin/main "$leak_commit"
+rc=0
+out="$(push_hooks "$leak_commit" "0000000000000000000000000000000000000000" refs/tags/r62-test 2>&1)" || rc=$?
+[[ "$rc" -eq 0 ]] || {
+    echo "[self-test] a tag already on the remote was refused (rc=$rc)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+echo '[self-test] a tag already on the remote passes the pattern check'
 
 # R57 F1: the allowlist comes from the pushed commit. An uncommitted
 # line that would allow the leak has no effect; the same line committed

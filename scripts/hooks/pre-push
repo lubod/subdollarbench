@@ -58,6 +58,14 @@ if [[ -n "$env_file" ]]; then
     done <"$env_file"
 fi
 
+# R62 F5: a commit already reachable from a remote-tracking ref adds
+# nothing new to the remote. Such a ref is scanned only for real .env
+# values, never refused on the pattern.
+already_on_remote() {
+    git for-each-ref --contains "$1" --count=1 --format='%(refname)' \
+        refs/remotes/ 2>/dev/null | grep -q .
+}
+
 # The base to diff from for one pushed ref.
 range_base() {
     local remote_sha="$1" local_sha="$2" commits first
@@ -86,6 +94,10 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     _remote_sha="${_remote_sha:-}"
     ref="${remote_ref:-$local_ref}"
     base="$(range_base "$_remote_sha" "$local_sha")"
+    already=0
+    if already_on_remote "$local_sha"; then
+        already=1
+    fi
 
     if ! diff_out="$(git diff -U0 "$base" "$local_sha" 2>/dev/null)"; then
         refuse "$ref" "cannot read the pushed range"
@@ -140,17 +152,22 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     fi
 
     # 2) The pattern, unless the path is allowlisted; the message names
-    # the file, never the matching text.
-    while IFS= read -r file; do
-        [[ -n "$file" ]] || continue
-        allowed_path "$file" && continue
-        refuse "$ref" "$file matches a secret pattern"
-    done < <(
-        printf '%s\n' "$diff_out" | awk -v re="$secret_re" '
-            /^diff --git / { f = $3; sub(/^a\//, "", f) }
-            $0 ~ re { if (f != "") { print f; f = "" } }
-        ' | sort -u
-    )
+    # the file, never the matching text. R62 F5: only added lines count
+    # (`+`, not `+++`), and an already-pushed ref is not scanned at all.
+    if [[ "$already" -eq 0 ]]; then
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            allowed_path "$file" && continue
+            refuse "$ref" "$file matches a secret pattern"
+        done < <(
+            printf '%s\n' "$diff_out" | awk -v re="$secret_re" '
+                /^diff --git / { f = $3; sub(/^a\//, "", f) }
+                /^\+/ && !/^\+\+\+/ && $0 ~ re {
+                    if (f != "") { print f; f = "" }
+                }
+            ' | sort -u
+        )
+    fi
 
     # 3) Tracked files that must never be pushed (no allowlist applies).
     while IFS= read -r file; do
