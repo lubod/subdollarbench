@@ -161,6 +161,10 @@ if [[ "${SDB_GATE_SCOPE_ONLY:-0}" == "1" ]]; then
     echo "scope:   $scope"
     exit 0
 fi
+if [[ $ready -eq 1 && $rules_bumped -eq 1 ]]; then
+    echo "[gate] FATAL: RULES_VERSION changed; --ready cannot substitute for the full gate" >&2
+    exit 1
+fi
 
 # R56 F6: a full gate builds and runs Docker-heavy tests; a --ready gate
 # runs the serialized live proofs too. Both refuse next to a live cell.
