@@ -72,6 +72,116 @@ changed_graded_paths() {
     )
 }
 
+# R62 F1: top-level fn spans in a Rust test file: name, start line and
+# end line (1-based). The span starts at the doc comment/attributes and
+# ends at the closing brace, so a hunk on either selects the function.
+fn_spans() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+head = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z0-9_]+)")
+attr = re.compile(r"^\s*#!?\[")
+doc = re.compile(r"^\s*///")
+raw = re.compile(r'(?:b|br)?r(#*)"')
+normal_str = re.compile(r'b?"')
+
+
+def end_of_block(start):
+    depth = 0
+    seen_open = False
+    in_block = False
+    in_str = False
+    raw_hashes = -1
+    i = start
+    while i < len(lines):
+        line = lines[i]
+        j = 0
+        while j < len(line):
+            ch = line[j]
+            if in_block:
+                if ch == "*" and line[j + 1:j + 2] == "/":
+                    in_block = False
+                    j += 2
+                    continue
+                j += 1
+                continue
+            if raw_hashes >= 0:
+                if ch == '"' and line[j + 1:j + 1 + raw_hashes] == "#" * raw_hashes:
+                    j += 1 + raw_hashes
+                    raw_hashes = -1
+                    continue
+                j += 1
+                continue
+            if in_str:
+                if ch == "\\":
+                    j += 2
+                    continue
+                if ch == '"':
+                    in_str = False
+                j += 1
+                continue
+            if ch == "/" and line[j + 1:j + 2] == "/":
+                break
+            if ch == "/" and line[j + 1:j + 2] == "*":
+                in_block = True
+                j += 2
+                continue
+            m = raw.match(line, j)
+            if m:
+                raw_hashes = len(m.group(1))
+                j = m.end()
+                continue
+            m = normal_str.match(line, j)
+            if m:
+                in_str = True
+                j = m.end()
+                continue
+            if ch == "'":
+                k = j + 1
+                if k < len(line) and line[k] == "\\":
+                    k += 2
+                else:
+                    k += 1
+                if k < len(line) and line[k] == "'":
+                    j = k + 1
+                    continue
+                j += 1
+                continue
+            if ch == "{":
+                depth += 1
+                seen_open = True
+            elif ch == "}":
+                depth -= 1
+                if seen_open and depth == 0:
+                    return i
+            j += 1
+        i += 1
+    return len(lines) - 1
+
+
+def head_start(i):
+    start = i
+    j = i - 1
+    while j >= 0:
+        if doc.match(lines[j]) or attr.match(lines[j]):
+            start = j
+            j -= 1
+            continue
+        break
+    return start
+
+
+for i, line in enumerate(lines):
+    m = head.match(line)
+    if not m:
+        continue
+    print(f"{m.group(1)}\t{head_start(i) + 1}\t{end_of_block(i) + 1}")
+PY
+}
+
 # Extra proofs (not the core set) selected by the branch's graded changes.
 # Output: <proof> TAB <reason>.
 mapped_ready_proofs() {
@@ -86,27 +196,56 @@ mapped_ready_proofs() {
         done < <(ready_full_set "$repo")
         return 0
     fi
-    local path header name proof full
+    local path name proof full start count last matched span s_start s_end
+    local -a head_bar base_bar ready_set spans
+
+    # R62 F2: a proof present at HEAD but not at the merge base is new (or
+    # renamed). Run it even when the hunk that adds it is not attributed.
+    mapfile -t head_bar < <(bar_proofs "$repo")
+    mapfile -t base_bar < <(bar_proofs_at "$repo" "$base")
+    mapfile -t ready_set < <(ready_full_set "$repo")
+    for proof in "${head_bar[@]}"; do
+        printf '%s\n' "${base_bar[@]}" | grep -qx "$proof" && continue
+        printf '%s\n' "${ready_set[@]}" | grep -qx "$proof" || continue
+        printf '%s\tnew proof\n' "$proof"
+    done
+
     while IFS= read -r path; do
         [[ -z "$path" ]] && continue
         if [[ "$path" == "src/pipeline/tests.rs" ]]; then
-            # R61 F7: attribute each hunk by the fn in git's Rust hunk
-            # header. A shared helper (or a whole-file add) is unattributed,
-            # so the full set runs.
+            # R62 F1: a hunk belongs to every top-level fn whose span (doc
+            # comment and attributes through the closing brace) contains
+            # its new lines. The hunk header alone is wrong for async fn,
+            # for a doc comment or signature, and for a hunk spanning two
+            # functions.
             full=0
-            while IFS= read -r header; do
-                name="$(sed -nE 's/^fn ([a-z0-9_]+).*/\1/p' <<<"$header")"
-                if [[ -z "$name" ]] || ! bar_proofs "$repo" | grep -qx "$name"; then
+            mapfile -t spans < <(fn_spans "$repo/src/pipeline/tests.rs")
+            while IFS=' ' read -r start count; do
+                [[ -n "$start" ]] || continue
+                local last="$start"
+                [[ "$count" -gt 0 ]] && last=$((start + count - 1))
+                matched=0
+                for span in "${spans[@]}"; do
+                    IFS=$'\t' read -r name s_start s_end <<<"$span"
+                    if ((start <= s_end && last >= s_start)); then
+                        matched=1
+                        if ! bar_proofs "$repo" | grep -qx "$name"; then
+                            full=1
+                            break 2
+                        fi
+                        # A proof the fast set already ran needs no extra run.
+                        if ! ready_full_set "$repo" | grep -qx "$name"; then
+                            continue
+                        fi
+                        printf '%s\tmapped: %s (hunk)\n' "$name" "$path"
+                    fi
+                done
+                if [[ "$matched" -eq 0 ]]; then
                     full=1
                     break
                 fi
-                # A proof the fast set already ran needs no extra run.
-                if ! ready_full_set "$repo" | grep -qx "$name"; then
-                    continue
-                fi
-                printf '%s\tmapped: %s (hunk)\n' "$name" "$path"
             done < <(git -C "$repo" diff -U0 "$base" HEAD -- "$path" \
-                | sed -n 's/^@@[^@]*@@ *//p')
+                | sed -nE 's/^@@ -[0-9]+(,[0-9]+)? \+([0-9]+)(,([0-9]+))? @@.*/\2 \4/p')
             if [[ "$full" -eq 1 ]]; then
                 while IFS= read -r proof; do
                     printf '%s\tunattributed hunk: full set\n' "$proof"
@@ -125,11 +264,12 @@ mapped_ready_proofs() {
 # each (core wins when both apply).
 select_ready_proofs() {
     local repo="$1" base="${2:-}" proof reason
-    local -A mapped=() unattributed=() core=()
+    local -A mapped=() unattributed=() new=() core=()
     while IFS=$'\t' read -r proof reason; do
         [[ -z "$proof" ]] && continue
         case "$reason" in
             core) core[$proof]=1 ;;
+            "new proof") new[$proof]=1 ;;
             "unattributed hunk: full set") unattributed[$proof]=1 ;;
             *) [[ -n "${mapped[$proof]:-}" ]] || mapped[$proof]="$reason" ;;
         esac
@@ -142,12 +282,17 @@ select_ready_proofs() {
         for proof in "${!core[@]}"; do
             printf '%s\tcore\n' "$proof"
         done
-        for proof in "${!unattributed[@]}"; do
+        for proof in "${!new[@]}"; do
             [[ -n "${core[$proof]:-}" ]] && continue
+            printf '%s\tnew proof\n' "$proof"
+        done
+        for proof in "${!unattributed[@]}"; do
+            [[ -n "${core[$proof]:-}" || -n "${new[$proof]:-}" ]] && continue
             printf '%s\tunattributed hunk: full set\n' "$proof"
         done
         for proof in "${!mapped[@]}"; do
-            [[ -n "${core[$proof]:-}" || -n "${unattributed[$proof]:-}" ]] && continue
+            [[ -n "${core[$proof]:-}" || -n "${unattributed[$proof]:-}" \
+                || -n "${new[$proof]:-}" ]] && continue
             printf '%s\t%s\n' "$proof" "${mapped[$proof]}"
         done
     } | sort
@@ -227,11 +372,25 @@ self_test() {
     : >"$repo/src/main.rs"
     {
         while IFS= read -r proof; do
-            if printf '%s\n' "${live[@]}" | grep -qx "$proof"; then
-                printf 'fn %s() { let _serial = SQL_PERF_LIVE.lock(); }\n\n' "$proof"
-            else
-                printf 'fn %s() {}\n\n' "$proof"
-            fi
+            case "$proof" in
+                r45_f1_reference_scores_one)
+                    printf '/// doc for %s\nfn %s() {\n    let _serial = SQL_PERF_LIVE.lock();\n    let x = 1;\n}\n\n' \
+                        "$proof" "$proof" ;;
+                # R62 F1: the lite proof ends on the line before the live
+                # proof's doc comment, so one two-line hunk spans both.
+                test_pipeline_eval_only_sql_stage12_concurrency_lite_live)
+                    printf '/// doc for %s\nfn %s() {\n    let _serial = SQL_PERF_LIVE.lock();\n    let x = 1;\n}\n' \
+                        "$proof" "$proof" ;;
+                test_pipeline_eval_only_sql_stage12_concurrency_live)
+                    printf '/// doc for %s\nasync fn %s() {\n    let _serial = SQL_PERF_LIVE.lock();\n    let x = 1;\n}\n\n' \
+                        "$proof" "$proof" ;;
+                *)
+                    if printf '%s\n' "${live[@]}" | grep -qx "$proof"; then
+                        printf 'fn %s() { let _serial = SQL_PERF_LIVE.lock(); }\n\n' "$proof"
+                    else
+                        printf 'fn %s() {}\n\n' "$proof"
+                    fi ;;
+            esac
         done < <(bar_proofs "$PROOF_MAP_ROOT")
         # The two live proofs outside the bar (r54, the tests/CI gate) still
         # belong to the full ready set.
@@ -240,9 +399,6 @@ self_test() {
             printf 'fn %s() { let _serial = SQL_PERF_LIVE.lock(); }\n\n' "$proof"
         done < <(printf '%s\n' "${live[@]}")
     } >"$repo/src/pipeline/tests.rs"
-    # The proof-body fixture needs a body line to change.
-    sed -i 's/^fn r45_f1_reference_scores_one() { let _serial = SQL_PERF_LIVE\.lock(); }$/fn r45_f1_reference_scores_one() {\n    let _serial = SQL_PERF_LIVE.lock();\n    let x = 1;\n}/' \
-        "$repo/src/pipeline/tests.rs"
     printf 'fn helper() {\n    let x = 1;\n}\n' >>"$repo/src/pipeline/tests.rs"
     git -C "$repo" init -q -b master
     git -C "$repo" config user.email proof-map@example.com
@@ -277,21 +433,64 @@ self_test() {
     [[ $failed -eq 0 ]] || return 1
     echo "[self-test] concurrency.rs selects the two stage-12 proofs"
 
-    # 4b) a hunk inside a proof body selects that proof.
+    # 4b) a hunk inside an async fn proof selects that proof (R61-6).
     git -C "$repo" reset -q --hard master
-    sed -i '/fn r45_f1_reference_scores_one()/,/^}/ s/let x = 1;/let x = 2;/' \
+    sed -i '/async fn test_pipeline_eval_only_sql_stage12_concurrency_live()/,/^}/ s/let x = 1;/let x = 2;/' \
         "$repo/src/pipeline/tests.rs"
     git -C "$repo" add -A
-    git -C "$repo" commit -qm proof-body
+    git -C "$repo" commit -qm async-body
     mapfile -t got < <(mapped_ready_proofs "$repo" master)
-    [[ ${#got[@]} -eq 1 && "${got[0]%%$'\t'*}" == "r45_f1_reference_scores_one" ]] || {
-        echo "[self-test] a proof-body hunk did not select just that proof" >&2
+    [[ ${#got[@]} -eq 1 && "${got[0]%%$'\t'*}" == "test_pipeline_eval_only_sql_stage12_concurrency_live" ]] || {
+        echo "[self-test] an async proof-body hunk did not select just that proof" >&2
         printf '%s\n' "${got[@]}" >&2
         return 1
     }
-    echo "[self-test] a proof-body hunk selects its proof"
+    echo "[self-test] an async proof-body hunk selects its proof"
 
-    # 4c) a helper outside any proof selects the full set.
+    # 4c) a hunk on a proof's doc comment selects that proof, not the one
+    # before it.
+    git -C "$repo" reset -q --hard master
+    sed -i 's|^/// doc for test_pipeline_eval_only_sql_stage12_concurrency_live$|/// changed doc|' \
+        "$repo/src/pipeline/tests.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm doc-comment
+    mapfile -t got < <(mapped_ready_proofs "$repo" master)
+    [[ ${#got[@]} -eq 1 && "${got[0]%%$'\t'*}" == "test_pipeline_eval_only_sql_stage12_concurrency_live" ]] || {
+        echo "[self-test] a doc-comment hunk selected the wrong proof" >&2
+        printf '%s\n' "${got[@]}" >&2
+        return 1
+    }
+    echo "[self-test] a doc-comment hunk selects its proof"
+
+    # 4d) one hunk spanning two proofs selects both.
+    git -C "$repo" reset -q --hard master
+    sed -i '/fn test_pipeline_eval_only_sql_stage12_concurrency_lite_live()/,/^}$/ s/^}$/} \/\/ changed/' \
+        "$repo/src/pipeline/tests.rs"
+    sed -i 's|^/// doc for test_pipeline_eval_only_sql_stage12_concurrency_live$|/// changed doc|' \
+        "$repo/src/pipeline/tests.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm two-proofs
+    [[ "$(git -C "$repo" diff -U0 master HEAD -- src/pipeline/tests.rs | grep -c '^@@')" -eq 1 ]] || {
+        echo "[self-test] the two-proof fixture is not one hunk" >&2
+        return 1
+    }
+    mapfile -t got < <(mapped_ready_proofs "$repo" master)
+    [[ ${#got[@]} -eq 2 ]] || {
+        echo "[self-test] the two-proof hunk selected ${#got[@]} proofs, want 2" >&2
+        printf '%s\n' "${got[@]}" >&2
+        return 1
+    }
+    printf '%s\n' "${got[@]}" | grep -q $'^test_pipeline_eval_only_sql_stage12_concurrency_lite_live\t' || {
+        echo "[self-test] the two-proof hunk missed stage12 lite" >&2
+        return 1
+    }
+    printf '%s\n' "${got[@]}" | grep -q $'^test_pipeline_eval_only_sql_stage12_concurrency_live\t' || {
+        echo "[self-test] the two-proof hunk missed stage12 live" >&2
+        return 1
+    }
+    echo "[self-test] one hunk selects both proofs it spans"
+
+    # 4e) a helper outside any proof selects the full set.
     git -C "$repo" reset -q --hard master
     sed -i '/fn helper()/,/^}/ s/let x = 1;/let x = 2;/' "$repo/src/pipeline/tests.rs"
     git -C "$repo" add -A
@@ -303,7 +502,7 @@ self_test() {
     }
     echo "[self-test] a helper hunk selects the full set"
 
-    # 4d) a docs-only change selects no mapped proof.
+    # 4f) a docs-only change selects no mapped proof.
     git -C "$repo" reset -q --hard master
     printf '# docs changed\n' >"$repo/docs/readme.md"
     git -C "$repo" add -A
@@ -314,6 +513,33 @@ self_test() {
         return 1
     }
     echo "[self-test] a docs-only change selects nothing"
+
+    # 4g) a proof added since the merge base is new and runs (R62 F2).
+    git -C "$repo" reset -q --hard master
+    python3 - "$repo/src/pipeline/tests.rs" <<'PY'
+import sys
+
+path = sys.argv[1]
+s = open(path).read()
+needle = "fn r45_f1_reference_scores_one() {"
+start = s.index(needle)
+end = s.index("\n}\n", start) + 3
+new = (
+    "\nasync fn test_pipeline_eval_only_sql_stage12_extra_live() {\n"
+    "    let _serial = SQL_PERF_LIVE.lock();\n"
+    "}\n"
+)
+open(path, "w").write(s[:end] + new + s[end:])
+PY
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm new-proof
+    mapfile -t got < <(mapped_ready_proofs "$repo" master)
+    printf '%s\n' "${got[@]}" | grep -q $'^test_pipeline_eval_only_sql_stage12_extra_live\tnew proof$' || {
+        echo "[self-test] a new proof was not selected as new proof" >&2
+        printf '%s\n' "${got[@]}" >&2
+        return 1
+    }
+    echo "[self-test] a new proof is selected as new proof"
 
     echo "RESULT: PASS (proof-map self-test)"
 }
