@@ -46,7 +46,7 @@ from `TEMPLATE.md`.
 | [58](58.md) | Grading: a busy retry is a time budget with jittered backoff (the bar's stage-12 flake); rules `.45` (full gate) | merged `36c512d` |
 | [59](59.md) | Tests: the busy-streak test gets its headroom back (R58-2; graded: full gate, no bump) | merged `f3d4292` |
 | [60](60.md) | Tests: the perf self-check measures again once on a loaded host (R59-1; graded: full gate, no bump) | merged `a821adf` |
-| [61](61.md) | The bar converges and the gate gets faster: test code leaves the key, one rerun, detached long jobs, a `--ready` gate (graded: full gate, no bump; D1 a, D2 a, D3 yes, D4 `--ready` gate; 9 items) | draft, opens after 60 |
+| [61](61.md) | The bar converges and the gate gets faster: test code leaves the key, one rerun, detached long jobs, a `--ready` gate (graded: full gate, no bump; D1 a, D2 a, D3 yes, D4 `--ready` gate; 9 items) | open |
 
 **Status values:**
 
