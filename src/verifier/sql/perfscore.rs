@@ -303,6 +303,7 @@ pub fn run_pair_with_flush(
     let mut error: Option<String> = None;
     for id in workloads_for_phase(phase) {
         let prefix = format!("p{}{}{:x}", cfg.seed, id.to_ascii_lowercase(), nonce);
+        let _phase_workload = super::PhaseTimer::new(format!("perf workload {id}"));
         let (workload, harness_error) = match *id {
             "W1" => run_w1(reference_addr, candidate_addr, &prefix, cfg),
             "W2" => run_w2(reference_addr, candidate_addr, &prefix, cfg),
@@ -1582,6 +1583,7 @@ pub fn run_workspace_at(
     // reaped too.
     let ref_guard = RunGuard::new(ref_sb);
     let cand_guard = RunGuard::new(cand_sb);
+    let phase_containers = super::PhaseTimer::new("perf containers + readiness");
     ref_guard
         .manager()
         .start_candidate_in_docker_with(&ref_ws, ref_port, &sql_extras(&ref_data, ref_port))
@@ -1607,6 +1609,7 @@ pub fn run_workspace_at(
             format!("the candidate did not answer: {e}"),
         ));
     }
+    drop(phase_containers);
     Ok(run_pair_with_flush(
         &ref_addr,
         &cand_addr,

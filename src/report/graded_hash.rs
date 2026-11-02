@@ -50,12 +50,10 @@ pub fn collect_dir(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
         let path = root.join(&rel);
         if path.is_dir() {
             collect_dir(root, &rel, out);
-        } else if path.is_file() {
+        } else if path.is_file() && entry.file_name() != "tests.rs" {
             // R61 F2: test code is not in the release binary and must
             // not move the graded digest.
-            if entry.file_name() != "tests.rs" {
-                out.push(rel);
-            }
+            out.push(rel);
         }
     }
 }
@@ -121,10 +119,8 @@ fn collect_dir_strict(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
         let path = root.join(&rel);
         if path.is_dir() {
             collect_dir_strict(root, &rel, out);
-        } else if path.is_file() {
-            if entry.file_name() != "tests.rs" {
-                out.push(rel);
-            }
+        } else if path.is_file() && entry.file_name() != "tests.rs" {
+            out.push(rel);
         }
     }
 }

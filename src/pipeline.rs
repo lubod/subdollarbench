@@ -1268,6 +1268,8 @@ impl BenchmarkPipeline {
                         sql_data = Some(data);
                     }
                 }
+                let phase_candidate =
+                    crate::verifier::sql::PhaseTimer::new("candidate start + ready wait");
                 if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
                     if crate::sandbox::docker::SandboxManager::is_model_packaging_error(
                         &e.to_string(),
@@ -1305,6 +1307,7 @@ impl BenchmarkPipeline {
                 } else {
                     logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
                 }
+                drop(phase_candidate);
 
                 match task {
                     TaskType::Sql => {
@@ -1510,6 +1513,9 @@ impl BenchmarkPipeline {
                             // ticket being graded, earlier lite passes come
                             // from the ladder (`passed_lite`).
                             let variants = suite_variants(passed_lite, lite_profile, &wanted);
+                            let phase_stage = crate::verifier::sql::PhaseTimer::new(format!(
+                                "stage {stage} differential suite"
+                            ));
                             let run = tokio::task::spawn_blocking(move || {
                                 crate::verifier::sql::driver::run_stage_with_variants(
                                     &addr,
@@ -1602,6 +1608,7 @@ impl BenchmarkPipeline {
                                     }
                                 }
                             };
+                            drop(phase_stage);
                             prior_failed |= !st.passed;
                             log_stage(logger, &st);
                             stages.push(st);
@@ -1806,6 +1813,9 @@ impl BenchmarkPipeline {
                             // ticket-4 graceful one (SIGKILL is ticket 5's
                             // contract, and ticket 11 needs only [3, 4]).
                             if late_failure.is_none() && wanted.contains(&11) {
+                                let _phase = crate::verifier::sql::PhaseTimer::new(
+                                    "late stage 11 perf gate",
+                                );
                                 late_ran.push(11);
                                 let lite = if wanted.iter().copied().max() == Some(11) {
                                     lite_profile.iter().any(|p| p == "index-equality-only")
@@ -1900,6 +1910,8 @@ impl BenchmarkPipeline {
                             // memory"). The heavy store is thrown away; the
                             // real store never sees it.
                             if late_failure.is_none() && wanted.contains(&16) {
+                                let _phase =
+                                    crate::verifier::sql::PhaseTimer::new("late stage 16 memory");
                                 late_ran.push(16);
                                 let scratch = sql_data.as_ref().map(|data| {
                                     data.with_file_name(format!(
@@ -1973,6 +1985,9 @@ impl BenchmarkPipeline {
                             // must succeed after the filler is removed
                             // (docs/PROPOSAL-sdb-sql.md, "17. Disk full").
                             if late_failure.is_none() && wanted.contains(&17) {
+                                let _phase = crate::verifier::sql::PhaseTimer::new(
+                                    "late stage 17 disk full",
+                                );
                                 late_ran.push(17);
                                 let mut disk_extras = extras.clone();
                                 disk_extras.binds.clear();
@@ -2047,6 +2062,8 @@ impl BenchmarkPipeline {
                             // "18. Hostile input and limits"). The password
                             // must not reach an error or the container logs.
                             if late_failure.is_none() && wanted.contains(&18) {
+                                let _phase =
+                                    crate::verifier::sql::PhaseTimer::new("late stage 18 security");
                                 late_ran.push(18);
                                 let password = format!(
                                     "sdb-sec-{:x}",
@@ -2150,6 +2167,9 @@ impl BenchmarkPipeline {
                             // primary (docs/PROPOSAL-sdb-sql.md,
                             // "19. Replication and failover").
                             if late_failure.is_none() && wanted.contains(&19) {
+                                let _phase = crate::verifier::sql::PhaseTimer::new(
+                                    "late stage 19 replication",
+                                );
                                 late_ran.push(19);
                                 let lite = if wanted.iter().copied().max() == Some(19) {
                                     lite_profile.iter().any(|p| p == "two-nodes-promote")
@@ -2342,6 +2362,8 @@ impl BenchmarkPipeline {
                             // extended query, SQLSTATE), then a stock psql
                             // from the local postgres image cross-checks it.
                             if late_failure.is_none() && wanted.contains(&20) {
+                                let _phase =
+                                    crate::verifier::sql::PhaseTimer::new("late stage 20 pgwire");
                                 late_ran.push(20);
                                 let lite = if wanted.iter().copied().max() == Some(20) {
                                     lite_profile.iter().any(|p| p == "pg-simple")
@@ -2840,6 +2862,7 @@ impl BenchmarkPipeline {
         }
 
         // 3. Start reference containers (attached to the run network under stable aliases)
+        let phase_ref = crate::verifier::sql::PhaseTimer::new("reference server start");
         logger.log("[SETUP] Starting official reference server in Docker...");
         match config.task {
             TaskType::Sql => {
@@ -2853,6 +2876,7 @@ impl BenchmarkPipeline {
                 }
             }
         }
+        drop(phase_ref);
 
         // 4. Read prompt (campaign tickets override the task prompt; port
         // templating + the READY contract apply to both).

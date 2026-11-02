@@ -128,6 +128,7 @@ pub struct StageOutcome {
 /// shrink reset untrusted (review finding 2). Any parseable answer counts,
 /// including an error class: stage-0 candidates may reject `SELECT 1`.
 pub fn wait_until_answering(addr: &str, timeout: Duration) -> Result<(), String> {
+    let _phase = super::PhaseTimer::new(format!("wait until answering {addr}"));
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Ok(mut c) = TcpCandidate::connect(addr, Duration::from_secs(2)) {
