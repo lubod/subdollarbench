@@ -4961,36 +4961,151 @@ main()
         let _ = fs::remove_dir_all(&dir);
     }
 
+    use crate::verifier::sql::perfscore::{PerfScore, WorkloadResult};
+
+    fn perf_fixture(ratio: f64, score: Option<f64>) -> PerfScore {
+        PerfScore {
+            workloads: vec![WorkloadResult {
+                id: "W1".to_string(),
+                metric: "latency".to_string(),
+                reference: 1.0,
+                candidate: ratio,
+                ratio,
+                correct: true,
+                numbers: Default::default(),
+                note: None,
+                harness_fault: false,
+            }],
+            score,
+            error: None,
+        }
+    }
+
+    fn perf_tolerance(score: &PerfScore) -> Result<(), String> {
+        let mut bad = Vec::new();
+        for w in &score.workloads {
+            if (w.ratio - 1.0).abs() > 0.1 {
+                bad.push(format!(
+                    "{} ratio {:.3} (correct {}) note {:?}: {:?}",
+                    w.id, w.ratio, w.correct, w.note, w.numbers
+                ));
+            }
+        }
+        match score.score {
+            Some(value) if (value - 1.0).abs() <= 0.1 => {}
+            Some(value) => bad.push(format!("score {value:.3}: {:?}", score.workloads)),
+            None => bad.push(format!("score missing: {:?}", score.workloads)),
+        }
+        if bad.is_empty() {
+            Ok(())
+        } else {
+            Err(bad.join("\n"))
+        }
+    }
+
+    fn loadavg_text() -> String {
+        std::fs::read_to_string("/proc/loadavg")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|e| format!("unreadable ({e})"))
+    }
+
+    /// R60 F1: one measurement inside the tolerance, or one re-measure
+    /// after a miss. The closure returns a `PerfScore` or its error.
+    fn perf_self_check<F>(mut run: F) -> Result<(), String>
+    where
+        F: FnMut() -> Result<PerfScore, String>,
+    {
+        let mut failures = Vec::new();
+        for attempt in 1..=2 {
+            let before = loadavg_text();
+            let result = run();
+            let after = loadavg_text();
+            let message = match result {
+                Ok(score) => match perf_tolerance(&score) {
+                    Ok(()) => return Ok(()),
+                    Err(msg) => msg,
+                },
+                Err(e) => e,
+            };
+            failures.push(format!(
+                "run {attempt}: {message}\nloadavg before: {before}\nloadavg after: {after}"
+            ));
+        }
+        Err(failures.join("\n\n"))
+    }
+
+    /// R59-1: the perf self-check measures once, and re-measures once on
+    /// a loaded host. The tolerance itself is unchanged (±0.1); a
+    /// systematic miss still fails both runs.
+    #[test]
+    fn r60_f1_first_run_in_tolerance_measures_once() {
+        let mut calls = 0;
+        let result = perf_self_check(|| {
+            calls += 1;
+            Ok(perf_fixture(1.0, Some(1.0)))
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn r60_f1_one_remeasure_passes() {
+        let mut calls = 0;
+        let result = perf_self_check(|| {
+            calls += 1;
+            if calls == 1 {
+                Ok(perf_fixture(0.8, Some(1.0)))
+            } else {
+                Ok(perf_fixture(1.0, Some(1.0)))
+            }
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn r60_f1_two_misses_fail_with_both_runs() {
+        let mut calls = 0;
+        let result = perf_self_check(|| {
+            calls += 1;
+            Ok(perf_fixture(0.8, Some(0.8)))
+        });
+        let err = result.unwrap_err();
+        assert_eq!(calls, 2);
+        assert!(err.contains("run 1:"), "{err}");
+        assert!(err.contains("run 2:"), "{err}");
+        assert!(err.contains("W1 ratio 0.800"), "{err}");
+        assert!(err.contains("loadavg"), "{err}");
+    }
+
+    #[test]
+    fn r60_f1_score_counts() {
+        let missing = perf_self_check(|| Ok(perf_fixture(1.0, None))).unwrap_err();
+        assert!(missing.contains("score missing"), "{missing}");
+        let low = perf_self_check(|| Ok(perf_fixture(1.0, Some(0.8)))).unwrap_err();
+        assert!(low.contains("score 0.800"), "{low}");
+    }
+
     /// R45 F1 acceptance (live): the reference against itself scores
     /// 1.0 ± 0.1 on every workload over 5 alternating rounds. Both sides
     /// run in the sandbox (2 CPUs, 2 GiB) through the production runner.
+    /// R59-1: a loaded host can move one run; the test re-measures once
+    /// on a fresh directory and fails only if the second run misses too.
     #[test]
     fn r45_f1_reference_scores_one() {
         use crate::verifier::sql::perfscore::{run_workspace_at, PerfConfig};
         let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = covtest_dir("perfref");
-        let workdir = dir.join("workspace");
-        crate::verifier::sql::ref_server::write_reference(&workdir, 5480).unwrap();
-        let score = run_workspace_at(&workdir, 4, &PerfConfig::default(), &dir.join("runs"))
-            .expect("the reference workspace must start and score");
-        for w in &score.workloads {
-            assert!(
-                (w.ratio - 1.0).abs() <= 0.1,
-                "{} ratio {:.3} (correct {}) note {:?}: {:?}",
-                w.id,
-                w.ratio,
-                w.correct,
-                w.note,
-                w.numbers
-            );
-        }
-        let value = score.score.expect("the reference must score");
-        assert!(
-            (value - 1.0).abs() <= 0.1,
-            "score {value:.3}: {:?}",
-            score.workloads
-        );
-        let _ = fs::remove_dir_all(&dir);
+        let mut attempt = 0;
+        let result = perf_self_check(|| {
+            attempt += 1;
+            let dir = covtest_dir(&format!("perfref_{attempt}"));
+            let workdir = dir.join("workspace");
+            crate::verifier::sql::ref_server::write_reference(&workdir, 5480)
+                .map_err(|e| format!("reference workspace: {e}"))?;
+            run_workspace_at(&workdir, 4, &PerfConfig::default(), &dir.join("runs"))
+                .map_err(|e| format!("reference run: {e}"))
+        });
+        result.expect("the reference workspace must score within tolerance");
     }
 
     /// R49 F2 (live): a reference with `synchronous=OFF` as the candidate
