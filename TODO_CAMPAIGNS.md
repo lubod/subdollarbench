@@ -185,6 +185,18 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   run shares the host with another lane's agent. This needs an operator
   decision on the grader (a load check before and after, or a re-measure
   on a harness note) and a rules bump if it changes the score.
+- **The faster bar (R61-8, `docs/rounds/61.md` F8):** about 6 h saved
+  per 20-pass bar.
+  - Each stage proof regrades only its own differential stage, saving
+    64 s each.
+  - Don't repeat earlier late checks in later stage proofs (about 366 s
+    per pass).
+  - Run `r45_f1` once per bar, or with a smaller W5 (W5 is 304 s of its
+    360 s).
+
+  The first two shrink per-stage coverage, so they need a spec and an
+  operator decision. Every one edits `src/pipeline/tests.rs` and moves
+  the key, so the round goes between bars, not during one.
 - **Failure taxonomy** from campaign stages: truncation, tool misuse,
   regression patterns (old H3).
 - **Retirement:** finish the README rewrite for sdb-sql only (old M8,
