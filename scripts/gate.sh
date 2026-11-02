@@ -249,7 +249,13 @@ fast_set() {
 # matches nothing would exit 0 with "0 passed", so require exactly one.
 run_ready_proof() {
     local proof="$1" reason="$2" t0=$SECONDS
-    if nice -n 10 cargo test --lib "pipeline::tests::$proof" -- --exact --nocapture \
+    local target="--lib" filter="pipeline::tests::$proof"
+    # R61 F6: r54 is a bin test (tests::r54_...), the bar proofs are lib.
+    if grep -qE "fn[[:space:]]+$proof\b" src/main.rs 2>/dev/null; then
+        target="--bins"
+        filter="tests::$proof"
+    fi
+    if nice -n 10 cargo test "$target" "$filter" -- --exact --nocapture \
         >"$log" 2>&1 \
         && grep -qE '^test result: ok\. 1 passed' "$log"; then
         echo "PASS  $proof ($((SECONDS - t0))s) [$reason]" >>"$out"
