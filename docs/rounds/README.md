@@ -47,7 +47,7 @@ from `TEMPLATE.md`.
 | [59](59.md) | Tests: the busy-streak test gets its headroom back (R58-2; graded: full gate, no bump) | merged `f3d4292` |
 | [60](60.md) | Tests: the perf self-check measures again once on a loaded host (R59-1; graded: full gate, no bump) | merged `a821adf` |
 | [61](61.md) | The bar converges and the gate gets faster: test code leaves the key, one rerun, detached long jobs, a `--ready` gate (graded: full gate, no bump; D1 a, D2 a, D3 yes, D4 `--ready` gate; 9 items) | merged `3da9265` |
-| [62](62.md) | A sharper `--ready`: async proofs, new proofs, full when everything is selected (R61-6, R61-7; no graded path) | draft |
+| [62](62.md) | Tooling after round 61: a sharper `--ready`, the bar stops on a harness failure, the pre-push hook (R61-6, R61-7, R61-10, R61-11; no graded path) | draft |
 
 **Status values:**
 
