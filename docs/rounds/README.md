@@ -45,6 +45,7 @@ from `TEMPLATE.md`.
 | [57](57.md) | Tooling follow-ups: the hook reads its allowlist from the pushed commit (R55-3); a stall is always `wall` (R56-3) | merged `57fbdc3` |
 | [58](58.md) | Grading: a busy retry is a time budget with jittered backoff (the bar's stage-12 flake); rules `.45` (full gate) | merged `36c512d` |
 | [59](59.md) | Tests: the busy-streak test gets its headroom back (R58-2; graded: full gate, no bump) | merged `f3d4292` |
+| [60](60.md) | Tests: the perf self-check measures again once on a loaded host (R59-1; graded: full gate, no bump) | open |
 
 **Status values:**
 
