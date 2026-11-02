@@ -13,6 +13,7 @@
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
+. scripts/graded-filter.sh
 
 fast=0
 allow_dirty=0
@@ -56,12 +57,12 @@ fi
 
 # Paths whose change needs the full gate on a `ready` commit: grading,
 # scoring, cost, what the candidate sees, and the harness that runs it.
-mapfile -t graded_paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.txt)
+mapfile -t graded_paths < <(graded_path_entries)
 base="$(git merge-base HEAD master 2>/dev/null || true)"
 touched=""
 if [[ -n "$base" ]]; then
     touched="$(git diff --name-only "$base" HEAD -- "${graded_paths[@]}" \
-        | awk '$0 !~ /(^|\/)tests\.rs$/ || $0 == "src/pipeline/tests.rs"' \
+        | graded_filter \
         | head -5 | tr '\n' ' ')"
 fi
 

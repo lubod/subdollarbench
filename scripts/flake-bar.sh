@@ -13,11 +13,12 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 # R27-3/R28 F2: the record is keyed by graded content, not by commit, so
 # a docs-only commit keeps the same resumable record. The paths are the
 # same list scripts/gate.sh reads.
-mapfile -t graded_paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.txt)
+. "$BAR_ROOT/scripts/graded-filter.sh"
+mapfile -t graded_paths < <(graded_path_entries)
 flake_key() {
     local repo="$1" tree="$2"
     ( cd "$repo" && git ls-tree -r "$tree" -- "${graded_paths[@]}" \
-        | awk '$4 !~ /(^|\/)tests\.rs$/ || $4 == "src/pipeline/tests.rs"' \
+        | graded_filter \
         | sha256sum | cut -c1-12 )
 }
 
@@ -119,7 +120,9 @@ summary() {
     if [[ "$any_fail" -eq 1 ]]; then
         local failed=()
         for t in "${tests[@]}"; do
-            if [[ "$(rerun_fail_for "$t" "$record")" -gt 0 || "$(cured_for "$t" "$record")" -gt 1 ]]; then
+            if [[ "$(rerun_fail_for "$t" "$record")" -gt 0 \
+                || "$(cured_for "$t" "$record")" -gt 1 \
+                || $(( $(fails_for "$t" "$record") - $(cured_for "$t" "$record") - $(rerun_fail_for "$t" "$record") )) -gt 0 ]]; then
                 failed+=("$t")
             fi
         done
@@ -189,8 +192,11 @@ if [[ "$self_test" -eq 1 ]]; then
     while IFS= read -r t; do
         printf '%s\n' "${bar_tests[@]}" | grep -qx "$t" \
             || { echo "[flake] bar list missing $t"; exit 1; }
-    done < <(grep -oE 'fn test_pipeline_eval_only_sql_[a-z0-9_]*_live' src/pipeline.rs \
+    done < <(grep -ohE 'fn test_pipeline_eval_only_sql_[a-z0-9_]*_live' src/pipeline.rs src/pipeline/tests.rs \
         | sed 's/^fn //' | sort -u)
+    for t in "${bar_tests[@]}"; do
+        [[ "$t" =~ ^[a-z0-9_]+$ ]] || { echo "[flake] bad bar name: $t"; exit 1; }
+    done
     for t in r45_f1_reference_scores_one r45_f5_perfscore_cli \
         r49_f2_unsynced_candidate_floors_live; do
         printf '%s\n' "${bar_tests[@]}" | grep -qx "$t" \
@@ -299,6 +305,23 @@ if [[ "$self_test" -eq 1 ]]; then
     git -C "$repo" commit -qm four
     key4=$(flake_key "$repo" HEAD)
     [[ "$key3" != "$key4" ]] || { echo "graded edit kept the key"; exit 1; }
+    mkdir -p "$repo/src/verifier/x"
+    echo "test" > "$repo/src/verifier/x/tests.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm tests-rs
+    key5=$(flake_key "$repo" HEAD)
+    [[ "$key4" == "$key5" ]] || { echo "tests.rs moved the key"; exit 1; }
+    mkdir -p "$repo/src/pipeline"
+    echo "proof" > "$repo/src/pipeline/tests.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm pipeline-tests
+    key6=$(flake_key "$repo" HEAD)
+    [[ "$key5" != "$key6" ]] || { echo "pipeline/tests.rs kept the key"; exit 1; }
+    echo "pub fn y() {}" > "$repo/src/verifier/x.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm verifier-edit
+    key7=$(flake_key "$repo" HEAD)
+    [[ "$key6" != "$key7" ]] || { echo "production edit kept the key"; exit 1; }
     # R48-5: the bar's lock holder blocks the probe, and releases on exit.
     lock="$dir/long-test.lock"
     (

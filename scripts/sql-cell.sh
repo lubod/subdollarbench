@@ -83,7 +83,8 @@ self_test() {
     trap "rm -rf '$dir'" EXIT
     repo="$dir/repo"
     mkdir -p "$repo/src" "$repo/scripts"
-    cp scripts/flake-bar.sh scripts/graded-paths.txt scripts/long-test-lock.sh "$repo/scripts/"
+    cp scripts/flake-bar.sh scripts/graded-paths.txt scripts/graded-filter.sh \
+        scripts/long-test-lock.sh "$repo/scripts/"
     git -C "$repo" init -q
     git -C "$repo" config user.email cell@example.com
     git -C "$repo" config user.name cell
