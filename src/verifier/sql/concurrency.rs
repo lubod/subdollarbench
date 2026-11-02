@@ -562,12 +562,16 @@ mod tests {
         /// lose updates.
         Naive,
         /// R58 F1: the first connection's first UPDATE of each transaction
-        /// answers busy for its first 1,000 transactions; the other
-        /// connections are normal.
+        /// answers busy for its first `BUSY_STREAK` transactions; the
+        /// other connections are normal.
         BusyStreak,
         /// R58 F1: every UPDATE answers busy forever.
         AlwaysBusy,
     }
+
+    /// R59 F1: more than the old 400-try limit, so the old loop still
+    /// fails, and about half the 10 s budget, so a slow runner passes.
+    const BUSY_STREAK: usize = 600;
 
     struct Mock {
         mode: Mode,
@@ -794,9 +798,9 @@ mod tests {
                 let Ok(sock) = stream else { break };
                 let mock = mock.clone();
                 // Connection 0 is the setup connection; the first client
-                // is 1. Give that client the 1,000-busy streak.
+                // is 1. Give that client the BUSY_STREAK.
                 let busy_left = if mode == Mode::BusyStreak && next_id == 1 {
-                    1_000
+                    BUSY_STREAK
                 } else {
                     0
                 };
@@ -893,7 +897,7 @@ mod tests {
         }
     }
 
-    /// R58 F1: a 1,000-transaction busy streak on one connection is
+    /// R58 F1/R59 F1: a 600-transaction busy streak on one connection is
     /// retried inside the 10 s budget and the increments still land.
     #[test]
     fn r58_f1_long_busy_streak_passes() {
