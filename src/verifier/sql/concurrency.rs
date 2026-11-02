@@ -32,9 +32,19 @@ const TRANSFERS_PER_WRITER: usize = 40;
 const TRANSFER: i64 = 10;
 const READERS: usize = 3;
 const MIN_SNAPSHOTS: usize = 10;
-/// A busy transaction is retried; a wedged server is not.
-const RETRIES: usize = 400;
+/// R58 F1: a busy transaction is retried for this long, not a count.
+/// Full jitter on an exponential backoff (2, 4, 8, 16 ms cap) keeps the
+/// 16 clients from retrying in lockstep.
+const BUSY_BUDGET: Duration = Duration::from_secs(10);
 const RETRY_PAUSE: Duration = Duration::from_millis(2);
+
+fn busy_pause(tries: u32) -> Duration {
+    let cap_ms = 2u64
+        .saturating_mul(1u64 << tries.saturating_sub(1).min(3))
+        .min(16);
+    let jitter = rand::random::<f64>();
+    Duration::from_secs_f64((cap_ms as f64 * jitter).max(1.0) / 1000.0)
+}
 /// A writer pauses after each transfer so the readers' snapshots overlap
 /// the transfers however fast the engine is (round-18 N4): without it a
 /// fast engine finished all 160 before the readers took 10 snapshots.
@@ -157,6 +167,16 @@ fn increment(c: &mut TcpCandidate, table: &str) -> Result<(), TxErr> {
 
 /// (a) 16 clients × 50 increments must leave exactly 800.
 pub fn lost_update(addr: &str, timeout: Duration, table: &str) -> Result<(), String> {
+    lost_update_with_budget(addr, timeout, table, BUSY_BUDGET)
+}
+
+/// R58 F1: the testable form; the production budget is `BUSY_BUDGET`.
+pub fn lost_update_with_budget(
+    addr: &str,
+    timeout: Duration,
+    table: &str,
+    budget: Duration,
+) -> Result<(), String> {
     let mut setup = TcpCandidate::connect(addr, timeout)?;
     expect_ok(
         &mut setup,
@@ -174,18 +194,22 @@ pub fn lost_update(addr: &str, timeout: Duration, table: &str) -> Result<(), Str
             let mut c = TcpCandidate::connect(&addr, timeout)
                 .map_err(|e| format!("client connect: {e}"))?;
             for i in 0..INCREMENTS {
+                let started = std::time::Instant::now();
                 let mut tries = 0;
                 loop {
                     tries += 1;
                     match increment(&mut c, &table) {
                         Ok(()) => break,
-                        Err(TxErr::Busy) if tries < RETRIES => {
-                            std::thread::sleep(RETRY_PAUSE);
-                        }
                         Err(TxErr::Busy) => {
-                            return Err(format!(
-                                "increment {i}: still busy after {RETRIES} retries"
-                            ))
+                            let elapsed = started.elapsed();
+                            if elapsed >= budget {
+                                return Err(format!(
+                                    "increment {i}: still busy after {} s ({} tries)",
+                                    elapsed.as_secs(),
+                                    tries
+                                ));
+                            }
+                            std::thread::sleep(busy_pause(tries));
                         }
                         Err(TxErr::Fail(e)) => return Err(format!("increment {i}: {e}")),
                     }
@@ -217,6 +241,16 @@ pub fn lost_update(addr: &str, timeout: Duration, table: &str) -> Result<(), Str
 
 /// (b) Concurrent transfers keep `sum(bal)` at 4000 in every snapshot.
 pub fn transfers(addr: &str, timeout: Duration, table: &str) -> Result<(), String> {
+    transfers_with_budget(addr, timeout, table, BUSY_BUDGET)
+}
+
+/// R58 F1: the testable form; the production budget is `BUSY_BUDGET`.
+pub fn transfers_with_budget(
+    addr: &str,
+    timeout: Duration,
+    table: &str,
+    budget: Duration,
+) -> Result<(), String> {
     let mut setup = TcpCandidate::connect(addr, timeout)?;
     expect_ok(
         &mut setup,
@@ -290,6 +324,7 @@ pub fn transfers(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
             for i in 0..TRANSFERS_PER_WRITER {
                 let from = (w + i) % ACCOUNTS as usize;
                 let to = (from + 1 + (i % (ACCOUNTS as usize - 1))) % ACCOUNTS as usize;
+                let started = std::time::Instant::now();
                 let mut tries = 0;
                 loop {
                     tries += 1;
@@ -298,11 +333,16 @@ pub fn transfers(addr: &str, timeout: Duration, table: &str) -> Result<(), Strin
                             std::thread::sleep(WRITER_PAUSE);
                             break;
                         }
-                        Err(TxErr::Busy) if tries < RETRIES => {
-                            std::thread::sleep(RETRY_PAUSE);
-                        }
                         Err(TxErr::Busy) => {
-                            return Err(format!("transfer {i}: still busy after {RETRIES} retries"))
+                            let elapsed = started.elapsed();
+                            if elapsed >= budget {
+                                return Err(format!(
+                                    "transfer {i}: still busy after {} s ({} tries)",
+                                    elapsed.as_secs(),
+                                    tries
+                                ));
+                            }
+                            std::thread::sleep(busy_pause(tries));
                         }
                         Err(TxErr::Fail(e)) => return Err(format!("transfer {i}: {e}")),
                     }
@@ -521,6 +561,12 @@ mod tests {
         /// BEGIN/COMMIT are accepted but ignored: read-modify-write races
         /// lose updates.
         Naive,
+        /// R58 F1: the first connection's first UPDATE of each transaction
+        /// answers busy for its first 1,000 transactions; the other
+        /// connections are normal.
+        BusyStreak,
+        /// R58 F1: every UPDATE answers busy forever.
+        AlwaysBusy,
     }
 
     struct Mock {
@@ -570,15 +616,17 @@ mod tests {
         lock_held: bool,
         pending: Vec<(String, i64, i64)>,
         busy_fired: bool,
+        busy_left: usize,
     }
 
     impl Conn {
-        fn new() -> Self {
+        fn new(busy_left: usize) -> Self {
             Self {
                 tx: false,
                 lock_held: false,
                 pending: Vec::new(),
                 busy_fired: false,
+                busy_left,
             }
         }
     }
@@ -676,6 +724,13 @@ mod tests {
                 conn.busy_fired = true;
                 return err("busy", "conflict");
             }
+            if mock.mode == Mode::BusyStreak && conn.busy_left > 0 {
+                conn.busy_left -= 1;
+                return err("busy", "conflict");
+            }
+            if mock.mode == Mode::AlwaysBusy {
+                return err("busy", "conflict");
+            }
             conn.pending.push(((*table).to_string(), id, val));
             return Response::Ok(1);
         }
@@ -735,11 +790,18 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
+            for (next_id, stream) in listener.incoming().enumerate() {
                 let Ok(sock) = stream else { break };
                 let mock = mock.clone();
+                // Connection 0 is the setup connection; the first client
+                // is 1. Give that client the 1,000-busy streak.
+                let busy_left = if mode == Mode::BusyStreak && next_id == 1 {
+                    1_000
+                } else {
+                    0
+                };
                 std::thread::spawn(move || {
-                    let mut conn = Conn::new();
+                    let mut conn = Conn::new(busy_left);
                     let mut sock = sock;
                     sock.set_nodelay(true).unwrap();
                     let mut reader = BufReader::new(sock.try_clone().unwrap());
@@ -813,6 +875,55 @@ mod tests {
         // Full: the same engine must fail (c).
         let err = scenario(&addr, timeout(), 8, false).unwrap_err();
         assert!(err.contains("blocked"), "{err}");
+    }
+
+    /// R58 F1: the full-jitter caps are 2, 4, 8, 16, 16 ms; each draw
+    /// stays within 1 ms and its cap.
+    #[test]
+    fn r58_f1_busy_pause_caps() {
+        for (tries, cap_ms) in [(1u32, 2u64), (2, 4), (3, 8), (4, 16), (5, 16)] {
+            for _ in 0..200 {
+                let d = busy_pause(tries);
+                assert!(d >= Duration::from_millis(1), "tries {tries}: {d:?}");
+                assert!(
+                    d <= Duration::from_millis(cap_ms),
+                    "tries {tries}: {d:?} > {cap_ms} ms"
+                );
+            }
+        }
+    }
+
+    /// R58 F1: a 1,000-transaction busy streak on one connection is
+    /// retried inside the 10 s budget and the increments still land.
+    #[test]
+    fn r58_f1_long_busy_streak_passes() {
+        let addr = serve(Mode::BusyStreak);
+        lost_update(&addr, timeout(), "t_streak").unwrap();
+    }
+
+    /// R58 F1: a wedged engine still fails, about one budget in.
+    #[test]
+    fn r58_f1_wedged_engine_still_fails() {
+        let addr = serve(Mode::AlwaysBusy);
+        let started = std::time::Instant::now();
+        let err = lost_update_with_budget(&addr, timeout(), "t_wedged", Duration::from_secs(1))
+            .unwrap_err();
+        assert!(err.contains("still busy"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "lost update took {:?}",
+            started.elapsed()
+        );
+
+        let started = std::time::Instant::now();
+        let err = transfers_with_budget(&addr, timeout(), "t_wedged_x", Duration::from_secs(1))
+            .unwrap_err();
+        assert!(err.contains("still busy"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "transfers took {:?}",
+            started.elapsed()
+        );
     }
 
     /// The soak-shaped repeat: the checks are deterministic, so a handful of

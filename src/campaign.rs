@@ -6881,46 +6881,11 @@ mod tests {
         }
     }
 
-    /// R45 F4 (kept current by round 49): a `.42` phase never chains into
+    /// R45 F4 (kept current by round 58): a `.43` phase never chains into
     /// the current rules; a same-version phase does.
     #[test]
     fn r45_f4_no_chain_across_the_bump() {
-        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.44");
-        let state = phase1_state();
-        let mut prev = chain_rollup(1, true);
-        prev.rules_version = "2026-10-19.42".to_string();
-        let err = validate_chain(
-            &prev,
-            Some(&state),
-            2,
-            "m",
-            "omp",
-            "high",
-            crate::report::rules::RULES_VERSION,
-            None,
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("ran rules 2026-10-19.42"), "{msg}");
-        assert!(msg.contains("not 2026-10-19.44"), "{msg}");
-        validate_chain(
-            &chain_rollup(1, true),
-            Some(&state),
-            2,
-            "m",
-            "omp",
-            "high",
-            crate::report::rules::RULES_VERSION,
-            None,
-        )
-        .expect("a current-version phase chains");
-    }
-
-    /// R49 F5: the `.44` W4/durability bump breaks the chain from a `.43`
-    /// phase; a `.44` phase chains normally.
-    #[test]
-    fn r49_f5_no_chain_across_the_bump() {
-        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.44");
+        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.45");
         let state = phase1_state();
         let mut prev = chain_rollup(1, true);
         prev.rules_version = "2026-10-19.43".to_string();
@@ -6937,7 +6902,42 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
-        assert!(msg.contains("not 2026-10-19.44"), "{msg}");
+        assert!(msg.contains("not 2026-10-19.45"), "{msg}");
+        validate_chain(
+            &chain_rollup(1, true),
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+        )
+        .expect("a current-version phase chains");
+    }
+
+    /// R49 F5: a `.44` phase never chains into the current `.45` rules; a
+    /// current phase chains normally.
+    #[test]
+    fn r49_f5_no_chain_across_the_bump() {
+        assert_eq!(crate::report::rules::RULES_VERSION, "2026-10-19.45");
+        let state = phase1_state();
+        let mut prev = chain_rollup(1, true);
+        prev.rules_version = "2026-10-19.44".to_string();
+        let err = validate_chain(
+            &prev,
+            Some(&state),
+            2,
+            "m",
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ran rules 2026-10-19.44"), "{msg}");
+        assert!(msg.contains("not 2026-10-19.45"), "{msg}");
         validate_chain(
             &chain_rollup(1, true),
             Some(&state),
