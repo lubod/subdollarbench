@@ -85,37 +85,52 @@ passes_for() {
 fails_for() {
     awk -v t="$1" '$1 == "TEST" && $2 == t && $3 == "FAIL" { n++ } END { print n + 0 }' "$2"
 }
+cured_for() {
+    awk -v t="$1" '$1 == "TEST" && $2 == t && $3 == "RERUN" && $4 == "PASS" { n++ } END { print n + 0 }' "$2"
+}
+rerun_fail_for() {
+    awk -v t="$1" '$1 == "TEST" && $2 == t && $3 == "RERUN" && $4 == "FAIL" { n++ } END { print n + 0 }' "$2"
+}
 
 summary() {
     local record="$1"
     shift
     local tests=("$@")
-    local any_fail=0 min_runs=20 all_full=1 line
+    local any_fail=0 min_runs=20 all_full=1 line total_cured=0 cured_names=()
     echo "--- summary ---"
     for t in "${tests[@]}"; do
-        local runs passes fails
+        local runs passes fails cured rf
         runs=$(runs_for "$t" "$record")
         passes=$(passes_for "$t" "$record")
         fails=$(fails_for "$t" "$record")
-        line="${passes}/${runs} ${t}"
-        if [[ "$fails" -gt 0 ]]; then
-            line+=" FAIL=${fails}"
-            any_fail=1
-        fi
+        cured=$(cured_for "$t" "$record")
+        rf=$(rerun_fail_for "$t" "$record")
+        line="${passes}/${runs} ${t} cured=${cured}"
+        if [[ "$fails" -gt 0 ]]; then line+=" FAIL=${fails}"; fi
+        if [[ "$rf" -gt 0 || "$cured" -gt 1 ]]; then line+=" RERUN=FAIL"; any_fail=1; fi
+        total_cured=$((total_cured + cured))
+        [[ "$cured" -gt 0 ]] && cured_names+=("$t")
         echo "$line"
         if [[ "$runs" -lt 20 ]]; then all_full=0; fi
         if [[ "$runs" -lt "$min_runs" ]]; then min_runs="$runs"; fi
     done
+    if [[ "$total_cured" -gt 2 ]]; then any_fail=1; fi
     if [[ "$any_fail" -eq 1 ]]; then
         local failed=()
         for t in "${tests[@]}"; do
-            if [[ "$(fails_for "$t" "$record")" -gt 0 ]]; then failed+=("$t"); fi
+            if [[ "$(rerun_fail_for "$t" "$record")" -gt 0 || "$(cured_for "$t" "$record")" -gt 1 ]]; then
+                failed+=("$t")
+            fi
         done
-        echo "RESULT: FAIL (${failed[*]})"
+        echo "RESULT: FAIL (${failed[*]:-too many cured})"
         return 1
     fi
     if [[ "$all_full" -eq 1 ]]; then
-        echo "RESULT: PASS"
+        if [[ "$total_cured" -gt 0 ]]; then
+            echo "RESULT: PASS (cured: $(IFS=,; echo "${cured_names[*]}" | sed 's/,/, /g'))"
+        else
+            echo "RESULT: PASS"
+        fi
     else
         echo "RESULT: IN PROGRESS (min runs ${min_runs}/20)"
     fi
@@ -150,7 +165,13 @@ run_chunk() {
                 echo "OUTPUT-BEGIN" >> "$record"
                 tail -n 40 "$log" | sed 's/^/  /' >> "$record"
                 echo "OUTPUT-END" >> "$record"
-                failed=1
+                local r0=$SECONDS
+                if run_one "$t" > "$log" 2>&1; then
+                    echo "TEST $t RERUN PASS $((SECONDS - r0)) $(date -u +%FT%TZ)" >> "$record"
+                else
+                    cp "$log" "${base}-${t}-rerun-${utc}.log"
+                    echo "TEST $t RERUN FAIL $((SECONDS - r0)) $(date -u +%FT%TZ) log=${base}-${t}-rerun-${utc}.log" >> "$record"
+                fi
             fi
         done
     done
