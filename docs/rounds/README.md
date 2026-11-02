@@ -44,6 +44,7 @@ from `TEMPLATE.md`.
 | [56](56.md) | A hung tool call and two lanes: stall guard, the live line names the tool, the audit key delta per lane, `concurrent_cells`, the Board's hung-agent warning, Docker tools refuse beside a cell (R54-2) | merged `9380525` |
 | [57](57.md) | Tooling follow-ups: the hook reads its allowlist from the pushed commit (R55-3); a stall is always `wall` (R56-3) | merged `57fbdc3` |
 | [58](58.md) | Grading: a busy retry is a time budget with jittered backoff (the bar's stage-12 flake); rules `.45` (full gate) | merged `36c512d` |
+| [59](59.md) | Tests: the busy-streak test gets its headroom back (R58-2; graded: full gate, no bump) | open (operator 2026-11-02 "Round 59 first") |
 
 **Status values:**
 
