@@ -50,7 +50,9 @@ pub fn collect_dir(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
         let path = root.join(&rel);
         if path.is_dir() {
             collect_dir(root, &rel, out);
-        } else if path.is_file() {
+        } else if path.is_file() && entry.file_name() != "tests.rs" {
+            // R61 F2: test code is not in the release binary and must
+            // not move the graded digest.
             out.push(rel);
         }
     }
@@ -117,7 +119,7 @@ fn collect_dir_strict(root: &Path, rel_dir: &Path, out: &mut Vec<PathBuf>) {
         let path = root.join(&rel);
         if path.is_dir() {
             collect_dir_strict(root, &rel, out);
-        } else if path.is_file() {
+        } else if path.is_file() && entry.file_name() != "tests.rs" {
             out.push(rel);
         }
     }
@@ -144,3 +146,7 @@ pub fn compiled_digest(root: &Path, manifest: &str) -> String {
     let files = compiled_files(root, manifest);
     digest_files(root, &files)
 }
+
+#[cfg(test)]
+#[path = "graded_hash/tests.rs"]
+mod tests;

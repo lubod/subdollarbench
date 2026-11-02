@@ -1,0 +1,57 @@
+# R61 F7: which extra proofs a changed graded path puts at risk.
+#
+# Format: <path glob> <comma-separated proofs>
+#   full  every proof the bar runs (a shared part of the harness)
+#   core  no extra proof (the core proofs or the fast set already run it)
+#
+# Every graded file must match one line (scripts/proof-map.sh --self-test
+# names the file that does not), and every proof named here must be in the
+# bar's list. Globs are shell `case` patterns; `*` also matches `/`.
+# `src/pipeline/tests.rs` is special: a hunk inside a proof body selects
+# that proof, and an unattributed hunk selects the full set.
+src/pipeline.rs full
+src/pipeline/tests.rs core
+src/campaign.rs full
+src/scoring.rs full
+src/sandbox/** full
+src/verifier/mod.rs full
+src/verifier/compliance.rs full
+src/verifier/sql/mod.rs full
+src/verifier/sql/client.rs full
+src/verifier/sql/compare.rs full
+src/verifier/sql/driver.rs full
+src/verifier/sql/generator.rs full
+src/verifier/sql/oracle.rs full
+src/verifier/sql/ref_server.rs full
+src/verifier/sql/run.rs full
+src/verifier/sql/scenarios.rs full
+src/verifier/sql/schema.rs full
+src/verifier/sql/sentinel.rs full
+src/verifier/sql/shrink.rs full
+src/verifier/sql/wire.rs full
+src/verifier/sql/concurrency.rs test_pipeline_eval_only_sql_stage12_concurrency_live,test_pipeline_eval_only_sql_stage12_concurrency_lite_live
+src/verifier/sql/perf.rs test_pipeline_eval_only_sql_stage11_indexes_live
+src/verifier/sql/perfscore.rs r45_f1_reference_scores_one,r45_f5_perfscore_cli
+src/verifier/sql/observability.rs test_pipeline_eval_only_sql_stage14_observability_live
+src/verifier/sql/memory.rs test_pipeline_eval_only_sql_stage16_memory_live
+src/verifier/sql/disk.rs test_pipeline_eval_only_sql_stage17_disk_full_live
+src/verifier/sql/security.rs test_pipeline_eval_only_sql_stage18_security_live
+src/verifier/sql/replication.rs test_pipeline_eval_only_sql_stage19_replication_live,test_pipeline_eval_only_sql_stage19_replication_lite_live
+src/verifier/sql/pgwire.rs core
+src/verifier/sql/crash.rs core
+src/verifier/sql/txn.rs core
+src/verifier/sql/toy.rs core
+src/bench/** core
+src/cost/** core
+src/prompts/** core
+src/report/rules.rs core
+src/report/graded_hash.rs core
+src/report/leaderboard.rs core
+src/report/graded-files.txt core
+campaigns/** core
+tasks/** core
+extensions/** core
+build.rs core
+scripts/graded-paths.txt core
+Cargo.lock full
+rust-toolchain.toml full

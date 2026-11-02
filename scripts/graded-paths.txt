@@ -1,6 +1,12 @@
-# One graded-path list for scripts/gate.sh (scope) and scripts/flake-bar.sh
-# (record key). A change under any of these needs the full gate and moves
-# the flake record.
+# One graded-path list for scripts/gate.sh (scope), scripts/flake-bar.sh
+# (record key) and the ready gate's proof map. A change under any of the
+# path lines below moves the flake record and the rules fingerprint (where
+# applicable).
+#
+# The two data lines at the end are read by scripts/graded-filter.sh, the
+# one place the tests.rs rule lives: a file whose basename is exclude-name
+# is ignored (test code is not in the release binary), except the exact
+# keep path (the file that holds the live proofs).
 src/verifier
 src/pipeline.rs
 src/sandbox
@@ -20,3 +26,5 @@ scripts/graded-paths.txt
 extensions
 Cargo.lock
 rust-toolchain.toml
+exclude-name tests.rs
+keep src/pipeline/tests.rs

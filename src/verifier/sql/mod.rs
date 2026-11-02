@@ -37,3 +37,27 @@ pub mod shrink;
 mod toy;
 pub mod txn;
 pub mod wire;
+
+/// R61 F8: phase timing for the live proofs (measure only). With
+/// `SDB_SQL_TIMING=1` the phase prints to stderr when it drops, so a
+/// proof's `--nocapture` output shows where its time went. Unset, it
+/// changes nothing.
+pub struct PhaseTimer(String, std::time::Instant);
+
+impl PhaseTimer {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self(label.into(), std::time::Instant::now())
+    }
+}
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        if std::env::var_os("SDB_SQL_TIMING").is_some() {
+            eprintln!(
+                "[TIMING] {}: {:.3}s",
+                self.0,
+                self.1.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
