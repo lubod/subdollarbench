@@ -40,7 +40,8 @@ exists, and when it was decided, goes in `docs/DECISIONS.md`.
    operator can change an open round, recorded under **Changes after
    open**.
 4. **Gate.** The implementer runs `scripts/gate.sh` on the final, clean
-   commit (full or `--fast`, see "Gates").
+   commit (fast, `--ready` or full, as its `scope:` line says; see
+   "Gates").
 5. **Ready.** The implementer sets `Status: ready <gated commit>` in the
    round file as the last commit and stops. After the gated commit, only
    `docs/rounds/NN.md` may change. The reviewer watches `roundNN` and
@@ -114,6 +115,12 @@ A round's "done" record lives in its round file, not in
     sandbox image builds wait for a gap (`gap`) or the end of the grid.
     When a round's next step needs a gap, the implementer says so in its
     notes and stops.
+- **Long jobs outlive the session** (`docs/DECISIONS.md` #24): the flake
+  bar, the load bar, the grid and multi-hour probes start through
+  `scripts/detach.sh <name> -- <command...>`. It runs them as a systemd
+  user unit, and linger is on for `ubuntu`. Follow a job with
+  `journalctl --user -u sdb-<name> -f`; stop it with `systemctl --user
+  stop sdb-<name>` or by its MainPID.
 - **Long tests come last** (`docs/DECISIONS.md` #22, #23): the 20-pass
   flake bar, the load bar, the perf baseline and the calibration career
   start only after every planned round has merged.
@@ -151,8 +158,9 @@ A round's "done" record lives in its round file, not in
     and the score impact. Chained career phases share a rules version,
     so a bump restarts careers at phase 1. Published results always name
     their rules version.
-  - **A graded-path change without a bump** needs the full gate and a
-    new 20-pass flake bar on that content before the next published cell.
+  - **A graded-path change without a bump** needs the `--ready` gate
+    ("Gates") and a new 20-pass flake bar on that content before the
+    next published cell.
 - **Claims cite code:** a statement about behaviour in a round file or a
   review names `path:line`, or the test that shows it.
 
@@ -176,37 +184,58 @@ A round's "done" record lives in its round file, not in
 
 `scripts/gate.sh` runs on a **clean** checkout: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, and the niced `cargo test`,
-in one of two modes:
+in one of three modes:
 
-- **full** (the default): unfiltered, about 45 min;
+- **full** (the default): unfiltered, about 50 min;
 - **fast** (`--fast`): everything except the tests that hold the
   `SQL_PERF_LIVE` lock (they run one at a time and take nearly all of
   the full gate's time); about 4-10 min. The skip list is printed by
-  `scripts/live-proofs.sh`, which reads `src/pipeline.rs`, so a new
-  proof is skipped automatically.
+  `scripts/live-proofs.sh`, which reads `src/pipeline.rs`,
+  `src/pipeline/tests.rs` and `src/main.rs`, so a new proof is skipped
+  automatically;
+- **ready** (`--ready`, round 61): the fast set, then one at a time the
+  core proofs (`scripts/ready-proofs.txt`) and the proofs the branch's
+  changes put at risk (`scripts/proof-map.txt`, read by
+  `scripts/proof-map.sh`). The record names each proof with its reason.
+  A change to a shared helper in `src/pipeline/tests.rs` selects every
+  proof.
 
-It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full) or
-`<commit>.fast.txt` (fast). That directory is inside `.git`, shared by
-every worktree and never committed.
+It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
+`<commit>.ready.txt` or `<commit>.fast.txt`. That directory is inside
+`.git`, shared by every worktree and never committed.
 
 **Which mode:**
 
 - **In-between commits:** fast, or none.
-- **The `ready` commit:** **full** when the round changes a graded path
-  since master, **fast** otherwise. The graded paths are listed once, in
-  `scripts/graded-paths.txt`; the record's `scope:` line says which mode
-  applies. A rules bump always lands in a graded path.
+- **The `ready` commit:** the mode its record's `scope:` line names:
+  - **fast** when no graded path changed since master;
+  - **ready** when one did;
+  - **full** when `RULES_VERSION` changes (`--ready` refuses a bump).
+
+  The graded paths are listed once, in `scripts/graded-paths.txt`. Its
+  `exclude-name tests.rs` and `keep src/pipeline/tests.rs` lines keep
+  unit-test files out of the key and the scope, but keep the proofs'
+  file in (`scripts/graded-filter.sh`). Test files are also outside the
+  rules fingerprint (`src/report/graded_hash.rs`).
+- **The live proofs not chosen** still run 20 times in the flake bar
+  before any published cell.
 - **The reviewer** reads the gate record for the `ready` commit instead
   of rerunning the suite, reruns what the change puts at risk, and may
   ask for the full gate on any round.
 
 **Flake bar** (`scripts/flake-bar.sh`, `--passes K`):
 
-- It runs the `test_pipeline_eval_only_sql_*_live` proofs K times
-  (about 50 min per pass). `flake-bar.sh --key` prints the graded-content
-  key; the record is `<git-common-dir>/sdb-gates/flake-<key>.txt`, so
-  docs-only commits keep it. A FAIL line names a file with that run's
-  output.
+- It runs the bar's 28 proofs K times (`scripts/bar-proofs.sh`, about
+  50 min per pass), launched through `scripts/detach.sh`.
+  `flake-bar.sh --key` prints the graded-content key; the record is
+  `<git-common-dir>/sdb-gates/flake-<key>.txt`, so docs-only commits
+  keep it. A FAIL line names a file with that run's output.
+- **Standard** (round 61, D1): a failed proof reruns once right away
+  (`TEST <t> RERUN PASS|FAIL`; a rerun doesn't count toward the 20).
+  - A failure cured by its rerun is allowed once per proof and twice per
+    bar; the result then reads `RESULT: PASS (cured: <proofs>)`.
+  - A failed rerun, a second cure on one proof, a third cure in the bar,
+    or a FAIL with no rerun after it gives `RESULT: FAIL`.
 - **When:** 20 passes after any graded-path change, before the next
   published cell. `scripts/sql-cell.sh` refuses an official cell without
   a PASS record (`SDB_CELL_SMOKE=1` runs a sub-$0.99 smoke cell without

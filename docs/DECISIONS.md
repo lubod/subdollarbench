@@ -589,6 +589,33 @@ The benchmark answers "what does a dollar buy" (round 23):
 - **AGENTS.md trimmed to rules** (operator: "trim"); the history it
   carried is kept below.
 
+## 24. The bar converges: test code out of the key, one rerun, detached jobs, the `--ready` gate (2026-11-02)
+
+- **Why:** the last bar that passed was `flake-9c90cfcf4b7b.txt`
+  (2026-10-27). Four bars started after it and none finished:
+  - test-only rounds moved the key and restarted 17-h bars (round 59);
+  - one failure in 560 runs failed a bar (rounds 58 and 59);
+  - the 2026-11-02 bar died with the opencode service (`59.md`, "After
+    the merge").
+
+  The full gate repeated one bar pass before every merge (about 50 min).
+  Source: the reviewer's process review, 2026-11-02.
+- **D1 = a** (operator, "a a yes"): a failed proof reruns once; a cured
+  failure is allowed once per proof and twice per bar.
+- **D2 = a:** long jobs run as systemd user units through
+  `scripts/detach.sh`. Linger was enabled for `ubuntu` on 2026-11-02
+  (operator's command).
+- **D3 = yes:** no bar on round 60's key; one bar after round 61.
+- **D4** (operator, "add it to current draft"): a `ready` commit that
+  changes a graded path runs `gate.sh --ready`, not the full gate. The
+  full gate stays for rules bumps and on the reviewer's request.
+- **Test files** (`tests.rs`, apart from `src/pipeline/tests.rs`, the
+  proofs) are outside the flake key, the gate scope and the rules
+  fingerprint. They can't change a grade: they aren't in the release
+  binary, and a test checks that every one is declared under
+  `#[cfg(test)]`. The fingerprint moved once, to `…+8344e803…`; nothing
+  published carried the old value.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
