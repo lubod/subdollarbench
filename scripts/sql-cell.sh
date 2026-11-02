@@ -127,11 +127,15 @@ self_test() {
     fi
     echo '[self-test] failed record refused'
 
-    # 5) PASS is allowed and reports the key.
+    # 5) PASS is allowed and reports the key. R61 F4: a cured failure's
+    # suffix does not hide the PASS.
     printf 'RESULT: PASS\n' > "$record"
     cell_gate "$repo" 0.5 0 || { echo '[self-test] PASS was refused' >&2; return 1; }
     [[ "$CELL_FLAKE_KEY" == "$key" && "$CELL_FLAKE_RESULT" == "PASS" ]] || {
         echo '[self-test] PASS did not report the key' >&2; return 1; }
+    printf 'RESULT: PASS (cured: beta)\n' > "$record"
+    cell_gate "$repo" 0.5 0 || {
+        echo '[self-test] a cured-failure PASS was refused' >&2; return 1; }
     echo '[self-test] pass record allowed'
 
     # 6) SMOKE with no record is allowed and says so.

@@ -251,6 +251,82 @@ if [[ "$self_test" -eq 1 ]]; then
         exit 1
     fi
 
+    # R61 F4: a failure that passes its rerun is cured, and the rerun does
+    # not count toward the 20 first runs.
+    record="$dir/cured.flake.txt"
+    : > "$record"
+    for _ in $(seq 1 20); do echo "TEST alpha PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    for _ in $(seq 1 19); do echo "TEST beta PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    echo "TEST beta FAIL 1 2026-10-23T00:00:00Z" >> "$record"
+    echo "TEST beta RERUN PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    summary "$record" "${tests[@]}" > "$dir/cured.txt" || true
+    grep -q 'RESULT: PASS (cured: beta)' "$dir/cured.txt" || {
+        cat "$dir/cured.txt"; exit 1;
+    }
+    grep -q '19/20 beta cured=1' "$dir/cured.txt" || {
+        echo "a rerun counted toward the 20"; cat "$dir/cured.txt"; exit 1;
+    }
+
+    # R61 F4: a failed rerun fails the bar.
+    record="$dir/rerun-fail.flake.txt"
+    : > "$record"
+    for _ in $(seq 1 20); do echo "TEST alpha PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    for _ in $(seq 1 19); do echo "TEST beta PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    echo "TEST beta FAIL 1 2026-10-23T00:00:00Z" >> "$record"
+    echo "TEST beta RERUN FAIL 1 2026-10-23T00:00:00Z" >> "$record"
+    summary "$record" "${tests[@]}" > "$dir/rerun-fail.txt" || true
+    grep -q 'RESULT: FAIL (beta)' "$dir/rerun-fail.txt" || {
+        cat "$dir/rerun-fail.txt"; exit 1;
+    }
+
+    # R61 F4: two cures on one proof fail the bar.
+    record="$dir/two-cured.flake.txt"
+    : > "$record"
+    for _ in $(seq 1 20); do echo "TEST alpha PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    for _ in $(seq 1 18); do echo "TEST beta PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+    for _ in $(seq 1 2); do
+        echo "TEST beta FAIL 1 2026-10-23T00:00:00Z" >> "$record"
+        echo "TEST beta RERUN PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    done
+    summary "$record" "${tests[@]}" > "$dir/two-cured.txt" || true
+    grep -q 'RESULT: FAIL (beta)' "$dir/two-cured.txt" || {
+        cat "$dir/two-cured.txt"; exit 1;
+    }
+
+    # R61 F4: three cures across the bar fail the bar.
+    record="$dir/three-cured.flake.txt"
+    : > "$record"
+    for t in alpha beta gamma; do
+        for _ in $(seq 1 19); do echo "TEST $t PASS 1 2026-10-23T00:00:00Z" >> "$record"; done
+        echo "TEST $t FAIL 1 2026-10-23T00:00:00Z" >> "$record"
+        echo "TEST $t RERUN PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    done
+    summary "$record" alpha beta gamma > "$dir/three-cured.txt" || true
+    grep -q 'RESULT: FAIL (too many cured)' "$dir/three-cured.txt" || {
+        cat "$dir/three-cured.txt"; exit 1;
+    }
+
+    # R61 F4: run_chunk records the rerun of the proof that failed, and a
+    # cured failure leaves the exit state clear.
+    log="$dir/rerun.log"
+    failed=0
+    calls=0
+    run_one() {
+        [[ "$1" == "flaky" ]] || return 0
+        calls=$((calls + 1))
+        [[ "$calls" -gt 1 ]]
+    }
+    record="$dir/rerun.flake.txt"
+    : > "$record"
+    run_chunk "$record" 20 flaky
+    grep -q 'TEST flaky FAIL' "$record" || { cat "$record"; exit 1; }
+    grep -q 'TEST flaky RERUN PASS' "$record" || { cat "$record"; exit 1; }
+    summary "$record" flaky > "$dir/rerun-cured.txt" || true
+    grep -q 'RESULT: PASS (cured: flaky)' "$dir/rerun-cured.txt" || {
+        cat "$dir/rerun-cured.txt"; exit 1;
+    }
+    [[ "$failed" -eq 0 ]] || { echo "a cured failure set the exit state"; exit 1; }
+
     # R28 F3: a failing proof is recorded and the rest of the chunk runs.
     log="$dir/fake.log"
     failed=0
