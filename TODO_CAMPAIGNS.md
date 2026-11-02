@@ -179,6 +179,12 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   - The campaign portal view: survival curve, cumulative cost, per-stage
     chips, regression badges (old G5).
   - Rank only within (rules version, harness) (old G1).
+- **The perf score's load sensitivity (R59-2, `docs/rounds/59.md`):** a
+  host-wide burst during a perf run moves a workload's median (the bar's
+  W5 0.846 on the reference against itself). In production a lane's perf
+  run shares the host with another lane's agent. This needs an operator
+  decision on the grader (a load check before and after, or a re-measure
+  on a harness note) and a rules bump if it changes the score.
 - **Failure taxonomy** from campaign stages: truncation, tool misuse,
   regression patterns (old H3).
 - **Retirement:** finish the README rewrite for sdb-sql only (old M8,
