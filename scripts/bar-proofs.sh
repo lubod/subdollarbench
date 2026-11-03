@@ -25,3 +25,13 @@ bar_proofs_at() {
         git -C "$repo" show "$ref:src/pipeline/tests.rs" 2>/dev/null || true
     } | bar_proofs_from_source
 }
+
+# R63 F4: the bar's per-proof run target. r45_f1's W5 is about 5 min of a
+# 6 min run; five runs keep its production-shaped self-check in every bar
+# without 20 x 6 min.
+bar_target() {
+    case "$1" in
+        r45_f1_reference_scores_one) echo 5 ;;
+        *) echo 20 ;;
+    esac
+}
