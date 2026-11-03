@@ -105,7 +105,8 @@ impl PerfScore {
     }
 
     /// The candidate failed to build, start, answer or be correct: the
-    /// workload floors and the block still has a score.
+    /// workload floors and the block still has a score. A Docker start
+    /// error from the host is not this case (see [`Self::harness_fault`]).
     pub fn floored(phase: u32, error: impl Into<String>) -> Self {
         let workloads = workloads_for_phase(phase)
             .iter()
@@ -116,7 +117,9 @@ impl PerfScore {
         out
     }
 
-    /// The harness (reference or setup) failed: no candidate score.
+    /// The harness (reference or setup) failed: no candidate score. A
+    /// host-side Docker error that prevents the candidate container from
+    /// starting, after one fresh-port retry, is a harness fault.
     pub fn harness_fault(phase: u32, error: impl Into<String>) -> Self {
         let workloads = workloads_for_phase(phase)
             .iter()
@@ -1447,9 +1450,90 @@ fn run_w5(
 
 // ---------------------------------------------------------------- F5
 
-fn free_port() -> std::io::Result<u16> {
-    let l = std::net::TcpListener::bind("127.0.0.1:0")?;
-    l.local_addr().map(|a| a.port())
+/// R63 F1: a port held by a listener until its container start drops it.
+struct ReservedPort {
+    listener: Option<std::net::TcpListener>,
+    port: u16,
+}
+
+impl ReservedPort {
+    fn take(&mut self) {
+        self.listener.take();
+    }
+}
+
+fn reserve_port() -> std::io::Result<ReservedPort> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    Ok(ReservedPort {
+        listener: Some(listener),
+        port,
+    })
+}
+
+/// Pick an item from `next` whose port differs from `first`. The closure
+/// is the test seam; the real caller passes `reserve_port`.
+fn distinct_port<T, F, P>(first: u16, mut next: F, port_of: P) -> std::io::Result<T>
+where
+    F: FnMut() -> std::io::Result<T>,
+    P: Fn(&T) -> u16,
+{
+    loop {
+        let item = next()?;
+        if port_of(&item) != first {
+            return Ok(item);
+        }
+    }
+}
+
+/// R63 F1: a Docker start error that comes from the host, not the
+/// candidate (a candidate build or start.sh failure is not in this list).
+fn start_error_is_host(message: &str) -> bool {
+    [
+        "port is already allocated",
+        "address already in use",
+        "Error response from daemon",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+enum StartFailure {
+    Candidate(anyhow::Error),
+    Harness(anyhow::Error),
+}
+
+/// R63 F1: start the candidate on `port`; on a host-side start error,
+/// retry once on a freshly reserved port. The listener is dropped just
+/// before each start. A candidate-owned failure floors on the first try.
+fn start_candidate_with_retry<F, G>(
+    mut port: u16,
+    held: &mut Option<ReservedPort>,
+    mut start: F,
+    mut fresh: G,
+) -> Result<u16, StartFailure>
+where
+    F: FnMut(u16) -> anyhow::Result<()>,
+    G: FnMut(u16) -> std::io::Result<ReservedPort>,
+{
+    for attempt in 0..2 {
+        if let Some(mut reservation) = held.take() {
+            reservation.take();
+        }
+        match start(port) {
+            Ok(()) => return Ok(port),
+            Err(e) if !start_error_is_host(&e.to_string()) => {
+                return Err(StartFailure::Candidate(e));
+            }
+            Err(e) if attempt == 1 => return Err(StartFailure::Harness(e)),
+            Err(_) => {
+                let reservation = fresh(port).map_err(|e| StartFailure::Harness(e.into()))?;
+                port = reservation.port;
+                *held = Some(reservation);
+            }
+        }
+    }
+    unreachable!()
 }
 
 fn sql_extras(data: &Path, port: u16) -> crate::sandbox::docker::CandidateRunExtras {
@@ -1573,8 +1657,12 @@ pub fn run_workspace_at(
             ))
         }
     };
-    let ref_port = free_port().context("reserve the reference port")?;
-    let cand_port = free_port().context("reserve the candidate port")?;
+    let mut ref_res = reserve_port().context("reserve the reference port")?;
+    let ref_port = ref_res.port;
+    let cand_res =
+        distinct_port(ref_port, reserve_port, |r| r.port).context("reserve the candidate port")?;
+    let mut cand_port = cand_res.port;
+    let mut cand_held = Some(cand_res);
     super::ref_server::write_reference(&ref_ws, ref_port).context("write the reference server")?;
 
     let ref_sb = SandboxManager::with_id(&format!("perf-ref-{}-{nonce:x}", std::process::id()));
@@ -1584,20 +1672,34 @@ pub fn run_workspace_at(
     let ref_guard = RunGuard::new(ref_sb);
     let cand_guard = RunGuard::new(cand_sb);
     let phase_containers = super::PhaseTimer::new("perf containers + readiness");
+    ref_res.take();
     ref_guard
         .manager()
         .start_candidate_in_docker_with(&ref_ws, ref_port, &sql_extras(&ref_data, ref_port))
         .context("start the reference container")?;
-    if let Err(e) = cand_guard.manager().start_candidate_in_docker_with(
-        &workspace,
-        cand_port,
-        &sql_extras(&cand_data, cand_port),
-    ) {
-        return Ok(PerfScore::floored(
-            phase,
-            format!("candidate container: {e:#}"),
-        ));
-    }
+    let start = |port: u16| {
+        cand_guard.manager().start_candidate_in_docker_with(
+            &workspace,
+            port,
+            &sql_extras(&cand_data, port),
+        )
+    };
+    let fresh = |avoid: u16| distinct_port(avoid, reserve_port, |r| r.port);
+    cand_port = match start_candidate_with_retry(cand_port, &mut cand_held, start, fresh) {
+        Ok(port) => port,
+        Err(StartFailure::Harness(e)) => {
+            return Ok(PerfScore::harness_fault(
+                phase,
+                format!("candidate container: {e:#}"),
+            ));
+        }
+        Err(StartFailure::Candidate(e)) => {
+            return Ok(PerfScore::floored(
+                phase,
+                format!("candidate container: {e:#}"),
+            ));
+        }
+    };
     let ref_addr = format!("127.0.0.1:{ref_port}");
     let cand_addr = format!("127.0.0.1:{cand_port}");
     super::driver::wait_until_answering(&ref_addr, Duration::from_secs(30))
