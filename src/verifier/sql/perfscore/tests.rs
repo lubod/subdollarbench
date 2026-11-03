@@ -573,3 +573,76 @@ fn r45_f1_wrong_answer_is_floor() {
         .expect("a wrong candidate still gets a floored score");
     assert!((value - WRONG_FLOOR).abs() < 1e-12, "score {value:.3}");
 }
+
+/// R63 F1: two reservations never share a port, even when the source
+/// hands the same one back.
+#[test]
+fn r63_f1_ports_distinct() {
+    let mut ports = [5000u16, 5000, 5001].into_iter();
+    let got = distinct_port(5000, || Ok(ports.next().unwrap()), |p| *p).unwrap();
+    assert_eq!(got, 5001);
+}
+
+/// R63 F1/R63-1: a host-side Docker start error retries once and then is
+/// a harness fault; a start.sh failure and a broken candidate image CMD
+/// are the candidate's and floor.
+#[test]
+fn r63_f1_host_start_failure_is_harness() {
+    let mut calls = 0;
+    let mut held = None;
+    let result = start_candidate_with_retry(
+        5000,
+        &mut held,
+        |_| {
+            calls += 1;
+            Err(anyhow::anyhow!(
+                "candidate sandbox failed to start: docker: Error response from daemon: \
+                 Bind for 127.0.0.1:5000 failed: port is already allocated"
+            ))
+        },
+        |avoid| {
+            assert_eq!(avoid, 5000);
+            reserve_port()
+        },
+    );
+    assert!(matches!(result, Err(StartFailure::Harness(_))));
+    assert_eq!(calls, 2, "a host-side failure retries once");
+
+    let mut calls = 0;
+    let mut held = None;
+    let result = start_candidate_with_retry(
+        5000,
+        &mut held,
+        |_| {
+            calls += 1;
+            Err(anyhow::anyhow!(
+                "candidate sandbox failed to start: start.sh exited 1"
+            ))
+        },
+        |_| reserve_port(),
+    );
+    assert!(matches!(result, Err(StartFailure::Candidate(_))));
+    assert_eq!(calls, 1, "a candidate failure does not retry");
+
+    // R63-1: a candidate image whose CMD names a missing binary fails
+    // with the generic daemon text; it is the candidate's, not the host's.
+    let mut calls = 0;
+    let mut held = None;
+    let result = start_candidate_with_retry(
+        5000,
+        &mut held,
+        |_| {
+            calls += 1;
+            Err(anyhow::anyhow!(
+                "candidate sandbox failed to start: docker: Error response from daemon: \
+                 failed to create task for container: failed to create shim task: OCI \
+                 runtime create failed: runc create failed: unable to start container \
+                 process: exec: \"/nonexistent-binary\": stat /nonexistent-binary: no such \
+                 file or directory: unknown"
+            ))
+        },
+        |_| reserve_port(),
+    );
+    assert!(matches!(result, Err(StartFailure::Candidate(_))));
+    assert_eq!(calls, 1, "a broken candidate image does not retry");
+}

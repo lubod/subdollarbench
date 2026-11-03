@@ -104,7 +104,7 @@ summary() {
     local record="$1"
     shift
     local tests=("$@")
-    local any_fail=0 min_runs=20 all_full=1 line total_cured=0 cured_names=()
+    local any_fail=0 min_runs=0 min_target=0 all_full=1 line total_cured=0 cured_names=()
     echo "--- summary ---"
     local harness
     harness="$(awk '$1 == "HARNESS" {
@@ -116,7 +116,8 @@ summary() {
         return 1
     fi
     for t in "${tests[@]}"; do
-        local runs passes fails cured rf
+        local runs passes fails cured rf target
+        target="$(bar_target "$t")"
         runs=$(runs_for "$t" "$record")
         passes=$(passes_for "$t" "$record")
         fails=$(fails_for "$t" "$record")
@@ -129,8 +130,12 @@ summary() {
         total_cured=$((total_cured + cured))
         [[ "$cured" -gt 0 ]] && cured_names+=("$t")
         echo "$line"
-        if [[ "$runs" -lt 20 ]]; then all_full=0; fi
-        if [[ "$runs" -lt "$min_runs" ]]; then min_runs="$runs"; fi
+        if [[ "$runs" -lt "$target" ]]; then all_full=0; fi
+        if [[ "$min_target" -eq 0 \
+            || $((runs * min_target)) -lt $((min_runs * target)) ]]; then
+            min_runs="$runs"
+            min_target="$target"
+        fi
     done
     if [[ "$total_cured" -gt 2 ]]; then any_fail=1; fi
     if [[ "$any_fail" -eq 1 ]]; then
@@ -152,7 +157,7 @@ summary() {
             echo "RESULT: PASS"
         fi
     else
-        echo "RESULT: IN PROGRESS (min runs ${min_runs}/20)"
+        echo "RESULT: IN PROGRESS (min runs ${min_runs}/${min_target})"
     fi
     return 0
 }
@@ -189,7 +194,7 @@ run_chunk() {
     local tests=("$@")
     for _ in $(seq 1 "$passes"); do
         for t in "${tests[@]}"; do
-            if [[ "$(runs_for "$t" "$record")" -ge 20 ]]; then
+            if [[ "$(runs_for "$t" "$record")" -ge "$(bar_target "$t")" ]]; then
                 continue
             fi
             local t0=$SECONDS
@@ -423,6 +428,47 @@ if [[ "$self_test" -eq 1 ]]; then
         cat "$dir/harness0.txt"; exit 1;
     }
     echo "[self-test] a 0-test filter stops the bar"
+
+    # R63 F4: a proof's own target. r45_f1 is 5, the rest 20.
+    record="$dir/targets.flake.txt"
+    : > "$record"
+    for _ in $(seq 1 5); do
+        echo "TEST r45_f1_reference_scores_one PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    done
+    for _ in $(seq 1 20); do
+        echo "TEST alpha PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    done
+    summary "$record" r45_f1_reference_scores_one alpha > "$dir/targets-pass.txt" || true
+    grep -q 'RESULT: PASS' "$dir/targets-pass.txt" || {
+        cat "$dir/targets-pass.txt"; exit 1;
+    }
+
+    record="$dir/targets4.flake.txt"
+    : > "$record"
+    for _ in $(seq 1 4); do
+        echo "TEST r45_f1_reference_scores_one PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    done
+    for _ in $(seq 1 20); do
+        echo "TEST alpha PASS 1 2026-10-23T00:00:00Z" >> "$record"
+    done
+    summary "$record" r45_f1_reference_scores_one alpha > "$dir/targets4.txt" || true
+    grep -q 'RESULT: IN PROGRESS (min runs 4/5)' "$dir/targets4.txt" || {
+        cat "$dir/targets4.txt"; exit 1;
+    }
+
+    log="$dir/target.log"
+    failed=0
+    run_one() {
+        echo 'test result: ok. 1 passed; 0 failed'
+        return 0
+    }
+    record="$dir/target-run.flake.txt"
+    : > "$record"
+    run_chunk "$record" 10 r45_f1_reference_scores_one
+    [[ "$(runs_for r45_f1_reference_scores_one "$record")" -eq 5 ]] || {
+        echo "run_chunk did not stop at the 5-run target"; cat "$record"; exit 1;
+    }
+    echo "[self-test] per-proof targets stop at 5 and keep PASS/IN PROGRESS"
 
     # R28 F3: a failing proof is recorded and the rest of the chunk runs.
     log="$dir/fake.log"
