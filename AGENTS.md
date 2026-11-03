@@ -225,8 +225,12 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
 
 **Flake bar** (`scripts/flake-bar.sh`, `--passes K`):
 
-- It runs the bar's 28 proofs K times (`scripts/bar-proofs.sh`, about
-  50 min per pass), launched through `scripts/detach.sh`.
+- It runs the bar's 28 proofs (`scripts/bar-proofs.sh`), launched
+  through `scripts/detach.sh`. Each proof has a run target
+  (`bar_target`): 5 for `r45_f1_reference_scores_one`, 20 for the rest
+  (round 63). Since round 63, a stage proof below 20 grades stages 0-4
+  and its own; the two stage-20 proofs grade the whole ladder. A full bar
+  takes about 7 h.
   `flake-bar.sh --key` prints the graded-content key; the record is
   `<git-common-dir>/sdb-gates/flake-<key>.txt`, so docs-only commits
   keep it. A FAIL line names a file with that run's output.
@@ -242,7 +246,8 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
   good. Fix the cause, move the record and its logs aside into
   `sdb-gates/void-flake-<key>-<utc>-<reason>/` (never delete them), and
   restart the bar.
-- **When:** 20 passes after any graded-path change, before the next
+- **When:** a full bar (every proof at its target) after any
+  graded-path change, before the next
   published cell. `scripts/sql-cell.sh` refuses an official cell without
   a PASS record (`SDB_CELL_SMOKE=1` runs a sub-$0.99 smoke cell without
   one).
