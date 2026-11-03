@@ -1327,7 +1327,7 @@ async fn test_pipeline_eval_only_sql_stage5_crash_live() {
         stage: 5,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 5],
+        accepted_stages: vec![0, 1, 2, 3, 4, 5],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -1359,7 +1359,7 @@ async fn test_pipeline_eval_only_sql_stage5_crash_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlcrash");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1384,7 +1384,7 @@ async fn test_pipeline_eval_only_sql_stage5_lite_live() {
         stage: 5,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 5],
+        accepted_stages: vec![0, 1, 2, 3, 4, 5],
         lite_profile: vec!["crash-acked-only".to_string()],
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -1421,7 +1421,7 @@ async fn test_pipeline_eval_only_sql_stage5_lite_live() {
             "the lite variant must not run {absent:?}"
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlcrashlite");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1581,7 +1581,7 @@ async fn test_pipeline_eval_only_sql_stage14_observability_live() {
         stage: 14,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 14],
+        accepted_stages: vec![0, 1, 2, 3, 4, 14],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..14).collect(),
@@ -1608,7 +1608,7 @@ async fn test_pipeline_eval_only_sql_stage14_observability_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlobs");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1650,7 +1650,7 @@ async fn test_pipeline_eval_only_sql_stage12_concurrency_live() {
         stage: 12,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 12],
+        accepted_stages: vec![0, 1, 2, 3, 4, 12],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..12).collect(),
@@ -1676,7 +1676,7 @@ async fn test_pipeline_eval_only_sql_stage12_concurrency_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlconc");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1718,7 +1718,7 @@ async fn test_pipeline_eval_only_sql_stage12_concurrency_lite_live() {
         stage: 12,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 12],
+        accepted_stages: vec![0, 1, 2, 3, 4, 12],
         lite_profile: vec!["concurrency-global-lock".to_string()],
         passed_lite: Vec::new(),
         passed_stages: (0..12).collect(),
@@ -1744,7 +1744,7 @@ async fn test_pipeline_eval_only_sql_stage12_concurrency_lite_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlconclite");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1869,7 +1869,7 @@ async fn test_pipeline_eval_only_sql_stage15_tests_ci_live() {
         stage: 15,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 15],
+        accepted_stages: vec![0, 1, 2, 3, 4, 15],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..15).collect(),
@@ -1899,7 +1899,7 @@ async fn test_pipeline_eval_only_sql_stage15_tests_ci_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqltests");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1942,7 +1942,7 @@ async fn test_pipeline_eval_only_sql_stage15_tests_ci_lite_live() {
         stage: 15,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 15],
+        accepted_stages: vec![0, 1, 2, 3, 4, 15],
         lite_profile: vec!["coverage-60".to_string()],
         passed_lite: Vec::new(),
         passed_stages: (0..15).collect(),
@@ -1970,7 +1970,7 @@ async fn test_pipeline_eval_only_sql_stage15_tests_ci_lite_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqltestslite");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2065,7 +2065,7 @@ async fn test_pipeline_eval_only_sql_stage16_memory_live() {
         stage: 16,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 16],
+        accepted_stages: vec![0, 1, 2, 3, 4, 16],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..16).collect(),
@@ -2094,7 +2094,7 @@ async fn test_pipeline_eval_only_sql_stage16_memory_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlmemory");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2139,7 +2139,7 @@ async fn test_pipeline_eval_only_sql_stage17_disk_full_live() {
         stage: 17,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 17],
+        accepted_stages: vec![0, 1, 2, 3, 4, 17],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..17).collect(),
@@ -2168,7 +2168,7 @@ async fn test_pipeline_eval_only_sql_stage17_disk_full_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqldisk");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2213,7 +2213,7 @@ async fn test_pipeline_eval_only_sql_stage18_security_live() {
         stage: 18,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 18],
+        accepted_stages: vec![0, 1, 2, 3, 4, 18],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..18).collect(),
@@ -2241,7 +2241,7 @@ async fn test_pipeline_eval_only_sql_stage18_security_live() {
                 logger.text()
             );
         }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlsec");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2287,7 +2287,7 @@ async fn test_pipeline_eval_only_sql_stage19_replication_live() {
         stage: 19,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 19],
+        accepted_stages: vec![0, 1, 2, 3, 4, 19],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..19).collect(),
@@ -2316,7 +2316,7 @@ async fn test_pipeline_eval_only_sql_stage19_replication_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlrepl");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2361,7 +2361,7 @@ async fn test_pipeline_eval_only_sql_stage19_replication_lite_live() {
         stage: 19,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 19],
+        accepted_stages: vec![0, 1, 2, 3, 4, 19],
         lite_profile: vec!["two-nodes-promote".to_string()],
         passed_lite: Vec::new(),
         passed_stages: (0..19).collect(),
@@ -2390,7 +2390,7 @@ async fn test_pipeline_eval_only_sql_stage19_replication_lite_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlrepllite");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2582,7 +2582,7 @@ async fn test_pipeline_eval_only_sql_stage13_schema_change_live() {
         stage: 13,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 13],
+        accepted_stages: vec![0, 1, 2, 3, 4, 13],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..13).collect(),
@@ -2600,6 +2600,7 @@ async fn test_pipeline_eval_only_sql_stage13_schema_change_live() {
     assert_proof_ok(&out, &logger);
     for needle in [
         "Stage 13: Schema change -> PASS",
+        "Stage 4: Persistence -> PASS",
         "[UPGRADE] sentinel for stage 13 written",
     ] {
         assert!(
@@ -2608,7 +2609,7 @@ async fn test_pipeline_eval_only_sql_stage13_schema_change_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlschema");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2638,7 +2639,7 @@ async fn test_pipeline_eval_only_sql_stage11_indexes_live() {
         stage: 11,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 11],
+        accepted_stages: vec![0, 1, 2, 3, 4, 11],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..11).collect(),
@@ -2677,7 +2678,7 @@ async fn test_pipeline_eval_only_sql_stage11_indexes_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlidx");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2703,7 +2704,7 @@ async fn test_pipeline_eval_only_sql_stage10_subqueries_live() {
         stage: 10,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 10],
+        accepted_stages: vec![0, 1, 2, 3, 4, 10],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: (0..10).collect(),
@@ -2729,7 +2730,7 @@ async fn test_pipeline_eval_only_sql_stage10_subqueries_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlsub");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2755,7 +2756,7 @@ async fn test_pipeline_eval_only_sql_stage9_constraints_live() {
         stage: 9,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 9],
+        accepted_stages: vec![0, 1, 2, 3, 4, 9],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -2781,7 +2782,7 @@ async fn test_pipeline_eval_only_sql_stage9_constraints_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlcons");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2807,7 +2808,7 @@ async fn test_pipeline_eval_only_sql_stage8_joins_live() {
         stage: 8,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 8],
+        accepted_stages: vec![0, 1, 2, 3, 4, 8],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -2833,7 +2834,7 @@ async fn test_pipeline_eval_only_sql_stage8_joins_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqljoin");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2858,7 +2859,7 @@ async fn test_pipeline_eval_only_sql_stage11_lite_live() {
         stage: 11,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 11],
+        accepted_stages: vec![0, 1, 2, 3, 4, 11],
         lite_profile: vec!["index-equality-only".to_string()],
         passed_lite: Vec::new(),
         passed_stages: (0..11).collect(),
@@ -2886,7 +2887,7 @@ async fn test_pipeline_eval_only_sql_stage11_lite_live() {
         "the lite gate must not measure ranges; log:\n{}",
         logger.text()
     );
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlidxlite");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2911,7 +2912,7 @@ async fn test_pipeline_eval_only_sql_stage8_lite_live() {
         stage: 8,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 8],
+        accepted_stages: vec![0, 1, 2, 3, 4, 8],
         lite_profile: vec!["join-inner-only".to_string()],
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -2927,14 +2928,14 @@ async fn test_pipeline_eval_only_sql_stage8_lite_live() {
     )
     .await;
     assert_proof_ok(&out, &logger);
-    for needle in ["Stage 8: Joins -> PASS", "Stage 7: Aggregates -> PASS"] {
+    for needle in ["Stage 8: Joins -> PASS"] {
         assert!(
             logger.contains(needle),
             "missing {needle:?}; log:\n{}",
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqljoinlite");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2960,7 +2961,7 @@ async fn test_pipeline_eval_only_sql_stage7_aggregates_live() {
         stage: 7,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 7],
+        accepted_stages: vec![0, 1, 2, 3, 4, 7],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -2986,7 +2987,7 @@ async fn test_pipeline_eval_only_sql_stage7_aggregates_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlagg");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -3012,7 +3013,7 @@ async fn test_pipeline_eval_only_sql_stage6_transactions_live() {
         stage: 6,
         prompt_path,
         continuity: true,
-        accepted_stages: vec![0, 1, 2, 3, 6],
+        accepted_stages: vec![0, 1, 2, 3, 4, 6],
         lite_profile: Vec::new(),
         passed_lite: Vec::new(),
         passed_stages: Vec::new(),
@@ -3040,7 +3041,7 @@ async fn test_pipeline_eval_only_sql_stage6_transactions_live() {
             logger.text()
         );
     }
-    assert_proof_score(&out, &logger, 5, 5);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqltxn");
     let _ = fs::remove_dir_all(&dir);
 }
