@@ -236,6 +236,12 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
     bar; the result then reads `RESULT: PASS (cured: <proofs>)`.
   - A failed rerun, a second cure on one proof, a third cure in the bar,
     or a FAIL with no rerun after it gives `RESULT: FAIL`.
+- **A harness failure stops the bar** (round 62): a run with exit 127,
+  `running 0 tests`, or no `test result:` line writes `HARNESS <t>
+  <reason>`, and the record reads `RESULT: FAIL (harness: ...)` for
+  good. Fix the cause, move the record and its logs aside into
+  `sdb-gates/void-flake-<key>-<utc>-<reason>/` (never delete them), and
+  restart the bar.
 - **When:** 20 passes after any graded-path change, before the next
   published cell. `scripts/sql-cell.sh` refuses an official cell without
   a PASS record (`SDB_CELL_SMOKE=1` runs a sub-$0.99 smoke cell without

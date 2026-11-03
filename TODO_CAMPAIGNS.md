@@ -187,6 +187,8 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   on a harness note) and a rules bump if it changes the score.
 - **The faster bar (R61-8):** now round 63, with the perf port race
   (R61-12), before the grid (operator, 2026-11-03, "1a no bump").
+- **The pre-push hook's `++` lines (R62-2, `docs/rounds/62.md`):** the
+  pattern check skips an added line whose content starts with `++`.
 - **Failure taxonomy** from campaign stages: truncation, tool misuse,
   regression patterns (old H3).
 - **Retirement:** finish the README rewrite for sdb-sql only (old M8,
