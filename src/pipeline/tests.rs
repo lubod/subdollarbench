@@ -2928,13 +2928,12 @@ async fn test_pipeline_eval_only_sql_stage8_lite_live() {
     )
     .await;
     assert_proof_ok(&out, &logger);
-    for needle in ["Stage 8: Joins -> PASS"] {
-        assert!(
-            logger.contains(needle),
-            "missing {needle:?}; log:\n{}",
-            logger.text()
-        );
-    }
+    let needle = "Stage 8: Joins -> PASS";
+    assert!(
+        logger.contains(needle),
+        "missing {needle:?}; log:\n{}",
+        logger.text()
+    );
     assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqljoinlite");
     let _ = fs::remove_dir_all(&dir);
