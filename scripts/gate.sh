@@ -42,6 +42,12 @@ if [[ $fast -eq 1 && $ready -eq 1 ]]; then
     exit 1
 fi
 
+# R62 F3: a ready selection that is the whole skip list is the full gate.
+ready_is_full() {
+    local selected="${1:-0}" live="${2:-0}"
+    [[ "$live" -gt 0 && "$selected" -eq "$live" ]]
+}
+
 scope_self_test() {
     local dir repo out
     dir="$(mktemp -d /tmp/sdb-gate-self-test.XXXXXX)"
@@ -112,6 +118,18 @@ scope_self_test() {
     }
     echo "[self-test] a RULES_VERSION change scopes to full"
 
+    # R62 F3: the full selection takes the full path, a partial one keeps
+    # the fast set plus its proofs.
+    ready_is_full 19 19 || {
+        echo "[self-test] a full ready selection did not take the full path" >&2
+        return 1
+    }
+    if ready_is_full 4 19; then
+        echo "[self-test] a partial ready selection took the full path" >&2
+        return 1
+    fi
+    echo "[self-test] full and partial ready selections pick the right path"
+
     echo "RESULT: PASS (gate scope self-test)"
 }
 
@@ -166,6 +184,18 @@ if [[ $ready -eq 1 && $rules_bumped -eq 1 ]]; then
     exit 1
 fi
 
+# R62 F3: when --ready selects every proof the fast set skipped, the full
+# gate's single cargo test is cheaper. Decide before the record header so
+# the mode line says which path ran.
+ready_full=0
+if [[ $ready -eq 1 ]]; then
+    mapfile -t live < <(scripts/live-proofs.sh)
+    mapfile -t ready_list < <(select_ready_proofs "$PWD" "$base")
+    if ready_is_full "${#ready_list[@]}" "${#live[@]}"; then
+        ready_full=1
+    fi
+fi
+
 # R56 F6: a full gate builds and runs Docker-heavy tests; a --ready gate
 # runs the serialized live proofs too. Both refuse next to a live cell.
 # `--fast` stays allowed (AGENTS.md).
@@ -204,6 +234,7 @@ trap 'rm -f "$log"' EXIT
 mode="full"
 [[ $fast == 1 ]] && mode="fast"
 [[ $ready == 1 ]] && mode="ready (fast set + core and mapped proofs)"
+[[ $ready == 1 && $ready_full == 1 ]] && mode="full (ready selected every proof)"
 {
     echo "commit:  $(git rev-parse HEAD)"
     echo "branch:  $(git rev-parse --abbrev-ref HEAD)"
@@ -284,19 +315,22 @@ if [[ -n "$base" ]]; then
 fi
 
 if [[ $ready -eq 1 ]]; then
-    fast_set
-    mapfile -t live < <(scripts/live-proofs.sh)
-    mapfile -t ready_list < <(select_ready_proofs "$PWD" "$base")
-    echo "proofs:  ${#ready_list[@]} selected by scripts/ready-proofs.txt and scripts/proof-map.txt" >>"$out"
-    while IFS=$'\t' read -r proof reason; do
-        [[ -z "$proof" ]] && continue
-        if ! printf '%s\n' "${live[@]}" | grep -qx "$proof"; then
-            echo "FAIL  $proof: not in scripts/live-proofs.sh; --ready must not run a proof outside it" >>"$out"
-            fail=1
-            continue
-        fi
-        run_ready_proof "$proof" "$reason"
-    done < <(printf '%s\n' "${ready_list[@]}")
+    if [[ $ready_full -eq 1 ]]; then
+        echo "proofs:  all ${#live[@]} (ready selected every proof; full gate)" >>"$out"
+        step "cargo test (full, unfiltered)" cargo test
+    else
+        fast_set
+        echo "proofs:  ${#ready_list[@]} selected by scripts/ready-proofs.txt and scripts/proof-map.txt" >>"$out"
+        while IFS=$'\t' read -r proof reason; do
+            [[ -z "$proof" ]] && continue
+            if ! printf '%s\n' "${live[@]}" | grep -qx "$proof"; then
+                echo "FAIL  $proof: not in scripts/live-proofs.sh; --ready must not run a proof outside it" >>"$out"
+                fail=1
+                continue
+            fi
+            run_ready_proof "$proof" "$reason"
+        done < <(printf '%s\n' "${ready_list[@]}")
+    fi
 elif [[ $fast -eq 1 ]]; then
     fast_set
 else
