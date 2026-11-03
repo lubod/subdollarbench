@@ -583,8 +583,9 @@ fn r63_f1_ports_distinct() {
     assert_eq!(got, 5001);
 }
 
-/// R63 F1: a host-side Docker start error retries once and then is a
-/// harness fault; a start.sh failure is the candidate's and floors.
+/// R63 F1/R63-1: a host-side Docker start error retries once and then is
+/// a harness fault; a start.sh failure and a broken candidate image CMD
+/// are the candidate's and floor.
 #[test]
 fn r63_f1_host_start_failure_is_harness() {
     let mut calls = 0;
@@ -622,4 +623,26 @@ fn r63_f1_host_start_failure_is_harness() {
     );
     assert!(matches!(result, Err(StartFailure::Candidate(_))));
     assert_eq!(calls, 1, "a candidate failure does not retry");
+
+    // R63-1: a candidate image whose CMD names a missing binary fails
+    // with the generic daemon text; it is the candidate's, not the host's.
+    let mut calls = 0;
+    let mut held = None;
+    let result = start_candidate_with_retry(
+        5000,
+        &mut held,
+        |_| {
+            calls += 1;
+            Err(anyhow::anyhow!(
+                "candidate sandbox failed to start: docker: Error response from daemon: \
+                 failed to create task for container: failed to create shim task: OCI \
+                 runtime create failed: runc create failed: unable to start container \
+                 process: exec: \"/nonexistent-binary\": stat /nonexistent-binary: no such \
+                 file or directory: unknown"
+            ))
+        },
+        |_| reserve_port(),
+    );
+    assert!(matches!(result, Err(StartFailure::Candidate(_))));
+    assert_eq!(calls, 1, "a broken candidate image does not retry");
 }

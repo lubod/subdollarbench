@@ -1486,13 +1486,17 @@ where
     }
 }
 
-/// R63 F1: a Docker start error that comes from the host, not the
-/// candidate (a candidate build or start.sh failure is not in this list).
+/// R63 F1/R63-1: a Docker start error that comes from the host, not the
+/// candidate. A candidate image with a bad CMD fails with the generic
+/// "Error response from daemon ... unable to start container process",
+/// so that text is deliberately not a host needle: it must floor.
 fn start_error_is_host(message: &str) -> bool {
     [
         "port is already allocated",
         "address already in use",
-        "Error response from daemon",
+        "failed to set up container networking",
+        "Conflict. The container name",
+        "Cannot connect to the Docker daemon",
     ]
     .iter()
     .any(|needle| message.contains(needle))
