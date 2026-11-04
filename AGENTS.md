@@ -92,6 +92,11 @@ the `@pfoundation/ocadvisor` plugin, configured in the repo's
 (`.opencode/commands/advisor.md`). It sends the session transcript (the
 last 200k characters) and returns a second opinion. The reviewer runs
 Opus, so the tool is hidden there.
+- **Only where the config is.** OpenCode reads `opencode.json` from the
+  session's directory and its parents, and a worktree holds only its
+  branch's files. A worktree branched before `ed29d7e` has no advisor;
+  every `roundNN` from `round-64-open` on does. Config edits reload
+  without a service restart.
 
 - **When to consult:**
   - `plan` / `before_approach`: before choosing an approach on an item
