@@ -616,6 +616,33 @@ The benchmark answers "what does a dollar buy" (round 23):
   `#[cfg(test)]`. The fingerprint moved once, to `…+8344e803…`; nothing
   published carried the old value.
 
+## 25. The implementer gets an advisor; the grid runs omp only (2026-11-04)
+
+- **The advisor** (operator, 2026-11-04: "how we can use advisor for
+  implementer").
+  - The implementer runs `opencode-go/deepseek-v4.1-flash#max`. The
+    `@pfoundation/ocadvisor` plugin gives it an `advisor` tool backed by
+    `claude-agent/opus#high`, at the checkpoints in AGENTS.md ("The
+    advisor").
+  - It is capped at 200k transcript characters and 600 s: implementer
+    sessions reach about 740k tokens.
+  - Its value is in catching blockers before a long gate. Round 61's
+    five early blockers each cost a gate or a review cycle.
+  - **Independence:** the advisor and the reviewer are the same model
+    family. The record in the implementer notes is how the reviewer sees
+    where the advice shaped the code.
+- **Where it is configured:** the repo's `opencode.json` and
+  `.opencode/`, not `~/.config/opencode`. The opencode candidate harness
+  mounts the host's `~/.config/opencode` and `~/.local/share/opencode`
+  into the sandbox (`src/sandbox/opencode.rs`, `host_opencode_dirs`). A
+  global plugin would reach the candidate, and the mounted database holds
+  every opencode session, including the implementer's and the
+  reviewer's.
+- **The grid runs `omp` only** (operator: "lets use only omp for grid").
+  `sql-cell.sh` defaults to `omp`. The opencode candidate harness is not
+  used for graded cells until a round gives it a per-run config and data
+  dir with auth only. That round changes `src/sandbox`, so it needs a bar.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

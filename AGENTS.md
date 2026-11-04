@@ -84,11 +84,42 @@ instructions live in the repo and a short phrase is enough:
 Anything round-specific (a choice, something not to do) goes in the
 round file, never only in chat.
 
+## The advisor (implementer)
+
+The implementer (opencode, `deepseek-v4.1-flash`) has an `advisor` tool:
+the `@pfoundation/ocadvisor` plugin, configured in the repo's
+`opencode.json` (Opus 5.5, high), plus `/advisor`
+(`.opencode/commands/advisor.md`). It sends the session transcript (the
+last 200k characters) and returns a second opinion. The reviewer runs
+Opus, so the tool is hidden there.
+
+- **When to consult:**
+  - `plan` / `before_approach`: before choosing an approach on an item
+    that changes a graded path, or that the spec leaves open;
+  - `debug` / `stuck`: after a gate or test fails twice for a reason
+    that isn't understood;
+  - `review` / `pre_complete`: once per round, before the gate run for
+    the `ready` commit. Ask it to check every acceptance box against the
+    diff and the seen-failing records.
+  - Skip it for mechanical edits and docs.
+- **The advice never overrides the round file or AGENTS.md.** A
+  disagreement with the spec goes under **Spec questions**, and the
+  implementer waits for the reviewer's answer.
+- **Every consultation is recorded** in the round's **Implementer
+  notes**: the mode, the question in one line, the gist of the advice,
+  and whether it was followed (with the reason if not). The reviewer
+  reads this as part of the review.
+- **Never in a candidate's harness.** The plugin lives only in the repo's
+  config, never in `~/.config/opencode`. That directory is mounted into
+  opencode-harness candidates (`src/sandbox/opencode.rs`). Grid cells
+  run `omp` only (`docs/DECISIONS.md` #25).
+
 ## File ownership
 
 | File | Owner | Others |
 |---|---|---|
 | `AGENTS.md`, `CLAUDE.md`, `docs/DECISIONS.md` | Reviewer, on operator decisions | Implementer proposes changes in its round notes |
+| `opencode.json`, `.opencode/` (the advisor) | Reviewer, on operator decisions | Implementer proposes changes in its round notes |
 | `docs/rounds/NN.md`: header, items, acceptance, review | Reviewer | — |
 | `docs/rounds/NN.md`: ticks, **Implementer notes**, `Status: ready` | Implementer | — |
 | `docs/rounds/NN.md`: **Spec questions** | Implementer asks | Reviewer answers in place, on master |

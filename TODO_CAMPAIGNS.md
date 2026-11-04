@@ -189,6 +189,13 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   (R61-12), before the grid (operator, 2026-11-03, "1a no bump").
 - **The pre-push hook's `++` lines (R62-2, `docs/rounds/62.md`):** the
   pattern check skips an added line whose content starts with `++`.
+- **The opencode candidate harness mounts host state** (`docs/DECISIONS.md`
+  #25). `src/sandbox/opencode.rs` mounts the host's `~/.config/opencode`
+  (plugins, commands) and `~/.local/share/opencode` (every session's
+  transcript) into the candidate. Give it a per-run config and data dir
+  with only the auth, and a test that a host plugin entry never reaches
+  the candidate. Graded (`src/sandbox`): a bar. Until then, cells use
+  `omp` only.
 - **Failure taxonomy** from campaign stages: truncation, tool misuse,
   regression patterns (old H3).
 - **Retirement:** finish the README rewrite for sdb-sql only (old M8,

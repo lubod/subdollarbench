@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "@pfoundation/ocadvisor",
+      "options": {
+        "model": "claude-agent/opus#high",
+        "maxTranscriptChars": 200000,
+        "timeoutMs": 600000
+      }
+    }
+  ]
+}
