@@ -6,7 +6,8 @@
       "options": {
         "model": "claude-agent/opus#high",
         "maxTranscriptChars": 200000,
-        "timeoutMs": 600000
+        "timeoutMs": 600000,
+        "disabledForModels": []
       }
     }
   ]

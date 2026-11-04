@@ -97,6 +97,10 @@ Opus, so the tool is hidden there.
   branch's files. A worktree branched before `ed29d7e` has no advisor;
   every `roundNN` from `round-64-open` on does. Config edits reload
   without a service restart.
+- **On/off switch:** `disabledForModels` in `opencode.json`. Set it to
+  `["opencode-go/deepseek-v4.1-flash"]` for off, or `[]` for on (the
+  default). It applies on save to sessions in the repo root; a worktree
+  uses its branch's copy.
 
 - **When to consult:**
   - `plan` / `before_approach`: before choosing an approach on an item
