@@ -81,3 +81,63 @@ sits below the bill. Options: (a) keep base rates and say so on the
 results page; (b) price the overrides in the snapshot (a rules bump);
 (c) cap context so no call crosses a threshold. Found in round 46.
 
+
+## Q9. The crash-safety gate (open, 2026-11-04; decide after the v2 grid)
+
+**The finding.** Ticket 5 (crash safety) gates most of phase 4 through
+the chain 4 → 5 → 6. Of the phase-4 tickets, 17 needs 5, and 16, 18, 19
+and 20 need 6 (`campaigns/sdb-sql/campaign.json`, `needs`). A career
+that can't pass 5, or its lite variant, scores 0 in phase 4: up to 32 of
+76 points (42%), whatever else it can do.
+
+**The evidence.** gpt-6-luna, grid career c2, rules `.45`:
+- It failed ticket 5 five times: full and lite in phase 1, then lite as
+  a catch-up in phases 3 and 4. Each catch-up target gets one attempt
+  per phase, and there are 3 slots (`CATCH_UP_SLOTS`,
+  `src/scoring.rs:33`; `catch_up_targets` in `src/campaign.rs`).
+- Its store rewrites one `database.json` per commit, and it never came
+  back after a torn tail.
+- Its phase 4 ended after 17 min with $0.94 of its $0.97 unspent, and 16
+  to 20 were skipped. The career ended at 27.4 points.
+
+**This is by design.** Ticket 6's scenario is a crash inside an open
+transaction (`PROPOSAL-sdb-sql.md:165`), and "transactions meet the WAL"
+is intended coupling (`:53`). The ladder measured a real gap. The open
+issues are:
+
+1. **The gate's weight:** a single capability decides 42% of the points.
+2. **Unspent budget:** when the blocker's one attempt per phase fails and
+   nothing else is runnable, the phase ends with its budget unused.
+3. **Variance:** if one career of a model passes 5 and another doesn't,
+   one ticket swings about 30 points. Publishing needs the spread
+   between models to exceed the spread within one model (`TODO_CAMPAIGNS.md`,
+   "The bar").
+
+**Options.**
+- **(a)** Change nothing, and report it: "points blocked by gate X" per
+  career, and the survival curve P(ticket ≥ i).
+- **(b)** When nothing else is runnable, the blocker gets further
+  attempts in the same phase until the budget runs out: full after lite,
+  with fresh feedback. This keeps the `needs` graph and stops wasting
+  budget. It needs a rules bump, and careers restart.
+- **(c)** Loosen the chain. Ticket 6 needs only 4, and the "crash inside
+  a transaction" check moves to 17 or a late check. This changes what the
+  ladder means, and needs a rules bump.
+- **(d)** Partial credit for skipped tickets. This contradicts the
+  cumulative design, and is not recommended.
+
+**The next step, after the v2 grid (reviewer).** For each of the 15
+careers, record:
+- which gate, if any, blocked it, and the points it blocked;
+- the budget left when each phase ended;
+- whether careers of the same model differ on ticket 5 or 6.
+
+Then run the variance check. The recommendation:
+- **(a)** if the spread within each model stays below the spread between
+  models;
+- **(b)**, as a rules `.46` round, if gate events drive the spread;
+- **(c)** only on the operator's call that crash safety should not gate
+  the top tier.
+
+No change during the running grid: any of (b)-(d) restarts all careers
+(about 30 h and $27).
