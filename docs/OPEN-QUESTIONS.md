@@ -82,7 +82,7 @@ results page; (b) price the overrides in the snapshot (a rules bump);
 (c) cap context so no call crosses a threshold. Found in round 46.
 
 
-## Q9. The crash-safety gate (open, 2026-11-04; decide after the v2 grid)
+## Q9. The crash-safety gate (decided 2026-11-06: (a), publish with the gates shown; (b) is a candidate for the next rules version)
 
 **The finding.** Ticket 5 (crash safety) gates most of phase 4 through
 the chain 4 → 5 → 6. Of the phase-4 tickets, 17 needs 5, and 16, 18, 19
