@@ -172,6 +172,31 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 - **Publish:** points vs dollars (a Pareto view), survival curve
   P(ticket >= i), $/ticket, and regression-free rates.
 
+## The next grid (draft; operator, 2026-11-06)
+
+- **Models (9):**
+  - rerun: `deepseek/deepseek-v4.1-flash-1017`, `xiaomi/mimo-v2.6-flash`,
+    `anthropic/claude-haiku-5.5`, `openai/gpt-6-luna`, `qwen/qwen3.8-flash`;
+  - new: `tencent/hy4`, `minimax/minimax-m3.1-flash`,
+    `openai/gpt-6-luna-pro`, `xiaomi/mimo-v2.6-pro`.
+
+  The four new models need entries in `src/cost/model_prices.json`
+  (graded, so it goes into a round with a bar).
+- **Set aside:** `google/gemini-3.8-flash`, `z-ai/glm-5.3-flashx`.
+  Optional wildcards: `inception/mercury-3`, `nvidia/nemotron-3.5-super-vl`,
+  `inclusionai/ling-3.1-flash`.
+- **No smoke phase for Hy4** (operator). The $0 rehearsal stays.
+- **Estimate:** 27 careers, about $68 at list price and about $75 billed;
+  about 2.7 days with 3 lanes, about 2 with 4.
+- **Open:**
+  - one board (rerun all) or a separate board for the new four;
+  - Q9 (b) before the grid (a rules bump) or not;
+  - 3 or 4 lanes;
+  - the credit top-up.
+- **Before it starts:** round 65 merged, its bar PASS, and the account
+  balance at least the billed estimate plus headroom (round 65 F3 checks
+  it per phase).
+
 ## Backlog carried over (still relevant to sdb-sql)
 
 - **Scoring and portal:**
