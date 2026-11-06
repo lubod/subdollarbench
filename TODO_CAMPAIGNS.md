@@ -188,11 +188,17 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 - **No smoke phase for Hy4** (operator). The $0 rehearsal stays.
 - **Estimate:** 27 careers, about $68 at list price and about $75 billed;
   about 2.7 days with 3 lanes, about 2 with 4.
-- **Open:**
-  - one board (rerun all) or a separate board for the new four;
-  - Q9 (b) before the grid (a rules bump) or not;
-  - 3 or 4 lanes;
-  - the credit top-up.
+- **Decided (operator, 2026-11-06, "go with recommendations"):**
+  - **no rerun** of the five v2 models: only the four new models, 12
+    careers (about $35 billed, about 1.2 days);
+  - one board per **rules version**, with every fingerprint shown
+    (round 66 F2);
+  - **no Q9 (b)** in this grid;
+  - **3 lanes**;
+  - a top-up to at least $40 before the grid.
+
+  The plan: round 65 (blockers) → round 66 (prices, the fingerprint
+  rule) → one bar → the rehearsal → the grid.
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
