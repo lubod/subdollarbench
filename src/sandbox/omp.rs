@@ -2389,6 +2389,23 @@ mod billing_tripwire_tests {
         assert!(classify_billing_error("402 rows affected").is_none());
     }
 
+    /// R65 F1: a bare `more credits`, `max_tokens = 402` or a `402 ` line
+    /// without a billing phrase is ordinary text, never a trip.
+    #[test]
+    fn r65_f1_no_false_trip() {
+        for text in [
+            "we need more credits in the game loop",
+            "max_tokens = 402",
+            "CREATE TABLE credits (id int); -- more credits",
+            "402 rows affected",
+        ] {
+            assert!(
+                classify_billing_error(text).is_none(),
+                "{text} must not trip"
+            );
+        }
+    }
+
     /// R65 F1 (R63-3): the exact OpenRouter outage line, its max_tokens
     /// variant, and the session envelope that carries errorStatus 402.
     #[test]
