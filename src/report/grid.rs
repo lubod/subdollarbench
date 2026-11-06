@@ -1104,7 +1104,7 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
     };
     let id = esc(&c.campaign_id);
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         esc(name),
         mark_badge(c),
         effort_note(&c.effort),
@@ -1262,7 +1262,7 @@ fn model_row(
         fmt_token_value,
     );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td title=\"the median career's\">{}</td><td class=\"num\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num\">{}</td><td class=\"num\">{duration}</td><td class=\"num\">{turns}</td><td>{tokens}</td><td>{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td class=\"col-model\"><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td class=\"col-highest\" title=\"the median career's\">{}</td><td class=\"num col-green\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{duration}</td><td class=\"num col-turns\">{turns}</td><td class=\"col-tokens\">{tokens}</td><td class=\"col-state\">{}</td></tr>",
         rank_label(g, stability),
         esc(&g.model),
         esc(short_model(&g.model)),
@@ -1381,7 +1381,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     if !current_groups.is_empty() && stability.is_none() {
         h.push_str("<div class=\"mut\">Rank stability: too many combinations to enumerate; ranks follow the board order.</div>");
     }
-    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th title=\"turns summed over the career's tickets\">Turns</th><th title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th>State</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th class=\"col-model\">Model / career</th><th class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th class=\"col-ppd\">Pts / $</th><th class=\"col-duration\" title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th class=\"col-turns\" title=\"turns summed over the career's tickets\">Turns</th><th class=\"col-tokens\" title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th class=\"col-state\">State</th></tr></thead><tbody>");
     if rows.is_empty() {
         h.push_str("<tr><td colspan=\"12\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
@@ -3979,6 +3979,53 @@ mod tests {
         assert_eq!(cells.len(), 21, "one cell per ticket: {row}");
         assert!(cells[15].starts_with("100%"), "survival at 15: {row}");
         assert!(cells[16].starts_with("0%"), "survival at 16: {row}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F8: the board's phone layout hides the secondary columns and
+    /// keeps rank, model, points, perf and spend.
+    #[test]
+    fn r65_f8_mobile_board() {
+        let css = include_str!("portal_board.css");
+        assert!(
+            css.contains("@media (max-width: 700px)"),
+            "the board has a phone media query"
+        );
+        for class in [
+            "col-highest",
+            "col-green",
+            "col-ppd",
+            "col-duration",
+            "col-turns",
+            "col-tokens",
+            "col-state",
+        ] {
+            assert!(css.contains(class), "the media query names {class}");
+        }
+        let (base, runs, out) = fixture("r65f8");
+        career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        for class in [
+            "col-model",
+            "col-highest",
+            "col-green",
+            "col-ppd",
+            "col-duration",
+            "col-turns",
+            "col-tokens",
+            "col-state",
+        ] {
+            assert!(
+                html.contains(&format!("class=\"{class}\"")),
+                "the board uses {class}: {html}"
+            );
+        }
+        assert!(
+            html.contains("<th class=\"col-highest\"")
+                && html.contains("<th class=\"col-duration\""),
+            "the headers carry the collapsed columns: {html}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 

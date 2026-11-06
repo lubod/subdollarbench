@@ -62,6 +62,20 @@ details.more { margin-top: 4px; font-size: 0.72rem; color: var(--mut); }
 details.more summary { cursor: pointer; }
 details.more .line { margin: 2px 0 0 12px; }
 
+/* R65 F8: the board on a phone. Below 700 px the table keeps rank, model,
+   points, perf and spend; the rest is in the row's expanded details. */
+@media (max-width: 700px) {
+  body { padding: 12px; }
+  th, td { padding: 8px 6px; }
+  .col-highest, .col-green, .col-ppd, .col-duration, .col-turns,
+  .col-tokens, .col-state { display: none; }
+  .col-model { overflow-wrap: anywhere; }
+  .wrap { overflow-x: visible; }
+  .dots { display: none; }
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  h1 { font-size: 1.15rem; }
+}
+
 /* R64 F6: per-model dot strips and the ticket-agreement strip. */
 .chart-legend .key { display: inline-flex; align-items: center; gap: 5px; }
 .chart-legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
