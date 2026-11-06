@@ -254,8 +254,13 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             .or_else(|| v.pointer("/error/status"))
             // R65 F1: OpenRouter's session envelope puts the status on the
             // message (`errorStatus`/`errorId`), not under `error.code`.
-            .or_else(|| v.pointer("/message/errorStatus"))
-            .or_else(|| v.pointer("/message/errorId"))
+            // Only 402 is new here; a session-level 401/429 keeps its
+            // existing handling and must not become a billing trip.
+            .or_else(|| {
+                v.pointer("/message/errorStatus")
+                    .or_else(|| v.pointer("/message/errorId"))
+                    .filter(|c| c.as_u64() == Some(402))
+            })
             .or_else(|| v.get("statusCode"))
             .or_else(|| v.get("code"))
             .and_then(|c| {
@@ -298,8 +303,6 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
         // Phrase match inside error message fields only (not free text).
         let msg = v
             .pointer("/error/message")
-            // R65 F1: OpenRouter's session line carries `errorMessage`.
-            .or_else(|| v.pointer("/message/errorMessage"))
             .or_else(|| v.get("message"))
             .and_then(|m| m.as_str())
             .unwrap_or("")
@@ -309,9 +312,6 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
                 || msg.contains("insufficient credit")
                 || msg.contains("credit exhausted")
                 || msg.contains("out of credit")
-                || msg.contains("requires more credits")
-                || msg.contains("can only afford")
-                || (msg.contains("more credits") && msg.contains("max_tokens"))
             {
                 return Some("provider billing exhausted (HTTP 402)".to_string());
             }
@@ -328,6 +328,24 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             {
                 return Some("provider auth rejected (HTTP 401)".to_string());
             }
+        }
+        // R65 F1: OpenRouter's session line carries the outage in
+        // `message.errorMessage`. Only billing phrases count here, so a
+        // rate-limit or auth message keeps its old handling.
+        let provider_msg = v
+            .pointer("/message/errorMessage")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if provider_msg.contains("payment required")
+            || provider_msg.contains("insufficient credit")
+            || provider_msg.contains("credit exhausted")
+            || provider_msg.contains("out of credit")
+            || provider_msg.contains("requires more credits")
+            || provider_msg.contains("can only afford")
+            || (provider_msg.contains("more credits") && provider_msg.contains("max_tokens"))
+        {
+            return Some("provider billing exhausted (HTTP 402)".to_string());
         }
         return None;
     }
@@ -1391,13 +1409,11 @@ impl OmpRunner {
                                 let tin = usage
                                     .get("input")
                                     .or_else(|| usage.get("prompt_tokens"))
-                                    .or_else(|| usage.get("input_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tout = usage
                                     .get("output")
                                     .or_else(|| usage.get("completion_tokens"))
-                                    .or_else(|| usage.get("output_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tcached = usage
@@ -1410,17 +1426,10 @@ impl OmpRunner {
                                             .and_then(|d| d.get("cached_tokens"))
                                             .and_then(|x| x.as_u64())
                                     })
-                                    .or_else(|| {
-                                        usage
-                                            .get("input_tokens_details")
-                                            .and_then(|d| d.get("cached_tokens"))
-                                            .and_then(|x| x.as_u64())
-                                    })
                                     .unwrap_or(0);
                                 let tcwrite = usage
                                     .get("cacheWrite")
                                     .or_else(|| usage.get("cache_write_input_tokens"))
-                                    .or_else(|| usage.get("cache_creation_input_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 if tin + tout + tcached + tcwrite == 0 {
@@ -2398,6 +2407,8 @@ mod billing_tripwire_tests {
             "max_tokens = 402",
             "CREATE TABLE credits (id int); -- more credits",
             "402 rows affected",
+            // A session-level rate limit is not the OpenRouter outage.
+            r#"{"type":"message","message":{"role":"assistant","stopReason":"error","errorStatus":429,"errorMessage":"rate limit exceeded"}}"#,
         ] {
             assert!(
                 classify_billing_error(text).is_none(),

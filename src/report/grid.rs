@@ -1045,8 +1045,9 @@ fn mark_badge(c: &CareerCell) -> String {
 
 /// R64 F4 (H1): a career's visible name is `<model> · career <i> · <date>`;
 /// the campaign id lives in the tooltip and the results-page link. The
-/// index is the career's best-first position within its model/harness/
-/// effort/rules group, so it matches the expanded rows.
+/// index is the ranked career's start-time position within its
+/// model/harness/effort/rules group (R64-3/R65 F7); an unranked cell
+/// follows the ranked ones.
 fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, c) in cells.iter().enumerate() {

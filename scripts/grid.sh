@@ -205,9 +205,14 @@ account_balance() {
         return
     fi
     local key
-    key="${OPENROUTER_API_KEY:-}"
-    if [[ -z "$key" && -f "$ROOT/.env" ]]; then
+    # The repo's .env is the source of truth (a stale shell key burned a
+    # cell on 2026-10-18); fall back to the environment.
+    key=""
+    if [[ -f "$ROOT/.env" ]]; then
         key="$(grep -m1 '^OPENROUTER_API_KEY=' "$ROOT/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+    fi
+    if [[ -z "$key" ]]; then
+        key="${OPENROUTER_API_KEY:-}"
     fi
     if [[ -z "$key" ]]; then
         log "balance: OPENROUTER_API_KEY is not set"
