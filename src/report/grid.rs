@@ -1072,8 +1072,8 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
             // unfinished cell never shifts the paid careers' indices.
             ranked_b
                 .cmp(&ranked_a)
-                .then_with(|| campaign::board_order(&ca.key, &cb.key))
                 .then_with(|| ca.started.cmp(&cb.started))
+                .then_with(|| ca.campaign_id.cmp(&cb.campaign_id))
         });
         for (i, idx) in g.iter().enumerate() {
             let c = &cells[*idx];
@@ -1663,7 +1663,7 @@ fn fmt_variance(name: &str, v: f64) -> String {
     match name {
         "points" => format!("{v:.1}"),
         "perf" => format!("{v:.2}×"),
-        "$" => format!("${v:.4}"),
+        "$" => format!("${v:.2}"),
         "duration" => fmt_hours(v),
         "turns" => fmt_count(v.round() as u64),
         "tokens out" => fmt_tokens(v.round() as u64),
@@ -1884,13 +1884,13 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     for c in cars {
         let color = palette(models.iter().position(|m| m == &c.model).unwrap_or(0));
         s.push_str(&format!(
-            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{color}\"><title>{}: {:.1} pts · ${:.4}</title></circle>",
+            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{color}\"><title>{}: {:.1} pts · ${:.2}</title></circle>",
             esc(&c.model),
             c.points,
             c.cost,
             x(c.cost),
             y(c.points),
-            esc(&c.model),
+            esc(short_model(&c.model)),
             c.points,
             c.cost
         ));
@@ -2015,9 +2015,18 @@ fn render_results(cells: &[CareerCell]) -> String {
         .map(|m| {
             let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
             if detail.is_empty() {
-                format!("{} — none", esc(m))
+                format!(
+                    "<span title=\"{}\">{}</span> — none",
+                    esc(m),
+                    esc(short_model(m))
+                )
             } else {
-                format!("{} — {}", esc(m), esc(detail))
+                format!(
+                    "<span title=\"{}\">{}</span> — {}",
+                    esc(m),
+                    esc(short_model(m)),
+                    esc(detail)
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -2074,8 +2083,9 @@ fn render_results(cells: &[CareerCell]) -> String {
         let regfree: u32 = cs.iter().map(|c| c.regression_free).sum();
         let rate = (passed > 0).then(|| regfree as f64 / passed as f64);
         metrics.push_str(&format!(
-            "<tr><td><b>{}</b></td><td class=\"num\">{:.4} / {:.4} / {:.4}</td><td class=\"num\">{}</td></tr>",
+            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td></tr>",
             esc(model),
+            esc(short_model(model)),
             costs.first().copied().unwrap_or(0.0),
             median(&costs).unwrap_or(0.0),
             costs.last().copied().unwrap_or(0.0),
@@ -2084,26 +2094,39 @@ fn render_results(cells: &[CareerCell]) -> String {
         ));
     }
 
-    let mut legend = String::new();
-    for (i, m) in models.iter().enumerate() {
-        legend.push_str(&format!(
-            "<span class=\"key\"><span class=\"dot\" style=\"background:{}\"></span>{}</span>",
-            palette(i),
-            esc(m)
-        ));
-    }
     let scatter = svg_scatter(&current, &models);
     let survival = svg_survival(&series);
+    let groups = model_groups(cells);
+    let model_order: HashMap<&str, usize> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.model.as_str(), i))
+        .collect();
+    let mut scatter_cells: Vec<&CareerCell> = current.clone();
+    scatter_cells.sort_by(|a, b| {
+        let oa = model_order
+            .get(a.model.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let ob = model_order
+            .get(b.model.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        oa.cmp(&ob)
+            .then_with(|| b.points.partial_cmp(&a.points).unwrap_or(Ordering::Equal))
+            .then_with(|| a.campaign_id.cmp(&b.campaign_id))
+    });
     let mut scatter_rows = String::new();
-    for c in &current {
+    for c in &scatter_cells {
         let id = esc(&c.campaign_id);
         let name = labels
             .get(&c.campaign_id)
             .map(String::as_str)
             .unwrap_or(&c.campaign_id);
         scatter_rows.push_str(&format!(
-            "<tr id=\"{id}\" title=\"{id}\"><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
+            "<tr id=\"{id}\" title=\"{id}\"><td title=\"{}\">{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.2}</td></tr>",
             esc(&c.model),
+            esc(short_model(&c.model)),
             esc(name),
             c.points,
             c.cost
@@ -2114,7 +2137,11 @@ fn render_results(cells: &[CareerCell]) -> String {
         let cells = (0..=20)
             .map(|i| format!("<td class=\"num\">{:.0}%</td>", vals[i] * 100.0))
             .collect::<String>();
-        survival_rows.push_str(&format!("<tr><td>{}</td>{cells}</tr>", esc(model)));
+        survival_rows.push_str(&format!(
+            "<tr><td title=\"{}\">{}</td>{cells}</tr>",
+            esc(model),
+            esc(short_model(model))
+        ));
     }
     let mut h = String::new();
     h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — results</title><style>");
@@ -2141,22 +2168,25 @@ fn render_results(cells: &[CareerCell]) -> String {
     ));
     let marked: Vec<&CareerCell> = cells.iter().filter(|c| c.rehearsal || c.smoke).collect();
     if !marked.is_empty() {
-        h.push_str("<section><h2>Rehearsals and smoke cells (not ranked)</h2><div class=\"wrap\"><table><tbody>");
-        for c in marked {
-            let id = esc(&c.campaign_id);
-            let name = labels
-                .get(&c.campaign_id)
-                .map(String::as_str)
-                .unwrap_or(&c.campaign_id);
-            h.push_str(&format!(
-                "<tr id=\"{id}\" title=\"{id}\"><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
-                esc(name),
-                mark_badge(c),
-                c.points,
-                c.cost
-            ));
-        }
-        h.push_str("</tbody></table></div></section>");
+        let notes: Vec<String> = marked
+            .iter()
+            .map(|c| {
+                let kind = if c.rehearsal {
+                    "a $0 rehearsal (the harness's reference server, no model)"
+                } else {
+                    "a smoke cell"
+                };
+                format!(
+                    "{kind} scored {} / {}",
+                    fmt_pts(c.points),
+                    c.max_points as u32
+                )
+            })
+            .collect();
+        h.push_str(&format!(
+            "<div class=\"mut note\">Not ranked: {}.</div>",
+            notes.join("; ")
+        ));
     }
     h.push_str(&format!(
         "<section><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>"
@@ -2166,8 +2196,7 @@ fn render_results(cells: &[CareerCell]) -> String {
     h.push_str("<section><h2>Survival: P(ticket ≥ i)</h2><div class=\"wrap\">");
     h.push_str(&survival);
     h.push_str(&format!("</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
-    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div></section>"));
-    let groups = model_groups(cells);
+    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
     let stability = rank_stability(cells, &groups);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let mut h2h_rows = String::new();
@@ -2186,9 +2215,11 @@ fn render_results(cells: &[CareerCell]) -> String {
             }
             let (aw, bw, ties) = head_to_head(&a, &b);
             h2h_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
+                "<tr><td title=\"{}\">{}</td><td title=\"{}\">{}</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
                 esc(&models[i]),
+                esc(short_model(&models[i])),
                 esc(&models[j]),
+                esc(short_model(&models[j])),
                 aw * 100.0,
                 bw * 100.0,
                 ties * 100.0
@@ -2218,18 +2249,17 @@ fn render_results(cells: &[CareerCell]) -> String {
     for (i, g) in current_groups.iter().enumerate() {
         let stab = stability.as_ref().map(|s| &s[i]);
         h.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
+            "<tr><td>{}</td><td title=\"{}\">{}</td><td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
             rank_label(g, stab),
             esc(&g.model),
+            esc(short_model(&g.model)),
             cells[g.best].points,
             cells[g.median].points,
             cells[g.worst].points
         ));
     }
     h.push_str("</tbody></table></div></section>");
-    h.push_str("<div class=\"mut\">Dots: <span class=\"key\">");
-    h.push_str(&legend);
-    h.push_str("</span></div></main></body></html>");
+    h.push_str("</main></body></html>");
     h
 }
 
@@ -2694,6 +2724,30 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {needle}: {hay}"))
     }
 
+    /// R65 F7: true when the visible text holds a dollar amount with more
+    /// than two decimals.
+    fn money_over_two(text: &str) -> bool {
+        let mut rest = text;
+        while let Some(i) = rest.find('$') {
+            let tail = &rest[i + 1..];
+            let digits: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if let Some(dot) = digits.find('.') {
+                let decimals = digits[dot + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count();
+                if decimals > 2 {
+                    return true;
+                }
+            }
+            rest = &tail[digits.len()..];
+        }
+        false
+    }
+
     /// R64 F4: the text a reader sees, with every tag and attribute removed.
     fn visible_text(html: &str) -> String {
         let mut out = String::new();
@@ -2701,7 +2755,12 @@ mod tests {
         for ch in html.chars() {
             match ch {
                 '<' => in_tag = true,
-                '>' => in_tag = false,
+                '>' => {
+                    in_tag = false;
+                    // Keep a boundary between cells: `$0.04` followed by a
+                    // bare `1750.0` must not read as one long decimal.
+                    out.push(' ');
+                }
                 c if !in_tag => out.push(c),
                 _ => {}
             }
@@ -3232,8 +3291,9 @@ mod tests {
             "{board}"
         );
         let results = read(&out.join("results.html"));
-        assert!(results.contains("REHEARSAL"), "{results}");
-        assert!(results.contains("not ranked"), "{results}");
+        // R65 F7: the results page shows the rehearsal as a footnote.
+        assert!(results.contains("Not ranked:"), "{results}");
+        assert!(results.contains("$0 rehearsal"), "{results}");
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["ranked"], 0);
         let _ = fs::remove_dir_all(&base);
@@ -3647,7 +3707,7 @@ mod tests {
         let h2h = &html[pos(&html, "Head-to-head")..];
         let at = pos(
             h2h,
-            "<td>openrouter/deepseek/deepseek-v4.1-flash-1017</td><td>openrouter/xiaomi/mimo-v2.6-flash</td>",
+            "<td title=\"openrouter/deepseek/deepseek-v4.1-flash-1017\">deepseek/deepseek-v4.1-flash-1017</td><td title=\"openrouter/xiaomi/mimo-v2.6-flash\">xiaomi/mimo-v2.6-flash</td>",
         );
         let row = &h2h[at..at + h2h[at..].find("</tr>").unwrap()];
         assert!(row.contains("mimo"), "deepseek vs mimo row: {row}");
@@ -3688,6 +3748,72 @@ mod tests {
         assert!(
             svg.contains("<polygon class=\"med\""),
             "median diamond: {svg}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F7 (R5-R8): the results page matches the board: short names,
+    /// two-decimal money, date-ordered career numbers and the rehearsal as
+    /// a footnote.
+    #[test]
+    fn r65_f7_results_matches_board() {
+        let (base, runs, out) = fixture("r65f7");
+        let model = "openrouter/deepseek/deepseek-v4.1-flash-1017";
+        for (prefix, date) in [
+            ("d1", "2026-11-04"),
+            ("d2", "2026-11-05"),
+            ("d3", "2026-11-06"),
+        ] {
+            career(&runs, prefix, model, [17.5; 4], [0.01; 4]);
+            for phase in 1..=4 {
+                set_phase_times(
+                    &runs,
+                    prefix,
+                    phase,
+                    &format!("{date}T0{phase}:00:00Z"),
+                    &format!("{date}T0{phase}:30:00Z"),
+                );
+            }
+        }
+        career(&runs, "reh", model, [17.75; 4], [0.0; 4]);
+        set_mark(&runs, "reh", 4, "rehearsal");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        for (page, html) in [("board", &board), ("results", &results)] {
+            let text = visible_text(html);
+            assert!(
+                !text.contains("openrouter/"),
+                "{page} shows the provider prefix: {text}"
+            );
+            assert!(
+                !money_over_two(&text),
+                "{page} holds a dollar amount with more than two decimals: {text}"
+            );
+        }
+        let text = visible_text(&results);
+        for (i, date) in ["2026-11-04", "2026-11-05", "2026-11-06"]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                text.contains(&format!(
+                    "deepseek/deepseek-v4.1-flash-1017 · career {} · {date}",
+                    i + 1
+                )),
+                "career {} is dated {date}: {text}",
+                i + 1
+            );
+        }
+        assert!(
+            text.contains(
+                "Not ranked: a $0 rehearsal (the harness's reference server, no model) scored 71 / 76."
+            ),
+            "the rehearsal is a footnote: {text}"
+        );
+        assert!(
+            !results.contains("Rehearsals and smoke cells"),
+            "the rehearsal section is gone: {results}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -3750,8 +3876,8 @@ mod tests {
             "5× the prompt rate above 100k prompt tokens",
             "2× above 272k prompt tokens",
             "2× in weekday peak hours",
-            "xiaomi/mimo-v2.6-flash — none",
-            "qwen/qwen3.8-flash — none",
+            "mimo-v2.6-flash</span> — none",
+            "qwen3.8-flash</span> — none",
         ] {
             assert!(html.contains(needle), "missing {needle:?}: {html}");
         }
