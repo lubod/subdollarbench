@@ -935,29 +935,23 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         );
     }
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · best {:.1} · median {:.1} · worst {:.1}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} careers</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{}/{}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">—</td><td>{}</td><td class=\"mut\"></td></tr>",
         g.rank_label(),
         esc(&g.model),
         mark_badge(med),
         more,
         esc(&g.harness),
         effort_note(&g.effort),
-        best.points,
-        med.points,
-        worst.points,
-        strip_html(&med.ladder),
-        reached_of(med),
-        med.regression_free,
+        fmt_pts1(med.points),
+        fmt_pts(worst.points),
+        fmt_pts(best.points),
+        g.careers.len(),
         fmt_pts(med.points),
         med.max_points as u32,
-        rules_of(med),
         perf_cell(med),
         med.cost,
         ppd_of(med),
-        rpd_of(med),
         state_of(med),
-        "",
-        esc(med.updated.get(..16).unwrap_or(&med.updated)),
     ));
 }
 
@@ -1022,6 +1016,21 @@ fn render_board(cells: &[CareerCell]) -> String {
         "<div class=\"sub\">Current binary: SQLite {} · cap policy: at list price (model_prices.json) for runs from .39; each career records its own.</div>",
         esc(crate::report::rules::sqlite_version())
     ));
+    // R64 F3 (M3): a grid with a career still running says so.
+    let grid_total = ranked.len()
+        + cells
+            .iter()
+            .filter(|c| {
+                !c.finished && c.key.current_rules && !c.rehearsal && !c.smoke
+            })
+            .count();
+    if ranked.len() < grid_total {
+        h.push_str(&format!(
+            "<div class=\"banner\">Grid in progress: {} of {} careers finished; ranks are provisional.</div>",
+            ranked.len(),
+            grid_total
+        ));
+    }
     h.push_str(&format!(
         "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{ranked_models}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
         ranked.len(),
@@ -2436,6 +2445,56 @@ mod tests {
             "the .44 cell is not in the unfinished section: {html}"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R64 F3 (M3, H5): an unfinished career raises the in-progress banner,
+    /// a finished grid doesn't, and the model row is the median with its
+    /// range and career count.
+    #[test]
+    fn r64_f3_banner_and_model_row() {
+        let (base, runs, out) = fixture("r64f3");
+        career(&runs, "lo", "m", [15.75; 4], [0.01; 4]); // 63
+        career(&runs, "mid", "m", [16.25; 4], [0.01; 4]); // 65
+        career(&runs, "hi", "m", [17.5; 4], [0.01; 4]); // 70
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(
+            html.contains("65.0 (63-70) · 3 careers"),
+            "the model row is median · worst-best · careers: {html}"
+        );
+        assert!(
+            !html.contains("best 70.0 · median 65.0 · worst 63.0"),
+            "the old repeated median line is gone: {html}"
+        );
+        assert!(
+            !html.contains("Grid in progress"),
+            "a finished grid has no banner: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+
+        let (base2, runs2, out2) = fixture("r64f3prog");
+        career(&runs2, "done", "m", [17.5; 4], [0.01; 4]); // 70, finished
+        write_phase(
+            &runs2,
+            "run",
+            "m",
+            1,
+            None,
+            &["campaign_run_p1".into()],
+            &[0, 1, 2, 3, 4, 5, 6],
+            9.0,
+            0.02,
+            "done",
+            9.0,
+            0.02,
+        );
+        export(runs2.to_str().unwrap(), out2.to_str().unwrap()).unwrap();
+        let html2 = read(&out2.join("index.html"));
+        assert!(
+            html2.contains("Grid in progress: 1 of 2 careers finished; ranks are provisional."),
+            "one unfinished career raises the banner: {html2}"
+        );
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x

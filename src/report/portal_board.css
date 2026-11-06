@@ -19,6 +19,8 @@ h1 { font-size: 1.35rem; color: #fff; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 .card .k { font-size: 0.72rem; color: var(--mut); text-transform: uppercase; letter-spacing: .04em; }
 .card .v { font-size: 1.3rem; font-weight: 700; color: #fff; margin-top: 4px; }
+.banner { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.45);
+          color: var(--warn); border-radius: 8px; padding: 10px 14px; font-size: 0.82rem; }
 .wrap { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 th { text-align: left; font-size: 0.72rem; color: var(--mut); text-transform: uppercase;
@@ -32,8 +34,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .b.run { color: var(--pri); border-color: rgba(88,166,255,0.4); }
 .b.warn { color: var(--warn); border-color: rgba(210,153,34,0.4); }
 .methodology { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-               padding: 14px 18px; }
-.methodology h2 { font-size: 0.95rem; margin-bottom: 8px; }
+               padding: 14px 18px; }.methodology h2 { font-size: 0.95rem; margin-bottom: 8px; }
 .methodology ul { margin-left: 18px; font-size: 0.8rem; color: var(--mut); line-height: 1.55; }
 .methodology b { color: var(--text); }
 code { background: rgba(110,118,129,0.25); border-radius: 3px; padding: 1px 4px; font-size: 0.78rem; }
