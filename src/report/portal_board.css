@@ -61,3 +61,14 @@ tr.divider td { border-top: 2px solid var(--line); color: var(--mut); font-size:
 details.more { margin-top: 4px; font-size: 0.72rem; color: var(--mut); }
 details.more summary { cursor: pointer; }
 details.more .line { margin: 2px 0 0 12px; }
+
+/* R64 F6: per-model dot strips and the ticket-agreement strip. */
+.dots { vertical-align: middle; margin-right: 4px; }
+.dots .dot { fill: var(--pri); opacity: 0.85; }
+.dots .dot.missing { fill: var(--line); opacity: 1; }
+.dots .med { fill: var(--warn); }
+.sq.agree-full { background: #3fb950; color: #0d1117; }
+.sq.agree-most { background: #56d364; color: #0d1117; }
+.sq.agree-some { background: #d29922; color: #0d1117; }
+.sq.agree-none { background: #f85149; color: #0d1117; }
+.agree { margin: 6px 0; }

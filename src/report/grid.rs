@@ -1052,7 +1052,10 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
     for (i, c) in cells.iter().enumerate() {
         match groups.iter_mut().find(|g| {
             let o = &cells[g[0]];
-            o.model == c.model && o.harness == c.harness && o.effort == c.effort && o.rules == c.rules
+            o.model == c.model
+                && o.harness == c.harness
+                && o.effort == c.effort
+                && o.rules == c.rules
         }) {
             Some(g) => g.push(i),
             None => groups.push(vec![i]),
@@ -1066,11 +1069,7 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
         });
         for (i, idx) in g.iter().enumerate() {
             let c = &cells[*idx];
-            let date = c
-                .started
-                .get(..10)
-                .filter(|d| !d.is_empty())
-                .unwrap_or("—");
+            let date = c.started.get(..10).filter(|d| !d.is_empty()).unwrap_or("—");
             out.insert(
                 c.campaign_id.clone(),
                 format!("{} · career {} · {}", c.model, i + 1, date),
@@ -1080,12 +1079,7 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
     out
 }
 
-fn career_row(
-    c: &CareerCell,
-    name: &str,
-    phase_label: Option<&str>,
-    extra_class: &str,
-) -> String {
+fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
         .unwrap_or_default();
@@ -1116,10 +1110,35 @@ fn career_row(
     )
 }
 
+/// R64 F6: the page-wide maxima the duration, turns and token strips share.
+struct DotScales {
+    wall: f64,
+    turns: f64,
+    tokens: f64,
+}
+
+fn strip_cell(
+    values: &[Option<f64>],
+    median: Option<f64>,
+    lo: f64,
+    hi: f64,
+    log: bool,
+    label: &str,
+    fmt: fn(f64) -> String,
+) -> String {
+    format!(
+        "{} {}",
+        dot_strip(values, median, lo, hi, log, label, fmt),
+        median.map(fmt).unwrap_or_else(|| "—".to_string())
+    )
+}
+
 fn model_row(
     cells: &[CareerCell],
     g: &ModelGroup,
     labels: &HashMap<String, String>,
+    stability: Option<&RankStability>,
+    scales: &DotScales,
     html: &mut String,
 ) {
     let med = &cells[g.median];
@@ -1127,7 +1146,7 @@ fn model_row(
     let worst = &cells[g.worst];
     // R64 F4: the model row no longer repeats the median career's line, so
     // every career (even a single one) lives in the expanded list with its
-    // ladder strip.
+    // ladder strip. R64 F6 adds the ticket-agreement strip there.
     let mut inner = String::new();
     for i in &g.careers {
         let c = &cells[*i];
@@ -1142,13 +1161,95 @@ fn model_row(
     } else {
         "careers"
     };
+    let agreement = if g.careers.len() > 1 {
+        ticket_agreement(cells, g)
+    } else {
+        String::new()
+    };
     let more = format!(
-        "<details class=\"more\"><summary>×{} {word} ▸</summary><table class=\"career-table\"><tbody>{inner}</tbody></table></details>",
+        "<details class=\"more\"><summary>×{} {word} ▸</summary>{agreement}<table class=\"career-table\"><tbody>{inner}</tbody></table></details>",
         g.careers.len()
     );
+    let points: Vec<Option<f64>> = g.careers.iter().map(|i| Some(cells[*i].points)).collect();
+    let perfs: Vec<Option<f64>> = g
+        .careers
+        .iter()
+        .map(|i| cells[*i].perf.as_ref().and_then(|p| p.score))
+        .collect();
+    let perf_med = med.perf.as_ref().and_then(|p| p.score);
+    let costs: Vec<Option<f64>> = g.careers.iter().map(|i| Some(cells[*i].cost)).collect();
+    let walls: Vec<Option<f64>> = g
+        .careers
+        .iter()
+        .map(|i| (cells[*i].wall_seconds > 0.0).then_some(cells[*i].wall_seconds))
+        .collect();
+    let wall_med = (med.wall_seconds > 0.0).then_some(med.wall_seconds);
+    let turn_vals: Vec<Option<f64>> = g
+        .careers
+        .iter()
+        .map(|i| (cells[*i].turns > 0).then_some(cells[*i].turns as f64))
+        .collect();
+    let turn_med = (med.turns > 0).then_some(med.turns as f64);
+    let token_vals: Vec<Option<f64>> = g
+        .careers
+        .iter()
+        .map(|i| {
+            cells[*i]
+                .tokens
+                .map(|t| t.completion as f64)
+                .filter(|v| *v > 0.0)
+        })
+        .collect();
+    let token_med = med.tokens.map(|t| t.completion as f64).filter(|v| *v > 0.0);
+    let points_cell = strip_cell(
+        &points,
+        Some(med.points),
+        0.0,
+        CAREER_MAX_POINTS,
+        false,
+        "points",
+        fmt_pts1,
+    );
+    let perf_cell = strip_cell(&perfs, perf_med, 0.1, 10.0, true, "perf", fmt_perf);
+    let spend_cell = strip_cell(
+        &costs,
+        Some(med.cost),
+        0.0,
+        CAREER_CAP_USD,
+        false,
+        "$",
+        fmt_dollars,
+    );
+    let duration = strip_cell(
+        &walls,
+        wall_med,
+        0.0,
+        scales.wall,
+        false,
+        "duration",
+        fmt_duration_value,
+    );
+    let turns = strip_cell(
+        &turn_vals,
+        turn_med,
+        0.0,
+        scales.turns,
+        false,
+        "turns",
+        fmt_turns_value,
+    );
+    let tokens = strip_cell(
+        &token_vals,
+        token_med,
+        0.0,
+        scales.tokens,
+        false,
+        "tokens out",
+        fmt_token_value,
+    );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
-        g.rank_label(),
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num\">{}</td><td class=\"num\">{duration}</td><td class=\"num\">{turns}</td><td>{tokens}</td><td>{}</td></tr>",
+        rank_label(g, stability),
         esc(&g.model),
         mark_badge(med),
         more,
@@ -1159,14 +1260,7 @@ fn model_row(
         fmt_pts(best.points),
         g.careers.len(),
         word,
-        fmt_pts(med.points),
-        med.max_points as u32,
-        perf_cell(med),
-        med.cost,
         ppd_of(med),
-        duration_cell(med),
-        turns_cell(med),
-        token_cell(med),
         state_of(med),
     ));
 }
@@ -1194,9 +1288,26 @@ fn render_board(cells: &[CareerCell]) -> String {
         .filter(|c| !c.finished && !c.key.current_rules)
         .collect();
     let labels = career_labels(cells);
+    let stability = rank_stability(cells, &groups);
+    let ranked_cells = || cells.iter().filter(|c| c.finished && c.key.current_rules);
+    let scales = DotScales {
+        wall: ranked_cells()
+            .map(|c| c.wall_seconds)
+            .fold(0.0, f64::max)
+            .max(1.0),
+        turns: ranked_cells()
+            .map(|c| c.turns as f64)
+            .fold(0.0, f64::max)
+            .max(1.0),
+        tokens: ranked_cells()
+            .filter_map(|c| c.tokens.map(|t| t.completion as f64))
+            .fold(0.0, f64::max)
+            .max(1.0),
+    };
     let mut rows = String::new();
-    for g in &current_groups {
-        model_row(cells, g, &labels, &mut rows);
+    for (i, g) in current_groups.iter().enumerate() {
+        let stab = stability.as_ref().map(|s| &s[i]);
+        model_row(cells, g, &labels, stab, &scales, &mut rows);
     }
     if !unfinished_current.is_empty() {
         rows.push_str(
@@ -1207,7 +1318,12 @@ fn render_board(cells: &[CareerCell]) -> String {
                 .get(&c.campaign_id)
                 .map(String::as_str)
                 .unwrap_or(&c.campaign_id);
-            rows.push_str(&career_row(c, name, Some(&unfinished_label(c)), "unfinished"));
+            rows.push_str(&career_row(
+                c,
+                name,
+                Some(&unfinished_label(c)),
+                "unfinished",
+            ));
         }
     }
     // R64 F1/B3: an older rule set is incomparable whether it finished or
@@ -1217,14 +1333,19 @@ fn render_board(cells: &[CareerCell]) -> String {
             "<tr class=\"divider\"><td colspan=\"12\">older rule sets (incomparable)</td></tr>",
         );
         for g in &old_groups {
-            model_row(cells, g, &labels, &mut rows);
+            model_row(cells, g, &labels, None, &scales, &mut rows);
         }
         for c in unfinished_old {
             let name = labels
                 .get(&c.campaign_id)
                 .map(String::as_str)
                 .unwrap_or(&c.campaign_id);
-            rows.push_str(&career_row(c, name, Some(&unfinished_label(c)), "unfinished"));
+            rows.push_str(&career_row(
+                c,
+                name,
+                Some(&unfinished_label(c)),
+                "unfinished",
+            ));
         }
     }
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
@@ -1246,9 +1367,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     let grid_total = ranked.len()
         + cells
             .iter()
-            .filter(|c| {
-                !c.finished && c.key.current_rules && !c.rehearsal && !c.smoke
-            })
+            .filter(|c| !c.finished && c.key.current_rules && !c.rehearsal && !c.smoke)
             .count();
     if ranked.len() < grid_total {
         h.push_str(&format!(
@@ -1311,6 +1430,339 @@ fn median(v: &[f64]) -> Option<f64> {
     } else {
         Some((v[v.len() / 2 - 1] + v[v.len() / 2]) / 2.0)
     }
+}
+
+/// R64 F6 (D1): exact rank stability. Every combination takes one finished
+/// career per current-rules model; each is ranked by the board order. The
+/// counts are exact, never sampled, and a grid too large to enumerate
+/// falls back to the board order.
+const RANK_ENUM_LIMIT: u64 = 100_000;
+
+#[derive(Debug, Clone)]
+pub struct RankStability {
+    pub total: u64,
+    /// counts[r] = combinations in which this model holds 0-based rank r.
+    pub counts: Vec<u64>,
+    pub most_likely: usize,
+    pub share: f64,
+    pub tie_with_above: bool,
+}
+
+fn rank_stability(cells: &[CareerCell], groups: &[ModelGroup]) -> Option<Vec<RankStability>> {
+    let current: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
+    let n = current.len();
+    if n == 0 {
+        return None;
+    }
+    let mut total: u64 = 1;
+    for g in &current {
+        total = total.checked_mul(g.careers.len() as u64)?;
+        if total > RANK_ENUM_LIMIT {
+            return None;
+        }
+    }
+    let mut counts = vec![vec![0u64; n]; n];
+    let mut idx = vec![0usize; n];
+    loop {
+        let picks: Vec<&CareerCell> = current
+            .iter()
+            .zip(idx.iter())
+            .map(|(g, i)| &cells[g.careers[*i]])
+            .collect();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| campaign::board_order(&picks[a].key, &picks[b].key));
+        let mut rank = 0usize;
+        for (pos, &gi) in order.iter().enumerate() {
+            if pos > 0
+                && campaign::board_order(&picks[order[pos - 1]].key, &picks[gi].key)
+                    != Ordering::Equal
+            {
+                rank = pos;
+            }
+            counts[gi][rank] += 1;
+        }
+        let mut done = true;
+        for k in (0..n).rev() {
+            idx[k] += 1;
+            if idx[k] < current[k].careers.len() {
+                done = false;
+                break;
+            }
+            idx[k] = 0;
+        }
+        if done {
+            break;
+        }
+    }
+    let mut out: Vec<RankStability> = counts
+        .iter()
+        .map(|c| {
+            let mut most = 0usize;
+            for (r, v) in c.iter().enumerate() {
+                if *v > c[most] {
+                    most = r;
+                }
+            }
+            RankStability {
+                total,
+                counts: c.clone(),
+                most_likely: most,
+                share: c[most] as f64 / total as f64,
+                tie_with_above: false,
+            }
+        })
+        .collect();
+    for i in 1..n {
+        // D1: tied with the row above only when both most likely hold the
+        // same rank and neither does so in more than half the combinations.
+        let same = out[i].most_likely == out[i - 1].most_likely;
+        let both = out[i].share <= 0.5 && out[i - 1].share <= 0.5;
+        out[i].tie_with_above = same && both;
+    }
+    Some(out)
+}
+
+/// R64 F6: the rank cell. With exact stability it reads `#1 (61%)`, with
+/// `=` when D1 shows a tie with the row above; a grid too large to
+/// enumerate keeps the board order's label.
+fn rank_label(g: &ModelGroup, stability: Option<&RankStability>) -> String {
+    if !g.current {
+        return "—".to_string();
+    }
+    match stability {
+        Some(s) => format!(
+            "#{}{} ({:.0}%)",
+            s.most_likely + 1,
+            if s.tie_with_above { "=" } else { "" },
+            s.share * 100.0
+        ),
+        None => g.rank_label(),
+    }
+}
+
+/// R64 F6: one dot per career and a diamond at the median, on a fixed
+/// scale for the column (points 0-76, perf log 0.1-10x, dollars 0-3.96,
+/// and the page's maximum for duration, turns and tokens).
+#[allow(clippy::too_many_arguments)]
+fn dot_strip(
+    values: &[Option<f64>],
+    median: Option<f64>,
+    lo: f64,
+    hi: f64,
+    log: bool,
+    label: &str,
+    fmt: fn(f64) -> String,
+) -> String {
+    let w = 72.0;
+    let h = 14.0;
+    let pad = 4.0;
+    let x = |v: f64| -> f64 {
+        let t = if log {
+            if v <= 0.0 || lo <= 0.0 || hi <= lo {
+                0.0
+            } else {
+                ((v.ln() - lo.ln()) / (hi.ln() - lo.ln())).clamp(0.0, 1.0)
+            }
+        } else if hi <= lo {
+            0.0
+        } else {
+            ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
+        };
+        pad + t * (w - 2.0 * pad)
+    };
+    let vals: Vec<String> = values
+        .iter()
+        .map(|v| v.map(fmt).unwrap_or_else(|| "—".to_string()))
+        .collect();
+    let med_text = median.map(fmt).unwrap_or_else(|| "—".to_string());
+    let mut s = format!(
+        "<svg class=\"dots\" data-metric=\"{}\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\" role=\"img\">",
+        esc(label)
+    );
+    s.push_str(&format!(
+        "<title>{}: {} · median {}</title>",
+        esc(label),
+        esc(&vals.join(", ")),
+        esc(&med_text)
+    ));
+    for v in values {
+        let vv = v.unwrap_or(lo);
+        s.push_str(&format!(
+            "<circle class=\"dot{}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.2\"/>",
+            if v.is_none() { " missing" } else { "" },
+            x(vv),
+            h / 2.0
+        ));
+    }
+    if let Some(m) = median {
+        let cx = x(m);
+        s.push_str(&format!(
+            "<polygon class=\"med\" points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\"/>",
+            cx,
+            h / 2.0 - 3.5,
+            cx + 3.5,
+            h / 2.0,
+            cx,
+            h / 2.0 + 3.5,
+            cx - 3.5,
+            h / 2.0
+        ));
+    }
+    s.push_str("</svg>");
+    s
+}
+
+fn fmt_perf(v: f64) -> String {
+    format!("{v:.2}×")
+}
+
+fn fmt_dollars(v: f64) -> String {
+    format!("${v:.4}")
+}
+
+fn fmt_duration_value(v: f64) -> String {
+    fmt_hours(v)
+}
+
+fn fmt_turns_value(v: f64) -> String {
+    fmt_count(v.round() as u64)
+}
+
+fn fmt_token_value(v: f64) -> String {
+    fmt_tokens(v.round() as u64)
+}
+
+fn fmt_variance(name: &str, v: f64) -> String {
+    match name {
+        "points" => format!("{v:.1}"),
+        "perf" => format!("{v:.2}×"),
+        "$" => format!("${v:.4}"),
+        "duration" => fmt_hours(v),
+        "turns" => fmt_count(v.round() as u64),
+        "tokens out" => fmt_tokens(v.round() as u64),
+        _ => format!("{v:.1}"),
+    }
+}
+
+/// R64 F6: the expanded model view's ticket agreement. The strip shades
+/// each ticket by the share of the model's careers that passed it, and
+/// the line counts agreement over the 20 non-genesis tickets.
+fn ticket_agreement(cells: &[CareerCell], g: &ModelGroup) -> String {
+    let n = g.careers.len();
+    let mut passed = [0usize; 21];
+    for i in &g.careers {
+        for rec in unique_stage_records(&cells[*i].stage_records) {
+            if rec.passed && rec.id <= 20 {
+                passed[rec.id as usize] += 1;
+            }
+        }
+    }
+    let mut squares = String::new();
+    for (id, p) in passed.iter().enumerate() {
+        let p = *p;
+        let cls = if p == 0 {
+            "agree-none"
+        } else if p == n {
+            "agree-full"
+        } else if p * 2 > n {
+            "agree-most"
+        } else {
+            "agree-some"
+        };
+        squares.push_str(&format!(
+            "<span class=\"sq {cls}\" title=\"ticket {id} · passed by {p}/{n}\">{id}</span>"
+        ));
+    }
+    let mut agree = 0;
+    let mut differs: Vec<String> = Vec::new();
+    for (id, p) in passed.iter().enumerate().skip(1) {
+        if *p == 0 || *p == n {
+            agree += 1;
+        } else {
+            differs.push(id.to_string());
+        }
+    }
+    let diff = if differs.is_empty() {
+        String::new()
+    } else {
+        format!(" · differs: {}", differs.join(", "))
+    };
+    format!(
+        "<div class=\"agree\"><div class=\"strip\">{squares}</div><div class=\"mut\">agree {agree}/20{diff}</div></div>"
+    )
+}
+
+/// R64 F6: the share of career pairs where A outscores B on points.
+fn head_to_head(a: &[&CareerCell], b: &[&CareerCell]) -> (f64, f64, f64) {
+    let mut aw = 0usize;
+    let mut bw = 0usize;
+    let mut ties = 0usize;
+    for x in a {
+        for y in b {
+            if x.points > y.points {
+                aw += 1;
+            } else if x.points < y.points {
+                bw += 1;
+            } else {
+                ties += 1;
+            }
+        }
+    }
+    let total = (aw + bw + ties).max(1) as f64;
+    (aw as f64 / total, bw as f64 / total, ties as f64 / total)
+}
+
+/// R64 F6: per metric, the median within-model spread against the span of
+/// the models' median careers, and their ratio (the publishing bar's
+/// variance check).
+fn variance_rows(
+    cells: &[CareerCell],
+    groups: &[&ModelGroup],
+) -> Vec<(&'static str, f64, f64, Option<f64>)> {
+    type Metric = (&'static str, fn(&CareerCell) -> Option<f64>);
+    let metrics: [Metric; 6] = [
+        ("points", |c| Some(c.points)),
+        ("perf", |c| c.perf.as_ref().and_then(|p| p.score)),
+        ("$", |c| Some(c.cost)),
+        ("duration", |c| {
+            (c.wall_seconds > 0.0).then_some(c.wall_seconds)
+        }),
+        ("turns", |c| (c.turns > 0).then_some(c.turns as f64)),
+        ("tokens out", |c| {
+            c.tokens.map(|t| t.completion as f64).filter(|v| *v > 0.0)
+        }),
+    ];
+    let mut out = Vec::new();
+    for (name, value) in metrics {
+        let mut spreads: Vec<f64> = Vec::new();
+        let mut medians: Vec<f64> = Vec::new();
+        for g in groups {
+            let vals: Vec<f64> = g.careers.iter().filter_map(|i| value(&cells[*i])).collect();
+            if vals.len() >= 2 {
+                let lo = vals.iter().copied().fold(f64::INFINITY, f64::min);
+                let hi = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                spreads.push(hi - lo);
+            } else if vals.len() == 1 {
+                spreads.push(0.0);
+            }
+            if let Some(m) = value(&cells[g.median]) {
+                medians.push(m);
+            }
+        }
+        let within = median(&sorted_unique(spreads.into_iter()));
+        let between = if medians.is_empty() {
+            None
+        } else {
+            let lo = medians.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = medians.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            Some(hi - lo)
+        };
+        if let (Some(w), Some(b)) = (within, between) {
+            let ratio = (w > 0.0).then(|| b / w);
+            out.push((name, w, b, ratio));
+        }
+    }
+    out
 }
 
 fn palette(i: usize) -> &'static str {
@@ -1688,11 +2140,59 @@ fn render_results(cells: &[CareerCell]) -> String {
     h.push_str(&survival);
     h.push_str(&format!("</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
     h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div></section>"));
+    let groups = model_groups(cells);
+    let stability = rank_stability(cells, &groups);
+    let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
+    let mut h2h_rows = String::new();
+    for i in 0..models.len() {
+        for j in (i + 1)..models.len() {
+            let a = by_model
+                .get(models[i].as_str())
+                .cloned()
+                .unwrap_or_default();
+            let b = by_model
+                .get(models[j].as_str())
+                .cloned()
+                .unwrap_or_default();
+            if a.is_empty() || b.is_empty() {
+                continue;
+            }
+            let (aw, bw, ties) = head_to_head(&a, &b);
+            h2h_rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
+                esc(&models[i]),
+                esc(&models[j]),
+                aw * 100.0,
+                bw * 100.0,
+                ties * 100.0
+            ));
+        }
+    }
+    h.push_str("<section><h2>Head-to-head</h2><div class=\"mut\">The share of career pairs where model A's career outscores model B's, by points.</div><div class=\"wrap\"><table><thead><tr><th>Model A</th><th>Model B</th><th>A wins</th><th>B wins</th><th>Ties</th></tr></thead><tbody>");
+    h.push_str(&h2h_rows);
+    h.push_str("</tbody></table></div></section>");
+    let vars = variance_rows(cells, &current_groups);
+    let mut var_rows = String::new();
+    for (name, within, between, ratio) in &vars {
+        var_rows.push_str(&format!(
+            "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+            esc(name),
+            fmt_variance(name, *within),
+            fmt_variance(name, *between),
+            ratio
+                .map(|r| format!("{r:.1}×"))
+                .unwrap_or_else(|| "—".to_string())
+        ));
+    }
+    h.push_str("<section><h2>Variance check</h2><div class=\"mut\">The publishing bar: the spread between models must exceed the spread within one model's careers.</div><div class=\"wrap\"><table><thead><tr><th>Metric</th><th>Median within-model spread</th><th>Span of model medians</th><th>Between / within</th></tr></thead><tbody>");
+    h.push_str(&var_rows);
+    h.push_str("</tbody></table></div></section>");
     h.push_str("<section><h2>Model ranks</h2><div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Best / median / worst points</th></tr></thead><tbody>");
-    for g in model_groups(cells).iter().filter(|g| g.current) {
+    for (i, g) in current_groups.iter().enumerate() {
+        let stab = stability.as_ref().map(|s| &s[i]);
         h.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
-            g.rank_label(),
+            rank_label(g, stab),
             esc(&g.model),
             cells[g.best].points,
             cells[g.median].points,
@@ -1996,7 +2496,8 @@ mod tests {
     }
 
     /// R54 F1: set `rehearsal`/`smoke` on a phase rollup in both files.
-    fn set_mark(runs: &Path, prefix: &str, phase: u32, key: &str) {        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+    fn set_mark(runs: &Path, prefix: &str, phase: u32, key: &str) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
         for file in ["campaign.json", "status.json"] {
             let path = dir.join(file);
             let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
@@ -2080,7 +2581,9 @@ mod tests {
         completion: u64,
         total: u64,
     ) {
-        let path = runs.join(format!("campaign_{prefix}_p{phase}/s{id}_full/manifest.json"));
+        let path = runs.join(format!(
+            "campaign_{prefix}_p{phase}/s{id}_full/manifest.json"
+        ));
         let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
         v["tokens"] = serde_json::json!({
             "prompt_tokens": prompt,
@@ -2089,6 +2592,34 @@ mod tests {
             "total_tokens": total,
         });
         fs::write(path, v.to_string()).unwrap();
+    }
+
+    /// R64 F6: mark one ticket failed in a career's phase cell.
+    fn fail_ticket(runs: &Path, prefix: &str, id: u32) {
+        for phase in 1..=4 {
+            let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+            if !dir.exists() {
+                continue;
+            }
+            for file in ["campaign.json", "status.json"] {
+                let path = dir.join(file);
+                let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+                let rollup = if file == "status.json" {
+                    v.get_mut("rollup").unwrap()
+                } else {
+                    &mut v
+                };
+                if let Some(stages) = rollup["stages"].as_array_mut() {
+                    for st in stages {
+                        if st["id"].as_u64() == Some(id as u64) {
+                            st["passed"] = serde_json::json!(false);
+                            st["status"] = serde_json::json!("failed");
+                        }
+                    }
+                }
+                fs::write(path, v.to_string()).unwrap();
+            }
+        }
     }
 
     /// R51 F3: rewrite (or remove) a phase's effort in both files.
@@ -2644,9 +3175,11 @@ mod tests {
         assert!(report.contains("tied"), "{report}");
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
+        // R64 F6/D1: exact rank stability replaces the N= groups. b holds
+        // #2 in 8 of 9 combinations (c=13 with b=12 is the exception).
         assert!(
-            html.contains("<td class=\"num\">2=</td>"),
-            "the tied row has no 2= rank cell: {html}"
+            html.contains("<td class=\"num\">#2 (89%)</td>"),
+            "the model row has no exact rank cell: {html}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -2821,8 +3354,7 @@ mod tests {
             "the career name is model · career i · date: {text}"
         );
         assert!(
-            html.contains("title=\"campaign_c_p4\"")
-                && html.contains("results.html#campaign_c_p4"),
+            html.contains("title=\"campaign_c_p4\"") && html.contains("results.html#campaign_c_p4"),
             "the campaign id lives in the tooltip and the link: {html}"
         );
         assert_eq!(
@@ -2931,6 +3463,201 @@ mod tests {
         assert!(cells2[0].tokens.is_none());
         assert_eq!(token_cell(&cells2[0]), "—");
         let _ = fs::remove_dir_all(&base2);
+    }
+
+    /// R64 F6/D1: rank stability is exact over every combination of one
+    /// career per model; 3x3 is 27 hand-counted combinations.
+    #[test]
+    fn r64_f6_rank_stability_exact() {
+        let (base, runs, out) = fixture("r64f6rank");
+        for (prefix, model, points) in [
+            ("a1", "A", 70.0),
+            ("a2", "A", 50.0),
+            ("a3", "A", 40.0),
+            ("b1", "B", 60.0),
+            ("b2", "B", 55.0),
+            ("b3", "B", 35.0),
+            ("c1", "C", 30.0),
+            ("c2", "C", 20.0),
+            ("c3", "C", 10.0),
+        ] {
+            career(&runs, prefix, model, [points / 4.0; 4], [0.01; 4]);
+        }
+        let cells = careers(runs.to_str().unwrap());
+        let groups = model_groups(&cells);
+        let stab = rank_stability(&cells, &groups).expect("27 combinations enumerate");
+        assert_eq!(stab[0].total, 27);
+        let of = |m: &str| {
+            let i = groups.iter().position(|g| g.model == m).unwrap();
+            &stab[i]
+        };
+        // A: #1 in 15 of 27 (9 with 70; 3 with 50 over B=35; 3 with 40
+        // over B=35). B: #1 in the other 12 (B=60/55 over A=50/40).
+        assert_eq!(of("A").counts[0], 15);
+        assert_eq!(of("A").counts[1], 12);
+        assert!((of("A").share - 15.0 / 27.0).abs() < 1e-9);
+        assert_eq!(of("B").counts[0], 12);
+        assert_eq!(of("B").counts[1], 15);
+        // C: last in every combination.
+        assert_eq!(of("C").counts[2], 27);
+        assert!((of("C").share - 1.0).abs() < 1e-9);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(html.contains("#1 (56%)"), "A's most likely rank: {html}");
+        assert!(html.contains("#3 (100%)"), "C's rank: {html}");
+        let _ = fs::remove_dir_all(&base);
+
+        // Identical careers hold their rank in every combination.
+        let (base2, runs2, _out2) = fixture("r64f6same");
+        for (prefix, model, points) in [
+            ("x1", "X", 50.0),
+            ("x2", "X", 50.0),
+            ("x3", "X", 50.0),
+            ("y1", "Y", 40.0),
+            ("y2", "Y", 40.0),
+            ("y3", "Y", 40.0),
+        ] {
+            career(&runs2, prefix, model, [points / 4.0; 4], [0.01; 4]);
+        }
+        let cells2 = careers(runs2.to_str().unwrap());
+        let groups2 = model_groups(&cells2);
+        let stab2 = rank_stability(&cells2, &groups2).unwrap();
+        let of2 = |m: &str| {
+            let i = groups2.iter().position(|g| g.model == m).unwrap();
+            &stab2[i]
+        };
+        assert_eq!(of2("X").counts[0], 9);
+        assert!((of2("X").share - 1.0).abs() < 1e-9);
+        assert_eq!(of2("Y").counts[1], 9);
+        let _ = fs::remove_dir_all(&base2);
+
+        // More than 100,000 combinations is not enumerated.
+        let (base3, runs3, _out3) = fixture("r64f6many");
+        for m in 0..6 {
+            for c in 0..7 {
+                career(
+                    &runs3,
+                    &format!("m{m}c{c}"),
+                    &format!("model{m}"),
+                    [1.0; 4],
+                    [0.01; 4],
+                );
+            }
+        }
+        let cells3 = careers(runs3.to_str().unwrap());
+        let groups3 = model_groups(&cells3);
+        assert!(
+            rank_stability(&cells3, &groups3).is_none(),
+            "6 models x 7 careers is 117,649 combinations"
+        );
+        let _ = fs::remove_dir_all(&base3);
+    }
+
+    /// R64 F6: ticket agreement is over the 20 non-genesis tickets.
+    #[test]
+    fn r64_f6_ticket_agreement() {
+        let (base, runs, out) = fixture("r64f6agree");
+        career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        fail_ticket(&runs, "b", 5);
+        fail_ticket(&runs, "c", 11);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(
+            html.contains("agree 18/20"),
+            "two of the 20 non-genesis tickets differ: {html}"
+        );
+        assert!(
+            html.contains("differs: 5, 11"),
+            "the differing tickets are listed: {html}"
+        );
+        assert!(
+            html.contains("passed by 2/3"),
+            "the strip shades by the share that passed: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R64 F6: the results page's head-to-head and within/between variance
+    /// on the reviewer's 2026-11-06 12-career table.
+    #[test]
+    fn r64_f6_head_to_head_and_spread() {
+        let (base, runs, out) = fixture("r64f6h2h");
+        let table: [(&str, &str, &[f64]); 5] = [
+            (
+                "haiku",
+                "openrouter/anthropic/claude-haiku-5.5",
+                &[55.6, 57.6, 64.6],
+            ),
+            (
+                "deepseek",
+                "openrouter/deepseek/deepseek-v4.1-flash-1017",
+                &[70.0, 63.0, 65.0],
+            ),
+            ("luna", "openrouter/openai/gpt-6-luna", &[27.4, 47.0]),
+            ("qwen", "openrouter/qwen/qwen3.8-flash", &[37.0, 37.0]),
+            ("mimo", "openrouter/xiaomi/mimo-v2.6-flash", &[67.0, 62.8]),
+        ];
+        for (prefix, model, points) in table {
+            for (i, p) in points.iter().enumerate() {
+                career(
+                    &runs,
+                    &format!("{prefix}{i}"),
+                    model,
+                    [p / 4.0; 4],
+                    [0.01; 4],
+                );
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        let h2h = &html[pos(&html, "Head-to-head")..];
+        let at = pos(
+            h2h,
+            "<td>openrouter/deepseek/deepseek-v4.1-flash-1017</td><td>openrouter/xiaomi/mimo-v2.6-flash</td>",
+        );
+        let row = &h2h[at..at + h2h[at..].find("</tr>").unwrap()];
+        assert!(row.contains("mimo"), "deepseek vs mimo row: {row}");
+        assert!(
+            row.contains("67%"),
+            "deepseek beats mimo in 4 of 6 pairs: {row}"
+        );
+        let var = &html[pos(&html, "Variance check")..];
+        let at = pos(var, "<td>points</td>");
+        let row = &var[at..at + var[at..].find("</tr>").unwrap()];
+        assert!(row.contains("7.0"), "points within-model spread: {row}");
+        assert!(row.contains("37.6"), "points between models: {row}");
+        assert!(row.contains("5.4×"), "the bar ratio: {row}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R64 F6: each dot strip is inline SVG, one dot per career, with the
+    /// values in its title.
+    #[test]
+    fn r64_f6_dot_strip_svg() {
+        let (base, runs, out) = fixture("r64f6dots");
+        career(&runs, "d1", "m", [2.5; 4], [0.01; 4]); // 10
+        career(&runs, "d2", "m", [5.0; 4], [0.01; 4]); // 20
+        career(&runs, "d3", "m", [7.5; 4], [0.01; 4]); // 30
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let at = pos(&html, "data-metric=\"points\"");
+        let svg = &html[at..at + html[at..].find("</svg>").unwrap()];
+        assert_eq!(
+            svg.matches("<circle").count(),
+            3,
+            "one dot per career: {svg}"
+        );
+        assert!(
+            svg.contains("<title>points: 30.0, 20.0, 10.0 · median 20.0</title>"),
+            "the values are in the title: {svg}"
+        );
+        assert!(
+            svg.contains("<polygon class=\"med\""),
+            "median diamond: {svg}"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x

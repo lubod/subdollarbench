@@ -2978,10 +2978,7 @@ mod tests {
             "retired campaign leaked: {html}"
         );
         // R64 F4: the rules version shows once, in the header.
-        assert!(
-            html.contains(&format!("Rules {}", RULES_VERSION)),
-            "{html}"
-        );
+        assert!(html.contains(&format!("Rules {}", RULES_VERSION)), "{html}");
         assert!(html.contains("RUNNING"), "the live cell is badged: {html}");
         // Round-12 P3: the console's strip, legend, `×N runs` and the
         // older-rules divider.
@@ -2993,8 +2990,7 @@ mod tests {
             "repeat careers collapse: {html}"
         );
         assert!(
-            pos("m1") < pos("m2")
-                && pos("m2") < pos("title=\"campaign_sdb-sql_m2b_20261017\""),
+            pos("m1") < pos("m2") && pos("m2") < pos("title=\"campaign_sdb-sql_m2b_20261017\""),
             "the duplicate career folds under its model row: {html}"
         );
         assert!(
