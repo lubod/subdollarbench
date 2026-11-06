@@ -277,7 +277,7 @@ EOF
     # flake-bar.sh --key, the default bar record must be that key's, and a
     # PASS record there must validate without SDB_BAR_RECORD.
     fixture="$root/repo"
-    mkdir -p "$fixture/src" "$fixture/scripts"
+    mkdir -p "$fixture/src/sandbox" "$fixture/scripts"
     cp scripts/publish.sh scripts/flake-bar.sh scripts/graded-paths.txt \
         scripts/graded-filter.sh scripts/bar-proofs.sh scripts/long-test-lock.sh \
         "$fixture/scripts/"
@@ -285,11 +285,11 @@ EOF
     git -C "$fixture" config user.email publish@example.com
     git -C "$fixture" config user.name publish
     echo one > "$fixture/src/x.rs"
-    echo one > "$fixture/src/tests.rs"
+    echo one > "$fixture/src/sandbox/tests.rs"
     echo lock > "$fixture/Cargo.lock"
     git -C "$fixture" add -A
     git -C "$fixture" commit -qm one
-    echo two > "$fixture/src/tests.rs"
+    echo two > "$fixture/src/sandbox/tests.rs"
     git -C "$fixture" add -A
     git -C "$fixture" commit -qm "edit tests.rs"
     pubkey="$(cd "$fixture" && scripts/publish.sh --key)"
