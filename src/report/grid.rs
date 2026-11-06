@@ -762,12 +762,6 @@ fn ppd_of(c: &CareerCell) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
-fn rpd_of(c: &CareerCell) -> String {
-    c.reg_free_per_dollar()
-        .map(|v| format!("{v:.1}"))
-        .unwrap_or_else(|| "—".to_string())
-}
-
 fn state_of(c: &CareerCell) -> String {
     match c.state.as_str() {
         "running" => "<span class=\"b run\">RUNNING</span>".to_string(),
@@ -788,29 +782,6 @@ fn flags_of(c: &CareerCell) -> String {
         f.push_str(" · <span class=\"b warn\">over wall</span>");
     }
     f
-}
-
-fn rules_of(c: &CareerCell) -> String {
-    let base = if c.rules == crate::report::rules::RULES_VERSION {
-        format!("<span class=\"mut\">{}</span>", esc(&c.rules))
-    } else if c.rules.is_empty() {
-        "<span class=\"b warn\">rules —</span>".to_string()
-    } else {
-        format!(
-            "<span class=\"b warn\" title=\"graded under a different rule set\">stale {}</span>",
-            esc(&c.rules)
-        )
-    };
-    let mut text = format!(
-        "{base} · SQLite {}",
-        esc(crate::report::rules::recorded_sqlite_version(
-            c.sqlite_version.as_deref()
-        ))
-    );
-    if crate::report::rules::recorded_cap_basis(&c.rules, c.cap_price_basis.as_deref()).is_some() {
-        text.push_str(" · cap at list price");
-    }
-    text
 }
 
 /// R47 F2: the board's Perf cell. A score reads `1.32×`; a career with no
@@ -887,7 +858,49 @@ fn mark_badge(c: &CareerCell) -> String {
     }
 }
 
-fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> String {
+/// R64 F4 (H1): a career's visible name is `<model> · career <i> · <date>`;
+/// the campaign id lives in the tooltip and the results-page link. The
+/// index is the career's best-first position within its model/harness/
+/// effort/rules group, so it matches the expanded rows.
+fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, c) in cells.iter().enumerate() {
+        match groups.iter_mut().find(|g| {
+            let o = &cells[g[0]];
+            o.model == c.model && o.harness == c.harness && o.effort == c.effort && o.rules == c.rules
+        }) {
+            Some(g) => g.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    let mut out = HashMap::new();
+    for g in &mut groups {
+        g.sort_by(|a, b| {
+            campaign::board_order(&cells[*a].key, &cells[*b].key)
+                .then_with(|| cells[*a].started.cmp(&cells[*b].started))
+        });
+        for (i, idx) in g.iter().enumerate() {
+            let c = &cells[*idx];
+            let date = c
+                .started
+                .get(..10)
+                .filter(|d| !d.is_empty())
+                .unwrap_or("—");
+            out.insert(
+                c.campaign_id.clone(),
+                format!("{} · career {} · {}", c.model, i + 1, date),
+            );
+        }
+    }
+    out
+}
+
+fn career_row(
+    c: &CareerCell,
+    name: &str,
+    phase_label: Option<&str>,
+    extra_class: &str,
+) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
         .unwrap_or_default();
@@ -896,10 +909,10 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
     } else {
         format!("career-row {extra_class}")
     };
+    let id = esc(&c.campaign_id);
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<b>{}</b>{}<div class=\"mut\">{}{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}/{} · {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>",
-        esc(&c.campaign_id),
-        esc(&c.model),
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+        esc(name),
         mark_badge(c),
         effort_note(&c.effort),
         flags_of(c),
@@ -908,34 +921,45 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         c.regression_free,
         fmt_pts(c.points),
         c.max_points as u32,
-        rules_of(c),
         perf_cell(c),
         c.cost,
         ppd_of(c),
-        rpd_of(c),
         state_of(c),
-        "",
-        esc(c.updated.get(..16).unwrap_or(&c.updated)),
     )
 }
 
-fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
+fn model_row(
+    cells: &[CareerCell],
+    g: &ModelGroup,
+    labels: &HashMap<String, String>,
+    html: &mut String,
+) {
     let med = &cells[g.median];
     let best = &cells[g.best];
     let worst = &cells[g.worst];
-    let mut more = String::new();
-    if g.careers.len() > 1 {
-        let mut inner = String::new();
-        for i in &g.careers {
-            inner.push_str(&career_row(&cells[*i], None, ""));
-        }
-        more = format!(
-            "<details class=\"more\"><summary>×{} careers ▸</summary><table class=\"career-table\"><tbody>{inner}</tbody></table></details>",
-            g.careers.len()
-        );
+    // R64 F4: the model row no longer repeats the median career's line, so
+    // every career (even a single one) lives in the expanded list with its
+    // ladder strip.
+    let mut inner = String::new();
+    for i in &g.careers {
+        let c = &cells[*i];
+        let name = labels
+            .get(&c.campaign_id)
+            .map(String::as_str)
+            .unwrap_or(&c.campaign_id);
+        inner.push_str(&career_row(c, name, None, ""));
     }
+    let word = if g.careers.len() == 1 {
+        "career"
+    } else {
+        "careers"
+    };
+    let more = format!(
+        "<details class=\"more\"><summary>×{} {word} ▸</summary><table class=\"career-table\"><tbody>{inner}</tbody></table></details>",
+        g.careers.len()
+    );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} careers</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{}/{}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">—</td><td>{}</td><td class=\"mut\"></td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td>{}</td></tr>",
         g.rank_label(),
         esc(&g.model),
         mark_badge(med),
@@ -946,6 +970,7 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         fmt_pts(worst.points),
         fmt_pts(best.points),
         g.careers.len(),
+        word,
         fmt_pts(med.points),
         med.max_points as u32,
         perf_cell(med),
@@ -977,29 +1002,38 @@ fn render_board(cells: &[CareerCell]) -> String {
         .iter()
         .filter(|c| !c.finished && !c.key.current_rules)
         .collect();
+    let labels = career_labels(cells);
     let mut rows = String::new();
     for g in &current_groups {
-        model_row(cells, g, &mut rows);
+        model_row(cells, g, &labels, &mut rows);
     }
     if !unfinished_current.is_empty() {
         rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"11\">unfinished careers (not ranked)</td></tr>",
+            "<tr class=\"divider\"><td colspan=\"9\">unfinished careers (not ranked)</td></tr>",
         );
         for c in unfinished_current {
-            rows.push_str(&career_row(c, Some(&unfinished_label(c)), "unfinished"));
+            let name = labels
+                .get(&c.campaign_id)
+                .map(String::as_str)
+                .unwrap_or(&c.campaign_id);
+            rows.push_str(&career_row(c, name, Some(&unfinished_label(c)), "unfinished"));
         }
     }
     // R64 F1/B3: an older rule set is incomparable whether it finished or
     // not; it never reads as "unfinished".
     if !old_groups.is_empty() || !unfinished_old.is_empty() {
         rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"11\">older rule sets (incomparable)</td></tr>",
+            "<tr class=\"divider\"><td colspan=\"9\">older rule sets (incomparable)</td></tr>",
         );
         for g in &old_groups {
-            model_row(cells, g, &mut rows);
+            model_row(cells, g, &labels, &mut rows);
         }
         for c in unfinished_old {
-            rows.push_str(&career_row(c, Some(&unfinished_label(c)), "unfinished"));
+            let name = labels
+                .get(&c.campaign_id)
+                .map(String::as_str)
+                .unwrap_or(&c.campaign_id);
+            rows.push_str(&career_row(c, name, Some(&unfinished_label(c)), "unfinished"));
         }
     }
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
@@ -1013,7 +1047,8 @@ fn render_board(cells: &[CareerCell]) -> String {
         esc(&now)
     ));
     h.push_str(&format!(
-        "<div class=\"sub\">Current binary: SQLite {} · cap policy: at list price (model_prices.json) for runs from .39; each career records its own.</div>",
+        "<div class=\"sub\">Rules {} · SQLite {} · cap policy: at list price (model_prices.json) for runs from .39; each career records its own.</div><div class=\"sub\">A career is 4 phases, 21 tickets, at most $0.99 per phase.</div>",
+        esc(crate::report::rules::RULES_VERSION),
         esc(crate::report::rules::sqlite_version())
     ));
     // R64 F3 (M3): a grid with a career still running says so.
@@ -1036,9 +1071,9 @@ fn render_board(cells: &[CareerCell]) -> String {
         ranked.len(),
         fmt_pts1(best_points)
     ));
-    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th>Reached</th><th>Reg-free</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th>Reg-free / $</th><th>State</th><th>Updated</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th>State</th></tr></thead><tbody>");
     if rows.is_empty() {
-        h.push_str("<tr><td colspan=\"11\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
+        h.push_str("<tr><td colspan=\"9\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
         h.push_str(&rows);
     }
@@ -1243,6 +1278,7 @@ fn svg_survival(series: &[(String, Vec<f64>)]) -> String {
 }
 
 fn render_results(cells: &[CareerCell]) -> String {
+    let labels = career_labels(cells);
     let current: Vec<&CareerCell> = cells
         .iter()
         .filter(|c| c.finished && c.key.current_rules)
@@ -1390,10 +1426,15 @@ fn render_results(cells: &[CareerCell]) -> String {
     let survival = svg_survival(&series);
     let mut scatter_rows = String::new();
     for c in &current {
+        let id = esc(&c.campaign_id);
+        let name = labels
+            .get(&c.campaign_id)
+            .map(String::as_str)
+            .unwrap_or(&c.campaign_id);
         scatter_rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
+            "<tr id=\"{id}\" title=\"{id}\"><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
             esc(&c.model),
-            esc(&c.campaign_id),
+            esc(name),
             c.points,
             c.cost
         ));
@@ -1432,9 +1473,14 @@ fn render_results(cells: &[CareerCell]) -> String {
     if !marked.is_empty() {
         h.push_str("<section><h2>Rehearsals and smoke cells (not ranked)</h2><div class=\"wrap\"><table><tbody>");
         for c in marked {
+            let id = esc(&c.campaign_id);
+            let name = labels
+                .get(&c.campaign_id)
+                .map(String::as_str)
+                .unwrap_or(&c.campaign_id);
             h.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
-                esc(&c.campaign_id),
+                "<tr id=\"{id}\" title=\"{id}\"><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
+                esc(name),
                 mark_badge(c),
                 c.points,
                 c.cost
@@ -1851,6 +1897,21 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {needle}: {hay}"))
     }
 
+    /// R64 F4: the text a reader sees, with every tag and attribute removed.
+    fn visible_text(html: &str) -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for ch in html.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                c if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
     #[test]
     fn r44_f1_careers_on_the_board() {
         let (base, runs, out) = fixture("r44f1");
@@ -1989,11 +2050,16 @@ mod tests {
         career(&runs, "m3", "m", [3.0; 4], [0.01; 4]);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
+        // R64 F3: the row is median (worst-best) · careers, not a repeated
+        // best/median/worst line.
         assert!(
-            html.contains("best 12.0 · median 8.0 · worst 4.0"),
-            "{html}"
+            html.contains("8.0 (4-12) · 3 careers"),
+            "the model row is the median with its range: {html}"
         );
-        assert!(html.contains("median 8.0"), "{html}");
+        assert!(
+            !html.contains("best 12.0 · median 8.0 · worst 4.0"),
+            "the old repeated median line is gone: {html}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -2495,6 +2561,66 @@ mod tests {
             "one unfinished career raises the banner: {html2}"
         );
         let _ = fs::remove_dir_all(&base2);
+    }
+
+    /// R64 F4 (H1-H4): plain career names, one header for the rules, the
+    /// SQLite version and the cap, renamed columns, and no per-row rules
+    /// or Updated.
+    #[test]
+    fn r64_f4_plain_names() {
+        let (base, runs, out) = fixture("r64f4");
+        career(&runs, "c", "m", [17.5; 4], [0.01; 4]); // 70
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let text = visible_text(&html);
+        assert!(
+            !text.contains("campaign_"),
+            "no campaign id is visible text: {text}"
+        );
+        assert!(
+            text.contains("m · career 1 · 2026-10-27"),
+            "the career name is model · career i · date: {text}"
+        );
+        assert!(
+            html.contains("title=\"campaign_c_p4\"")
+                && html.contains("results.html#campaign_c_p4"),
+            "the campaign id lives in the tooltip and the link: {html}"
+        );
+        assert_eq!(
+            text.matches(crate::report::rules::RULES_VERSION).count(),
+            1,
+            "the rules version shows once, in the header: {text}"
+        );
+        assert_eq!(
+            text.matches("Updated").count(),
+            1,
+            "only the page's Updated line survives: {text}"
+        );
+        assert!(
+            html.contains("70 / 76"),
+            "the Points cell is `70 / 76`: {html}"
+        );
+        assert!(
+            html.contains(">Highest ticket</th>") && html.contains(">Tickets kept green</th>"),
+            "the columns are renamed: {html}"
+        );
+        assert!(
+            !html.contains(">Reached</th>")
+                && !html.contains(">Reg-free</th>")
+                && !html.contains("Reg-free / $")
+                && !html.contains(">Updated</th>"),
+            "the retired columns are gone: {html}"
+        );
+        assert!(
+            text.contains("A career is 4 phases, 21 tickets, at most $0.99 per phase."),
+            "the one-line definition is under the title: {text}"
+        );
+        let results = read(&out.join("results.html"));
+        assert!(
+            results.contains("id=\"campaign_c_p4\""),
+            "the results page anchors the career the board links to: {results}"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x

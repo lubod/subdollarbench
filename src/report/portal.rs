@@ -2977,7 +2977,11 @@ mod tests {
             !html.contains("zz_retired_model"),
             "retired campaign leaked: {html}"
         );
-        assert!(html.contains("stale 2026-10-16.12"), "{html}");
+        // R64 F4: the rules version shows once, in the header.
+        assert!(
+            html.contains(&format!("Rules {}", RULES_VERSION)),
+            "{html}"
+        );
         assert!(html.contains("RUNNING"), "the live cell is badged: {html}");
         // Round-12 P3: the console's strip, legend, `×N runs` and the
         // older-rules divider.
@@ -2989,12 +2993,13 @@ mod tests {
             "repeat careers collapse: {html}"
         );
         assert!(
-            pos("m1") < pos("m2") && pos("m2") < pos("m2b"),
+            pos("m1") < pos("m2")
+                && pos("m2") < pos("title=\"campaign_sdb-sql_m2b_20261017\""),
             "the duplicate career folds under its model row: {html}"
         );
         assert!(
-            html.contains("median 8.0"),
-            "the model row is the worse middle career: {html}"
+            html.contains("8.0 (8-12) · 2 careers"),
+            "the model row is the worse middle career with its range: {html}"
         );
         assert!(
             pos("older rule sets") < pos("m3"),
@@ -3068,9 +3073,9 @@ mod tests {
         assert!(!html.contains("poisoned-model"), "{html}");
         // The current-rules run sits above the divider; the stale and the
         // unknown-rules runs sit below it (the head rows carry their points).
-        assert!(pos("12/36") < pos("older rule sets"), "{html}");
-        assert!(pos("older rule sets") < pos("9/36"), "{html}");
-        assert!(pos("older rule sets") < pos("7/36"), "{html}");
+        assert!(pos("12 / 36") < pos("older rule sets"), "{html}");
+        assert!(pos("older rule sets") < pos("9 / 36"), "{html}");
+        assert!(pos("older rule sets") < pos("7 / 36"), "{html}");
         // Same model, same stale rules: the second run folds into the first.
         assert!(html.contains("×2 careers"), "stale careers fold: {html}");
         assert!(
@@ -3084,7 +3089,7 @@ mod tests {
             "one row per (model, rules) group: {html}"
         );
         assert!(
-            html.contains("campaign_sdb-sql_c"),
+            html.contains("title=\"campaign_sdb-sql_c_20261018\""),
             "the folded run is named"
         );
         let _ = fs::remove_dir_all(&dir);
