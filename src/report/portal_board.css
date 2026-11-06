@@ -5,7 +5,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg);
        color: var(--text); line-height: 1.5; padding: 24px; }
-main { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+main { max-width: 1360px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
          padding-bottom: 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 h1 { font-size: 1.35rem; color: #fff; }
@@ -22,10 +22,10 @@ h1 { font-size: 1.35rem; color: #fff; }
 .banner { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.45);
           color: var(--warn); border-radius: 8px; padding: 10px 14px; font-size: 0.82rem; }
 .wrap { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: auto; }
-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
 th { text-align: left; font-size: 0.72rem; color: var(--mut); text-transform: uppercase;
-     letter-spacing: .04em; padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+     letter-spacing: .04em; padding: 10px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr:last-child td { border-bottom: none; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .b { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.68rem;
@@ -72,3 +72,15 @@ details.more .line { margin: 2px 0 0 12px; }
 .sq.agree-some { background: #d29922; color: #0d1117; }
 .sq.agree-none { background: #f85149; color: #0d1117; }
 .agree { margin: 6px 0; }
+
+/* Portal polish (operator, 2026-11-06). */
+a { color: var(--pri); }
+a:visited { color: #a5b4fc; }
+td.rank { font-weight: 700; color: #fff; white-space: nowrap; }
+tr.model-row > td { background: rgba(255,255,255,0.015); }
+tr.model-row > td:nth-child(n+5) { white-space: nowrap; }
+.career-table td { font-size: 0.76rem; }
+.note { padding: 2px 4px; }
+.val { font-weight: 600; color: #fff; }
+.dots { display: block; margin: 3px 0 0 auto; }
+.dots .baseline { stroke: var(--line); stroke-width: 1; }

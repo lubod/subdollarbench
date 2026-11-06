@@ -1080,11 +1080,17 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
             let date = c.started.get(..10).filter(|d| !d.is_empty()).unwrap_or("—");
             out.insert(
                 c.campaign_id.clone(),
-                format!("{} · career {} · {}", c.model, i + 1, date),
+                format!("{} · career {} · {}", short_model(&c.model), i + 1, date),
             );
         }
     }
     out
+}
+
+/// Portal polish (operator, 2026-11-06): the provider prefix is noise on
+/// the page; the full model id stays in the row's title.
+fn short_model(model: &str) -> &str {
+    model.strip_prefix("openrouter/").unwrap_or(model)
 }
 
 fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
@@ -1098,7 +1104,7 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
     };
     let id = esc(&c.campaign_id);
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
         esc(name),
         mark_badge(c),
         effort_note(&c.effort),
@@ -1135,9 +1141,9 @@ fn strip_cell(
     fmt: fn(f64) -> String,
 ) -> String {
     format!(
-        "{} {}",
-        dot_strip(values, median, lo, hi, log, label, fmt),
-        median.map(fmt).unwrap_or_else(|| "—".to_string())
+        "<div class=\"val\">{}</div>{}",
+        median.map(fmt).unwrap_or_else(|| "—".to_string()),
+        dot_strip(values, median, lo, hi, log, label, fmt)
     )
 }
 
@@ -1256,11 +1262,11 @@ fn model_row(
         fmt_token_value,
     );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num\">{}</td><td class=\"num\">{duration}</td><td class=\"num\">{turns}</td><td>{tokens}</td><td>{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td title=\"the median career's\">{}</td><td class=\"num\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num\">{}</td><td class=\"num\">{duration}</td><td class=\"num\">{turns}</td><td>{tokens}</td><td>{}</td></tr>",
         rank_label(g, stability),
         esc(&g.model),
+        esc(short_model(&g.model)),
         mark_badge(med),
-        more,
         esc(&g.harness),
         effort_note(&g.effort),
         fmt_pts1(med.points),
@@ -1268,6 +1274,9 @@ fn model_row(
         fmt_pts(best.points),
         g.careers.len(),
         word,
+        more,
+        reached_of(med),
+        med.regression_free,
         ppd_of(med),
         state_of(med),
     ));
@@ -1286,14 +1295,16 @@ fn render_board(cells: &[CareerCell]) -> String {
     let best_points = ranked.iter().map(|c| c.points).fold(0.0f64, f64::max);
     let spend: f64 = ranked.iter().map(|c| c.cost).sum();
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
-    let old_groups: Vec<&ModelGroup> = groups.iter().filter(|g| !g.current).collect();
+    // Portal polish (operator, 2026-11-06: "remove old rule set results"):
+    // the board shows the current rules only. A $0 rehearsal or a smoke
+    // cell is a footnote under the table, not a row.
     let unfinished_current: Vec<&CareerCell> = cells
         .iter()
-        .filter(|c| !c.finished && c.key.current_rules)
+        .filter(|c| !c.finished && c.key.current_rules && !c.rehearsal && !c.smoke)
         .collect();
-    let unfinished_old: Vec<&CareerCell> = cells
+    let marked: Vec<&CareerCell> = cells
         .iter()
-        .filter(|c| !c.finished && !c.key.current_rules)
+        .filter(|c| c.key.current_rules && (c.rehearsal || c.smoke))
         .collect();
     let labels = career_labels(cells);
     let stability = rank_stability(cells, &groups);
@@ -1322,28 +1333,6 @@ fn render_board(cells: &[CareerCell]) -> String {
             "<tr class=\"divider\"><td colspan=\"12\">unfinished careers (not ranked)</td></tr>",
         );
         for c in unfinished_current {
-            let name = labels
-                .get(&c.campaign_id)
-                .map(String::as_str)
-                .unwrap_or(&c.campaign_id);
-            rows.push_str(&career_row(
-                c,
-                name,
-                Some(&unfinished_label(c)),
-                "unfinished",
-            ));
-        }
-    }
-    // R64 F1/B3: an older rule set is incomparable whether it finished or
-    // not; it never reads as "unfinished".
-    if !old_groups.is_empty() || !unfinished_old.is_empty() {
-        rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"12\">older rule sets (incomparable)</td></tr>",
-        );
-        for g in &old_groups {
-            model_row(cells, g, &labels, None, &scales, &mut rows);
-        }
-        for c in unfinished_old {
             let name = labels
                 .get(&c.campaign_id)
                 .map(String::as_str)
@@ -1385,7 +1374,7 @@ fn render_board(cells: &[CareerCell]) -> String {
         ));
     }
     h.push_str(&format!(
-        "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{ranked_models}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
+        "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{ranked_models}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.2}</div></div></div>",
         ranked.len(),
         fmt_pts1(best_points)
     ));
@@ -1401,7 +1390,28 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str("</tbody></table>");
     h.push_str(legend_html());
     h.push_str("</div>");
-    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf cell for each workload's reference, candidate, ratio and any floor.</li><li><b>Ties</b>: adjacent models are a rank group (<code>2=</code>) when the worse model's best career is at least as good as the better model's worst, by the shared board order (points, then perf, then points per dollar). Ties never block publishing.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Older rule sets are incomparable and sit below the board.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
+    if !marked.is_empty() {
+        let notes: Vec<String> = marked
+            .iter()
+            .map(|c| {
+                let kind = if c.rehearsal {
+                    "a $0 rehearsal (the harness's reference server, no model)"
+                } else {
+                    "a smoke cell"
+                };
+                format!(
+                    "{kind} scored {} / {}",
+                    fmt_pts(c.points),
+                    c.max_points as u32
+                )
+            })
+            .collect();
+        h.push_str(&format!(
+            "<div class=\"mut note\">Not ranked: {}.</div>",
+            esc(&notes.join("; "))
+        ));
+    }
+    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf cell for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1 (70%)</code> means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Only the current rule set is shown; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
     h.push_str("</main></body></html>");
     h
 }
@@ -1564,8 +1574,8 @@ fn dot_strip(
     label: &str,
     fmt: fn(f64) -> String,
 ) -> String {
-    let w = 72.0;
-    let h = 14.0;
+    let w = 84.0;
+    let h = 16.0;
     let pad = 4.0;
     let x = |v: f64| -> f64 {
         let t = if log {
@@ -1596,10 +1606,16 @@ fn dot_strip(
         esc(&vals.join(", ")),
         esc(&med_text)
     ));
+    s.push_str(&format!(
+        "<line class=\"baseline\" x1=\"{pad:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"/>",
+        h / 2.0,
+        w - pad,
+        h / 2.0
+    ));
     for v in values {
         let vv = v.unwrap_or(lo);
         s.push_str(&format!(
-            "<circle class=\"dot{}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.2\"/>",
+            "<circle class=\"dot{}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.2\"/>",
             if v.is_none() { " missing" } else { "" },
             x(vv),
             h / 2.0
@@ -1611,11 +1627,11 @@ fn dot_strip(
             "<polygon class=\"med\" points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\"/>",
             cx,
             h / 2.0 - 3.5,
-            cx + 3.5,
+            cx + 4.5,
             h / 2.0,
             cx,
             h / 2.0 + 3.5,
-            cx - 3.5,
+            cx - 4.5,
             h / 2.0
         ));
     }
@@ -1628,7 +1644,7 @@ fn fmt_perf(v: f64) -> String {
 }
 
 fn fmt_dollars(v: f64) -> String {
-    format!("${v:.4}")
+    format!("${v:.2}")
 }
 
 fn fmt_duration_value(v: f64) -> String {
@@ -3189,7 +3205,7 @@ mod tests {
         // R64 F6/D1: exact rank stability replaces the N= groups. b holds
         // #2 in 8 of 9 combinations (c=13 with b=12 is the exception).
         assert!(
-            html.contains("<td class=\"num\">#2 (89%)</td>"),
+            html.contains("<td class=\"num rank\">#2 (89%)</td>"),
             "the model row has no exact rank cell: {html}"
         );
         let _ = fs::remove_dir_all(&base);
@@ -3206,8 +3222,15 @@ mod tests {
         assert!(model_groups(&cells).is_empty(), "a rehearsal must not rank");
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let board = read(&out.join("index.html"));
-        assert!(board.contains("REHEARSAL"), "{board}");
-        assert!(board.contains("rehearsal (not ranked)"), "{board}");
+        // Portal polish: the rehearsal is a footnote under the table.
+        assert!(
+            board.contains(
+                "Not ranked: a $0 rehearsal (the harness&#39;s reference server, no model) scored"
+            ) || board.contains(
+                "Not ranked: a $0 rehearsal (the harness's reference server, no model) scored"
+            ),
+            "{board}"
+        );
         let results = read(&out.join("results.html"));
         assert!(results.contains("REHEARSAL"), "{results}");
         assert!(results.contains("not ranked"), "{results}");
@@ -3231,8 +3254,8 @@ mod tests {
         );
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let board = read(&out.join("index.html"));
-        assert!(board.contains("SMOKE"), "{board}");
-        assert!(board.contains("smoke (not ranked)"), "{board}");
+        // Portal polish: a smoke cell is a footnote, not a row.
+        assert!(board.contains("Not ranked: a smoke cell scored"), "{board}");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -3278,20 +3301,18 @@ mod tests {
             "the $0 rehearsal's 71 must not be the header best: {html}"
         );
         assert!(
-            html.contains("$0.8000"),
+            html.contains("$0.80<"),
             "spend is the ranked careers' $0.80: {html}"
         );
         assert!(
             html.contains("57.6") && !html.contains("57.599999999999994"),
             "points print with one decimal: {html}"
         );
+        // Portal polish (operator, 2026-11-06): the .44 cell is not on the
+        // board at all, neither as unfinished nor as an older rule set.
         assert!(
-            pos(&html, "older rule sets") < pos(&html, "old-model"),
-            "the .44 cell is under older rule sets: {html}"
-        );
-        assert!(
-            pos(&html, "unfinished careers") < pos(&html, "older rule sets"),
-            "the .44 cell is not in the unfinished section: {html}"
+            !html.contains("old-model") && !html.contains("older rule sets"),
+            "the .44 cell must not show: {html}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -3874,8 +3895,10 @@ mod tests {
         }
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(html.contains("old-model"), "{html}");
-        assert!(html.contains("older rule sets"), "{html}");
+        // Portal polish (operator, 2026-11-06): an old rule set renders
+        // without error and is not on the board.
+        assert!(!html.contains("old-model"), "{html}");
+        assert!(!html.contains("older rule sets"), "{html}");
         let _ = fs::remove_dir_all(&base);
     }
 }
