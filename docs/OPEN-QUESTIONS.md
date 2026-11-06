@@ -141,3 +141,34 @@ Then run the variance check. The recommendation:
 
 No change during the running grid: any of (b)-(d) restarts all careers
 (about 30 h and $27).
+
+**Measured** (reviewer, 2026-11-06 14:10 CET / 13:10 UTC; the v2 grid, 15
+careers, rules `.45`, key `a249e9c32c47`).
+
+| model | careers (points) | median | spread |
+|---|---|---|---|
+| deepseek-v4.1-flash | 63.0 · 65.0 · 70.0 | 65.0 | 7.0 |
+| mimo-v2.6-flash | 24.4 · 62.8 · 67.0 | 62.8 | 42.6 |
+| claude-haiku-5.5 | 55.6 · 57.6 · 64.6 | 57.6 | 9.0 |
+| gpt-6-luna | 27.4 · 44.0 · 47.0 | 44.0 | 19.6 |
+| qwen3.8-flash | 25.0 · 37.0 · 37.0 | 37.0 | 12.0 |
+
+- **The variance check:** the median within-model spread is 12.0; the
+  model medians span 28.0, a ratio of 2.3. The adjacent median gaps are
+  2.2, 5.2, 13.6 and 7.0.
+  - The top three are not separable from each other.
+  - The groups are separable: haiku's worst (55.6) beats luna's best
+    (47.0).
+  - Rank stability over all 243 combinations: deepseek #1 in 70%.
+- **The gates drive the outliers:**
+  - Two careers failed ticket 5 and lost all of phase 4: mimo c13
+    (24.4, also 0 in phase 1 on its ticket-0 budget) and luna c2 (27.4).
+    They ended phase 4 with $0.90 and $0.96 unspent.
+  - Qwen c14 failed ticket 6, and 16, 18, 19 and 20 were skipped.
+  - Without the gated careers, the spreads are deepseek 7.0, mimo 4.2,
+    haiku 9.0, luna 3.0 and qwen 0.0.
+- **Reading against the rule above:** the aggregate test passes (12.0
+  within < 28.0 between). But gate events cause the two largest spreads.
+  Both conditions hold, so this is the operator's call: (a) publish with
+  the gates shown per career, or (b) a rules `.46` round and a new grid.
+
