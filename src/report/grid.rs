@@ -1389,6 +1389,9 @@ fn render_board(cells: &[CareerCell]) -> String {
         ranked.len(),
         fmt_pts1(best_points)
     ));
+    if !current_groups.is_empty() && stability.is_none() {
+        h.push_str("<div class=\"mut\">Rank stability: too many combinations to enumerate; ranks follow the board order.</div>");
+    }
     h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th title=\"turns summed over the career's tickets\">Turns</th><th title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th>State</th></tr></thead><tbody>");
     if rows.is_empty() {
         h.push_str("<tr><td colspan=\"12\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
