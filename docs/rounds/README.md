@@ -49,6 +49,7 @@ from `TEMPLATE.md`.
 | [61](61.md) | The bar converges and the gate gets faster: test code leaves the key, one rerun, detached long jobs, a `--ready` gate (graded: full gate, no bump; D1 a, D2 a, D3 yes, D4 `--ready` gate; 9 items) | merged `3da9265` |
 | [62](62.md) | Tooling after round 61: a sharper `--ready`, the bar stops on a harness failure, the pre-push hook (R61-6, R61-7, R61-10, R61-11; no graded path) | merged `efb5732` |
 | [63](63.md) | The perf port race (R61-12) and the faster bar (R61-8) (graded: `--ready`, no bump) | merged `b8f141e` |
+| [64](64.md) | The results page and the Board read clearly: wrong header numbers, the rehearsal on the Board, duration/turns/tokens (R63-2; no graded path) | draft, after the grid |
 
 **Status values:**
 
