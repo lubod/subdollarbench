@@ -734,6 +734,22 @@ fn legend_html() -> &'static str {
     "<div class=\"legend\"><span class=\"sq pass\">·</span>pass<span class=\"sq lite\">·</span>lite<span class=\"sq fail\">·</span>fail<span class=\"sq fault\">·</span>fault<span class=\"sq skip\">·</span>skipped<span class=\"sq run\">·</span>running<span class=\"sq na\">·</span>not reached</div>"
 }
 
+/// R64 F1: points print with at most one decimal (`57.6`, never
+/// `57.599999999999994`). A whole number loses the trailing `.0`.
+fn fmt_pts(v: f64) -> String {
+    let rounded = (v * 10.0).round() / 10.0;
+    if (rounded.fract()).abs() < f64::EPSILON {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.1}")
+    }
+}
+
+/// A median keeps one decimal (`65.0`), the form the model row uses.
+fn fmt_pts1(v: f64) -> String {
+    format!("{v:.1}")
+}
+
 fn reached_of(c: &CareerCell) -> String {
     c.reached
         .map(|r| format!("ticket {r}"))
@@ -890,7 +906,7 @@ fn career_row(c: &CareerCell, phase_label: Option<&str>, extra_class: &str) -> S
         strip_html(&c.ladder),
         reached_of(c),
         c.regression_free,
-        c.points,
+        fmt_pts(c.points),
         c.max_points as u32,
         rules_of(c),
         perf_cell(c),
@@ -932,7 +948,7 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
         strip_html(&med.ladder),
         reached_of(med),
         med.regression_free,
-        med.points,
+        fmt_pts(med.points),
         med.max_points as u32,
         rules_of(med),
         perf_cell(med),
@@ -947,38 +963,49 @@ fn model_row(cells: &[CareerCell], g: &ModelGroup, html: &mut String) {
 
 fn render_board(cells: &[CareerCell]) -> String {
     let groups = model_groups(cells);
-    let unfinished: Vec<&CareerCell> = cells.iter().filter(|c| !c.finished).collect();
-    let finished_count = cells.iter().filter(|c| c.finished).count();
-    let best_points = cells.iter().map(|c| c.points).fold(0.0f64, f64::max);
-    let spend: f64 = cells.iter().map(|c| c.cost).sum();
+    // R64 F1: the header counts only careers that rank: finished, current
+    // rules, never a $0 rehearsal or a smoke cell. An older rule set is
+    // incomparable and counts nowhere.
+    let ranked: Vec<&CareerCell> = cells
+        .iter()
+        .filter(|c| c.finished && c.key.current_rules && !c.rehearsal && !c.smoke)
+        .collect();
+    let ranked_models = groups.iter().filter(|g| g.current).count();
+    let best_points = ranked.iter().map(|c| c.points).fold(0.0f64, f64::max);
+    let spend: f64 = ranked.iter().map(|c| c.cost).sum();
+    let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
+    let old_groups: Vec<&ModelGroup> = groups.iter().filter(|g| !g.current).collect();
+    let unfinished_current: Vec<&CareerCell> = cells
+        .iter()
+        .filter(|c| !c.finished && c.key.current_rules)
+        .collect();
+    let unfinished_old: Vec<&CareerCell> = cells
+        .iter()
+        .filter(|c| !c.finished && !c.key.current_rules)
+        .collect();
     let mut rows = String::new();
-    let mut old_divider = false;
-    for g in &groups {
-        if !g.current && !old_divider {
-            rows.push_str(
-                "<tr class=\"divider\"><td colspan=\"11\">older rule sets (incomparable)</td></tr>",
-            );
-            old_divider = true;
-        }
+    for g in &current_groups {
         model_row(cells, g, &mut rows);
     }
-    if !unfinished.is_empty() {
+    if !unfinished_current.is_empty() {
         rows.push_str(
             "<tr class=\"divider\"><td colspan=\"11\">unfinished careers (not ranked)</td></tr>",
         );
-        for c in unfinished {
-            let label = if c.rehearsal {
-                "rehearsal (not ranked)".to_string()
-            } else if c.smoke {
-                "smoke (not ranked)".to_string()
-            } else {
-                match (c.phase, c.phase_total) {
-                    (Some(p), t) if t > 0 => format!("phase {p} of {t}"),
-                    (Some(p), _) => format!("phase {p}"),
-                    _ => "in progress".to_string(),
-                }
-            };
-            rows.push_str(&career_row(c, Some(&label), "unfinished"));
+        for c in unfinished_current {
+            rows.push_str(&career_row(c, Some(&unfinished_label(c)), "unfinished"));
+        }
+    }
+    // R64 F1/B3: an older rule set is incomparable whether it finished or
+    // not; it never reads as "unfinished".
+    if !old_groups.is_empty() || !unfinished_old.is_empty() {
+        rows.push_str(
+            "<tr class=\"divider\"><td colspan=\"11\">older rule sets (incomparable)</td></tr>",
+        );
+        for g in &old_groups {
+            model_row(cells, g, &mut rows);
+        }
+        for c in unfinished_old {
+            rows.push_str(&career_row(c, Some(&unfinished_label(c)), "unfinished"));
         }
     }
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
@@ -996,8 +1023,9 @@ fn render_board(cells: &[CareerCell]) -> String {
         esc(crate::report::rules::sqlite_version())
     ));
     h.push_str(&format!(
-        "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{finished_count}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{best_points:.1}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
-        groups.iter().filter(|g| g.current).count()
+        "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{ranked_models}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.4}</div></div></div>",
+        ranked.len(),
+        fmt_pts1(best_points)
     ));
     h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th>Reached</th><th>Reg-free</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th>Reg-free / $</th><th>State</th><th>Updated</th></tr></thead><tbody>");
     if rows.is_empty() {
@@ -1011,6 +1039,20 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf cell for each workload's reference, candidate, ratio and any floor.</li><li><b>Ties</b>: adjacent models are a rank group (<code>2=</code>) when the worse model's best career is at least as good as the better model's worst, by the shared board order (points, then perf, then points per dollar). Ties never block publishing.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Older rule sets are incomparable and sit below the board.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
     h.push_str("</main></body></html>");
     h
+}
+
+fn unfinished_label(c: &CareerCell) -> String {
+    if c.rehearsal {
+        "rehearsal (not ranked)".to_string()
+    } else if c.smoke {
+        "smoke (not ranked)".to_string()
+    } else {
+        match (c.phase, c.phase_total) {
+            (Some(p), t) if t > 0 => format!("phase {p} of {t}"),
+            (Some(p), _) => format!("phase {p}"),
+            _ => "in progress".to_string(),
+        }
+    }
 }
 
 /// R51 F4: a grid date is printed to the minute.
@@ -1708,8 +1750,7 @@ mod tests {
     }
 
     /// R54 F1: set `rehearsal`/`smoke` on a phase rollup in both files.
-    fn set_mark(runs: &Path, prefix: &str, phase: u32, key: &str) {
-        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+    fn set_mark(runs: &Path, prefix: &str, phase: u32, key: &str) {        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
         for file in ["campaign.json", "status.json"] {
             let path = dir.join(file);
             let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
@@ -1736,6 +1777,22 @@ mod tests {
             };
             rollup["started_at"] = serde_json::json!(started);
             rollup["finished_at"] = serde_json::json!(finished);
+            fs::write(path, v.to_string()).unwrap();
+        }
+    }
+
+    /// R64 F1: rewrite a phase's recorded rules version in both files.
+    fn set_phase_rules(runs: &Path, prefix: &str, phase: u32, rules: &str) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["rules_version"] = serde_json::json!(rules);
             fs::write(path, v.to_string()).unwrap();
         }
     }
@@ -2318,6 +2375,66 @@ mod tests {
         let board = read(&out.join("index.html"));
         assert!(board.contains("SMOKE"), "{board}");
         assert!(board.contains("smoke (not ranked)"), "{board}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R64 F1 (B1, B2, B3): the header counts ranked careers only, points
+    /// print with at most one decimal, and an older rule set sits under
+    /// "older rule sets", never under "unfinished".
+    #[test]
+    fn r64_f1_header_counts_ranked_only() {
+        let (base, runs, out) = fixture("r64f1");
+        career(&runs, "paid", "paid-model", [17.5; 4], [0.1; 4]); // 70
+        career(&runs, "haiku", "haiku-model", [14.4; 4], [0.1; 4]); // 57.599999999999994
+        career(&runs, "reh", "reh-model", [17.75; 4], [0.0; 4]); // 71, $0
+        set_mark(&runs, "reh", 4, "rehearsal");
+        // B3: an unfinished cell from an older rule set is incomparable,
+        // not "phase 1 of 4" among the unfinished careers.
+        write_phase(
+            &runs,
+            "old",
+            "old-model",
+            1,
+            None,
+            &["campaign_old_p1".into()],
+            &[0, 1, 2, 3, 4, 5, 6],
+            9.0,
+            0.05,
+            "done",
+            9.0,
+            0.05,
+        );
+        set_phase_rules(&runs, "old", 1, "2026-10-19.44");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(
+            html.contains("<div class=\"k\">Careers</div><div class=\"v\">2</div>"),
+            "only the two ranked careers count: {html}"
+        );
+        assert!(
+            html.contains("<div class=\"k\">Models</div><div class=\"v\">2</div>"),
+            "the old and rehearsal models count nowhere: {html}"
+        );
+        assert!(
+            html.contains("<div class=\"k\">Best points</div><div class=\"v\">70.0</div>"),
+            "the $0 rehearsal's 71 must not be the header best: {html}"
+        );
+        assert!(
+            html.contains("$0.8000"),
+            "spend is the ranked careers' $0.80: {html}"
+        );
+        assert!(
+            html.contains("57.6") && !html.contains("57.599999999999994"),
+            "points print with one decimal: {html}"
+        );
+        assert!(
+            pos(&html, "older rule sets") < pos(&html, "old-model"),
+            "the .44 cell is under older rule sets: {html}"
+        );
+        assert!(
+            pos(&html, "unfinished careers") < pos(&html, "older rule sets"),
+            "the .44 cell is not in the unfinished section: {html}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
