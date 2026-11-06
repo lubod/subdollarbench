@@ -2392,6 +2392,15 @@
     function cellCost(c) { return Number(cellRollup(c).total_cost_usd || 0); }
     function cellPerDollar(c) { const v = cellCost(c); return v > 0 ? cellPoints(c) / v : null; }
     function cellRules(c) { return cellRollup(c).rules_version || ''; }
+    /// R64 F2: a $0 rehearsal or a smoke cell is shown but never ranked.
+    function cellMark(c) {
+      const r = cellRollup(c);
+      return r.rehearsal ? 'rehearsal' : (r.smoke ? 'smoke' : '');
+    }
+    function groupMark(cells) {
+      for (const c of cells) { const m = cellMark(c); if (m) return m; }
+      return '';
+    }
 
     /// Board state text: running and stalled cells say what is happening
     /// (round-10 bug 4 / U3), with the Live staleness colour.
@@ -2679,11 +2688,11 @@
       const visible = showAll
         ? boardCache.slice()
         : (boardRulesFilter === 'current' ? boardCache.slice() : pickVersion(boardRulesFilter));
-      const best = boardCache.reduce((m, c) => {
+      const best = boardCache.filter(c => !cellMark(c)).reduce((m, c) => {
         const passed = (c.ladder || []).filter(e => e.status === 'pass' || e.status === 'lite').map(e => e.id);
         return Math.max(m, passed.length ? Math.max(...passed) : -1);
       }, -1);
-      const spend = boardCache.reduce((s, c) => s + cellCost(c), 0);
+      const spend = boardCache.filter(c => !cellMark(c)).reduce((s, c) => s + cellCost(c), 0);
       head.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
           <h2 style="margin:0;font-size:1.05rem;">sdb-sql</h2>
           <span class="hint" title="highest ticket passed with all earlier needs green">${boardCache.length} runs \u00b7 best: ${best >= 0 ? 'ticket ' + best : '\u2014'} \u00b7 spend $${fmtMoney(spend)}</span>
@@ -2706,22 +2715,35 @@
       let rank = 0;
       let rows = '';
       let dividerDone = false;
-      groupCells(visible).forEach(({ key, cells, career }) => {
+      let unrankedDivider = false;
+      const groups = groupCells(visible);
+      // R64 F2: rehearsal and smoke careers sit below every ranked row.
+      const ordered = [
+        ...groups.filter(g => !groupMark(g.cells)),
+        ...groups.filter(g => groupMark(g.cells)),
+      ];
+      ordered.forEach(({ key, cells, career }) => {
         // R2: a career's top is the finished leaf (no other cell names it),
         // not merely the highest phase; a refork's older child ties, so the
         // newest started_at wins. The rest are expanded phase rows.
         const top = career ? (careerLeaf(cells) || cells[0]) : cells[0];
-        if (boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
+        const mark = groupMark(cells);
+        if (mark && !unrankedDivider) {
+          rows += `<tr><td colspan="7" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">rehearsals and smoke cells (not ranked)</td></tr>`;
+          unrankedDivider = true;
+        }
+        if (!mark && boardRulesFilter === 'current' && cur && cellRules(top) !== cur && !dividerDone) {
           rows += `<tr><td colspan="7" class="hint" style="border-top:2px solid var(--border);padding-top:10px;">older rule sets (incomparable)</td></tr>`;
           dividerDone = true;
         }
-        rank += 1;
+        if (!mark) rank += 1;
         const n = cells.length;
         const expanded = !!boardExpandedGroups[key];
-        const extra = n > 1
+        const expand = n > 1
           ? ` <a href="#" onclick="event.stopPropagation(); toggleBoardGroup('${escapeHtml(key)}'); return false;" class="hint" style="color:var(--primary);">\u00d7${n} ${career ? 'phases' : 'runs'} ${expanded ? '\u25be' : '\u25b8'}</a>`
           : '';
-        rows += boardRowHtml(top, rank, { extra, careerView: career, careerCells: career ? cells : null });
+        const extra = (mark ? ` <span class="hint">${mark} (not ranked)</span>` : '') + expand;
+        rows += boardRowHtml(top, mark ? '\u00b7' : rank, { extra, careerView: career, careerCells: career ? cells : null });
         if (expanded && n > 1) {
           if (career) {
             const topRollup = cellRollup(top);

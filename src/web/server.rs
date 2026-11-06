@@ -4411,7 +4411,8 @@ console.log('live button OK');
 
     /// The DOM stubs the console boot smoke needs: every element is a
     /// benign object, fetch answers the read endpoints, timers are inert.
-    const GUI_SMOKE_HARNESS: &str = r#"
+    /// R64 F2: shared by the boot smoke and the Board rehearsal fixture.
+    const GUI_HARNESS_PRELUDE: &str = r#"
 const fs = require('fs');
 const path = require('path');
 const dir = __dirname;
@@ -4463,6 +4464,10 @@ try {
   eval(fs.readFileSync(path.join(dir, 'shared.js'), 'utf8'));
   eval(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'));
 } catch (e) { console.log('EVAL FAILED:', e.message); process.exit(1); }
+"#;
+
+    /// The boot smoke's body: every entry point is called once.
+    const GUI_SMOKE_BODY: &str = r#"
 const calls = [
   ['checkActiveRun'], ['refreshQueue'], ['refreshBoard'], ['loadRulesVersion'], ['applyHash'],
   ['checkBreaker'], ['fetchOmpStatus'], ['fetchOpencodeStatus'], ['fetchIntegrity'],
@@ -4902,40 +4907,107 @@ global.fetch = async (url) => {
     /// shared.js + the inline script under a DOM stub, runs the boot path
     /// and the 4 s pollers, and fails on any ReferenceError. Skipped when
     /// node is absent.
-    #[test]
-    fn test_gui_console_boots_under_a_dom_stub() {
+    /// R64 F2: run the console's inline script under the shared DOM stub.
+    /// `body` is appended after the stub and must print its own OK line.
+    /// Returns None when node is absent.
+    fn run_gui_harness(name: &str, body: &str) -> Option<std::process::Output> {
         let html = include_str!("index.html");
         let mut scripts = Vec::new();
         let mut rest = html;
         while let Some(s) = rest.find("<script>") {
-            let body = &rest[s + "<script>".len()..];
-            if let Some(e) = body.find("</script>") {
-                scripts.push(&body[..e]);
-                rest = &body[e + "</script>".len()..];
+            let inner = &rest[s + "<script>".len()..];
+            if let Some(e) = inner.find("</script>") {
+                scripts.push(&inner[..e]);
+                rest = &inner[e + "</script>".len()..];
             } else {
                 break;
             }
         }
         assert_eq!(scripts.len(), 1, "index.html must hold one inline script");
-        let dir = std::env::temp_dir().join(format!("gui_smoke_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gui_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shared.js"), include_str!("shared.js")).unwrap();
         std::fs::write(dir.join("app.js"), scripts[0]).unwrap();
         std::fs::write(dir.join("index.html"), html).unwrap();
-        std::fs::write(dir.join("harness.js"), GUI_SMOKE_HARNESS).unwrap();
+        std::fs::write(
+            dir.join("harness.js"),
+            format!("{GUI_HARNESS_PRELUDE}{body}"),
+        )
+        .unwrap();
         let out = std::process::Command::new("node")
             .arg(dir.join("harness.js"))
             .output();
         let _ = std::fs::remove_dir_all(&dir);
-        match out {
-            Ok(o) => assert!(
+        out.ok()
+    }
+
+    #[test]
+    fn test_gui_console_boots_under_a_dom_stub() {
+        match run_gui_harness("smoke", GUI_SMOKE_BODY) {
+            Some(o) => assert!(
                 o.status.success() && String::from_utf8_lossy(&o.stdout).contains("smoke OK"),
                 "console boot smoke failed:\n{}\n{}",
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
             ),
-            Err(_) => eprintln!("node not found; skipping GUI boot smoke"),
+            None => eprintln!("node not found; skipping GUI boot smoke"),
+        }
+    }
+
+    /// R64 F2 (R63-2): a $0 rehearsal is listed below the ranked rows,
+    /// unnumbered, and the header's best/spend leave it out.
+    const GUI_BOARD_REHEARSAL_BODY: &str = r#"
+const base = { model:'paid-model', harness:'omp', effort:'high', rules_version:'2026-10-19.45', max_points:76 };
+const paid = { id:'campaign_paid_p4', state:'done', ladder:[{id:19,title:'t19',status:'pass',points:1}],
+  rollup: Object.assign({}, base, { points:70, total_cost_usd:2.4, phase:4,
+    chain_from:'campaign_paid_p1', started_at:'2026-11-04T07:07:20Z',
+    career:{points:70,total_cost_usd:2.4,cells:['campaign_paid_p1','campaign_paid_p4']} }) };
+const reh = { id:'campaign_reh_p4', state:'done', ladder:[{id:20,title:'t20',status:'pass',points:1}],
+  rollup: Object.assign({}, base, { model:'reh-model', points:71, total_cost_usd:0.5, rehearsal:true, phase:4,
+    chain_from:'campaign_reh_p1', started_at:'2026-11-04T02:47:03Z',
+    career:{points:71,total_cost_usd:0.5,cells:['campaign_reh_p1','campaign_reh_p4']} }) };
+global.fetch = async (url) => {
+  const u = String(url || '');
+  let body = {};
+  if (u.includes('/api/campaigns') && !u.includes('/log')) body = [reh, paid];
+  else if (u.includes('/api/status')) body = { is_running: false, rules_version: '2026-10-19.45' };
+  else if (u.includes('/api/queue')) body = [];
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => body, text: async () => '' };
+};
+(async () => {
+  await loadRulesVersion();
+  await refreshBoard();
+  const body = el('boardBody').innerHTML;
+  const head = el('boardHead').innerHTML;
+  const fail = [];
+  const iP = body.indexOf('paid-model');
+  const iR = body.indexOf('reh-model');
+  if (iP < 0 || iR < 0) fail.push('rows:' + iP + ',' + iR);
+  if (iP >= 0 && iR >= 0 && !(iR > iP)) fail.push('rehearsal-not-below');
+  if (!body.includes('rehearsal (not ranked)')) fail.push('no-label');
+  if (!body.includes('rehearsals and smoke cells (not ranked)')) fail.push('no-divider');
+  const rowAt = i => body.slice(body.lastIndexOf('<tr', i), body.indexOf('</tr>', i));
+  if (iR >= 0 && !rowAt(iR).includes('>\u00b7</td>')) fail.push('rehearsal-numbered');
+  if (iP >= 0 && !rowAt(iP).includes('>1</td>')) fail.push('paid-not-1');
+  if (!head.includes('best: ticket 19')) fail.push('header-best:' + head);
+  if (!head.includes('spend $2.4000')) fail.push('header-spend:' + head);
+  if (fail.length) { console.log('BOARD CHECKS FAILED:', fail.join(',')); process.exit(1); }
+  console.log('board rehearsal OK');
+})();
+"#;
+
+    #[test]
+    fn r64_f2_board_rehearsal_unranked() {
+        match run_gui_harness("board_rehearsal", GUI_BOARD_REHEARSAL_BODY) {
+            Some(o) => assert!(
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).contains("board rehearsal OK"),
+                "GUI board rehearsal check failed:\n{}\n{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            None => eprintln!("node not found; skipping GUI board rehearsal check"),
         }
     }
 
