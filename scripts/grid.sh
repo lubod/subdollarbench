@@ -195,6 +195,65 @@ port_busy() {
     command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$port "
 }
 
+# R65 F3: the account balance, in dollars, from OpenRouter's credits
+# endpoint (total_credits - total_usage). SDB_GRID_BALANCE_CMD is the test
+# seam: it prints a number or fails. The key goes through curl's stdin
+# config, never argv, and is never printed.
+account_balance() {
+    if [[ -n "${SDB_GRID_BALANCE_CMD:-}" ]]; then
+        "$SDB_GRID_BALANCE_CMD"
+        return
+    fi
+    local key
+    key="${OPENROUTER_API_KEY:-}"
+    if [[ -z "$key" && -f "$ROOT/.env" ]]; then
+        key="$(grep -m1 '^OPENROUTER_API_KEY=' "$ROOT/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+    fi
+    if [[ -z "$key" ]]; then
+        log "balance: OPENROUTER_API_KEY is not set"
+        return 1
+    fi
+    local body
+    body="$(printf 'header = "Authorization: Bearer %s"\n' "$key" \
+        | curl -sS --max-time 20 -K - https://openrouter.ai/api/v1/credits)" || {
+        log "balance: the credits endpoint failed"
+        return 1
+    }
+    printf '%s' "$body" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)["data"]
+    print(float(d["total_credits"]) - float(d["total_usage"]))
+except Exception:
+    raise SystemExit(1)'
+}
+
+# R65 F3: print the hold reason and return 1 when the phase may not start.
+# `running` in the spec is the other lanes; the reserved set already holds
+# this phase when CAP > 0, and the whole lane count is the worst case at
+# the start. A rehearsal and a dry run spend nothing and skip.
+balance_gate() {
+    [[ "$REHEARSAL" == "1" || "$DRY_RUN" == "1" ]] && return 0
+    local reserved other concurrent need balance
+    reserved=$(find "$RUNNING_DIR" -maxdepth 1 -type f -name 'res-*' 2>/dev/null | wc -l)
+    if [[ "$CAP" == "0" || -z "$CAP" ]]; then
+        other=0
+    else
+        other=$((reserved > 0 ? reserved - 1 : 0))
+    fi
+    concurrent=$other
+    (( concurrent < LANES - 1 )) && concurrent=$((LANES - 1))
+    need="$(awk -v b="$PHASE_BUDGET" -v r="$concurrent" 'BEGIN { printf "%.2f", b * (r + 1) + 1.00 }')"
+    if ! balance="$(account_balance)"; then
+        printf 'balance unknown\n'
+        return 1
+    fi
+    if awk -v b="$balance" -v n="$need" 'BEGIN { exit !(b < n) }'; then
+        printf 'balance $%s below $%s\n' "$balance" "$need"
+        return 1
+    fi
+    return 0
+}
+
 preflight() {
     local worker="$1"
     if [[ "${SDB_GRID_SKIP_PREFLIGHT:-0}" == "1" ]]; then
@@ -331,6 +390,18 @@ run_lane() {
                 touch "$STOP"
                 return "$failed"
             }
+            local hold_reason
+            if ! hold_reason="$(balance_gate)"; then
+                release_phase "$token"
+                printf '%s\n' "hold: $hold_reason" > "$HOLD"
+                log "hold: $hold_reason (release $HOLD after a top-up)"
+                wait_hold
+                token="$(reserve_phase "$PHASE_BUDGET")" || {
+                    log "lane $lane: cap $CAP reached (reservations count); STOP"
+                    touch "$STOP"
+                    return "$failed"
+                }
+            fi
             if ! preflight "$worker"; then
                 release_phase "$token"
                 log "lane $lane: preflight failed for career $idx $model phase $phase"
@@ -495,6 +566,13 @@ EOF
     CELL="$fake"
     SDB_GRID_SKIP_PREFLIGHT=1
     export SDB_GRID_SKIP_PREFLIGHT
+    # R65 F3: every self-test case gets a rich balance unless it overrides
+    # it; the balance cases below drive the hold path explicitly.
+    balance="$dir/balance.sh"
+    printf '#!/bin/sh\necho 100.00\n' > "$balance"
+    chmod +x "$balance"
+    SDB_GRID_BALANCE_CMD="$balance"
+    export SDB_GRID_BALANCE_CMD
 
     # 1) three lanes, six careers: 24 rows, phases in order, one worker per
     # lane.
@@ -841,6 +919,95 @@ EOF
     [[ "$bad" -eq 0 ]] || { echo "$bad phase(s) started after the billing fault"; exit 1; }
     unset SDB_FAKE_HARNESS_FAULT SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP
     export -n SDB_FAKE_HARNESS_FAULT SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP 2>/dev/null || true
+
+    # 13) R65 F3: the balance preflight. 10.00 with 3 lanes at $0.99 runs;
+    # 2.00 holds before any phase (3 lanes need $3.97); a failing stub
+    # holds with "balance unknown"; a rehearsal with a failing stub runs.
+    scenario="$dir/thirteen"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 c2 c3 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=3
+    CAP=0
+    PHASE_BUDGET=0.99
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    printf '#!/bin/sh\necho 10.00\n' > "$balance"
+    chmod +x "$balance"
+    load_careers "$CAREERS_FILE"
+    run_grid
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 12 ]] || {
+        echo "balance 10: expected 12 rows, got $(($(wc -l < "$LEDGER") - 1))"; exit 1; }
+    [[ ! -f "$HOLD" ]] || { echo "balance 10 wrote a hold"; exit 1; }
+
+    scenario="$dir/thirteen-hold"
+    mkdir -p "$scenario"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    printf '#!/bin/sh\necho 2.00\n' > "$balance"
+    chmod +x "$balance"
+    ( run_grid >"$scenario/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 50); do [[ -f "$HOLD" ]] && break; sleep 0.1; done
+    [[ -f "$HOLD" ]] || { kill "$pid" 2>/dev/null || true; echo "balance 2: no hold"; exit 1; }
+    grep -q 'hold: balance \$2.00 below \$3.97' "$scenario/out" || {
+        echo "balance 2: wrong hold line"; cat "$scenario/out"; kill "$pid" 2>/dev/null || true; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER" 2>/dev/null || echo 1) - 1))" -eq 0 ]] || {
+        echo "balance 2: a phase started before the hold"; kill "$pid" 2>/dev/null || true; exit 1; }
+    printf '#!/bin/sh\necho 100.00\n' > "$balance"
+    rm -f "$HOLD"
+    wait "$pid" || { echo "balance 2: the grid did not resume"; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 12 ]] || {
+        echo "balance 2: expected 12 rows after the top-up, got $(($(wc -l < "$LEDGER") - 1))"; exit 1; }
+
+    scenario="$dir/thirteen-unknown"
+    mkdir -p "$scenario"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    printf '#!/bin/sh\nexit 1\n' > "$balance"
+    chmod +x "$balance"
+    export OPENROUTER_API_KEY="sk-r65-secret"
+    ( run_grid >"$scenario/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 50); do [[ -f "$HOLD" ]] && break; sleep 0.1; done
+    [[ -f "$HOLD" ]] || { kill "$pid" 2>/dev/null || true; echo "balance unknown: no hold"; exit 1; }
+    grep -q 'hold: balance unknown' "$scenario/out" || {
+        echo "balance unknown: wrong hold line"; cat "$scenario/out"; kill "$pid" 2>/dev/null || true; exit 1; }
+    if grep -q 'sk-r65-secret' "$scenario/out"; then
+        echo "the API key was printed"; kill "$pid" 2>/dev/null || true; exit 1
+    fi
+    printf '#!/bin/sh\necho 100.00\n' > "$balance"
+    rm -f "$HOLD"
+    wait "$pid" || { echo "balance unknown: the grid did not resume"; exit 1; }
+    unset OPENROUTER_API_KEY
+
+    scenario="$dir/thirteen-reh"
+    mkdir -p "$scenario"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    printf '#!/bin/sh\nexit 1\n' > "$balance"
+    chmod +x "$balance"
+    REHEARSAL=1
+    PHASE_BUDGET=0
+    load_careers "$CAREERS_FILE"
+    run_grid
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 12 ]] || {
+        echo "rehearsal with a failing balance did not run"; exit 1; }
+    [[ ! -f "$HOLD" ]] || { echo "a rehearsal wrote a hold"; exit 1; }
+    REHEARSAL=0
+    PHASE_BUDGET=0.99
 
     echo "RESULT: PASS (grid self-test)"
 }
