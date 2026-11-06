@@ -63,3 +63,4 @@ from `TEMPLATE.md`.
 Rounds 1-21 predate this process. Their reviews are in
 `archive/REVIEW-rounds-01-21.md`, and their specs and "landed" notes are
 in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
+| [65](65.md) | A provider credit failure stops the grid (R63-3); a balance preflight; `publish.sh` uses the one key; fresh input tokens on every route (graded: `--ready`, then a bar) | open |
