@@ -1391,11 +1391,13 @@ impl OmpRunner {
                                 let tin = usage
                                     .get("input")
                                     .or_else(|| usage.get("prompt_tokens"))
+                                    .or_else(|| usage.get("input_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tout = usage
                                     .get("output")
                                     .or_else(|| usage.get("completion_tokens"))
+                                    .or_else(|| usage.get("output_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tcached = usage
@@ -1408,10 +1410,17 @@ impl OmpRunner {
                                             .and_then(|d| d.get("cached_tokens"))
                                             .and_then(|x| x.as_u64())
                                     })
+                                    .or_else(|| {
+                                        usage
+                                            .get("input_tokens_details")
+                                            .and_then(|d| d.get("cached_tokens"))
+                                            .and_then(|x| x.as_u64())
+                                    })
                                     .unwrap_or(0);
                                 let tcwrite = usage
                                     .get("cacheWrite")
                                     .or_else(|| usage.get("cache_write_input_tokens"))
+                                    .or_else(|| usage.get("cache_creation_input_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 if tin + tout + tcached + tcwrite == 0 {
@@ -1453,11 +1462,13 @@ impl OmpRunner {
                                 let tin = usage
                                     .get("input")
                                     .or_else(|| usage.get("prompt_tokens"))
+                                    .or_else(|| usage.get("input_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tout = usage
                                     .get("output")
                                     .or_else(|| usage.get("completion_tokens"))
+                                    .or_else(|| usage.get("output_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tcached = usage
@@ -1467,6 +1478,12 @@ impl OmpRunner {
                                     .or_else(|| {
                                         usage
                                             .get("prompt_tokens_details")
+                                            .and_then(|d| d.get("cached_tokens"))
+                                            .and_then(|x| x.as_u64())
+                                    })
+                                    .or_else(|| {
+                                        usage
+                                            .get("input_tokens_details")
                                             .and_then(|d| d.get("cached_tokens"))
                                             .and_then(|x| x.as_u64())
                                     })
@@ -2112,6 +2129,7 @@ impl OmpRunner {
                     if let Some(pt) = usage
                         .get("input")
                         .or_else(|| usage.get("prompt_tokens"))
+                        .or_else(|| usage.get("input_tokens"))
                         .and_then(|x| x.as_u64())
                     {
                         prompt_tokens += pt;
@@ -2119,6 +2137,7 @@ impl OmpRunner {
                     if let Some(ct) = usage
                         .get("output")
                         .or_else(|| usage.get("completion_tokens"))
+                        .or_else(|| usage.get("output_tokens"))
                         .and_then(|x| x.as_u64())
                     {
                         completion_tokens += ct;
@@ -2129,7 +2148,10 @@ impl OmpRunner {
                         .and_then(|x| x.as_u64())
                     {
                         cached_tokens += cr;
-                    } else if let Some(details) = usage.get("prompt_tokens_details") {
+                    } else if let Some(details) = usage
+                        .get("prompt_tokens_details")
+                        .or_else(|| usage.get("input_tokens_details"))
+                    {
                         if let Some(c) = details.get("cached_tokens").and_then(|x| x.as_u64()) {
                             cached_tokens += c;
                         }
@@ -2137,6 +2159,7 @@ impl OmpRunner {
                     if let Some(cw) = usage
                         .get("cacheWrite")
                         .or_else(|| usage.get("cache_write_input_tokens"))
+                        .or_else(|| usage.get("cache_creation_input_tokens"))
                         .and_then(|x| x.as_u64())
                     {
                         cache_write_tokens += cw;

@@ -435,6 +435,57 @@ fn test_extract_session_stats_and_finding() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+/// R65 F5: prompt tokens come from the field each provider route sends:
+/// deepseek/OpenAI chat (`prompt_tokens`), Anthropic (`input_tokens`), and
+/// OpenAI's Responses shape (`input_tokens` + `input_tokens_details`).
+#[test]
+fn r65_f5_prompt_tokens_every_route() {
+    let temp_dir = std::env::temp_dir().join(format!("r65_tokens_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let cases = [
+        (
+            "deepseek",
+            r#"{"message":{"role":"assistant","usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40}}}}"#,
+            100u64,
+            40u64,
+            20u64,
+            0u64,
+        ),
+        (
+            "anthropic",
+            r#"{"message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":40,"cache_creation_input_tokens":10}}}"#,
+            100,
+            40,
+            20,
+            10,
+        ),
+        (
+            "openai",
+            r#"{"message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":40}}}}"#,
+            100,
+            40,
+            20,
+            0,
+        ),
+    ];
+    for (name, line, prompt, cached, completion, cache_write) in cases {
+        let path = temp_dir.join(format!("{name}.jsonl"));
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let stats = OmpRunner::extract_latest_session_stats(Some(&path)).unwrap();
+        assert_eq!(stats.prompt_tokens, prompt, "{name} prompt");
+        assert_eq!(stats.cached_tokens, cached, "{name} cached");
+        assert_eq!(stats.completion_tokens, completion, "{name} completion");
+        assert_eq!(stats.cache_write_tokens, cache_write, "{name} cache write");
+        assert_eq!(
+            stats.total_tokens,
+            prompt + cached + completion + cache_write,
+            "{name} total"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 #[test]
 fn test_extract_session_stats_reads_negotiated_thinking_level() {
     // The session's thinking_level_change is the source of truth for
