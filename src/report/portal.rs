@@ -2970,8 +2970,16 @@ mod tests {
         // conservative even median is the worse one, 8), then the running
         // m5 (0); the stale 20-point m3 groups below them.
         assert!(pos("m1") < pos("m2"), "points order: {html}");
-        assert!(pos("m2") < pos("m5"), "current before stale: {html}");
-        assert!(pos("m5") < pos("m3"), "stale rules grouped last: {html}");
+        assert!(
+            pos("m2") < pos("m5"),
+            "current before the unfinished: {html}"
+        );
+        // Portal polish (operator, 2026-11-06): an older rule set is not on
+        // the board at all.
+        assert!(
+            !html.contains("m3"),
+            "the stale-rules cell must not show: {html}"
+        );
         assert!(!html.contains("m4"), "poisoned cell leaked: {html}");
         assert!(
             !html.contains("zz_retired_model"),
@@ -2998,12 +3006,8 @@ mod tests {
             "the model row is the worse middle career with its range: {html}"
         );
         assert!(
-            pos("older rule sets") < pos("m3"),
-            "the stale cell sits under the divider: {html}"
-        );
-        assert!(
-            pos("m5") < pos("older rule sets"),
-            "current rules before the divider: {html}"
+            !html.contains("older rule sets"),
+            "no older-rules section: {html}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3067,26 +3071,23 @@ mod tests {
         };
         // A poisoned cell never publishes.
         assert!(!html.contains("poisoned-model"), "{html}");
-        // The current-rules run sits above the divider; the stale and the
-        // unknown-rules runs sit below it (the head rows carry their points).
-        assert!(pos("12 / 36") < pos("older rule sets"), "{html}");
-        assert!(pos("older rule sets") < pos("9 / 36"), "{html}");
-        assert!(pos("older rule sets") < pos("7 / 36"), "{html}");
-        // Same model, same stale rules: the second run folds into the first.
-        assert!(html.contains("×2 careers"), "stale careers fold: {html}");
-        assert!(
-            !html.contains("×3 runs") && !html.contains("×4 runs"),
-            "different rule sets never fold together: {html}"
-        );
-        // Three model rows: current, the stale pair, and the unknown one.
+        // Portal polish (operator, 2026-11-06): only the current rule set
+        // is on the board. The stale and the unknown-rules runs never show,
+        // and never fold into the current model's row.
+        assert!(pos("12 / 36") > 0, "{html}");
+        for gone in [
+            "9 / 36",
+            "8 / 36",
+            "7 / 36",
+            "older rule sets",
+            "campaign_sdb-sql_c_20261018",
+        ] {
+            assert!(!html.contains(gone), "{gone} must not show: {html}");
+        }
         assert_eq!(
-            html.matches("<b>m</b>").count(),
-            3,
-            "one row per (model, rules) group: {html}"
-        );
-        assert!(
-            html.contains("title=\"campaign_sdb-sql_c_20261018\""),
-            "the folded run is named"
+            html.matches(">m</b>").count(),
+            1,
+            "one model row, the current rules only: {html}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
