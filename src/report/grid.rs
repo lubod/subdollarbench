@@ -1064,8 +1064,16 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for g in &mut groups {
         g.sort_by(|a, b| {
-            campaign::board_order(&cells[*a].key, &cells[*b].key)
-                .then_with(|| cells[*a].started.cmp(&cells[*b].started))
+            let ca = &cells[*a];
+            let cb = &cells[*b];
+            let ranked_a = ca.finished && ca.key.current_rules && !ca.rehearsal && !ca.smoke;
+            let ranked_b = cb.finished && cb.key.current_rules && !cb.rehearsal && !cb.smoke;
+            // R64 F4: the ranked careers number first, so a rehearsal or an
+            // unfinished cell never shifts the paid careers' indices.
+            ranked_b
+                .cmp(&ranked_a)
+                .then_with(|| campaign::board_order(&ca.key, &cb.key))
+                .then_with(|| ca.started.cmp(&cb.started))
         });
         for (i, idx) in g.iter().enumerate() {
             let c = &cells[*idx];
