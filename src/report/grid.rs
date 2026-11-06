@@ -1094,6 +1094,11 @@ fn short_model(model: &str) -> &str {
     model.strip_prefix("openrouter/").unwrap_or(model)
 }
 
+/// R65-1: the short model name may break at its `/` (not mid-word).
+fn model_name_html(model: &str) -> String {
+    esc(short_model(model)).replace('/', "/<wbr>")
+}
+
 fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -1104,9 +1109,9 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
         format!("career-row {extra_class}")
     };
     let id = esc(&c.campaign_id);
+    let name_html = esc(name).replace('/', "/<wbr>");
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
-        esc(name),
+        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         mark_badge(c),
         effort_note(&c.effort),
         flags_of(c),
@@ -1266,7 +1271,7 @@ fn model_row(
         "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td class=\"col-model\"><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td class=\"col-highest\" title=\"the median career's\">{}</td><td class=\"num col-green\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{duration}</td><td class=\"num col-turns\">{turns}</td><td class=\"col-tokens\">{tokens}</td><td class=\"col-state\">{}</td></tr>",
         rank_label(g, stability),
         esc(&g.model),
-        esc(short_model(&g.model)),
+        model_name_html(&g.model),
         mark_badge(med),
         esc(&g.harness),
         effort_note(&g.effort),
@@ -1382,7 +1387,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     if !current_groups.is_empty() && stability.is_none() {
         h.push_str("<div class=\"mut\">Rank stability: too many combinations to enumerate; ranks follow the board order.</div>");
     }
-    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th class=\"col-model\">Model / career</th><th class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th class=\"col-ppd\">Pts / $</th><th class=\"col-duration\" title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th class=\"col-turns\" title=\"turns summed over the career's tickets\">Turns</th><th class=\"col-tokens\" title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th class=\"col-state\">State</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table class=\"board-table\"><thead><tr><th>#</th><th class=\"col-model\">Model / career</th><th class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th class=\"col-ppd\">Pts / $</th><th class=\"col-duration\" title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th class=\"col-turns\" title=\"turns summed over the career's tickets\">Turns</th><th class=\"col-tokens\" title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th class=\"col-state\">State</th></tr></thead><tbody>");
     if rows.is_empty() {
         h.push_str("<tr><td colspan=\"12\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
@@ -2004,15 +2009,37 @@ fn render_results(cells: &[CareerCell]) -> String {
     } else {
         recorded.join(", ")
     };
-    let fingerprint_note = if recorded.is_empty() {
-        " <span class=\"b warn\">no recorded fingerprint</span>".to_string()
-    } else if recorded.iter().any(|f| f != &binary_fingerprint) {
-        format!(
-            " <span class=\"b warn\">recorded fingerprint differs from binary {}</span>",
-            esc(&binary_fingerprint)
-        )
-    } else {
-        String::new()
+    // R65-2: a harness change after the careers ran is normal, not a
+    // warning. One recorded fingerprint gets two neutral rows; the amber
+    // warning is kept only for the mixed case publish.sh refuses.
+    let (fingerprint_rows, fingerprint_note) = match recorded.len() {
+        0 => (
+            "<tr><th>Fingerprint (recorded)</th><td><span class=\"b warn\">no recorded fingerprint</span></td></tr>".to_string(),
+            String::new(),
+        ),
+        1 => {
+            let graded = &recorded[0];
+            let note = if graded != &binary_fingerprint {
+                "<div class=\"mut\">The harness changed after these careers ran; their grades are as recorded.</div>".to_string()
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "<tr><th>Graded under</th><td><code>{}</code></td></tr><tr><th>Page built with</th><td><code>{}</code></td></tr>",
+                    esc(graded),
+                    esc(&binary_fingerprint)
+                ),
+                note,
+            )
+        }
+        _ => (
+            format!(
+                "<tr><th>Fingerprint (recorded)</th><td><code>{}</code> <span class=\"b warn\">ranked careers carry more than one recorded fingerprint</span></td></tr>",
+                esc(&recorded_text)
+            ),
+            String::new(),
+        ),
     };
     let rules = current
         .iter()
@@ -2188,10 +2215,8 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
     ));
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
+        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}</section>",
         esc(rules),
-        esc(&recorded_text),
-        fingerprint_note,
         esc(crate::report::rules::sqlite_version()),
         esc(image),
         esc(&harness_effort),
@@ -3010,7 +3035,12 @@ mod tests {
         assert_ne!(meta["fingerprint"].as_str().unwrap(), "fp-a");
         let html = read(&out.join("results.html"));
         assert!(html.contains("fp-a") && html.contains("fp-b"), "{html}");
-        assert!(html.contains("recorded fingerprint differs"), "{html}");
+        // R65-2: a mixed set keeps the amber warning; a single recorded
+        // fingerprint is neutral.
+        assert!(
+            html.contains("more than one recorded fingerprint"),
+            "{html}"
+        );
 
         let bar = base.join("bar.txt");
         fs::write(&bar, "RESULT: PASS\n").unwrap();
@@ -4028,6 +4058,55 @@ mod tests {
             "the headers carry the collapsed columns: {html}"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65-2: one recorded fingerprint gets neutral "Graded under" and
+    /// "Page built with" rows, even when the binary moved on; only the
+    /// mixed case keeps the amber warning.
+    #[test]
+    fn r65_r2_fingerprint_rows() {
+        let (base, runs, out) = fixture("r65r2");
+        career_with_stamp(&runs, "a", "m", [1.0; 4], [0.01; 4], "fp-old");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("<th>Graded under</th>"), "{html}");
+        assert!(html.contains("<th>Page built with</th>"), "{html}");
+        assert!(html.contains("fp-old"), "{html}");
+        assert!(
+            html.contains(&crate::report::rules::fingerprint()),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "The harness changed after these careers ran; their grades are as recorded."
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("recorded fingerprint differs"), "{html}");
+        let section = &html[pos(&html, "What it measured")..];
+        let section = &section[..section.find("</section>").unwrap()];
+        assert!(
+            !section.contains("class=\"b warn\""),
+            "the single-fingerprint case has no warning: {section}"
+        );
+        let _ = fs::remove_dir_all(&base);
+
+        let (base2, runs2, out2) = fixture("r65r2mixed");
+        career_with_stamp(&runs2, "a", "m1", [1.0; 4], [0.01; 4], "fp-a");
+        career_with_stamp(&runs2, "b", "m2", [2.0; 4], [0.01; 4], "fp-b");
+        export(runs2.to_str().unwrap(), out2.to_str().unwrap()).unwrap();
+        let html2 = read(&out2.join("results.html"));
+        assert!(
+            html2.contains("ranked careers carry more than one recorded fingerprint"),
+            "{html2}"
+        );
+        let section2 = &html2[pos(&html2, "What it measured")..];
+        let section2 = &section2[..section2.find("</section>").unwrap()];
+        assert!(
+            section2.contains("class=\"b warn\""),
+            "the mixed case keeps the warning: {section2}"
+        );
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
