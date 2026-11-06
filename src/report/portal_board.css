@@ -63,6 +63,8 @@ details.more summary { cursor: pointer; }
 details.more .line { margin: 2px 0 0 12px; }
 
 /* R64 F6: per-model dot strips and the ticket-agreement strip. */
+.chart-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .dots { vertical-align: middle; margin-right: 4px; }
 .dots .dot { fill: var(--pri); opacity: 0.85; }
 .dots .dot.missing { fill: var(--line); opacity: 1; }

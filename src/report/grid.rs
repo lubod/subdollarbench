@@ -1834,6 +1834,22 @@ fn pareto<'a>(cars: &'a [&'a CareerCell]) -> Vec<&'a CareerCell> {
     out
 }
 
+/// R65 F6: one legend for both charts: a swatch in the series colour and
+/// the short model name (the full id stays in the title).
+fn chart_legend(models: &[String]) -> String {
+    let mut s = String::from("<div class=\"legend chart-legend\">");
+    for (i, m) in models.iter().enumerate() {
+        s.push_str(&format!(
+            "<span class=\"key\"><span class=\"dot\" style=\"background:{}\"></span><span title=\"{}\">{}</span></span>",
+            palette(i),
+            esc(m),
+            esc(short_model(m))
+        ));
+    }
+    s.push_str("</div>");
+    s
+}
+
 fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     let w = 760.0;
     let h = 340.0;
@@ -1858,8 +1874,13 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     ));
     for (frac, label) in [(0.0, "0"), (0.5, "1.98"), (1.0, "3.96")] {
         let xx = l + frac * pw;
+        let anchor = if frac == 1.0 {
+            " text-anchor=\"end\""
+        } else {
+            ""
+        };
         s.push_str(&format!(
-            "<text x=\"{xx:.1}\" y=\"{:.1}\" fill=\"#8b949e\" font-size=\"10\">${label}</text>",
+            "<text x=\"{xx:.1}\" y=\"{:.1}\" fill=\"#8b949e\" font-size=\"10\"{anchor}>${label}</text>",
             t + ph + 15.0
         ));
     }
@@ -1937,10 +1958,23 @@ fn svg_survival(series: &[(String, Vec<f64>)]) -> String {
             })
             .collect::<Vec<_>>()
             .join(" ");
+        let dash = match mi {
+            0 => "",
+            1 => "6 3",
+            2 => "2 3",
+            3 => "8 3 2 3",
+            _ => "4 4",
+        };
+        let dash_attr = if dash.is_empty() {
+            String::new()
+        } else {
+            format!(" stroke-dasharray=\"{dash}\"")
+        };
         s.push_str(&format!(
-            "<polyline class=\"survival-line\" data-model=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"/>",
+            "<polyline class=\"survival-line\" data-model=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"{dash_attr}><title>{} · P(highest passed ticket ≥ i)</title></polyline>",
             esc(model),
-            palette(mi)
+            palette(mi),
+            esc(short_model(model))
         ));
     }
     s.push_str("</svg>");
@@ -2191,11 +2225,50 @@ fn render_results(cells: &[CareerCell]) -> String {
     h.push_str(&format!(
         "<section><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>"
     ));
-    h.push_str(&format!("<div class=\"wrap\">{scatter}</div>"));
+    let legend_html = chart_legend(&models);
+    h.push_str(&format!("<div class=\"wrap\">{scatter}</div>{legend_html}"));
     h.push_str(&format!("<div class=\"wrap\"><table><thead><tr><th>Model</th><th>Career</th><th>Points</th><th>Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"));
-    h.push_str("<section><h2>Survival: P(ticket ≥ i)</h2><div class=\"wrap\">");
+    h.push_str("<section><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div><div class=\"wrap\">");
     h.push_str(&survival);
-    h.push_str(&format!("</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
+    h.push_str(&format!("</div>{legend_html}<div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
+    // R65 F6: the per-ticket pass share, shaded like the board's agreement.
+    let mut ticket_rows = String::new();
+    for model in &models {
+        let cs = by_model.get(model.as_str()).cloned().unwrap_or_default();
+        let n = cs.len();
+        let mut passed = [0usize; 21];
+        for c in &cs {
+            for rec in unique_stage_records(&c.stage_records) {
+                if rec.passed && rec.id <= 20 {
+                    passed[rec.id as usize] += 1;
+                }
+            }
+        }
+        let cells = (0..=20)
+            .map(|id| {
+                let p = passed[id];
+                let pct = if n > 0 { p * 100 / n } else { 0 };
+                let cls = if p == 0 {
+                    "agree-none"
+                } else if p == n {
+                    "agree-full"
+                } else if p * 2 > n {
+                    "agree-most"
+                } else {
+                    "agree-some"
+                };
+                format!(
+                    "<td class=\"num {cls}\" title=\"ticket {id} · passed by {p}/{n}\">{pct}%</td>"
+                )
+            })
+            .collect::<String>();
+        ticket_rows.push_str(&format!(
+            "<tr><td title=\"{}\">{}</td>{cells}</tr>",
+            esc(model),
+            esc(short_model(model))
+        ));
+    }
+    h.push_str(&format!("<section><h3>Per-ticket pass share</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div></section>"));
     h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
     let stability = rank_stability(cells, &groups);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
@@ -3815,6 +3888,97 @@ mod tests {
             !results.contains("Rehearsals and smoke cells"),
             "the rehearsal section is gone: {results}"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F6 (R1, R2): both charts carry one legend swatch per model in
+    /// the series colour, with the short name; the broken Dots: line is gone.
+    #[test]
+    fn r65_f6_chart_legends() {
+        let (base, runs, out) = fixture("r65f6legends");
+        for (prefix, model) in [
+            ("a", "openrouter/vendor/alpha"),
+            ("b", "openrouter/vendor/beta"),
+            ("c", "openrouter/vendor/gamma"),
+        ] {
+            career(&runs, prefix, model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert_eq!(
+            html.matches("class=\"legend chart-legend\"").count(),
+            2,
+            "one legend for each chart: {html}"
+        );
+        assert!(!html.contains("Dots:"), "the broken Dots line is gone");
+        for legend in html.split("class=\"legend chart-legend\"").skip(1) {
+            let legend = &legend[..legend.find("</div>").unwrap()];
+            assert_eq!(
+                legend.matches("class=\"dot\"").count(),
+                3,
+                "one swatch per model: {legend}"
+            );
+            for (i, name) in ["vendor/alpha", "vendor/beta", "vendor/gamma"]
+                .iter()
+                .enumerate()
+            {
+                assert!(legend.contains(name), "short name {name}: {legend}");
+                assert!(
+                    legend.contains(&format!("background:{}", palette(i))),
+                    "series colour {i}: {legend}"
+                );
+            }
+            assert!(
+                !visible_text(legend).contains("openrouter/"),
+                "the legend shows no provider prefix: {legend}"
+            );
+        }
+        assert!(
+            html.contains("<title>vendor/alpha · P(highest passed ticket ≥ i)</title>"),
+            "each survival line names its model: {html}"
+        );
+        assert!(
+            html.contains("<title>vendor/alpha: 4.0 pts · $0.04</title>"),
+            "each dot names its model and career: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F6 (R3, R4): survival is the highest passed ticket, and the
+    /// per-ticket table shows an earlier failure.
+    #[test]
+    fn r65_f6_per_ticket_pass_table() {
+        let (base, runs, out) = fixture("r65f6tickets");
+        career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
+        fail_ticket(&runs, "m", 5);
+        for id in 16..=20 {
+            fail_ticket(&runs, "m", id);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(
+            html.contains("Survival: P(highest passed ticket ≥ i)"),
+            "the heading says highest passed: {html}"
+        );
+        assert!(
+            html.contains("Per-ticket pass share"),
+            "the per-ticket table exists: {html}"
+        );
+        assert!(
+            html.contains("title=\"ticket 5 · passed by 0/1\""),
+            "ticket 5 is below 100%: {html}"
+        );
+        assert!(
+            html.contains("title=\"ticket 15 · passed by 1/1\""),
+            "ticket 15 passed: {html}"
+        );
+        let surv = &html[pos(&html, "Survival: P(highest")..];
+        let at = pos(surv, "<td title=\"m\">m</td>");
+        let row = &surv[at..at + surv[at..].find("</tr>").unwrap()];
+        let cells: Vec<&str> = row.split("<td class=\"num\">").skip(1).collect();
+        assert_eq!(cells.len(), 21, "one cell per ticket: {row}");
+        assert!(cells[15].starts_with("100%"), "survival at 15: {row}");
+        assert!(cells[16].starts_with("0%"), "survival at 16: {row}");
         let _ = fs::remove_dir_all(&base);
     }
 
