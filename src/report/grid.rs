@@ -19,6 +19,24 @@ use crate::report::portal::{is_hidden, is_poisoned, publishable, PortalSummary};
 pub const CAREER_CAP_USD: f64 = 4.0 * 0.99;
 pub const CAREER_MAX_POINTS: f64 = 76.0;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenTotals {
+    pub prompt: u64,
+    pub cached: u64,
+    pub completion: u64,
+    pub total: u64,
+}
+
+impl TokenTotals {
+    /// R64 F5: `prompt_tokens` is 0 on some routes, so fresh input is the
+    /// remainder of the total after the cached and completion shares.
+    pub fn fresh_input(&self) -> u64 {
+        self.total
+            .saturating_sub(self.cached)
+            .saturating_sub(self.completion)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CareerCell {
     pub campaign_id: String,
@@ -54,6 +72,12 @@ pub struct CareerCell {
     pub updated: String,
     pub started: String,
     pub finished_at: String,
+    /// R64 F5: the phases' wall time summed, the agent's own share, the
+    /// turns, and the manifests' token totals (display only).
+    pub wall_seconds: f64,
+    pub agent_seconds: f64,
+    pub turns: u64,
+    pub tokens: Option<TokenTotals>,
     pub stage_records: Vec<StageRecord>,
     pub ladder: Vec<LadderEntry>,
     pub key: BoardSortKey,
@@ -396,6 +420,67 @@ fn recorded_fingerprints(cells: &[&RawCell]) -> Vec<String> {
     out
 }
 
+/// R64 F5: wall time summed over the career's phase cells, the agent's own
+/// share from each stage's `duration_seconds`, and the turns.
+fn career_effort(cells: &[&RawCell]) -> (f64, f64, u64) {
+    let mut wall = 0.0;
+    let mut agent = 0.0;
+    let mut turns = 0u64;
+    for cell in cells {
+        let started = cell.rollup["started_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+        let finished = cell.rollup["finished_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+        if let (Some(a), Some(b)) = (started, finished) {
+            let secs = (b - a).num_seconds() as f64;
+            if secs > 0.0 {
+                wall += secs;
+            }
+        }
+        if let Some(parsed) = &cell.parsed {
+            for rec in &parsed.stages {
+                turns += rec.turns.unwrap_or(0) as u64;
+                agent += rec.duration_seconds.unwrap_or(0.0);
+            }
+        }
+    }
+    (wall, agent, turns)
+}
+
+/// R64 F5: sum `tokens` from every `s*/manifest.json` in the career's
+/// cells. A career with no manifest carrying a `tokens` object has None
+/// and shows `—`.
+fn token_totals(cells: &[&RawCell]) -> Option<TokenTotals> {
+    let mut found = false;
+    let mut t = TokenTotals::default();
+    for cell in cells {
+        let Ok(rd) = fs::read_dir(&cell.dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with('s') || !entry.path().is_dir() {
+                continue;
+            }
+            let Some(v) = read_json(&entry.path().join("manifest.json")) else {
+                continue;
+            };
+            let Some(tok) = v.get("tokens").filter(|x| x.is_object()) else {
+                continue;
+            };
+            found = true;
+            let get = |key: &str| tok.get(key).and_then(Value::as_u64).unwrap_or(0);
+            t.prompt += get("prompt_tokens");
+            t.cached += get("cached_tokens");
+            t.completion += get("completion_tokens");
+            t.total += get("total_tokens");
+        }
+    }
+    found.then_some(t)
+}
+
 fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
     let spec_loaded = campaign::load_campaign(
         leaf.parsed
@@ -431,6 +516,8 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
     };
     let stage_records = merge_stage_records(cells, spec);
     let fingerprints = recorded_fingerprints(cells);
+    let (wall_seconds, agent_seconds, turns) = career_effort(cells);
+    let tokens = token_totals(cells);
     let unique = unique_stage_records(&stage_records);
     let reached = unique.iter().filter(|r| r.passed).map(|r| r.id).max();
     let regression_free = unique
@@ -555,6 +642,10 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         updated: leaf.updated.clone().unwrap_or_else(|| finished_at.clone()),
         started,
         finished_at,
+        wall_seconds,
+        agent_seconds,
+        turns,
+        tokens,
         stage_records,
         ladder,
         key,
@@ -750,6 +841,100 @@ fn fmt_pts1(v: f64) -> String {
     format!("{v:.1}")
 }
 
+/// R64 F5: a duration in hours (`5.4 h`); under an hour reads in minutes.
+fn fmt_hours(seconds: f64) -> String {
+    if seconds <= 0.0 {
+        return "—".to_string();
+    }
+    let hours = seconds / 3600.0;
+    if hours >= 1.0 {
+        format!("{hours:.1} h")
+    } else {
+        format!("{:.0} m", (seconds / 60.0).round())
+    }
+}
+
+fn fmt_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn fmt_tokens(n: u64) -> String {
+    let scaled = |v: f64, suffix: &str| {
+        let r = (v * 10.0).round() / 10.0;
+        if (r.fract()).abs() < f64::EPSILON {
+            format!("{r:.0}{suffix}")
+        } else {
+            format!("{r:.1}{suffix}")
+        }
+    };
+    if n >= 1_000_000 {
+        scaled(n as f64 / 1_000_000.0, "M")
+    } else if n >= 1_000 {
+        scaled(n as f64 / 1_000.0, "K")
+    } else {
+        n.to_string()
+    }
+}
+
+fn duration_cell(c: &CareerCell) -> String {
+    if c.wall_seconds <= 0.0 {
+        return "—".to_string();
+    }
+    let title = format!(
+        "agent {} of {}",
+        fmt_hours(c.agent_seconds),
+        fmt_hours(c.wall_seconds)
+    );
+    format!(
+        "<span title=\"{}\">{}</span>",
+        esc(&title),
+        fmt_hours(c.wall_seconds)
+    )
+}
+
+fn turns_cell(c: &CareerCell) -> String {
+    if c.turns == 0 {
+        "—".to_string()
+    } else {
+        fmt_count(c.turns)
+    }
+}
+
+fn token_cell(c: &CareerCell) -> String {
+    let Some(t) = &c.tokens else {
+        return "—".to_string();
+    };
+    let share = if t.total > 0 {
+        100.0 * t.cached as f64 / t.total as f64
+    } else {
+        0.0
+    };
+    let title = format!(
+        "prompt {} · cached {} · completion {} · total {} · cache share {:.1}% · fresh input {}",
+        fmt_count(t.prompt),
+        fmt_count(t.cached),
+        fmt_count(t.completion),
+        fmt_count(t.total),
+        share,
+        fmt_count(t.fresh_input())
+    );
+    format!(
+        "<span title=\"{}\">out {} · in {} (+{} cached)</span>",
+        esc(&title),
+        fmt_tokens(t.completion),
+        fmt_tokens(t.fresh_input()),
+        fmt_tokens(t.cached)
+    )
+}
+
 fn reached_of(c: &CareerCell) -> String {
     c.reached
         .map(|r| format!("ticket {r}"))
@@ -911,7 +1096,7 @@ fn career_row(
     };
     let id = esc(&c.campaign_id);
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
         esc(name),
         mark_badge(c),
         effort_note(&c.effort),
@@ -924,6 +1109,9 @@ fn career_row(
         perf_cell(c),
         c.cost,
         ppd_of(c),
+        duration_cell(c),
+        turns_cell(c),
+        token_cell(c),
         state_of(c),
     )
 }
@@ -959,7 +1147,7 @@ fn model_row(
         g.careers.len()
     );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num\">{}</td><td><b>{}</b>{}{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div></td><td>—</td><td class=\"num\">—</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.4}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
         g.rank_label(),
         esc(&g.model),
         mark_badge(med),
@@ -976,6 +1164,9 @@ fn model_row(
         perf_cell(med),
         med.cost,
         ppd_of(med),
+        duration_cell(med),
+        turns_cell(med),
+        token_cell(med),
         state_of(med),
     ));
 }
@@ -1009,7 +1200,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     }
     if !unfinished_current.is_empty() {
         rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"9\">unfinished careers (not ranked)</td></tr>",
+            "<tr class=\"divider\"><td colspan=\"12\">unfinished careers (not ranked)</td></tr>",
         );
         for c in unfinished_current {
             let name = labels
@@ -1023,7 +1214,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     // not; it never reads as "unfinished".
     if !old_groups.is_empty() || !unfinished_old.is_empty() {
         rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"9\">older rule sets (incomparable)</td></tr>",
+            "<tr class=\"divider\"><td colspan=\"12\">older rule sets (incomparable)</td></tr>",
         );
         for g in &old_groups {
             model_row(cells, g, &labels, &mut rows);
@@ -1071,9 +1262,9 @@ fn render_board(cells: &[CareerCell]) -> String {
         ranked.len(),
         fmt_pts1(best_points)
     ));
-    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th>State</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th title=\"turns summed over the career's tickets\">Turns</th><th title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th>State</th></tr></thead><tbody>");
     if rows.is_empty() {
-        h.push_str("<tr><td colspan=\"9\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
+        h.push_str("<tr><td colspan=\"12\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
         h.push_str(&rows);
     }
@@ -1852,6 +2043,54 @@ mod tests {
         }
     }
 
+    /// R64 F5: rewrite every stage's turns and give it a 1000 s agent
+    /// duration, in both files.
+    fn set_turns(runs: &Path, prefix: &str, phase: u32, turns: &[u32]) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            for (i, st) in rollup["stages"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                st["turns"] = serde_json::json!(turns.get(i).copied().unwrap_or(0));
+                st["duration_seconds"] = serde_json::json!(1000.0);
+            }
+            fs::write(path, v.to_string()).unwrap();
+        }
+    }
+
+    /// R64 F5: write one ticket manifest's token block.
+    #[allow(clippy::too_many_arguments)]
+    fn set_tokens(
+        runs: &Path,
+        prefix: &str,
+        phase: u32,
+        id: u32,
+        prompt: u64,
+        cached: u64,
+        completion: u64,
+        total: u64,
+    ) {
+        let path = runs.join(format!("campaign_{prefix}_p{phase}/s{id}_full/manifest.json"));
+        let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+        v["tokens"] = serde_json::json!({
+            "prompt_tokens": prompt,
+            "cached_tokens": cached,
+            "completion_tokens": completion,
+            "total_tokens": total,
+        });
+        fs::write(path, v.to_string()).unwrap();
+    }
+
     /// R51 F3: rewrite (or remove) a phase's effort in both files.
     fn set_effort(runs: &Path, prefix: &str, phase: u32, effort: Option<&str>) {
         let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
@@ -2621,6 +2860,77 @@ mod tests {
             "the results page anchors the career the board links to: {results}"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R64 F5: duration is the phases' summed wall time, turns the stages'
+    /// sum, and tokens the manifests' sums with fresh input derived as
+    /// total - cached - completion.
+    #[test]
+    fn r64_f5_duration_turns_tokens() {
+        let (base, runs, out) = fixture("r64f5");
+        career(&runs, "t", "m", [1.0; 4], [0.01; 4]);
+        let times = [
+            ("00:00", "01:00"),
+            ("01:00", "02:00"),
+            ("02:00", "03:30"),
+            ("03:30", "05:24"),
+        ];
+        for (i, (start, end)) in times.iter().enumerate() {
+            set_phase_times(
+                &runs,
+                "t",
+                i as u32 + 1,
+                &format!("2026-10-27T{start}:00Z"),
+                &format!("2026-10-27T{end}:00Z"),
+            );
+        }
+        set_turns(&runs, "t", 1, &[100; 7]);
+        set_turns(&runs, "t", 2, &[100; 4]);
+        set_turns(&runs, "t", 3, &[100; 5]);
+        set_turns(&runs, "t", 4, &[78, 77, 77, 77, 77]);
+        // One route left prompt_tokens at 0; fresh input comes from the
+        // total after cached and completion.
+        set_tokens(&runs, "t", 1, 0, 0, 100_000_000, 1_000_000, 101_000_000);
+        set_tokens(&runs, "t", 2, 7, 45_511, 54_500_000, 740_000, 61_100_000);
+
+        let cells = careers(runs.to_str().unwrap());
+        let c = &cells[0];
+        assert!(
+            (c.wall_seconds - 5.4 * 3600.0).abs() < 1.0,
+            "phase wall time sums to 5.4 h: {}",
+            c.wall_seconds
+        );
+        assert_eq!(c.turns, 1986, "stage turns sum");
+        let tokens = c.tokens.expect("two manifests carry tokens");
+        assert_eq!(tokens.completion, 1_740_000);
+        assert_eq!(tokens.cached, 154_500_000);
+        assert_eq!(tokens.fresh_input(), 5_860_000);
+
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(html.contains("5.4 h"), "the career duration: {html}");
+        assert!(html.contains("1,986"), "the career turns: {html}");
+        assert!(
+            html.contains("out 1.7M · in 5.9M (+154.5M cached)"),
+            "the token cell: {html}"
+        );
+        assert!(
+            html.contains("cache share 95.3%"),
+            "the tooltip gives the cache share: {html}"
+        );
+        assert!(
+            html.contains("agent 5.8 h"),
+            "the tooltip gives the agent's share: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+
+        // A career whose manifests carry no tokens shows an em dash.
+        let (base2, runs2, _out2) = fixture("r64f5notok");
+        career(&runs2, "n", "n", [1.0; 4], [0.01; 4]);
+        let cells2 = careers(runs2.to_str().unwrap());
+        assert!(cells2[0].tokens.is_none());
+        assert_eq!(token_cell(&cells2[0]), "—");
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
