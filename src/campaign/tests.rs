@@ -55,6 +55,66 @@ async fn f2_a_provider_billing_fault_stays_fault_and_stops() {
     );
 }
 
+/// R65 F2 (R63-3): the real outage line classifies, and the phase it trips
+/// is a harness fault: the cell stops and no ticket is a model failure.
+#[tokio::test]
+async fn r65_f2_billing_trip_is_harness_fault() {
+    let outage = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
+    let reason = crate::sandbox::omp::classify_billing_error(outage)
+        .expect("R65 F1 must classify the outage line");
+    let fault = format!("provider billing/auth: {reason}");
+    let lc = fixture_campaign_with_lite();
+    let opts = CampaignRunOptions {
+        campaign_id: "r65f2".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let rollup = run_campaign(
+        &lc,
+        &opts,
+        move |attempt| {
+            let out = if attempt.stage.id == 0 {
+                outcome(true, &[(1, true), (2, true)])
+            } else {
+                let mut o = outcome(false, &[]);
+                o.agent_failed = true;
+                o.harness_fault = Some(fault.clone());
+                o
+            };
+            async move { Ok(out) }
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stop_reason(&rollup), "harness fault");
+    assert!(
+        rollup
+            .harness_fault
+            .as_deref()
+            .unwrap_or("")
+            .contains("provider billing exhausted (HTTP 402)"),
+        "{:?}",
+        rollup.harness_fault
+    );
+    assert_eq!(rollup.stages[1].status, "fault");
+    assert!(
+        !rollup.stages.iter().any(|r| r.status == "failed"),
+        "a provider fault is not a model failure: {:?}",
+        rollup.stages
+    );
+    assert!(
+        !rollup
+            .stages
+            .iter()
+            .any(|r| r.id == 1 && r.variant == "lite"),
+        "a billing fault must not get a lite"
+    );
+}
+
 /// gui-spec.md §5.2: the classifier's six kinds, one fixture each.
 #[test]
 fn failure_classifier_kinds() {

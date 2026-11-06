@@ -471,9 +471,9 @@ stop=0
 [[ "${SDB_FAKE_STOP_ID:-}" == "$id" ]] && stop=1
 res_phase="${SDB_FAKE_RESULT_PHASE:-$phase}"
 res_chain="${SDB_FAKE_RESULT_CHAIN-$chain}"
-python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" <<'PY'
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" <<'PY'
 import json, sys
-out, cid, phase, worker, chain, stop, cost, res_phase, res_chain = sys.argv[1:10]
+out, cid, phase, worker, chain, stop, cost, res_phase, res_chain, fault = sys.argv[1:11]
 json.dump({
     "campaign_id": cid,
     "phase": int(res_phase),
@@ -484,7 +484,7 @@ json.dump({
     "points": 10.0,
     "over_budget": False,
     "over_wall": stop == "1",
-    "harness_fault": None,
+    "harness_fault": fault or None,
     "infra_error": False,
     "wall_stop": stop == "1",
     "phase_complete": stop != "1",
@@ -813,6 +813,34 @@ EOF
         echo "a cell ran before the marked-row refusal"; exit 1; }
     [[ "$(($(wc -l < "$runs/.grid-ledger.tsv") - 1))" -eq 2 ]] || {
         echo "the refusal changed the ledger"; exit 1; }
+
+    # 12) R65 F2: a provider billing harness fault stops the grid: the
+    # ledger says "harness fault", STOP is written, and no later phase runs
+    # on either lane.
+    scenario="$dir/twelve"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 c2 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=2
+    CAP=0
+    PHASE_BUDGET=0.99
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    SDB_FAKE_HARNESS_FAULT="provider billing exhausted (HTTP 402)"
+    SDB_FAKE_SLEEP_ID="fake-c1-c2-p1"
+    SDB_FAKE_SLEEP=0.3
+    export SDB_GRID_TRACE SDB_FAKE_HARNESS_FAULT SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP
+    load_careers "$CAREERS_FILE"
+    run_grid || true
+    got="$(awk -F'\t' 'NR > 1 { s = $8 } END { print s }' "$LEDGER")"
+    [[ "$got" == "harness fault" ]] || { echo "billing fault stop: '$got'"; exit 1; }
+    [[ -f "$STOP" ]] || { echo "a billing fault did not STOP"; exit 1; }
+    bad="$(awk -F'\t' 'NR > 1 && $3 >= 2 { n++ } END { print n + 0 }' "$LEDGER")"
+    [[ "$bad" -eq 0 ]] || { echo "$bad phase(s) started after the billing fault"; exit 1; }
+    unset SDB_FAKE_HARNESS_FAULT SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP
+    export -n SDB_FAKE_HARNESS_FAULT SDB_FAKE_SLEEP_ID SDB_FAKE_SLEEP 2>/dev/null || true
 
     echo "RESULT: PASS (grid self-test)"
 }

@@ -1715,6 +1715,11 @@ case "$1" in
         sleep 0.5
         exit 0
         ;;
+      billing_openrouter)
+        printf '%s\n' "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit" >&2
+        sleep 0.5
+        exit 0
+        ;;
     esac
     exit 1
     ;;
@@ -1938,6 +1943,28 @@ fn omp_driver() {
         let err = res.expect_err("stderr 402 must trip");
         assert!(err.downcast_ref::<OmpBillingError>().is_some());
         assert!(logs.iter().any(|l| l.contains("[STDERR]")));
+        passed += 1;
+    }
+
+    // 8b. R65 F1/F2: OpenRouter's exact 402 text on stderr trips the wire
+    // through the real runner, and the log names the billing reason.
+    {
+        let (res, logs, _, _) = run_omp_scenario(
+            "billing_openrouter",
+            &root,
+            covtest_limits(10, 1.0, 10),
+            None,
+        );
+        let err = res.expect_err("OpenRouter 402 must trip");
+        assert!(
+            err.downcast_ref::<OmpBillingError>().is_some(),
+            "a billing trip is OmpBillingError"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("[STDERR] 402 This request requires more credits")),
+            "the outage line reaches the log: {logs:?}"
+        );
         passed += 1;
     }
 
