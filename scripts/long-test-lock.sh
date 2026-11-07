@@ -32,9 +32,18 @@ hold_long_test_lock() {
 
 # True (exit 0) when another process holds the lock. The probe takes an
 # exclusive lock, so any shared holder (a running gate or bar) wins.
+# R66-3: grid lanes that start in the same second probe at once, and two
+# exclusive probes collide, so one would read the other as a holder. A real
+# holder keeps the lock for minutes to hours, and a collision lasts
+# milliseconds: retry a few times with 0.1-0.5 s of jitter (about 1.5 s at
+# most), and report busy only when every attempt fails.
 long_test_lock_busy() {
-    local path
+    local path tries="${SDB_LONG_TEST_PROBE_TRIES:-4}" i
     path="$(long_test_lock_path)"
     mkdir -p "$(dirname "$path")"
-    ! flock -n -x "$path" true 2>/dev/null
+    for ((i = 1; i <= tries; i++)); do
+        flock -n -x "$path" true 2>/dev/null && return 1
+        ((i < tries)) && sleep "$(awk -v r="$RANDOM" 'BEGIN { printf "%.2f", 0.1 + (r % 40) / 100 }')"
+    done
+    return 0
 }
