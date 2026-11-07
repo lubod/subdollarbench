@@ -63,5 +63,5 @@ from `TEMPLATE.md`.
 Rounds 1-21 predate this process. Their reviews are in
 `archive/REVIEW-rounds-01-21.md`, and their specs and "landed" notes are
 in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
-| [65](65.md) | A provider credit failure stops the grid (R63-3); a balance preflight; `publish.sh` uses the one key; fresh input tokens on every route; the published pages read clearly (F6-F8 added after open) (graded: `--ready`, then a bar) | open |
+| [65](65.md) | A provider credit failure stops the grid (R63-3); a balance preflight; `publish.sh` uses the one key; fresh input tokens on every route; the published pages read clearly (F6-F8 added after open) (graded: `--ready`, then a bar) | merged `3fae830` |
 | [66](66.md) | Ready for the next grid: four new models priced; one board per rules version, every fingerprint shown (graded: `--ready`, then one bar for 65+66) | draft, opens after 65 |
