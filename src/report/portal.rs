@@ -2998,7 +2998,7 @@ mod tests {
             "repeat careers collapse: {html}"
         );
         assert!(
-            pos("m1") < pos("m2") && pos("m2") < pos("title=\"campaign_sdb-sql_m2b_20261017\""),
+            pos("m1") < pos("m2") && pos("m2") < pos("title=\"campaign_sdb-sql_m2b_20261017 · "),
             "the duplicate career folds under its model row: {html}"
         );
         assert!(

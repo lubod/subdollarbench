@@ -1109,9 +1109,10 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
         format!("career-row {extra_class}")
     };
     let id = esc(&c.campaign_id);
+    let fp = esc(c.fingerprints.first().map(String::as_str).unwrap_or("—"));
     let name_html = esc(name).replace('/', "/<wbr>");
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id} · {fp}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         mark_badge(c),
         effort_note(&c.effort),
         flags_of(c),
@@ -2004,42 +2005,44 @@ fn render_results(cells: &[CareerCell]) -> String {
         .collect();
     recorded.sort();
     recorded.dedup();
-    let recorded_text = if recorded.is_empty() {
-        "—".to_string()
-    } else {
-        recorded.join(", ")
-    };
-    // R65-2: a harness change after the careers ran is normal, not a
-    // warning. One recorded fingerprint gets two neutral rows; the amber
-    // warning is kept only for the mixed case publish.sh refuses.
-    let (fingerprint_rows, fingerprint_note) = match recorded.len() {
-        0 => (
-            "<tr><th>Fingerprint (recorded)</th><td><span class=\"b warn\">no recorded fingerprint</span></td></tr>".to_string(),
-            String::new(),
-        ),
-        1 => {
-            let graded = &recorded[0];
-            let note = if graded != &binary_fingerprint {
-                "<div class=\"mut\">The harness changed after these careers ran; their grades are as recorded.</div>".to_string()
-            } else {
-                String::new()
-            };
-            (
-                format!(
-                    "<tr><th>Graded under</th><td><code>{}</code></td></tr><tr><th>Page built with</th><td><code>{}</code></td></tr>",
-                    esc(graded),
-                    esc(&binary_fingerprint)
-                ),
-                note,
-            )
+    // R66 F2: one board per rules version. Every recorded fingerprint is
+    // listed with its career count; a difference is normal (the harness or
+    // the price list moved), not a warning.
+    let mut fingerprint_counts: HashMap<&str, usize> = HashMap::new();
+    for c in &current {
+        for f in &c.fingerprints {
+            *fingerprint_counts.entry(f.as_str()).or_default() += 1;
         }
-        _ => (
-            format!(
-                "<tr><th>Fingerprint (recorded)</th><td><code>{}</code> <span class=\"b warn\">ranked careers carry more than one recorded fingerprint</span></td></tr>",
-                esc(&recorded_text)
-            ),
-            String::new(),
-        ),
+    }
+    let fingerprint_rows = if recorded.is_empty() {
+        "<tr><th>Fingerprint (recorded)</th><td><span class=\"b warn\">no recorded fingerprint</span></td></tr>".to_string()
+    } else {
+        let mut rows = String::from("<tr><th>Graded under</th><td>");
+        for (i, f) in recorded.iter().enumerate() {
+            if i > 0 {
+                rows.push_str("<br>");
+            }
+            let n = fingerprint_counts.get(f.as_str()).copied().unwrap_or(0);
+            rows.push_str(&format!(
+                "<code>{}</code> ({} {})",
+                esc(f),
+                n,
+                if n == 1 { "career" } else { "careers" }
+            ));
+        }
+        rows.push_str("</td></tr>");
+        rows.push_str(&format!(
+            "<tr><th>Page built with</th><td><code>{}</code></td></tr>",
+            esc(&binary_fingerprint)
+        ));
+        rows
+    };
+    let fingerprint_note = if recorded.len() > 1 {
+        "<div class=\"mut\">Fingerprints differ when the harness or the price list changed between careers; the rules version, and so the grading, is the same.</div>".to_string()
+    } else if recorded.len() == 1 && recorded[0] != binary_fingerprint {
+        "<div class=\"mut\">The harness changed after these careers ran; their grades are as recorded.</div>".to_string()
+    } else {
+        String::new()
     };
     let rules = current
         .iter()
@@ -2181,12 +2184,13 @@ fn render_results(cells: &[CareerCell]) -> String {
     let mut scatter_rows = String::new();
     for c in &scatter_cells {
         let id = esc(&c.campaign_id);
+        let fp = esc(c.fingerprints.first().map(String::as_str).unwrap_or("—"));
         let name = labels
             .get(&c.campaign_id)
             .map(String::as_str)
             .unwrap_or(&c.campaign_id);
         scatter_rows.push_str(&format!(
-            "<tr id=\"{id}\" title=\"{id}\"><td title=\"{}\">{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.2}</td></tr>",
+            "<tr id=\"{id}\" title=\"{id} · {fp}\"><td title=\"{}\">{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.2}</td></tr>",
             esc(&c.model),
             esc(short_model(&c.model)),
             esc(name),
@@ -2402,12 +2406,19 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
         .collect();
     ranked_fingerprints.sort();
     ranked_fingerprints.dedup();
+    let mut fingerprint_careers: HashMap<String, usize> = HashMap::new();
+    for c in &ranked {
+        for f in &c.fingerprints {
+            *fingerprint_careers.entry(f.clone()).or_default() += 1;
+        }
+    }
     let meta = serde_json::json!({
         "rules_version": cells.iter().map(|c| c.rules.as_str()).find(|r| !r.is_empty()).unwrap_or(crate::report::rules::RULES_VERSION),
         "current_rules": crate::report::rules::RULES_VERSION,
         "ranked_rules": ranked_rules,
         "fingerprint": fingerprint,
         "ranked_fingerprints": ranked_fingerprints,
+        "fingerprint_careers": fingerprint_careers,
         "careers": cells.len(),
         "ranked": ranked.len(),
         "ranked_rehearsal": ranked.iter().filter(|c| c.rehearsal || c.smoke).count(),
@@ -3035,10 +3046,17 @@ mod tests {
         assert_ne!(meta["fingerprint"].as_str().unwrap(), "fp-a");
         let html = read(&out.join("results.html"));
         assert!(html.contains("fp-a") && html.contains("fp-b"), "{html}");
-        // R65-2: a mixed set keeps the amber warning; a single recorded
-        // fingerprint is neutral.
+        // R66 F2: two fingerprints under one rules version are listed with
+        // their counts, not warned about.
+        assert!(html.contains("Graded under"), "{html}");
+        assert!(html.contains("<code>fp-a</code> (1 career)"), "{html}");
+        assert!(html.contains("<code>fp-b</code> (1 career)"), "{html}");
         assert!(
-            html.contains("more than one recorded fingerprint"),
+            html.contains("Fingerprints differ when the harness or the price list changed"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("more than one recorded fingerprint"),
             "{html}"
         );
 
@@ -3050,8 +3068,8 @@ mod tests {
             .status()
             .expect("run publish check");
         assert!(
-            !status.success(),
-            "mixed recorded fingerprints were accepted"
+            status.success(),
+            "two fingerprints under one rules version must publish"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -3550,13 +3568,20 @@ mod tests {
             "the career name is model · career i · date: {text}"
         );
         assert!(
-            html.contains("title=\"campaign_c_p4\"") && html.contains("results.html#campaign_c_p4"),
+            html.contains("title=\"campaign_c_p4 · ")
+                && html.contains("results.html#campaign_c_p4"),
             "the campaign id lives in the tooltip and the link: {html}"
         );
+        // R66 F2: the fingerprint rows name the rules version too; the
+        // header's "Rules <version>" is the one place it is stated as a rule.
         assert_eq!(
-            text.matches(crate::report::rules::RULES_VERSION).count(),
+            text.matches("Rules ").count(),
             1,
             "the rules version shows once, in the header: {text}"
+        );
+        assert!(
+            text.contains(&format!("Rules {}", crate::report::rules::RULES_VERSION)),
+            "the header names the rules version: {text}"
         );
         assert_eq!(
             text.matches("Updated").count(),
@@ -4096,17 +4121,73 @@ mod tests {
         career_with_stamp(&runs2, "b", "m2", [2.0; 4], [0.01; 4], "fp-b");
         export(runs2.to_str().unwrap(), out2.to_str().unwrap()).unwrap();
         let html2 = read(&out2.join("results.html"));
+        // R66 F2: a mixed recorded set is listed with its counts and no
+        // amber warning.
+        assert!(html2.contains("<code>fp-a</code> (1 career)"), "{html2}");
+        assert!(html2.contains("<code>fp-b</code> (1 career)"), "{html2}");
         assert!(
-            html2.contains("ranked careers carry more than one recorded fingerprint"),
+            html2.contains("Fingerprints differ when the harness or the price list changed"),
+            "{html2}"
+        );
+        assert!(
+            !html2.contains("more than one recorded fingerprint"),
             "{html2}"
         );
         let section2 = &html2[pos(&html2, "What it measured")..];
         let section2 = &section2[..section2.find("</section>").unwrap()];
         assert!(
-            section2.contains("class=\"b warn\""),
-            "the mixed case keeps the warning: {section2}"
+            !section2.contains("class=\"b warn\""),
+            "the mixed case is neutral: {section2}"
         );
         let _ = fs::remove_dir_all(&base2);
+    }
+
+    /// R66 F2: every fingerprint of the ranked careers is listed with its
+    /// career count, the page binary is separate, and each career's title
+    /// carries its fingerprint.
+    #[test]
+    fn r66_f2_fingerprints_listed() {
+        let (base, runs, out) = fixture("r66f2");
+        for (prefix, stamp) in [
+            ("a1", "fp-a"),
+            ("a2", "fp-a"),
+            ("a3", "fp-a"),
+            ("b1", "fp-b"),
+            ("b2", "fp-b"),
+        ] {
+            career_with_stamp(&runs, prefix, "m", [1.0; 4], [0.01; 4], stamp);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let results = read(&out.join("results.html"));
+        assert!(results.contains("Graded under"), "{results}");
+        assert!(
+            results.contains("<code>fp-a</code> (3 careers)"),
+            "{results}"
+        );
+        assert!(
+            results.contains("<code>fp-b</code> (2 careers)"),
+            "{results}"
+        );
+        assert!(results.contains("Page built with"), "{results}");
+        assert!(
+            results.contains(
+                "Fingerprints differ when the harness or the price list changed between careers; the rules version, and so the grading, is the same."
+            ),
+            "{results}"
+        );
+        assert!(
+            results.contains("title=\"campaign_a1_p4 · fp-a\""),
+            "the results row carries its fingerprint: {results}"
+        );
+        let board = read(&out.join("index.html"));
+        assert!(
+            board.contains("title=\"campaign_a1_p4 · fp-a\""),
+            "the board row carries its fingerprint: {board}"
+        );
+        let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
+        assert_eq!(meta["fingerprint_careers"]["fp-a"], 3, "{meta}");
+        assert_eq!(meta["fingerprint_careers"]["fp-b"], 2, "{meta}");
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
@@ -4161,7 +4242,7 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("results.html"));
         assert!(html.contains("<th>Prices</th>"), "{html}");
-        assert!(html.contains("2026-10-28"), "{html}");
+        assert!(html.contains("2026-11-07"), "{html}");
         assert!(html.contains("base rates per call"), "{html}");
         for needle in [
             "5× the prompt rate above 100k prompt tokens",
