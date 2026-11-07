@@ -7,7 +7,9 @@
         "model": "claude-agent/opus#high",
         "maxTranscriptChars": 200000,
         "timeoutMs": 600000,
-        "disabledForModels": []
+        "disabledForModels": [
+          "opencode-go/deepseek-v4.1-flash"
+        ]
       }
     }
   ]

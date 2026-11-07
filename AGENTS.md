@@ -86,6 +86,12 @@ round file, never only in chat.
 
 ## The advisor (implementer)
 
+**Currently off** (operator, 2026-11-07, R66-2 "c"): `disabledForModels`
+lists `opencode-go/deepseek-v4.1-flash`. It runs on `claude-agent`, the
+same Claude plan as the reviewer, and failed every `review` call in rounds
+64-66 (empty responses, the plan's 5-hour limit). The rules below apply
+again if it is switched back on.
+
 The implementer (opencode, `deepseek-v4.1-flash`) has an `advisor` tool:
 the `@pfoundation/ocadvisor` plugin, configured in the repo's
 `opencode.json` (Opus 5.5, high), plus `/advisor`
