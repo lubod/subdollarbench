@@ -115,6 +115,28 @@ async fn r65_f2_billing_trip_is_harness_fault() {
     );
 }
 
+/// R66 F1: the paid launch's price preflight accepts the next grid's four
+/// ids and still refuses an unknown one.
+#[tokio::test]
+async fn r66_f1_price_preflight_accepts_the_new_grid() {
+    for model in [
+        "tencent/hy4",
+        "minimax/minimax-m3.1-flash",
+        "openai/gpt-6-luna-pro",
+        "xiaomi/mimo-v2.6-pro",
+    ] {
+        require_model_list_price(model, false)
+            .await
+            .unwrap_or_else(|e| panic!("{model}: {e}"));
+    }
+    assert!(
+        require_model_list_price("not/a-priced-model", false)
+            .await
+            .is_err(),
+        "an unknown model must still be refused"
+    );
+}
+
 /// gui-spec.md §5.2: the classifier's six kinds, one fixture each.
 #[test]
 fn failure_classifier_kinds() {

@@ -101,7 +101,10 @@ tr.model-row > td:nth-child(n+5) { white-space: nowrap; }
   .cards { grid-template-columns: repeat(2, 1fr); }
   h1 { font-size: 1.15rem; }
   .board-table { table-layout: fixed; }
-  .board-table th:nth-child(1), .board-table td:nth-child(1) { width: 48px; }
+  .board-table th:nth-child(1), .board-table td:nth-child(1) {
+    width: 56px;
+    padding-right: 8px;
+  }
   .board-table th:nth-child(5), .board-table td:nth-child(5) { width: 58px; }
   .board-table th:nth-child(6), .board-table td:nth-child(6) { width: 50px; }
   .board-table th:nth-child(7), .board-table td:nth-child(7) { width: 54px; }

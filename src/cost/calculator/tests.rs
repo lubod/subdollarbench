@@ -10,6 +10,10 @@ fn r51_f5_every_grid_model_has_an_entry() {
         "deepseek/deepseek-v4.1-flash-1017",
         "xiaomi/mimo-v2.6-flash",
         "qwen/qwen3.8-flash",
+        "tencent/hy4",
+        "minimax/minimax-m3.1-flash",
+        "openai/gpt-6-luna-pro",
+        "xiaomi/mimo-v2.6-pro",
     ] {
         assert!(price_override_for(m).is_some(), "{m} has no entry");
     }
@@ -20,7 +24,7 @@ fn r51_f5_every_grid_model_has_an_entry() {
         Some("2× above 272k prompt tokens")
     );
     assert_eq!(price_override_for("unknown/model"), None);
-    assert_eq!(price_snapshot_as_of(), "2026-10-28");
+    assert_eq!(price_snapshot_as_of(), "2026-11-07");
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -95,18 +99,19 @@ fn test_pricing_for_known_models() {
     assert_eq!(gemini.cache_read_per_million, 0.03);
 
     let deepseek = ModelPricing::for_model("deepseek/deepseek-chat");
-    assert_eq!(deepseek.prompt_per_million, 0.2574);
-    assert_eq!(deepseek.completion_per_million, 1.0287);
-    assert_eq!(deepseek.cache_read_per_million, 0.06435);
+    assert_eq!(deepseek.prompt_per_million, 0.32);
+    assert_eq!(deepseek.completion_per_million, 0.89);
+    assert_eq!(deepseek.cache_read_per_million, 0.32);
 
     let qwen = ModelPricing::for_model("qwen/qwen-2.5-coder-32b-instruct");
     assert_eq!(qwen.prompt_per_million, 0.66);
     assert_eq!(qwen.completion_per_million, 1.00);
-    assert_eq!(qwen.cache_read_per_million, 0.165);
+    assert_eq!(qwen.cache_read_per_million, 0.66);
 
     let llama = ModelPricing::for_model("meta-llama/llama-3.3-70b-instruct");
-    assert_eq!(llama.prompt_per_million, 0.10);
-    assert_eq!(llama.completion_per_million, 0.32);
+    assert_eq!(llama.prompt_per_million, 0.59);
+    assert_eq!(llama.completion_per_million, 0.79);
+    assert_eq!(llama.cache_read_per_million, 0.295);
 
     let gpt4o = ModelPricing::for_model("openai/gpt-4o-mini");
     assert_eq!(gpt4o.prompt_per_million, 0.15);
@@ -178,6 +183,49 @@ fn r46_f1_grid_models_are_priced() {
             "{model} cache write"
         );
     }
+}
+
+/// R66 F1: the next grid's four models are priced from the catalog, with
+/// the two context/time overrides; the snapshot date moved to the fetch.
+#[test]
+fn r66_f1_new_models_priced() {
+    let cases = [
+        ("tencent/hy4", 0.417, 1.2505, 0.021, 0.417),
+        ("minimax/minimax-m3.1-flash", 0.075, 0.3, 0.0075, 0.075),
+        ("openai/gpt-6-luna-pro", 0.1, 0.5, 0.01, 0.125),
+        ("xiaomi/mimo-v2.6-pro", 0.435, 0.87, 0.0036, 0.435),
+    ];
+    for (id, prompt, completion, cache_read, cache_write) in cases {
+        let p = ModelPricing::list_price_for_model(id)
+            .unwrap_or_else(|| panic!("{id} has no snapshot row"));
+        assert!((p.prompt_per_million - prompt).abs() < 1e-9, "{id} prompt");
+        assert!(
+            (p.completion_per_million - completion).abs() < 1e-9,
+            "{id} completion"
+        );
+        assert!(
+            (p.cache_read_per_million - cache_read).abs() < 1e-9,
+            "{id} cache read"
+        );
+        assert!(
+            (p.cache_write_per_million - cache_write).abs() < 1e-9,
+            "{id} cache write"
+        );
+        assert!(
+            ModelPricing::list_price_for_model(&format!("openrouter/{id}")).is_some(),
+            "{id} must match with the openrouter/ prefix"
+        );
+    }
+    assert_eq!(
+        price_override_for("minimax/minimax-m3.1-flash"),
+        Some("2× the base rate 01:00-15:00 UTC")
+    );
+    assert_eq!(
+        price_override_for("openai/gpt-6-luna-pro"),
+        Some("2× above 272k prompt tokens")
+    );
+    assert_eq!(price_override_for("tencent/hy4"), Some(""));
+    assert_eq!(price_override_for("xiaomi/mimo-v2.6-pro"), Some(""));
 }
 
 /// R24-1: the operator's test/calibration models must be launchable.
@@ -288,9 +336,9 @@ fn test_attribution_each_model_prices_its_own_rates() {
     // total = prompt + 1M*cache_frac + completion.
     let cases = [
         ("google/gemini-2.5-flash", 0.30, 2.50, 0.03),
-        ("deepseek/deepseek-chat", 0.2574, 1.0287, 0.06435),
-        ("qwen/qwen-2.5-coder-32b-instruct", 0.66, 1.00, 0.165),
-        ("meta-llama/llama-3.3-70b-instruct", 0.10, 0.32, 0.025),
+        ("deepseek/deepseek-chat", 0.32, 0.89, 0.32),
+        ("qwen/qwen-2.5-coder-32b-instruct", 0.66, 1.00, 0.66),
+        ("meta-llama/llama-3.3-70b-instruct", 0.59, 0.79, 0.295),
         ("openai/gpt-4o-mini", 0.15, 0.60, 0.075),
         ("anthropic/claude-haiku-5.5", 0.10, 0.50, 0.01),
         ("mistralai/mistral-small-2603", 0.15, 0.60, 0.015),
@@ -337,11 +385,17 @@ fn test_attribution_cached_between_zero_and_fresh() {
         let p = ModelPricing::for_model(model);
         let fresh = p.compute_cost_with_cache(1_000_000, 0, 0).total_cost_usd;
         let cached = p.compute_cost_with_cache(0, 1_000_000, 0).total_cost_usd;
+        // A catalog row with no cache discount (deepseek-chat today) may
+        // equal the fresh rate; it is never free and never above it.
         assert!(
-            cached > 0.0 && cached < fresh,
-            "{model}: cached {cached} not in (0, {fresh})"
+            cached > 0.0 && cached <= fresh,
+            "{model}: cached {cached} not in (0, {fresh}]"
         );
     }
+    let gem = ModelPricing::for_model("google/gemini-2.5-flash");
+    let fresh = gem.compute_cost_with_cache(1_000_000, 0, 0).total_cost_usd;
+    let cached = gem.compute_cost_with_cache(0, 1_000_000, 0).total_cost_usd;
+    assert!(cached < fresh, "gemini keeps a cache discount");
 }
 
 /// Effective-cost formula exactness: api + time floor + fresh baseline +

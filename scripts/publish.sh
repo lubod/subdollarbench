@@ -96,10 +96,6 @@ if not rules:
 if len(rules) != 1 or rules[0] != current:
     print("[publish] refusal: ranked careers are not all on the current rules: %r" % (rules,), file=sys.stderr)
     raise SystemExit(1)
-fps = v.get("ranked_fingerprints") or []
-if len(fps) != 1 or fps[0] != v.get("fingerprint"):
-    print("[publish] refusal: ranked careers do not share one fingerprint", file=sys.stderr)
-    raise SystemExit(1)
 if not int(v.get("ranked") or 0) > 0:
     print("[publish] refusal: no ranked careers", file=sys.stderr)
     raise SystemExit(1)
@@ -185,7 +181,7 @@ if [[ "$self_test" -eq 1 ]]; then
     mkdir -p "$good" "$target"
     printf '<html>board</html>\n' > "$good/index.html"
     printf '<html>results</html>\n' > "$good/results.html"
-    printf '{"careers":3,"ranked":3,"current_rules":"2026-10-19.42","ranked_rules":["2026-10-19.42"],"fingerprint":"fp-one","ranked_fingerprints":["fp-one"]}\n' > "$good/grid.json"
+    printf '{"careers":3,"ranked":3,"current_rules":"2026-10-19.42","ranked_rules":["2026-10-19.42"],"fingerprint":"fp-binary","ranked_fingerprints":["fp-one"],"fingerprint_careers":{"fp-one":3}}\n' > "$good/grid.json"
     bar="$root/flake.txt"
     printf 'RESULT: PASS\n' > "$bar"
 
@@ -200,10 +196,22 @@ p=sys.argv[1]; v=json.load(open(p))
 v["ranked_fingerprints"]=["fp-one","fp-two"]
 json.dump(v,open(p,"w"))
 PY
-    if validate_export "$mixed" "$bar" >/dev/null 2>&1; then
-        echo '[self-test] mixed fingerprint was accepted' >&2; exit 1
+    validate_export "$mixed" "$bar" || {
+        echo '[self-test] two fingerprints under one rules version were refused' >&2; exit 1; }
+    echo '[self-test] two fingerprints accepted'
+
+    rules="$root/rules"
+    cp -a "$good" "$rules"
+    python3 - "$rules/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_rules"]=["2026-10-19.42","2026-10-19.43"]
+json.dump(v,open(p,"w"))
+PY
+    if validate_export "$rules" "$bar" >/dev/null 2>&1; then
+        echo '[self-test] mixed rules versions were accepted' >&2; exit 1
     fi
-    echo '[self-test] mixed fingerprint refused'
+    echo '[self-test] mixed rules versions refused'
 
     rehearsal="$root/rehearsal"
     cp -a "$good" "$rehearsal"
