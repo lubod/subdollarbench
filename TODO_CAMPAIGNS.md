@@ -199,6 +199,22 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 
   The plan: round 65 (blockers) → round 66 (prices, the fingerprint
   rule) → one bar → the rehearsal → the grid.
+- **One model at a time, cheapest first** (operator, 2026-11-07):
+  1. minimax-m3.1-flash;
+  2. gpt-6-luna-pro;
+  3. mimo-v2.6-pro;
+  4. hy4.
+
+  The operator looks at each model's results before the next.
+  - Minimax runs off-peak only: its catalog price is 2× during
+    01:00-15:00 UTC, which the snapshot's base rate doesn't count.
+  - The bar on `589e9fd33cd2` (rounds 65 and 66) passed, 545/545, on
+    2026-11-07 at 15:31 UTC.
+  - The minimax step (operator: "start minimax") is armed as
+    `sdb-grid-arm` (`runs/grid-arm-minimax.sh`): a $0 rehearsal, then
+    `runs/grid-v21-minimax.careers` (3 careers), 3 lanes, `--cap 10`,
+    and its own ledger `runs/.grid-v21-minimax-ledger.tsv`. The script
+    refuses to start inside the 2× hours.
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
